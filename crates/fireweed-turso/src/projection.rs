@@ -1991,12 +1991,62 @@ fn class_s_item_from_driver_row(
     })
 }
 
+/// Select pending item-Claim IDs on a borrowed committed snapshot.
+///
+/// The snapshot is already open. This helper issues no writer lease and no outbox row.
+pub async fn select_item_claim_ids_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max: usize,
+    exclude: &[ItemId],
+) -> EngineResult<Vec<ItemId>> {
+    if max == 0 {
+        return Ok(Vec::new());
+    }
+    let tenant = shard.tenant_id.as_str();
+    let queue = shard.queue_id.as_str();
+    if queue_paused(connection, tenant, queue).await? {
+        return Ok(Vec::new());
+    }
+    let mut params = vec![
+        Value::Text(tenant.to_string()),
+        Value::Text(queue.to_string()),
+        Value::Integer(ts_nanos(now)),
+        Value::Integer(i64::try_from(max).map_err(storage)?),
+    ];
+    let exclude_clause = if exclude.is_empty() {
+        String::new()
+    } else {
+        let start = params.len() + 1;
+        let placeholders = (0..exclude.len())
+            .map(|index| format!("?{}", start + index))
+            .collect::<Vec<_>>()
+            .join(",");
+        params.extend(exclude.iter().map(|id| Value::Text(id.to_string())));
+        format!(" AND item_id NOT IN ({placeholders})")
+    };
+    let query = format!(
+        "SELECT item_id FROM fireweed_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+         AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+         JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
+         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id)\
+         {exclude_clause} \
+         ORDER BY priority_sort,created_seq LIMIT ?4"
+    );
+    let rows = query_driver_value_rows(connection, query, params).await?;
+    rows.into_iter()
+        .map(|values| ItemId::new(text(&values[0])?).map_err(storage))
+        .collect()
+}
+
 /// Full-row grouped/cohort Claim materialization over a borrowed driver snapshot.
 ///
-/// Items may still be Pending. Lease token/expiry come from the request. Inert until S3c selects
-/// this helper with committed driver pools; serving still uses post-append [`TursoRelational`]
-/// `render_claimed`.
-#[allow(dead_code)]
+/// Items may still be Pending. Lease token/expiry come from the request. S5 item/group/cohort
+/// serving retains these rows through append; `render_claimed` stays for recovery/legacy reads.
 pub async fn materialize_grouped_cohort_claimed_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -3613,7 +3663,10 @@ mod committed_pool_helper_tests {
     use fireweed_relational::nanos_ts;
     use turso::Value;
 
-    use super::{TursoRelational, finish_retained_claimed, materialize_grouped_cohort_claimed_on};
+    use super::{
+        TursoRelational, finish_retained_claimed, materialize_grouped_cohort_claimed_on,
+        select_item_claim_ids_on,
+    };
 
     fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let (_, tail) = source
@@ -3673,12 +3726,26 @@ mod committed_pool_helper_tests {
         let apply_live = between(projection, "fn apply_live(", "fn apply_recovery(");
         asserts_no_pool_borrow(apply_live, "apply_live");
 
+        let (_, production) = compose
+            .rsplit_once("// Atomic log-replay × Turso")
+            .expect("production Turso composition boundary");
         let class_s = between(
-            compose,
+            production,
             "async fn dispatch_class_s_claim(",
             "async fn append_class_s_claim(",
         );
-        asserts_no_pool_borrow(class_s, "class-s post-publication response");
+        assert!(
+            class_s.contains("claim_turns") && class_s.contains("acquire_exclusive"),
+            "default item Claim must take ClaimQueueTurn and the exclusive selection fence"
+        );
+        assert!(
+            !class_s.contains("class_s_claim_for_queue"),
+            "S5 cuts item Claim off the SQL-first writer lease-before-append lane"
+        );
+        assert!(
+            !class_s.contains("render_claimed(") && !class_s.contains("render_prepared_claim"),
+            "item Claim continuation must retain pre-materialized rows"
+        );
         let retained = between(
             compose,
             "fn finish_retained_grouped_cohort_response(",
@@ -3889,9 +3956,20 @@ mod committed_pool_helper_tests {
         let render = between(projection, "fn render_claimed(", "fn item_state(");
         assert!(
             render.contains("self.query("),
-            "existing serving must keep post-append render_claimed until S3c"
+            "legacy render_claimed stays on the serving reader for recovery"
         );
         assert!(render.contains("lifecycle_state='Leased'"));
+        let select_helper = between(
+            projection,
+            "pub async fn select_item_claim_ids_on(",
+            "pub async fn materialize_grouped_cohort_claimed_on(",
+        );
+        assert!(
+            !select_helper.contains("lifecycle_state='Leased'"),
+            "log-first item select must not lease before append"
+        );
+        asserts_no_pool_borrow(select_helper, "select_item_claim_ids_on");
+        let _ = select_item_claim_ids_on;
     }
 
     #[test]

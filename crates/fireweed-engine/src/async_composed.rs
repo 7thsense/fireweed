@@ -187,10 +187,39 @@ pub enum PreparedClaim {
     },
 }
 
-/// Inert grouped/cohort full-row result retained through append.
+impl PreparedClaim {
+    /// Stamp `authority_first` on new item Claim envelopes. Legacy outbox recoveries stay false.
+    pub fn with_item_authority_first(self) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::Commit {
+                request,
+                item_ids,
+                cohort_id,
+            } => {
+                let (shard, mut commands, epoch, fault, admission) =
+                    request.into_parts_with_append_admission();
+                for envelope in &mut commands {
+                    if let QueueCommand::Claim(command) = &mut envelope.command {
+                        command.authority_first = true;
+                    }
+                }
+                Self::Commit {
+                    request: RawCommitRequest::new(shard, commands, epoch)
+                        .with_fault(fault)
+                        .with_append_admission(admission),
+                    item_ids,
+                    cohort_id,
+                }
+            }
+        }
+    }
+}
+
+/// Grouped/cohort/item full-row result retained through append.
 ///
-/// Serving still renders after apply via [`AsyncComposedBackend::render_prepared_claim`] until S3c
-/// selects this carrier with committed driver pools.
+/// S5 item/group/cohort continuation returns this carrier after apply and must not borrow a
+/// projection handle or committed pool.
 #[derive(Debug, Clone)]
 pub enum PreparedClaimedResult {
     Empty,
@@ -2411,7 +2440,9 @@ where
 
     /// Plan a claim under the queue permit and release it before the caller appends.
     ///
-    /// Same sqlite-log restriction as [`Self::prepare_push`].
+    /// Same sqlite-log restriction as [`Self::prepare_push`]. Object-log × Turso S5 uses
+    /// [`Self::plan_exclusive_claim`] so the selection fence, not this keyed permit, spans
+    /// caught-up selection through publication.
     pub async fn prepare_claim(
         &self,
         request: ClaimRequest,
@@ -2423,6 +2454,21 @@ where
         .await
         .map_err(AsyncClaimError::Submit)?
         .map_err(AsyncClaimError::from)
+    }
+
+    /// Plan one exclusive Claim without taking the keyed queue permit.
+    ///
+    /// The caller must already hold ClaimQueueTurn, the driver slot, and SelectionFenceAdmission.
+    /// Item envelopes are stamped `authority_first`; grouped/cohort shaping stays with the
+    /// retained carrier.
+    pub async fn plan_exclusive_claim(
+        &self,
+        request: ClaimRequest,
+    ) -> Result<PreparedClaim, AsyncClaimError> {
+        planned_claim(Arc::clone(&self.claim_planner), request)
+            .await
+            .map(PreparedClaim::with_item_authority_first)
+            .map_err(AsyncClaimError::from)
     }
 
     pub fn claim_planner(&self) -> Arc<P> {
@@ -5005,9 +5051,37 @@ mod tests {
             .expect("serving claim end");
         assert!(
             serving.contains("finish_rendered_claim(planner, request, item_ids, cohort_id)"),
-            "existing serving must keep post-append render until S3c"
+            "atomic/sqlite serving keeps post-append render; S5 exclusive is plan_exclusive_claim"
         );
         assert!(!serving.contains("PreparedClaimedResult"));
+        let exclusive = source
+            .split("pub async fn plan_exclusive_claim(")
+            .nth(1)
+            .expect("exclusive claim")
+            .split("pub async fn render_prepared_claim(")
+            .next()
+            .expect("exclusive claim end");
+        assert!(exclusive.contains("with_item_authority_first"));
+        assert!(!exclusive.contains("submit_operation"));
+        assert!(!exclusive.contains("render_claimed"));
+        assert!(!exclusive.contains("SelectionFence"));
+        let stamped = PreparedClaim::Commit {
+            request: RawCommitRequest::new(
+                grouped.shard.clone(),
+                vec![claim_envelope(&grouped, first)],
+                1,
+            ),
+            item_ids: vec![first],
+            cohort_id: None,
+        }
+        .with_item_authority_first();
+        let PreparedClaim::Commit { request, .. } = stamped else {
+            panic!("stamped exclusive item Claim");
+        };
+        match &request.commands()[0].command {
+            QueueCommand::Claim(command) => assert!(command.authority_first),
+            other => panic!("expected item Claim, got {other:?}"),
+        }
     }
 
     fn generation_definition() -> QueueDefinition {

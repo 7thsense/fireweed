@@ -1,7 +1,7 @@
-//! Inert, runtime-neutral coordination primitives for derived lifecycle microbatching.
+//! Coordination primitives for derived lifecycle microbatching.
 //!
-//! These types bound retained requests and resource predecessors without changing any production
-//! serving path. Later slices attach planning, committed reads, and the selection fence to them.
+//! S5 activates the selection fence and log-first item Claim. Turn, slot, sequencer, and pool
+//! admissions remain the canonical predecessors of every non-bypass fence acquire.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -31,28 +31,30 @@ pub const OUTCOME_SLOT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(10);
 
 /// S3s structural wait floor applied before the reviewed hard caps.
 pub const S3S_WAIT_FLOOR: Duration = Duration::from_millis(500);
-/// Coverage, delta-coverage, and outcome-work cap. Not activated here.
+/// Coverage, delta-coverage, and outcome-work cap. S5 re-derives the same 5 s ceiling.
 pub const S3S_COVERAGE_OR_WORK_CAP: Duration = Duration::from_secs(5);
-/// Fence-acquire term carried from legal composition; not measured while dispositions are inert.
+/// Fence-acquire term carried from legal composition; S5 activates it as the live acquire cap.
 pub const S3S_FENCE_ACQUIRE_CARRIED_CAP: Duration = Duration::from_secs(75);
-/// S3s-derived Claim/mutation turn wait. Equals the reviewed 255 s cap; S3c activates it.
+/// S3s-derived Claim/mutation turn wait. Equals the reviewed 255 s cap; live from S3c/S5.
 pub const S3S_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
-/// S3s-derived Claim/shared driver-slot wait. Equals the reviewed 95 s cap; S3c activates it.
+/// S3s-derived Claim/shared driver-slot wait. Equals the reviewed 95 s cap; live from S3c/S5.
 pub const S3S_DERIVED_DRIVER_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
-/// S3s-derived OutcomeReadAdmission wait. Equals the reviewed 10 s cap; S3c activates it.
+/// S3s-derived OutcomeReadAdmission wait. Equals the reviewed 10 s cap; live from S3c/S5.
 pub const S3S_DERIVED_OUTCOME_SLOT_WAIT: Duration = OUTCOME_SLOT_DEFAULT_MAX_WAIT;
-/// S3s-derived coverage/outcome-work wait. Equals the reviewed 5 s cap; S3c activates it.
+/// S3s-derived coverage/outcome-work wait. Equals the reviewed 5 s cap; live from S3c/S5.
 pub const S3S_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
 /// S3m structural wait floor. Same 500 ms composition floor as S3s; recorded separately.
 pub const S3M_WAIT_FLOOR: Duration = S3S_WAIT_FLOOR;
-/// S3m-derived Claim-turn wait. Floor 500 ms / cap 255 s; production fence stays inert.
+/// S3m-derived Claim-turn wait. Floor 500 ms / cap 255 s; S5 re-derives the same cap.
 pub const S3M_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
-/// S3m-derived Claim-slot wait. Floor 500 ms / cap 95 s; production fence stays inert.
+/// S3m-derived Claim-slot wait. Floor 500 ms / cap 95 s; S5 re-derives the same cap.
 pub const S3M_DERIVED_CLAIM_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
-/// S3m-derived fence-acquire wait. Floor 500 ms / cap 75 s; recorded, not activated.
+/// S3m-derived fence-acquire wait. Floor 500 ms / cap 75 s; S5 activates this bound.
 pub const S3M_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3S_FENCE_ACQUIRE_CARRIED_CAP;
 /// S3m-derived pre-fence/drain/delta coverage and 800-item/4 MiB work wait. Floor 500 ms / cap 5 s.
 pub const S3M_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
+/// S5-activated fence-acquire wait. Same 75 s composition cap as S3m.
+pub const S5_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3M_DERIVED_FENCE_ACQUIRE_WAIT;
 /// Post-slot driver-pool borrow measurement cap used by S3m calibration. Zero expiry required.
 pub const S3M_DRIVER_POOL_BORROW_CAP: Duration = Duration::from_millis(100);
 
@@ -65,6 +67,7 @@ pub const OUTCOME_READ_SLOTS_RESOURCE: &str = "committed outcome read slots";
 pub const MUTATION_SEQUENCER_RESOURCE: &str = "mutation sequencer capacity";
 pub const MUTATION_SEQUENCER_WAIT_RESOURCE: &str = "mutation sequencer wait";
 pub const SELECTION_FENCE_WAITERS_RESOURCE: &str = "selection fence waiters";
+pub const SELECTION_FENCE_ACQUIRE_RESOURCE: &str = "selection fence acquire";
 
 /// Compatible microbatch overlays currently have exactly the two reviewed FIFO shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1768,10 +1771,10 @@ struct SelectionFenceInner<K> {
     state: Mutex<SelectionFenceState<K>>,
 }
 
-/// Fair keyed read/write fence prepared for later activation.
+/// Fair keyed read/write fence. S5 attaches it to every non-bypass derived append site.
 ///
-/// A queued exclusive waiter prevents later shared callers from passing it. This type is not attached
-/// to a production append site in S2.
+/// A queued exclusive waiter prevents later shared callers from passing it. Acquire uses the S5
+/// 75 s cap unless the caller supplies a tighter wait.
 pub struct SelectionFence<K>
 where
     K: Clone + Eq + Hash + Send + 'static,
@@ -1817,21 +1820,48 @@ where
     }
 
     pub fn acquire_shared(&self, key: K) -> SelectionFenceAcquire<K> {
-        self.acquire(key, SelectionFenceMode::Shared)
+        self.acquire_with_wait(
+            key,
+            SelectionFenceMode::Shared,
+            S5_DERIVED_FENCE_ACQUIRE_WAIT,
+        )
     }
 
     pub fn acquire_exclusive(&self, key: K) -> SelectionFenceAcquire<K> {
-        self.acquire(key, SelectionFenceMode::Exclusive)
+        self.acquire_with_wait(
+            key,
+            SelectionFenceMode::Exclusive,
+            S5_DERIVED_FENCE_ACQUIRE_WAIT,
+        )
     }
 
-    fn acquire(&self, key: K, mode: SelectionFenceMode) -> SelectionFenceAcquire<K> {
+    pub fn acquire_shared_with_wait(&self, key: K, max_wait: Duration) -> SelectionFenceAcquire<K> {
+        self.acquire_with_wait(key, SelectionFenceMode::Shared, max_wait)
+    }
+
+    pub fn acquire_exclusive_with_wait(
+        &self,
+        key: K,
+        max_wait: Duration,
+    ) -> SelectionFenceAcquire<K> {
+        self.acquire_with_wait(key, SelectionFenceMode::Exclusive, max_wait)
+    }
+
+    fn acquire_with_wait(
+        &self,
+        key: K,
+        mode: SelectionFenceMode,
+        max_wait: Duration,
+    ) -> SelectionFenceAcquire<K> {
         SelectionFenceAcquire {
             inner: Arc::clone(&self.inner),
             key,
             mode,
+            max_wait,
             waiter_id: None,
             acquired: false,
             completed: false,
+            registered_at: None,
         }
     }
 
@@ -1880,9 +1910,11 @@ where
     inner: Arc<SelectionFenceInner<K>>,
     key: K,
     mode: SelectionFenceMode,
+    max_wait: Duration,
     waiter_id: Option<u64>,
     acquired: bool,
     completed: bool,
+    registered_at: Option<Instant>,
 }
 
 impl<K> Unpin for SelectionFenceAcquire<K> where K: Clone + Eq + Hash + Send + 'static {}
@@ -1910,7 +1942,17 @@ where
                 waiter.status
             };
             return match status {
-                FenceWaiterStatus::Waiting => Poll::Pending,
+                FenceWaiterStatus::Waiting => {
+                    let started = *self.registered_at.get_or_insert_with(Instant::now);
+                    if started.elapsed() >= self.max_wait {
+                        self.completed = true;
+                        Poll::Ready(Err(CoordinationError::Deadline {
+                            resource: SELECTION_FENCE_ACQUIRE_RESOURCE,
+                        }))
+                    } else {
+                        Poll::Pending
+                    }
+                }
                 FenceWaiterStatus::Granted => {
                     self.inner
                         .state
@@ -2008,6 +2050,7 @@ where
             }
             Registration::Queued(waiter_id) => {
                 self.waiter_id = Some(waiter_id);
+                self.registered_at = Some(Instant::now());
                 Poll::Pending
             }
         }
@@ -3274,7 +3317,7 @@ mod tests {
     }
 
     #[test]
-    fn inert_selection_fence_is_fifo_and_writer_preferring() {
+    fn selection_fence_is_fifo_and_writer_preferring() {
         let fence = SelectionFence::<&'static str>::new();
         let mut first_reader = fence.acquire_shared("q");
         let first_reader = match poll_once(&mut first_reader) {
@@ -3432,5 +3475,195 @@ mod tests {
             ),
             Some(S3M_DERIVED_COVERAGE_OR_WORK_WAIT)
         );
+    }
+
+    #[test]
+    fn s5_activates_selection_fence_and_rederives_bounds() {
+        assert_eq!(S5_DERIVED_FENCE_ACQUIRE_WAIT, Duration::from_secs(75));
+        assert_eq!(
+            S5_DERIVED_FENCE_ACQUIRE_WAIT,
+            S3M_DERIVED_FENCE_ACQUIRE_WAIT
+        );
+        assert_eq!(S3M_DERIVED_TURN_WAIT, Duration::from_secs(255));
+        assert_eq!(S3M_DERIVED_CLAIM_SLOT_WAIT, Duration::from_secs(95));
+        assert_eq!(S3S_DERIVED_OUTCOME_SLOT_WAIT, Duration::from_secs(10));
+        assert_eq!(S3M_DERIVED_COVERAGE_OR_WORK_WAIT, Duration::from_secs(5));
+        assert_eq!(
+            derive_structural_wait(
+                Duration::ZERO,
+                Duration::from_secs(70),
+                S3M_WAIT_FLOOR,
+                S3S_FENCE_ACQUIRE_CARRIED_CAP,
+            ),
+            Some(S5_DERIVED_FENCE_ACQUIRE_WAIT)
+        );
+
+        let fence = SelectionFence::<&'static str>::new();
+        let mut held = fence.acquire_shared("q");
+        let held = match poll_once(&mut held) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("shared fence holder"),
+        };
+        let mut exclusive = fence.acquire_exclusive_with_wait("q", Duration::ZERO);
+        assert!(matches!(poll_once(&mut exclusive), Poll::Pending));
+        assert_poll_error(
+            poll_once(&mut exclusive),
+            CoordinationError::Deadline {
+                resource: SELECTION_FENCE_ACQUIRE_RESOURCE,
+            },
+        );
+        drop(exclusive);
+        drop(held);
+        assert_eq!(fence.entry_count(), 0);
+    }
+
+    #[test]
+    fn s5_four_key_claim_cliff_still_holds() {
+        let turns = ClaimQueueTurn::<&'static str>::default();
+        let coordinator = ClaimCoordinator::<u8, usize>::default();
+        let mut callers = Vec::new();
+        for key in 0..4u8 {
+            callers.push(
+                coordinator
+                    .join(key, Arc::new(key as usize), 1, 8)
+                    .expect("four Claim keys fit the eight-driver budget"),
+            );
+        }
+        let mut first = turns.acquire("q");
+        let active = match poll_once(&mut first) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("first Claim turn"),
+        };
+        let mut second = turns.acquire("q");
+        assert!(
+            matches!(poll_once(&mut second), Poll::Pending),
+            "second incompatible Claim key must queue on the one-queue turn"
+        );
+        for key in 2..4 {
+            let mut extra = turns.acquire("q");
+            assert_poll_error(
+                poll_once(&mut extra),
+                CoordinationError::Capacity {
+                    resource: CLAIM_QUEUE_TURN_RESOURCE,
+                },
+            );
+            let _ = key;
+        }
+        drop(second);
+        drop(active);
+        drop(callers);
+        assert_eq!(turns.queued(), 0);
+        assert_eq!(coordinator.driver_count(), 0);
+    }
+
+    #[test]
+    fn s5_activated_capacity_cliffs_remain_independent() {
+        let sequencer = MutationSequencer::<u8, MutationGenerationKind, u8>::new();
+        let mut mutation_tickets = Vec::new();
+        for index in 0..MUTATION_MAX_REQUESTS_PER_QUEUE {
+            mutation_tickets.push(
+                sequencer
+                    .admit(
+                        0,
+                        MutationGenerationKind::Push,
+                        MutationIngress::Direct,
+                        Arc::new(index as u8),
+                        1,
+                        1,
+                    )
+                    .expect("32 compatible mutations fit two generations"),
+            );
+        }
+        assert_eq!(sequencer.generation_count(&0), 2);
+        assert_error(
+            sequencer.admit(
+                0,
+                MutationGenerationKind::Push,
+                MutationIngress::Direct,
+                Arc::new(99),
+                1,
+                1,
+            ),
+            CoordinationError::Capacity {
+                resource: MUTATION_SEQUENCER_RESOURCE,
+            },
+        );
+
+        let gate = crate::KeyedQueueGate::new_with_per_key_limit(1_024, 16);
+        let mut first = gate.acquire("q");
+        let active = match poll_once(&mut first) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("keyed gate"),
+        };
+        let mut waiters = Vec::new();
+        for _ in 0..15 {
+            let mut waiter = gate.acquire("q");
+            assert!(matches!(poll_once(&mut waiter), Poll::Pending));
+            waiters.push(waiter);
+        }
+        let mut rejected = gate.acquire("q");
+        assert!(matches!(
+            poll_once(&mut rejected),
+            Poll::Ready(Err(crate::QueueGateError::PerKeyFull))
+        ));
+        drop(waiters);
+        drop(active);
+
+        let turns = ClaimQueueTurn::<u8>::default();
+        let mut claim_queues = Vec::new();
+        for queue in 0..9u8 {
+            let mut acquire = turns.acquire(queue);
+            claim_queues.push(match poll_once(&mut acquire) {
+                Poll::Ready(Ok(permit)) => permit,
+                _ => panic!("claim queue {queue}"),
+            });
+        }
+        assert_eq!(turns.entry_count(), 9);
+
+        let sequencer = MutationSequencer::<u8, MutationGenerationKind, u8>::new();
+        let mut shared_queues = Vec::new();
+        for queue in 0..25u8 {
+            shared_queues.push(
+                sequencer
+                    .admit(
+                        queue,
+                        MutationGenerationKind::Push,
+                        MutationIngress::Direct,
+                        Arc::new(queue),
+                        1,
+                        1,
+                    )
+                    .expect("twenty-five shared-generation queues"),
+            );
+        }
+        assert_eq!(shared_queues.len(), 25);
+
+        let outcomes = OutcomeReadAdmission::default();
+        let mut readers = Vec::new();
+        for _ in 0..8 {
+            let mut acquire = outcomes.acquire();
+            readers.push(match poll_once(&mut acquire) {
+                Poll::Ready(Ok(permit)) => permit,
+                _ => panic!("outcome reader"),
+            });
+        }
+        let mut queued = Vec::new();
+        for _ in 0..8 {
+            let mut acquire = outcomes.acquire();
+            assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+            queued.push(acquire);
+        }
+        let mut seventeenth = outcomes.acquire();
+        assert_poll_error(
+            poll_once(&mut seventeenth),
+            CoordinationError::Capacity {
+                resource: OUTCOME_READ_SLOTS_RESOURCE,
+            },
+        );
+        drop(queued);
+        drop(readers);
+        drop(claim_queues);
+        drop(mutation_tickets);
+        drop(shared_queues);
     }
 }

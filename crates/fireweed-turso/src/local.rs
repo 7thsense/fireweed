@@ -627,6 +627,100 @@ impl TursoRelational {
         self.committed_pools.as_ref()
     }
 
+    /// Borrow one committed driver connection without opening a snapshot.
+    ///
+    /// S5 acquires the selection fence after this borrow and before the Deferred snapshot.
+    pub async fn borrow_committed_driver_connection(
+        &self,
+    ) -> EngineResult<Option<CommittedReaderGuard>> {
+        match self.committed_pools.as_ref() {
+            Some(pools) => Ok(Some(pools.borrow_driver().await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Select and materialize item Claims against the serving reader when pools are absent.
+    pub async fn item_claim_microbatch_on_serving_reader(
+        &self,
+        shard: &QueueKey,
+        members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        let mut connection = self.reader.lock().await;
+        Self::item_claim_microbatch_on_connection(&mut connection, shard, members).await
+    }
+
+    /// FIFO item-Claim selects on one Deferred snapshot against an already-borrowed driver.
+    pub async fn item_claim_microbatch_on_connection(
+        connection: &mut Connection,
+        shard: &QueueKey,
+        members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        let snapshot = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .await
+            .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
+        let result = async {
+            let mut assigned = Vec::new();
+            let mut out = Vec::with_capacity(members.len());
+            for (now, max, token, expires) in members {
+                let ids = crate::projection::select_item_claim_ids_on(
+                    &snapshot, shard, *now, *max, &assigned,
+                )
+                .await?;
+                let items = if ids.is_empty() {
+                    Vec::new()
+                } else {
+                    crate::projection::materialize_grouped_cohort_claimed_on(
+                        &snapshot, shard, &ids, token, *expires,
+                    )
+                    .await?
+                };
+                assigned.extend_from_slice(&ids);
+                out.push((ids, items));
+            }
+            Ok(out)
+        }
+        .await;
+        match &result {
+            Ok(_) => {
+                snapshot.commit().await.map_err(|error| {
+                    map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE)
+                })?;
+            }
+            Err(_) => {
+                let _ = snapshot.rollback().await;
+            }
+        }
+        result
+    }
+
+    /// Load a mutation-generation overlay snapshot on an already-borrowed driver connection.
+    pub async fn mutation_driver_snapshot_on(
+        connection: &mut Connection,
+        shard: &QueueKey,
+        definition: QueueDefinition,
+        keys: &[ClientItemKey],
+        batch_keys: &[ClientItemKey],
+    ) -> EngineResult<MutationDriverSnapshot> {
+        let snapshot = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .await
+            .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
+        let loaded =
+            load_mutation_driver_snapshot(&snapshot, shard, definition, keys, batch_keys).await;
+        match &loaded {
+            Ok(_) => {
+                snapshot.commit().await.map_err(|error| {
+                    map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE)
+                })?;
+            }
+            Err(_) => {
+                let _ = snapshot.rollback().await;
+            }
+        }
+        loaded
+    }
+
     pub async fn server_peek_committed(
         &self,
         shard: &QueueKey,

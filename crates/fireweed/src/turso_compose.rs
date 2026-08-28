@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,11 +25,11 @@ use fireweed_engine::{
     AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecycleError, AsyncLogStore,
     AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
     AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand,
-    ClaimCompatibility, ClaimDriverReadAdmission, ClaimPort, ClaimQueueTurn, ClaimRequest, Claimed,
-    CommandChecksum, CommandEnvelope, CommandPosition, ControlPlane, ControlPlaneStore,
-    CoordinationError, CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError,
-    DurabilityClass, EngineError, EngineResult, ExpiredLeaseCursor, ExpiredLeasePage,
-    FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
+    ClaimCompatibility, ClaimCoordinator, ClaimDriverReadAdmission, ClaimPort, ClaimQueueTurn,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandPosition, ControlPlane,
+    ControlPlaneStore, CoordinationError, CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT,
+    DispatchError, DurabilityClass, EngineError, EngineResult, ExpiredLeaseCursor,
+    ExpiredLeasePage, FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
     HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane, InProcessLogStore,
     IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest,
     ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
@@ -40,15 +41,17 @@ use fireweed_engine::{
     ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushFingerprint, PushPort, PushSpec,
     QueueCommand, QueueCounters, QueueGateError, QueueKey, QueueMetrics, RawCommitFault,
     RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeasePort, RenewTarget, S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
-    SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
-    SharedDriverReadAdmission, SnapshotRef, SnapshotStore, TaskOutcome, TaskOutcomeError,
-    TaskOutcomeSender, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
-    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    retain_sequencer_after_slot_release, task_outcome_channel, validate_inert_mutation_generation,
+    ReclaimPort, RenewLeasePort, RenewTarget, S3S_DERIVED_COVERAGE_OR_WORK_WAIT, SelectionFence,
+    SelectionFenceAdmission, SelectionFenceDisposition, SeparateReplayCommit,
+    SeparateReplayCommitter, SeqIdGen, SetGatesPort, SharedDriverReadAdmission, SnapshotRef,
+    SnapshotStore, TaskOutcome, TaskOutcomeError, TaskOutcomeSender, TerminalEmissionMetrics,
+    TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, retain_sequencer_after_slot_release,
+    selection_fence_disposition_for_commands, task_outcome_channel,
+    validate_inert_mutation_generation,
 };
 use fireweed_projection::InMemoryProjection;
-use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
+use fireweed_turso::{TursoConfig, TursoRelational, materialize_grouped_cohort_claimed_on};
 
 #[cfg(feature = "objectlog")]
 use fireweed_objectlog::{
@@ -173,6 +176,37 @@ fn map_coord(error: CoordinationError) -> EngineError {
 struct QueueFrontiers {
     last_claim: Option<CommandPosition>,
     last_candidate_mutation: Option<CommandPosition>,
+}
+
+#[cfg(feature = "objectlog")]
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ItemClaimKey {
+    shard: QueueKey,
+    expected_epoch: Option<u64>,
+    eligibility_time: Option<UtcTimestamp>,
+}
+
+#[cfg(feature = "objectlog")]
+impl ItemClaimKey {
+    fn from_request(request: &ClaimRequest) -> Self {
+        Self {
+            shard: request.shard.clone(),
+            expected_epoch: request.expected_epoch,
+            eligibility_time: request.eligibility_time,
+        }
+    }
+}
+
+#[cfg(feature = "objectlog")]
+struct ItemClaimWork {
+    id: u64,
+    request: ClaimRequest,
+}
+
+#[cfg(feature = "objectlog")]
+struct ItemClaimJoin {
+    notify: tokio::sync::Notify,
+    outcomes: Mutex<HashMap<u64, EngineResult<Claimed>>>,
 }
 
 struct GenerationJoin {
@@ -543,8 +577,8 @@ mod contention_mapping_tests {
             "grouped/cohort must not post-append render_prepared_claim"
         );
         assert!(
-            !grouped.contains("SelectionFence"),
-            "selection fence remains inert"
+            grouped.contains("acquire_exclusive"),
+            "grouped/cohort must take the exclusive selection fence"
         );
         let class_s = between(
             production,
@@ -552,11 +586,21 @@ mod contention_mapping_tests {
             "async fn append_class_s_claim(",
         );
         assert!(
-            class_s.contains("class_s_claim_for_queue"),
-            "default item Claim stays on the writer-transaction lane"
+            !class_s.contains("class_s_claim_for_queue"),
+            "default item Claim must leave the SQL-first writer lease-before-append lane"
         );
-        assert!(!class_s.contains("claim_turns.acquire"));
-        assert!(!class_s.contains("ClaimQueueTurn"));
+        assert!(
+            class_s.contains("claim_turns"),
+            "default item Claim must take ClaimQueueTurn"
+        );
+        assert!(
+            class_s.contains("acquire_exclusive"),
+            "default item Claim must take the exclusive selection fence"
+        );
+        assert!(
+            class_s.contains("authority_first: true"),
+            "new item Claim envelopes must be authority-first"
+        );
         let continuation = between(
             preamble,
             "fn finish_retained_grouped_cohort_response(",
@@ -610,7 +654,10 @@ mod contention_mapping_tests {
         assert!(derived_push.contains("validate_inert_mutation_generation"));
         assert!(derived_push.contains("shared_slots"));
         assert!(derived_push.contains("sequencer"));
-        assert!(!derived_push.contains("SelectionFence"));
+        assert!(
+            derived_push.contains("acquire_shared"),
+            "candidate mutations must take the shared selection fence"
+        );
 
         let helper = between(
             compose_file,
@@ -774,16 +821,20 @@ mod contention_mapping_tests {
             "async fn dispatch_class_s_claim(",
             "async fn append_class_s_claim(",
         );
-        assert!(class_s.contains("class_s_claim_for_queue"));
-        assert!(!class_s.contains("claim_turns.acquire"));
-        assert!(!class_s.contains("SelectionFence"));
+        assert!(!class_s.contains("class_s_claim_for_queue"));
+        assert!(class_s.contains("claim_turns"));
+        assert!(class_s.contains("acquire_exclusive"));
         assert!(
-            !production
+            production
                 .split("async fn dispatch_class_s_claim(")
                 .nth(1)
                 .unwrap()
                 .contains("self.claim_slots.acquire()"),
-            "item Claim must not take ClaimDriverReadAdmission"
+            "item Claim must take ClaimDriverReadAdmission"
+        );
+        assert!(
+            !class_s.contains("render_claimed") && !class_s.contains("render_prepared_claim"),
+            "item Claim continuation must not post-publication render"
         );
     }
 }
@@ -2171,6 +2222,8 @@ struct ObjectLogTursoCommitter {
     apply_turn: Arc<tokio::sync::Notify>,
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
+    selection_fence: SelectionFence<QueueKey>,
+    fence_admission: SelectionFenceAdmission,
 }
 
 #[cfg(feature = "objectlog")]
@@ -2199,6 +2252,8 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
         let apply_turn = Arc::clone(&self.apply_turn);
         let async_apply = self.async_apply.clone();
         let last_produce = Arc::clone(&self.last_produce);
+        let selection_fence = self.selection_fence.clone();
+        let fence_admission = self.fence_admission.clone();
         Box::pin(async move {
             let (shard, commands, expected_epoch, fault, append_admission) =
                 request.into_parts_with_append_admission();
@@ -2211,6 +2266,26 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                 | AppendAdmissionClass::RecoveryOnly
                 | AppendAdmissionClass::ClaimCoordinatorLive => {}
             }
+            let _shared_fence = match (
+                append_admission,
+                selection_fence_disposition_for_commands(
+                    commands.iter().map(|envelope| &envelope.command),
+                ),
+            ) {
+                (
+                    AppendAdmissionClass::KeyedPermitLive | AppendAdmissionClass::SelectionRequired,
+                    SelectionFenceDisposition::Shared,
+                ) => {
+                    let _waiter = fence_admission.admit_waiter().map_err(map_coord)?;
+                    Some(
+                        selection_fence
+                            .acquire_shared(shard.clone())
+                            .await
+                            .map_err(map_coord)?,
+                    )
+                }
+                _ => None,
+            };
             match fault {
                 RawCommitFault::BeforeAppend => {
                     return Err(EngineError::Invalid("fault-injection: kill before append"));
@@ -2569,10 +2644,15 @@ pub struct DerivedObjectLogTursoBackend {
     frontiers: Arc<tokio::sync::Mutex<HashMap<QueueKey, QueueFrontiers>>>,
     sequencer: MutationSequencer<QueueKey, MutationSequencerKey, MutationGenerationWork>,
     claim_turns: ClaimQueueTurn<QueueKey>,
+    claim_coordinator: ClaimCoordinator<ItemClaimKey, ItemClaimWork>,
     claim_slots: ClaimDriverReadAdmission,
     shared_slots: SharedDriverReadAdmission,
     outcome_slots: OutcomeReadAdmission,
+    selection_fence: SelectionFence<QueueKey>,
+    fence_admission: SelectionFenceAdmission,
     generation_joins: Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>,
+    claim_joins: Arc<Mutex<HashMap<ItemClaimKey, Arc<ItemClaimJoin>>>>,
+    claim_work_ids: AtomicU64,
     #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
     drivers: CoordinatorDriverRegistry,
 }
@@ -2606,12 +2686,16 @@ impl DerivedObjectLogTursoBackend {
         let last_produce = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let produce_caught_up = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let frontiers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let selection_fence = SelectionFence::default();
+        let fence_admission = SelectionFenceAdmission::new(1_024);
         let committer = ObjectLogTursoCommitter {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
             apply_turn: Arc::new(tokio::sync::Notify::new()),
             async_apply: async_apply.clone(),
             last_produce: Arc::clone(&last_produce),
+            selection_fence: selection_fence.clone(),
+            fence_admission: fence_admission.clone(),
         };
         let strategy = SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer)
             .map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -2664,10 +2748,15 @@ impl DerivedObjectLogTursoBackend {
             frontiers,
             sequencer: MutationSequencer::new(),
             claim_turns: ClaimQueueTurn::default(),
+            claim_coordinator: ClaimCoordinator::default(),
             claim_slots: ClaimDriverReadAdmission::default(),
             shared_slots: SharedDriverReadAdmission::default(),
             outcome_slots: OutcomeReadAdmission::default(),
+            selection_fence,
+            fence_admission,
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
+            claim_joins: Arc::new(Mutex::new(HashMap::new())),
+            claim_work_ids: AtomicU64::new(1),
             drivers,
         };
         backend.recover_async().await?;
@@ -2705,6 +2794,7 @@ impl DerivedObjectLogTursoBackend {
         self.wait_for_projection(shard, &target).await
     }
 
+    #[allow(dead_code)]
     async fn catch_up_produce(&self, shard: &QueueKey) -> EngineResult<()> {
         let Some(coordinator) = &self.async_apply else {
             return Ok(());
@@ -3372,10 +3462,32 @@ impl DerivedObjectLogTursoBackend {
         }
         let definition =
             AsyncControlPlane::queue_definition(self.control.as_ref(), queue.clone()).await?;
-        let snapshot = self
-            .projection
-            .mutation_driver_snapshot(&queue, definition, &keys, &batch_keys)
-            .await?;
+        let mut driver = self.projection.borrow_committed_driver_connection().await?;
+        let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
+        let _fence = self
+            .selection_fence
+            .acquire_shared(queue.clone())
+            .await
+            .map_err(map_coord)?;
+        self.wait_queue_frontiers(&queue).await?;
+        let snapshot = match driver.as_mut() {
+            Some(connection) => {
+                TursoRelational::mutation_driver_snapshot_on(
+                    connection,
+                    &queue,
+                    definition,
+                    &keys,
+                    &batch_keys,
+                )
+                .await?
+            }
+            None => {
+                self.projection
+                    .mutation_driver_snapshot(&queue, definition, &keys, &batch_keys)
+                    .await?
+            }
+        };
+        drop(driver);
         let members = validate_inert_mutation_generation(&snapshot, &works)?;
         drop(_slot);
         let prepared = retain_sequencer_after_slot_release(members.clone(), generation);
@@ -3405,9 +3517,17 @@ impl DerivedObjectLogTursoBackend {
             .map_err(map_coord)?;
         self.wait_queue_frontiers(&request.shard).await?;
         let slot = self.claim_slots.acquire().await.map_err(map_coord)?;
+        let driver = self.projection.borrow_committed_driver_connection().await?;
+        let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
+        let fence = self
+            .selection_fence
+            .acquire_exclusive(request.shard.clone())
+            .await
+            .map_err(map_coord)?;
+        self.wait_queue_frontiers(&request.shard).await?;
         let prepared = self
             .engine
-            .prepare_claim(request.clone())
+            .plan_exclusive_claim(request.clone())
             .await
             .map_err(map_claim)?;
         match prepared {
@@ -3417,20 +3537,47 @@ impl DerivedObjectLogTursoBackend {
                 item_ids,
                 cohort_id,
             } => {
-                let items = self
-                    .projection
-                    .materialize_grouped_cohort_committed(
-                        &request.shard,
-                        &item_ids,
-                        &request.lease_token,
-                        request.lease_expires_at,
-                    )
-                    .await?;
+                let items = match driver.as_ref() {
+                    Some(connection) => {
+                        materialize_grouped_cohort_claimed_on(
+                            connection,
+                            &request.shard,
+                            &item_ids,
+                            &request.lease_token,
+                            request.lease_expires_at,
+                        )
+                        .await?
+                    }
+                    None => {
+                        self.projection
+                            .materialize_grouped_cohort_committed(
+                                &request.shard,
+                                &item_ids,
+                                &request.lease_token,
+                                request.lease_expires_at,
+                            )
+                            .await?
+                    }
+                };
+                drop(driver);
                 drop(slot);
                 let retained =
                     PreparedClaimedResult::from_rendered(&request, &item_ids, items, cohort_id)?;
-                self.commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
-                    .await?;
+                let reservation = match &self.async_apply {
+                    Some(coordinator) => Some(
+                        coordinator
+                            .reserve(request.shard.clone(), commit.commands())
+                            .await?,
+                    ),
+                    None => None,
+                };
+                self.append_class_s_claim(
+                    commit.with_append_admission(AppendAdmissionClass::ClaimCoordinatorLive),
+                    reservation,
+                    "",
+                )
+                .await?;
+                drop(fence);
                 self.wait_request_entry_coverage(&request.shard).await?;
                 self.projection
                     .remember_leases(&request.shard, &item_ids, request.lease_token.clone())
@@ -3442,94 +3589,168 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn dispatch_class_s_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
-        self.catch_up_produce(&request.shard).await?;
-        let epoch = match request.expected_epoch {
-            Some(epoch) => epoch,
-            None => AsyncLogStore::current_epoch(self.log.as_ref(), request.shard.clone()).await?,
-        };
-        let command_id = self.ids.next_command_id();
-        let now_nanos = request
-            .eligibility_at()
-            .seconds
-            .saturating_mul(1_000_000_000)
-            .saturating_add(i64::from(request.eligibility_at().nanoseconds));
-        let expires_nanos = request
-            .lease_expires_at
-            .seconds
-            .saturating_mul(1_000_000_000)
-            .saturating_add(i64::from(request.lease_expires_at.nanoseconds));
-        let leased = self
-            .projection
-            .class_s_claim_for_queue(
-                request.shard.tenant_id.as_str(),
-                request.shard.queue_id.as_str(),
-                now_nanos,
-                i64::try_from(request.max_items)
-                    .map_err(|_| EngineError::Storage("claim limit".into()))?,
-                &request.lease_token,
-                expires_nanos,
-                command_id.0.as_str(),
-                Some(request.worker_id.as_str()),
+        let key = ItemClaimKey::from_request(&request);
+        let work_id = self.claim_work_ids.fetch_add(1, Ordering::Relaxed);
+        let work = Arc::new(ItemClaimWork {
+            id: work_id,
+            request,
+        });
+        let caller = self
+            .claim_coordinator
+            .join(
+                key.clone(),
+                Arc::clone(&work),
+                work.request.max_items,
+                work.request.max_items.saturating_mul(4 * 1024),
             )
-            .await?;
-        if leased.items.is_empty() {
-            return Ok(Claimed::default());
+            .map_err(map_coord)?;
+        let join = {
+            let mut joins = self.claim_joins.lock().expect("item claim join map");
+            Arc::clone(joins.entry(key.clone()).or_insert_with(|| {
+                Arc::new(ItemClaimJoin {
+                    notify: tokio::sync::Notify::new(),
+                    outcomes: Mutex::new(HashMap::new()),
+                })
+            }))
+        };
+        loop {
+            if let Some(outcome) = join
+                .outcomes
+                .lock()
+                .expect("item claim outcomes")
+                .remove(&work_id)
+            {
+                drop(caller);
+                return outcome;
+            }
+            if let Some(batch) = self.claim_coordinator.start_driver(&key) {
+                let works: Vec<Arc<ItemClaimWork>> = batch.requests().cloned().collect();
+                let driven = self.drive_log_first_item_claim(batch, &works).await;
+                {
+                    let mut outcomes = join.outcomes.lock().expect("item claim outcomes");
+                    match driven {
+                        Ok(results) => outcomes.extend(results),
+                        Err(error) => {
+                            for work in &works {
+                                outcomes.insert(work.id, Err(error.clone()));
+                            }
+                        }
+                    }
+                }
+                join.notify.notify_waiters();
+                continue;
+            }
+            join.notify.notified().await;
         }
-        let item_ids: Vec<ItemId> = leased
-            .items
+    }
+
+    async fn drive_log_first_item_claim(
+        &self,
+        batch: fireweed_engine::ClaimDriverBatch<ItemClaimKey, ItemClaimWork>,
+        works: &[Arc<ItemClaimWork>],
+    ) -> EngineResult<Vec<(u64, EngineResult<Claimed>)>> {
+        let shard = works[0].request.shard.clone();
+        let _turn = self
+            .claim_turns
+            .acquire(shard.clone())
+            .await
+            .map_err(map_coord)?;
+        self.wait_queue_frontiers(&shard).await?;
+        let slot = self.claim_slots.acquire().await.map_err(map_coord)?;
+        let mut driver = self.projection.borrow_committed_driver_connection().await?;
+        let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
+        let fence = self
+            .selection_fence
+            .acquire_exclusive(shard.clone())
+            .await
+            .map_err(map_coord)?;
+        self.wait_queue_frontiers(&shard).await?;
+        let epoch = match works[0].request.expected_epoch {
+            Some(epoch) => epoch,
+            None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
+        };
+        let members: Vec<(UtcTimestamp, usize, LeaseToken, UtcTimestamp)> = works
             .iter()
-            .map(|item| ItemId::new(&item.item_id).map_err(|e| EngineError::Storage(e.to_string())))
-            .collect::<EngineResult<_>>()?;
-        let envelope = CommandEnvelope {
-            command_id,
-            request_id: None,
-            request_fingerprint: None,
-            request_outcome: None,
-            item_ids: item_ids.clone(),
-            command: QueueCommand::Claim(ClaimCommand {
-                item_ids: item_ids.clone(),
-                lease_token: request.lease_token.clone(),
-                lease_expires_at: request.lease_expires_at,
-                worker_id: Some(request.worker_id.clone()),
-                authority_first: false,
-            }),
-            checksum: CommandChecksum(0),
-            created_at: request.now,
+            .map(|work| {
+                (
+                    work.request.eligibility_at(),
+                    work.request.max_items,
+                    work.request.lease_token.clone(),
+                    work.request.lease_expires_at,
+                )
+            })
+            .collect();
+        let selected = match driver.as_mut() {
+            Some(connection) => {
+                TursoRelational::item_claim_microbatch_on_connection(connection, &shard, &members)
+                    .await?
+            }
+            None => {
+                self.projection
+                    .item_claim_microbatch_on_serving_reader(&shard, &members)
+                    .await?
+            }
         };
-        let reservation = match &self.async_apply {
-            Some(coordinator) => Some(
-                coordinator
-                    .reserve(request.shard.clone(), std::slice::from_ref(&envelope))
-                    .await?,
-            ),
-            None => None,
-        };
-        let committed = self
-            .append_class_s_claim(
-                RawCommitRequest::new(request.shard.clone(), vec![envelope], epoch)
+        drop(driver);
+        drop(slot);
+        let mut envelopes = Vec::new();
+        let mut retained = Vec::new();
+        let mut results = Vec::new();
+        for (work, (ids, items)) in works.iter().zip(selected) {
+            if ids.is_empty() {
+                results.push((work.id, Ok(Claimed::default())));
+                continue;
+            }
+            let claimed = PreparedClaimedResult::from_rendered(&work.request, &ids, items, None)?
+                .into_claimed();
+            let envelope = CommandEnvelope {
+                command_id: self.ids.next_command_id(),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: ids.clone(),
+                command: QueueCommand::Claim(ClaimCommand {
+                    item_ids: ids.clone(),
+                    lease_token: work.request.lease_token.clone(),
+                    lease_expires_at: work.request.lease_expires_at,
+                    worker_id: Some(work.request.worker_id.clone()),
+                    authority_first: true,
+                }),
+                checksum: CommandChecksum(0),
+                created_at: work.request.now,
+            };
+            envelopes.push(envelope);
+            retained.push((work.id, ids, work.request.lease_token.clone(), claimed));
+        }
+        let published = !envelopes.is_empty();
+        if published {
+            let reservation = match &self.async_apply {
+                Some(coordinator) => Some(coordinator.reserve(shard.clone(), &envelopes).await?),
+                None => None,
+            };
+            self.append_class_s_claim(
+                RawCommitRequest::new(shard.clone(), envelopes, epoch)
                     .with_append_admission(AppendAdmissionClass::ClaimCoordinatorLive),
                 reservation,
-                &leased.outbox_id,
+                "",
             )
-            .await;
-        if let Err(error) = committed {
-            let _ = self
-                .projection
-                .abort_class_s_claim(
-                    request.shard.tenant_id.as_str(),
-                    request.shard.queue_id.as_str(),
-                    &leased.outbox_id,
-                    &item_ids,
-                    &request.lease_token,
-                    now_nanos,
-                )
-                .await;
-            return Err(error);
+            .await?;
         }
-        self.projection
-            .remember_leases(&request.shard, &item_ids, request.lease_token.clone())
-            .await;
-        claimed_from_class_s(&request.lease_token, leased)
+        drop(fence);
+        if published {
+            self.wait_request_entry_coverage(&shard).await?;
+            self.record_frontier(&shard, true).await?;
+            for (_id, ids, token, _) in &retained {
+                self.projection
+                    .remember_leases(&shard, ids, token.clone())
+                    .await;
+            }
+        }
+        drop(batch);
+        for (id, _, _, claimed) in retained {
+            results.push((id, Ok(claimed)));
+        }
+        Ok(results)
     }
 
     async fn append_class_s_claim(
@@ -3564,7 +3785,7 @@ impl DerivedObjectLogTursoBackend {
                 commands.clone(),
                 epoch,
                 reservation.as_ref().map(|reserved| reserved.id()),
-                false,
+                true,
             )
             .await
         {
@@ -4190,7 +4411,7 @@ mod s3c_activation {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn grouped_claim_uses_retained_carrier_and_item_claim_stays_provisional() {
+    async fn grouped_and_item_claim_use_retained_carrier_without_sql_first_lease() {
         let root = std::env::temp_dir().join(format!(
             "fireweed-s3c-claim-{}-{}",
             std::process::id(),
