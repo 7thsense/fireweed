@@ -18,6 +18,10 @@ pub mod maintenance;
 pub mod object_store_observability;
 mod port_surface;
 mod reclaim_tick;
+pub use reclaim_tick::{
+    EXPIRED_LEASE_SCAN_LIMIT, RECLAIM_RETRY_BACKOFF_MS, RECLAIM_RETRY_QUEUE_CAPACITY,
+    RECLAIM_SATURATED_KEY_DEADLINE, ReclaimRetryMetrics, ReclaimTickOutcome, tick_owned_reclaim,
+};
 mod recovery_stats;
 mod request_id_probe;
 mod s3_create_only;

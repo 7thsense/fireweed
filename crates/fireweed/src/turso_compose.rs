@@ -24,8 +24,9 @@ use fireweed_engine::{
     AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
     AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand,
     ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
-    CommandPosition, ControlPlaneStore, CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT,
-    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget,
+    CommandPosition, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
+    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult,
+    ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome, FinalizePort, FinalizeTarget,
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, InProcessControlPlane,
     InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
     ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
@@ -274,6 +275,10 @@ mod contention_mapping_tests {
 
         assert!(compose.contains(".with_append_admission(AppendAdmissionClass::AtomicNative)"));
         assert!(compose.contains(".with_append_admission(AppendAdmissionClass::KeyedPermitLive)"));
+        assert!(
+            compose.contains("tick_turso_expired_leases") && compose.contains("tick_owned_reclaim"),
+            "Turso reclaim ticks must own per-queue retry through the shared object-log driver"
+        );
         assert!(
             production_async
                 .contains("let request = request.with_append_admission(self.append_admission);")
@@ -1068,6 +1073,97 @@ where
 
 // Port impls for AtomicTursoBackend — shared via macro-like duplication with object-log product.
 
+#[cfg(feature = "objectlog")]
+struct TursoExpiredScan {
+    shards: Vec<QueueKey>,
+    index: usize,
+}
+
+#[cfg(feature = "objectlog")]
+async fn next_turso_expired_page(
+    projection: &TursoRelational,
+    scan: &tokio::sync::Mutex<TursoExpiredScan>,
+    now: UtcTimestamp,
+) -> EngineResult<ExpiredLeasePage> {
+    let limit = fireweed_objectlog::EXPIRED_LEASE_SCAN_LIMIT;
+    let mut leases = Vec::new();
+    let mut rows = 0usize;
+    loop {
+        let shard = {
+            let mut scan = scan.lock().await;
+            if scan.index >= scan.shards.len() || rows >= limit {
+                let next = (scan.index < scan.shards.len()).then(|| {
+                    ExpiredLeaseCursor::from_row(0, &scan.shards[scan.index], &ItemId::from_u64(0))
+                });
+                return Ok(ExpiredLeasePage { leases, next });
+            }
+            let shard = scan.shards[scan.index].clone();
+            scan.index += 1;
+            shard
+        };
+        let remaining = limit.saturating_sub(rows);
+        let ids =
+            AsyncProjectionStore::expired_leases(projection, shard.clone(), now, remaining).await?;
+        if ids.is_empty() {
+            continue;
+        }
+        rows = rows.saturating_add(ids.len());
+        leases.push((shard, ids));
+    }
+}
+
+async fn tick_turso_expired_leases<B>(
+    projection: Arc<TursoRelational>,
+    control: Arc<InProcessControlPlane>,
+    backend: &B,
+    now: UtcTimestamp,
+) -> EngineResult<TickReport>
+where
+    B: ReclaimPort + Sync,
+{
+    #[cfg(feature = "objectlog")]
+    {
+        let definitions = AsyncProjectionStore::recover_definitions(projection.as_ref()).await?;
+        let mut shards = definitions
+            .into_iter()
+            .map(|definition| QueueKey::new(definition.tenant_id, definition.queue_id))
+            .collect::<Vec<_>>();
+        shards.sort();
+        let scan = Arc::new(tokio::sync::Mutex::new(TursoExpiredScan {
+            shards,
+            index: 0,
+        }));
+        let outcome =
+            fireweed_objectlog::tick_owned_reclaim(
+                backend,
+                now,
+                {
+                    let scan = Arc::clone(&scan);
+                    let projection = Arc::clone(&projection);
+                    move |_cursor| {
+                        let scan = Arc::clone(&scan);
+                        let projection = Arc::clone(&projection);
+                        async move {
+                            next_turso_expired_page(projection.as_ref(), scan.as_ref(), now).await
+                        }
+                    }
+                },
+                move |shard| {
+                    let definition = ControlPlane::queue_definition(control.as_ref(), shard)?;
+                    Ok(usize::try_from(definition.max_claim_batch_size).unwrap_or(usize::MAX))
+                },
+                1,
+            )
+            .await?;
+        Ok(outcome.report)
+    }
+    #[cfg(not(feature = "objectlog"))]
+    {
+        let _ = (projection, control, backend, now);
+        Ok(TickReport::default())
+    }
+}
+
 macro_rules! impl_turso_product_ports {
     ($ty:ty, $durability:expr, $consistency:expr) => {
         impl Backend for $ty {
@@ -1585,9 +1681,17 @@ macro_rules! impl_turso_product_ports {
         impl ReclaimDriver for $ty {
             fn tick(
                 &self,
-                _now: UtcTimestamp,
+                now: UtcTimestamp,
             ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-                std::future::ready(Ok(TickReport::default()))
+                async move {
+                    tick_turso_expired_leases(
+                        Arc::clone(&self.projection),
+                        Arc::clone(&self.control),
+                        self,
+                        now,
+                    )
+                    .await
+                }
             }
         }
 
