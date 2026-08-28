@@ -21,17 +21,18 @@ use fireweed_engine::{
     TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
-    RelRow, RelTx, RelValue, TokenOp, async_projection as sql, elig_sort, entity_from_json,
-    fields_from_json, fields_to_json, lease_hash, metadata_from_json, metadata_to_json, nanos_ts,
-    parse_priority, parse_state, ts_nanos, ts_nanos_opt,
+    ClassSClaimedItem, RelRow, RelTx, RelValue, TokenOp, async_projection as sql, elig_sort,
+    entity_from_json, fields_from_json, fields_to_json, lease_hash, metadata_from_json,
+    metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos, ts_nanos_opt,
 };
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
 
 use crate::{
-    COMMITTED_OUTCOME_POOL_RESOURCE, TursoApplyPhaseObservation, TursoRelational,
+    COMMITTED_DRIVER_POOL_RESOURCE, COMMITTED_OUTCOME_POOL_RESOURCE, TursoApplyPhaseObservation,
+    TursoRelational,
     local::{ConsumerLeaseIndex, TursoBatchUpdateStatementShape},
-    map_pooled_reader_error,
+    map_pooled_reader_error, render_class_s_claimed_items,
 };
 
 fn storage(error: impl std::fmt::Display) -> EngineError {
@@ -40,6 +41,10 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
 
 fn outcome_read_error(error: turso::Error) -> EngineError {
     map_pooled_reader_error(error, COMMITTED_OUTCOME_POOL_RESOURCE)
+}
+
+fn driver_read_error(error: turso::Error) -> EngineError {
+    map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE)
 }
 
 fn text(value: &Value) -> EngineResult<String> {
@@ -1943,6 +1948,109 @@ pub fn finish_retained_claimed(items: Vec<ClaimedItem>) -> EngineResult<Vec<Clai
     Ok(items)
 }
 
+async fn query_driver_value_rows(
+    connection: &Connection,
+    query: impl AsRef<str>,
+    params: Vec<Value>,
+) -> EngineResult<Vec<Vec<Value>>> {
+    let mut rows = connection
+        .query(query, params)
+        .await
+        .map_err(driver_read_error)?;
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next().await.map_err(driver_read_error)? {
+        let mut values = Vec::with_capacity(row.column_count());
+        for index in 0..row.column_count() {
+            values.push(row.get_value(index).map_err(driver_read_error)?);
+        }
+        collected.push(values);
+    }
+    Ok(collected)
+}
+
+fn class_s_item_from_driver_row(
+    values: &[Value],
+    lease_expires_at: i64,
+) -> EngineResult<ClassSClaimedItem> {
+    Ok(ClassSClaimedItem {
+        item_id: text(&values[0])?,
+        client_item_key: text(&values[1])?,
+        payload: optional_blob(&values[2])?,
+        item_version: integer(&values[3])? + 1,
+        retry_count: integer(&values[4])? + 1,
+        lease_expires_at,
+        priority: optional_text(&values[5])?,
+        group_key: optional_text(&values[6])?,
+        not_before: optional_integer(&values[7])?,
+        fields_json: optional_text(&values[8])?.unwrap_or_else(|| "{}".into()),
+        metadata_json: optional_text(&values[9])?.unwrap_or_else(|| "{}".into()),
+        max_attempts: optional_integer(&values[10])?.unwrap_or(0),
+        entity_document: optional_text(&values[11])?,
+        index_fields: optional_blob(&values[12])?,
+        gate_keys: Vec::new(),
+    })
+}
+
+/// Full-row grouped/cohort Claim materialization over a borrowed driver snapshot.
+///
+/// Items may still be Pending. Lease token/expiry come from the request. Inert until S3c selects
+/// this helper with committed driver pools; serving still uses post-append [`TursoRelational`]
+/// `render_claimed`.
+#[allow(dead_code)]
+pub async fn materialize_grouped_cohort_claimed_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    lease_token: &LeaseToken,
+    lease_expires_at: UtcTimestamp,
+) -> EngineResult<Vec<ClaimedItem>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let expires = ts_nanos(lease_expires_at);
+    let mut item_rows = HashMap::<ItemId, ClassSClaimedItem>::with_capacity(ids.len());
+    let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
+    for chunk in ids.chunks(500) {
+        let placeholders = (0..chunk.len())
+            .map(|index| format!("?{}", index + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ];
+        params.extend(chunk.iter().map(|id| id.to_string().into()));
+        let item_sql = format!(
+            "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
+             not_before,fields,metadata,max_attempts,entity_document,index_fields \
+             FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+        );
+        for values in query_driver_value_rows(connection, item_sql, params.clone()).await? {
+            let item = class_s_item_from_driver_row(&values, expires)?;
+            let id = ItemId::new(&item.item_id).map_err(storage)?;
+            item_rows.insert(id, item);
+        }
+        let gate_sql = format!(
+            "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
+             AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+        );
+        for values in query_driver_value_rows(connection, gate_sql, params).await? {
+            let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+            gate_keys.entry(id).or_default().push(text(&values[1])?);
+        }
+    }
+    let mut relational = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(mut item) = item_rows.remove(id) else {
+            continue;
+        };
+        item.gate_keys = gate_keys.remove(id).unwrap_or_default();
+        relational.push(item);
+    }
+    render_class_s_claimed_items(lease_token, relational)
+}
+
 impl TursoRelational {
     /// Atomically create the queue or return its exact durable definition.
     pub async fn create_or_read_queue(
@@ -3492,9 +3600,20 @@ mod push_batch_lowering_tests {
 
 #[cfg(test)]
 mod committed_pool_helper_tests {
-    use fireweed_engine::ClaimedItem;
+    use std::collections::BTreeMap;
 
-    use super::finish_retained_claimed;
+    use fireweed_core::{
+        CohortId, GroupKey, ItemId, LeaseToken, MetadataValue, PriorityValue, QueueId, TenantId,
+        TypedValue, UtcTimestamp, WorkerId,
+    };
+    use fireweed_engine::{
+        ClaimCompatibility, ClaimRequest, ClaimedItem, PreparedClaimedResult, QueueKey,
+        finish_retained_grouped_cohort_claim,
+    };
+    use fireweed_relational::nanos_ts;
+    use turso::Value;
+
+    use super::{TursoRelational, finish_retained_claimed, materialize_grouped_cohort_claimed_on};
 
     fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let (_, tail) = source
@@ -3532,7 +3651,7 @@ mod committed_pool_helper_tests {
         let retained = between(
             projection,
             "pub fn finish_retained_claimed(",
-            "impl TursoRelational {",
+            "async fn query_driver_value_rows(",
         );
         assert!(
             retained.contains("Ok(items)"),
@@ -3566,6 +3685,193 @@ mod committed_pool_helper_tests {
 
         let items = finish_retained_claimed(Vec::<ClaimedItem>::new()).expect("retained");
         assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grouped_cohort_claim_materializes_before_append() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        let stored_id = ItemId::mint(1, 0, 1);
+        let compact_id = ItemId::mint(1, 0, 2);
+        let index_fields = BTreeMap::from([
+            ("profile.rank".to_string(), TypedValue::Integer(42)),
+            (
+                "profile.region".to_string(),
+                TypedValue::String("east".to_string()),
+            ),
+        ]);
+        let encoded_index_fields =
+            fireweed_engine::index_fields::encode_index_fields_blob(&index_fields)
+                .expect("encode index fields")
+                .expect("nonempty index fields");
+        let insert = "INSERT INTO fireweed_items(\
+             tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
+             not_before,eligible_since,group_key,payload,fields,metadata,entity_document,index_fields,\
+             retry_count,item_version,last_command_sequence,created_at,updated_at,fenced,superseded,\
+             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+        for (id, entity, native_indexes, created_seq) in [
+            (
+                stored_id,
+                Value::Text(r#"{"kind":"stored","rank":7}"#.to_string()),
+                Value::Null,
+                1_i64,
+            ),
+            (
+                compact_id,
+                Value::Null,
+                Value::Blob(encoded_index_fields),
+                2_i64,
+            ),
+        ] {
+            store
+                .execute(
+                    insert,
+                    vec![
+                        Value::Text("t".to_string()),
+                        Value::Text("q".to_string()),
+                        Value::Text(id.to_string()),
+                        Value::Text(format!("key-{id}")),
+                        Value::Text("Pending".to_string()),
+                        Value::Text(
+                            serde_json::to_string(&PriorityValue::Int64(7)).expect("priority"),
+                        ),
+                        Value::Blob(vec![0, created_seq as u8]),
+                        Value::Integer(7),
+                        Value::Integer(1),
+                        Value::Text("group-a".to_string()),
+                        Value::Blob(vec![0xCA, 0xFE]),
+                        Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
+                        Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
+                        entity,
+                        native_indexes,
+                        Value::Integer(2),
+                        Value::Integer(4),
+                        Value::Integer(1),
+                        Value::Integer(1),
+                        Value::Integer(1),
+                        Value::Integer(0),
+                        Value::Integer(0),
+                        Value::Integer(9),
+                        Value::Integer(created_seq),
+                    ],
+                )
+                .await
+                .expect("insert pending full row");
+        }
+        store
+            .execute(
+                "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                 VALUES('t','q',?,'gate-satisfied')",
+                vec![Value::Text(stored_id.to_string())],
+            )
+            .await
+            .expect("insert satisfied gate membership");
+
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let token = LeaseToken::new("token-grouped").expect("token");
+        let expires = UtcTimestamp::new(20, 0).unwrap();
+        let ids = vec![stored_id, compact_id];
+        let snapshot = store.reader.lock().await;
+        let items = materialize_grouped_cohort_claimed_on(&snapshot, &shard, &ids, &token, expires)
+            .await
+            .expect("materialize on driver snapshot");
+        drop(snapshot);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].item_id, stored_id);
+        assert_eq!(items[1].item_id, compact_id);
+        assert_eq!(items[0].payload.as_deref(), Some(&[0xCA, 0xFE][..]));
+        assert_eq!(
+            items[0].fields.get("blob").map(|value| value.as_ref()),
+            Some(&[1, 2, 3][..])
+        );
+        assert_eq!(
+            items[0].metadata.get("source"),
+            Some(&MetadataValue::String("class-s".to_string()))
+        );
+        assert_eq!(
+            items[0].metadata.get("attempt"),
+            Some(&MetadataValue::Integer(7))
+        );
+        assert_eq!(
+            items[0].entity,
+            Some(serde_json::json!({"kind": "stored", "rank": 7}))
+        );
+        assert_eq!(items[0].gate_keys, ["gate-satisfied"]);
+        assert_eq!(items[0].not_before, Some(nanos_ts(7)));
+        assert_eq!(items[0].priority, Some(PriorityValue::Int64(7)));
+        assert_eq!(
+            items[0].group_key.as_ref().map(GroupKey::as_str),
+            Some("group-a")
+        );
+        assert_eq!(
+            items[1].entity,
+            Some(serde_json::json!({"profile": {"rank": 42, "region": "east"}}))
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| item.lease_token.as_ref() == Some(&token))
+        );
+        assert!(items.iter().all(|item| item.lease_expires_at == expires));
+
+        let request = ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("worker").unwrap(),
+            max_items: 2,
+            lease_token: token.clone(),
+            lease_expires_at: expires,
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: Some(1),
+        };
+        let grouped = PreparedClaimedResult::from_rendered(&request, &ids, items.clone(), None)
+            .expect("grouped retained")
+            .into_claimed();
+        assert_eq!(grouped.items.len(), 2);
+        assert_eq!(
+            grouped.items[0].lease_token.as_ref(),
+            Some(&request.lease_token)
+        );
+        assert!(grouped.cohort_id.is_none());
+
+        let mut cohort_request = request.clone();
+        cohort_request.compatibility.whole_cohort = true;
+        let cohort_id = CohortId::new("coh:group-a:10000000000").unwrap();
+        let shaped = finish_retained_grouped_cohort_claim(
+            &cohort_request,
+            &ids,
+            items,
+            Some(cohort_id.clone()),
+        )
+        .expect("cohort shape");
+        assert!(shaped.items.iter().all(|item| item.lease_token.is_none()));
+        assert_eq!(
+            shaped.cohort_lease_token.as_ref(),
+            Some(&cohort_request.lease_token)
+        );
+        assert_eq!(shaped.cohort_id.as_ref(), Some(&cohort_id));
+        let continued = PreparedClaimedResult::Retained(shaped).into_claimed();
+        assert_eq!(continued.cohort_id.as_ref(), Some(&cohort_id));
+
+        let projection = include_str!("projection.rs");
+        let helper = between(
+            projection,
+            "pub async fn materialize_grouped_cohort_claimed_on(",
+            "impl TursoRelational {",
+        );
+        assert!(helper.contains("connection: &Connection"));
+        assert!(
+            !helper.contains("lifecycle_state='Leased'"),
+            "pre-append snapshot rows are still Pending"
+        );
+        asserts_no_pool_borrow(helper, "materialize_grouped_cohort_claimed_on");
+        let render = between(projection, "fn render_claimed(", "fn item_state(");
+        assert!(
+            render.contains("self.query("),
+            "existing serving must keep post-append render_claimed until S3c"
+        );
+        assert!(render.contains("lifecycle_state='Leased'"));
     }
 
     #[test]

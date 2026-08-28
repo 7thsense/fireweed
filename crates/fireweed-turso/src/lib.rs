@@ -13,6 +13,8 @@ mod tx;
 
 #[cfg(feature = "local")]
 pub use local::*;
+#[cfg(feature = "local")]
+pub use projection::materialize_grouped_cohort_claimed_on;
 
 /// Whether this build contains the embedded Turso engine.
 pub const LOCAL_FEATURE_ENABLED: bool = cfg!(feature = "local");
