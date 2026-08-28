@@ -4,7 +4,6 @@
 //! projection that may lag under `ResponseBarrier::AsyncProjection`.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -20,6 +19,17 @@ use tokio::sync::{Mutex, Notify};
 pub struct AsyncProjectionApplyReservation {
     id: u64,
     shard: QueueKey,
+}
+
+impl AsyncProjectionApplyReservation {
+    /// Packer-visible identifier used to transfer co-sealed followers into the leader.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn shard(&self) -> &QueueKey {
+        &self.shard
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,10 +197,7 @@ where
     ) -> EngineResult<AsyncProjectionApplyReservation> {
         let command_count = u64::try_from(commands.len())
             .map_err(|_| EngineError::Storage("async projection command count overflow".into()))?;
-        let mut counter = CountingWriter::default();
-        serde_json::to_writer(&mut counter, commands)
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-        let debt_bytes = counter.bytes;
+        let debt_bytes = crate::log_engine_store::exact_envelope_bytes(commands)?;
         let now = Instant::now();
         let mut state = self.inner.state.lock().await;
         let shard_state = state.shards.entry(shard.clone()).or_default();
@@ -237,6 +244,85 @@ where
         drop(state);
         self.inner.changed.notify_waiters();
         Ok(AsyncProjectionApplyReservation { id, shard })
+    }
+
+    /// Merge co-sealed follower reservations into the leader and charge exact packed envelope bytes.
+    ///
+    /// Followers must not cancel after this transfer: the leader publishes the combined debt.
+    pub async fn transfer_followers_and_recharge(
+        &self,
+        leader: &AsyncProjectionApplyReservation,
+        follower_ids: &[u64],
+        packed_commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        let command_count = u64::try_from(packed_commands.len())
+            .map_err(|_| EngineError::Storage("async projection command count overflow".into()))?;
+        let debt_bytes = crate::log_engine_store::exact_envelope_bytes(packed_commands)?;
+        let mut state = self.inner.state.lock().await;
+        if follower_ids.iter().any(|id| *id == leader.id) {
+            drop(state);
+            return self
+                .poison(
+                    leader.shard.clone(),
+                    "async projection leader reservation was transferred as a follower".into(),
+                )
+                .await;
+        }
+        state
+            .entries
+            .retain(|entry| entry.shard() != &leader.shard || !follower_ids.contains(&entry.id()));
+        let Some(entry) = state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id() == leader.id && entry.shard() == &leader.shard)
+        else {
+            drop(state);
+            return self
+                .poison(
+                    leader.shard.clone(),
+                    "async projection leader reservation disappeared before transfer".into(),
+                )
+                .await;
+        };
+        match entry {
+            ApplyEntry::Reserved {
+                command_count: reserved_count,
+                debt_bytes: reserved_debt,
+                ..
+            } => {
+                *reserved_count = command_count;
+                *reserved_debt = debt_bytes;
+            }
+            ApplyEntry::Ready(_) => {
+                drop(state);
+                return self
+                    .poison(
+                        leader.shard.clone(),
+                        "async projection leader reservation was published before transfer".into(),
+                    )
+                    .await;
+            }
+        }
+        drop(state);
+        self.inner.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// True while the reservation is still Reserved or Ready (not cancelled).
+    pub async fn reservation_outstanding(
+        &self,
+        reservation: &AsyncProjectionApplyReservation,
+    ) -> bool {
+        let state = self.inner.state.lock().await;
+        state
+            .entries
+            .iter()
+            .any(|entry| entry.id() == reservation.id && entry.shard() == &reservation.shard)
+    }
+
+    /// Latch shard poison for post-position append ambiguity. Does not cancel reservations.
+    pub async fn latch_poison(&self, shard: QueueKey, reason: String) {
+        let _ = self.poison(shard, reason).await;
     }
 
     /// Cancel a pre-append reservation after append rejection or a deliberate crash cut.
@@ -730,22 +816,6 @@ fn backpressure(resource: &'static str) -> EngineError {
 
 fn poisoned(reason: &str) -> EngineError {
     EngineError::Storage(format!("async projection poisoned: {reason}"))
-}
-
-#[derive(Default)]
-struct CountingWriter {
-    bytes: u64,
-}
-
-impl Write for CountingWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes = self.bytes.saturating_add(buffer.len() as u64);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

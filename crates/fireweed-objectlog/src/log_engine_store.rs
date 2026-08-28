@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as IoWrite;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -21,8 +21,8 @@ use bytes::Bytes;
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
     AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, PayloadUpdate, ProjectionSnapshot, QueueCommand,
-    QueueKey, SnapshotRef,
+    DurabilityClass, EngineError, EngineResult, ProjectionSnapshot, QueueCommand, QueueKey,
+    SnapshotRef,
 };
 use object_log::{
     BlobStore, Durability, FlushConfig, LocalBlobStore, LogEngine, ManifestSequencer,
@@ -124,6 +124,10 @@ const PACK_MAX_BATCHES: usize = 8;
 /// Gather window for concurrent produces. Seal immediately once a full window
 /// is waiting; otherwise wait this long for more callers to join the PUT.
 const PACK_LINGER: Duration = Duration::from_millis(20);
+/// Pre-position budget covering linger, produce-lock queueing, encode, and leader election.
+pub const OBJECT_LOG_PRE_POSITION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Post-position budget covering `engine.produce` plus periodic high-water `put_json`.
+pub const OBJECT_LOG_POST_POSITION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Signaled after the pack leader has published apply (or skipped it).
 /// Followers wait on this before cancelling their apply reservation.
@@ -182,6 +186,35 @@ pub struct PackedAppendOutcome {
 pub struct PackedApplyBatch {
     pub positions: Vec<CommandPosition>,
     pub commands: Vec<CommandEnvelope>,
+    /// Follower reservation ids the leader must absorb before enqueue.
+    pub transferred_reservation_ids: Vec<u64>,
+}
+
+/// Typed packed-append disposition broadcast to every co-sealed waiter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackedAppendError {
+    /// Linger/lock/encode/leader-election failure. Reservation may be cancelled.
+    BeforePosition(EngineError),
+    /// `engine.produce` or later `advance_high_water`→`put_json` failed or timed out.
+    /// Positions must not be reused; the shard is poisoned.
+    PostPositionAmbiguous { shard: QueueKey, reason: String },
+}
+
+impl PackedAppendError {
+    fn before_timeout() -> Self {
+        Self::BeforePosition(EngineError::Backpressure {
+            resource: "object-log-append-pre-position",
+        })
+    }
+
+    pub fn into_engine(self) -> EngineError {
+        match self {
+            Self::BeforePosition(error) => error,
+            Self::PostPositionAmbiguous { reason, .. } => {
+                EngineError::Storage(format!("object-log post-position ambiguous: {reason}"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,18 +236,40 @@ fn pack_lane(commands: &[CommandEnvelope]) -> PackLane {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PackGroupKey {
+    shard: QueueKey,
+    epoch: u64,
+    lane: PackLane,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackGroupPhase {
+    PrePosition,
+    PostPosition,
+}
+
 struct PackWaiter {
     shard: QueueKey,
     epoch: u64,
     lane: PackLane,
     commands: Vec<CommandEnvelope>,
-    tx: oneshot::Sender<EngineResult<PackedAppendOutcome>>,
+    bytes: usize,
+    reservation_id: Option<u64>,
+    joined_at: Instant,
+    tx: oneshot::Sender<Result<PackedAppendOutcome, PackedAppendError>>,
 }
 
 struct PackState {
     pending: Vec<PackWaiter>,
     bytes: usize,
-    oldest: Option<std::time::Instant>,
+    oldest: Option<Instant>,
+    groups: HashMap<PackGroupKey, PackGroupPhase>,
+}
+
+struct PackedProduceGate {
+    group: PackGroupKey,
+    pre_deadline: Instant,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -314,6 +369,7 @@ impl ObjectLogPacker {
                 pending: Vec::new(),
                 bytes: 0,
                 oldest: None,
+                groups: HashMap::new(),
             }),
             notify: Notify::new(),
             counters: PackerCounters {
@@ -419,6 +475,10 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     meta_prefix: String,
     definition_authority: DefinitionAuthority,
     definition_permit: tokio::sync::Mutex<()>,
+    pre_position_timeout_ms: AtomicU64,
+    post_position_timeout_ms: AtomicU64,
+    fail_high_water_puts: AtomicU32,
+    pre_position_stall_ms: AtomicU64,
 }
 
 impl ObjectLogEngineStore<ManifestSequencer> {
@@ -503,6 +563,14 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             meta_prefix: "fwmeta/".to_string(),
             definition_authority: DefinitionAuthority::Local { root },
             definition_permit: tokio::sync::Mutex::new(()),
+            pre_position_timeout_ms: AtomicU64::new(
+                OBJECT_LOG_PRE_POSITION_TIMEOUT.as_millis() as u64
+            ),
+            post_position_timeout_ms: AtomicU64::new(
+                OBJECT_LOG_POST_POSITION_TIMEOUT.as_millis() as u64
+            ),
+            fail_high_water_puts: AtomicU32::new(0),
+            pre_position_stall_ms: AtomicU64::new(0),
         };
         store.load_meta().await?;
         Ok(store)
@@ -670,6 +738,14 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             meta_prefix,
             definition_authority,
             definition_permit: tokio::sync::Mutex::new(()),
+            pre_position_timeout_ms: AtomicU64::new(
+                OBJECT_LOG_PRE_POSITION_TIMEOUT.as_millis() as u64
+            ),
+            post_position_timeout_ms: AtomicU64::new(
+                OBJECT_LOG_POST_POSITION_TIMEOUT.as_millis() as u64
+            ),
+            fail_high_water_puts: AtomicU32::new(0),
+            pre_position_stall_ms: AtomicU64::new(0),
         };
         store.load_meta().await?;
         Ok(store)
@@ -902,6 +978,19 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
     }
 
     async fn put_json(&self, key: &str, value: &impl Serialize) -> EngineResult<()> {
+        if key.contains("high_water/") {
+            let remaining = self.fail_high_water_puts.load(Ordering::SeqCst);
+            if remaining > 0
+                && self
+                    .fail_high_water_puts
+                    .compare_exchange(remaining, remaining - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                return Err(EngineError::Storage(
+                    "injected high-water put_json failure".into(),
+                ));
+            }
+        }
         let bytes = Bytes::from(serde_json::to_vec(value).map_err(store_err)?);
         self.blob.put(key, bytes).await.map_err(store_err)
     }
@@ -1129,8 +1218,9 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if epoch != expected_epoch {
             return Err(EngineError::EpochFenced);
         }
-        self.produce_immediate(&shard, commands, expected_epoch)
+        self.produce_immediate(&shard, commands, expected_epoch, None)
             .await
+            .map_err(PackedAppendError::into_engine)
     }
 
     pub fn packer_stats(&self) -> PackerStats {
@@ -1149,7 +1239,32 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
-    ) -> EngineResult<PackedAppendOutcome> {
+    ) -> Result<PackedAppendOutcome, PackedAppendError> {
+        self.packed_append_owned(shard, commands, expected_epoch, None, false)
+            .await
+    }
+
+    /// Force-seal only this shard/epoch/lane group, charging exact envelope bytes.
+    pub async fn packed_append_force_seal(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+        reservation_id: Option<u64>,
+    ) -> Result<PackedAppendOutcome, PackedAppendError> {
+        self.packed_append_owned(shard, commands, expected_epoch, reservation_id, true)
+            .await
+    }
+
+    /// Packed append that carries a reservation id so co-sealed followers transfer to the leader.
+    pub async fn packed_append_owned(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+        reservation_id: Option<u64>,
+        force_seal: bool,
+    ) -> Result<PackedAppendOutcome, PackedAppendError> {
         if commands.is_empty() {
             return Ok(PackedAppendOutcome {
                 positions: Vec::new(),
@@ -1157,12 +1272,23 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 apply_published: ApplyPublish::already_done(),
             });
         }
-        let epoch = self.load_epoch(&shard).await?;
+        let epoch = self
+            .load_epoch(&shard)
+            .await
+            .map_err(PackedAppendError::BeforePosition)?;
         if epoch != expected_epoch {
-            return Err(EngineError::EpochFenced);
+            return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
         }
-        let bytes = estimate_pack_bytes(&commands);
+        let bytes =
+            exact_envelope_bytes(&commands).map_err(PackedAppendError::BeforePosition)? as usize;
+        let lane = pack_lane(&commands);
+        let group = PackGroupKey {
+            shard: shard.clone(),
+            epoch: expected_epoch,
+            lane,
+        };
         let (tx, rx) = oneshot::channel();
+        let joined_at = Instant::now();
         let should_seal = {
             let mut state = self.packer.state.lock().expect("packer");
             if !state.pending.is_empty()
@@ -1176,36 +1302,87 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             state.pending.push(PackWaiter {
                 shard,
                 epoch: expected_epoch,
-                lane: pack_lane(&commands),
+                lane,
                 commands,
+                bytes,
+                reservation_id,
+                joined_at,
                 tx,
             });
             state.bytes = state.bytes.saturating_add(bytes);
             if state.oldest.is_none() {
-                state.oldest = Some(std::time::Instant::now());
+                state.oldest = Some(joined_at);
             }
-            ObjectLogPacker::ready_locked(&state)
+            force_seal || ObjectLogPacker::ready_locked(&state)
         };
         if should_seal {
             self.packer.notify.notify_waiters();
-            self.seal_packed(true).await;
-            return rx
-                .await
-                .map_err(|_| EngineError::Storage("object-log packer waiter dropped".into()))?;
+            if force_seal {
+                self.seal_own_group(group.clone()).await;
+            } else {
+                self.seal_packed(true).await;
+            }
+            return self.await_packed_result(rx, &group).await;
         }
         tokio::pin!(rx);
         tokio::select! {
             result = &mut rx => {
-                return result.map_err(|_| {
-                    EngineError::Storage("object-log packer waiter dropped".into())
-                })?;
+                return self.unpack_packed_result(result.map_err(|_| ()), &group);
             }
             _ = tokio::time::sleep(PACK_LINGER) => {
                 self.seal_packed(true).await;
             }
         }
-        rx.await
-            .map_err(|_| EngineError::Storage("object-log packer waiter dropped".into()))?
+        self.unpack_packed_result(rx.await.map_err(|_| ()), &group)
+    }
+
+    async fn await_packed_result(
+        &self,
+        rx: oneshot::Receiver<Result<PackedAppendOutcome, PackedAppendError>>,
+        group: &PackGroupKey,
+    ) -> Result<PackedAppendOutcome, PackedAppendError> {
+        self.unpack_packed_result(rx.await.map_err(|_| ()), group)
+    }
+
+    fn unpack_packed_result(
+        &self,
+        result: Result<Result<PackedAppendOutcome, PackedAppendError>, ()>,
+        group: &PackGroupKey,
+    ) -> Result<PackedAppendOutcome, PackedAppendError> {
+        match result {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                let phase = self
+                    .packer
+                    .state
+                    .lock()
+                    .expect("packer")
+                    .groups
+                    .get(group)
+                    .copied();
+                if phase == Some(PackGroupPhase::PostPosition) {
+                    Err(PackedAppendError::PostPositionAmbiguous {
+                        shard: group.shard.clone(),
+                        reason: "object-log packer waiter dropped after position".into(),
+                    })
+                } else {
+                    Err(PackedAppendError::BeforePosition(EngineError::Storage(
+                        "object-log packer waiter dropped".into(),
+                    )))
+                }
+            }
+        }
+    }
+
+    async fn seal_own_group(&self, group: PackGroupKey) {
+        let waiters = {
+            let mut state = self.packer.state.lock().expect("packer");
+            take_group(&mut state, &group)
+        };
+        if waiters.is_empty() {
+            return;
+        }
+        self.seal_group(group, waiters).await;
     }
 
     async fn seal_packed(&self, force: bool) {
@@ -1227,70 +1404,103 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if pending.is_empty() {
             return;
         }
-        let mut groups: HashMap<(QueueKey, u64, PackLane), Vec<PackWaiter>> = HashMap::new();
+        let mut groups: HashMap<PackGroupKey, Vec<PackWaiter>> = HashMap::new();
         for w in pending {
             groups
-                .entry((w.shard.clone(), w.epoch, w.lane))
+                .entry(PackGroupKey {
+                    shard: w.shard.clone(),
+                    epoch: w.epoch,
+                    lane: w.lane,
+                })
                 .or_default()
                 .push(w);
         }
-        for ((shard, epoch, _lane), waiters) in groups {
-            let waiter_n = waiters.len() as u64;
-            let command_n = waiters.iter().map(|w| w.commands.len() as u64).sum::<u64>();
-            let byte_n = waiters
-                .iter()
-                .map(|w| estimate_pack_bytes(&w.commands) as u64)
-                .sum::<u64>();
-            self.packer.counters.seals.fetch_add(1, Ordering::Relaxed);
-            self.packer
-                .counters
-                .waiters
-                .fetch_add(waiter_n, Ordering::Relaxed);
-            self.packer
-                .counters
-                .commands
-                .fetch_add(command_n, Ordering::Relaxed);
-            self.packer
-                .counters
-                .bytes
-                .fetch_add(byte_n, Ordering::Relaxed);
-            let counts: Vec<usize> = waiters.iter().map(|w| w.commands.len()).collect();
-            let mut all = Vec::with_capacity(counts.iter().sum());
-            for w in &waiters {
-                all.extend(w.commands.iter().cloned());
-            }
-            match self.produce_immediate(&shard, all.clone(), epoch).await {
-                Ok(positions) => {
-                    let mut offset = 0usize;
-                    let mut leader = true;
-                    let apply_published = ApplyPublish::new();
-                    for (w, n) in waiters.into_iter().zip(counts) {
-                        let slice = positions
-                            .get(offset..offset + n)
-                            .map(|s| s.to_vec())
-                            .unwrap_or_default();
-                        offset += n;
-                        let apply_batch = if leader {
-                            leader = false;
-                            Some(PackedApplyBatch {
-                                positions: positions.clone(),
-                                commands: all.clone(),
-                            })
-                        } else {
-                            None
-                        };
-                        let _ = w.tx.send(Ok(PackedAppendOutcome {
-                            positions: slice,
-                            apply_batch,
-                            apply_published: Arc::clone(&apply_published),
-                        }));
-                    }
+        for (group, waiters) in groups {
+            self.seal_group(group, waiters).await;
+        }
+    }
+
+    async fn seal_group(&self, group: PackGroupKey, waiters: Vec<PackWaiter>) {
+        let waiter_n = waiters.len() as u64;
+        let command_n = waiters.iter().map(|w| w.commands.len() as u64).sum::<u64>();
+        let byte_n = waiters.iter().map(|w| w.bytes as u64).sum::<u64>();
+        self.packer.counters.seals.fetch_add(1, Ordering::Relaxed);
+        self.packer
+            .counters
+            .waiters
+            .fetch_add(waiter_n, Ordering::Relaxed);
+        self.packer
+            .counters
+            .commands
+            .fetch_add(command_n, Ordering::Relaxed);
+        self.packer
+            .counters
+            .bytes
+            .fetch_add(byte_n, Ordering::Relaxed);
+        let pre_deadline = waiters
+            .iter()
+            .map(|w| w.joined_at)
+            .min()
+            .unwrap_or_else(Instant::now)
+            + Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
+        {
+            let mut state = self.packer.state.lock().expect("packer");
+            state
+                .groups
+                .insert(group.clone(), PackGroupPhase::PrePosition);
+        }
+        let counts: Vec<usize> = waiters.iter().map(|w| w.commands.len()).collect();
+        let mut all = Vec::with_capacity(counts.iter().sum());
+        for w in &waiters {
+            all.extend(w.commands.iter().cloned());
+        }
+        let gate = PackedProduceGate {
+            group: group.clone(),
+            pre_deadline,
+        };
+        let result = self
+            .produce_immediate(&group.shard, all.clone(), group.epoch, Some(gate))
+            .await;
+        {
+            let mut state = self.packer.state.lock().expect("packer");
+            state.groups.remove(&group);
+        }
+        match result {
+            Ok(positions) => {
+                let mut offset = 0usize;
+                let mut leader = true;
+                let apply_published = ApplyPublish::new();
+                let transferred_reservation_ids: Vec<u64> = waiters
+                    .iter()
+                    .skip(1)
+                    .filter_map(|w| w.reservation_id)
+                    .collect();
+                for (w, n) in waiters.into_iter().zip(counts) {
+                    let slice = positions
+                        .get(offset..offset + n)
+                        .map(|s| s.to_vec())
+                        .unwrap_or_default();
+                    offset += n;
+                    let apply_batch = if leader {
+                        leader = false;
+                        Some(PackedApplyBatch {
+                            positions: positions.clone(),
+                            commands: all.clone(),
+                            transferred_reservation_ids: transferred_reservation_ids.clone(),
+                        })
+                    } else {
+                        None
+                    };
+                    let _ = w.tx.send(Ok(PackedAppendOutcome {
+                        positions: slice,
+                        apply_batch,
+                        apply_published: Arc::clone(&apply_published),
+                    }));
                 }
-                Err(error) => {
-                    let msg = error.to_string();
-                    for w in waiters {
-                        let _ = w.tx.send(Err(EngineError::Storage(msg.clone())));
-                    }
+            }
+            Err(error) => {
+                for w in waiters {
+                    let _ = w.tx.send(Err(error.clone()));
                 }
             }
         }
@@ -1301,47 +1511,103 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         shard: &QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
-    ) -> EngineResult<Vec<CommandPosition>> {
+        gate: Option<PackedProduceGate>,
+    ) -> Result<Vec<CommandPosition>, PackedAppendError> {
         if commands.is_empty() {
             return Ok(Vec::new());
         }
-        // Terminal suffix: metadata-permit then produce-lock. The permit is held
-        // across produce and the permit-held high-water decision/advance.
+        let pre_budget =
+            Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
+        let pre_deadline = gate
+            .as_ref()
+            .map(|gate| gate.pre_deadline)
+            .unwrap_or_else(|| Instant::now() + pre_budget);
+        let post_timeout =
+            Duration::from_millis(self.post_position_timeout_ms.load(Ordering::Relaxed));
         let permit = self.metadata_permit(shard);
-        let wait_started = Instant::now();
-        let _metadata = permit.lock().await;
-        self.lock_wait.record_append(wait_started.elapsed());
-        let wait_started = Instant::now();
-        let _produce = self.produce_lock.lock().await;
-        self.lock_wait.record_append(wait_started.elapsed());
-        let payload = Bytes::from(
-            fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
-                .map_err(store_err)?,
-        );
-        let record_count = i32::try_from(commands.len())
-            .map_err(|_| EngineError::Invalid("batch too large for object-log record_count"))?;
-        let outcome = self
-            .engine
-            .produce(
-                partition_key(shard),
-                payload,
-                record_count,
-                (),
-                Durability::Sequenced,
-            )
-            .await
-            .map_err(store_err)?;
-        let base = outcome
-            .base_offset
-            .ok_or_else(|| EngineError::Storage("sequenced produce missing base_offset".into()))?
-            as u64;
-        let positions: Vec<CommandPosition> = (0..commands.len() as u64)
-            .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
-            .collect();
-        if let Some(last) = positions.last() {
-            self.advance_high_water_held(shard, last).await?;
+        let pre = async {
+            let stall_ms = self.pre_position_stall_ms.load(Ordering::Relaxed);
+            if stall_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(stall_ms)).await;
+            }
+            // Terminal suffix: metadata-permit then produce-lock. The permit is held
+            // across produce and the permit-held high-water decision/advance.
+            let wait_started = Instant::now();
+            let metadata = permit.lock().await;
+            self.lock_wait.record_append(wait_started.elapsed());
+            let epoch = self
+                .load_epoch(shard)
+                .await
+                .map_err(PackedAppendError::BeforePosition)?;
+            if epoch != expected_epoch {
+                return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
+            }
+            let wait_started = Instant::now();
+            let produce = self.produce_lock.lock().await;
+            self.lock_wait.record_append(wait_started.elapsed());
+            let payload = Bytes::from(
+                fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
+                    .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
+            );
+            let record_count = i32::try_from(commands.len()).map_err(|_| {
+                PackedAppendError::BeforePosition(EngineError::Invalid(
+                    "batch too large for object-log record_count",
+                ))
+            })?;
+            Ok((metadata, produce, payload, record_count))
+        };
+        let remaining = pre_deadline.saturating_duration_since(Instant::now());
+        let (metadata, produce, payload, record_count) =
+            match tokio::time::timeout(remaining, pre).await {
+                Ok(Ok(parts)) => parts,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(PackedAppendError::before_timeout()),
+            };
+        let _metadata = metadata;
+        let _produce = produce;
+        if let Some(gate) = &gate {
+            let mut state = self.packer.state.lock().expect("packer");
+            match state.groups.get_mut(&gate.group) {
+                Some(phase) if *phase == PackGroupPhase::PrePosition => {
+                    *phase = PackGroupPhase::PostPosition;
+                }
+                Some(_) | None => return Err(PackedAppendError::before_timeout()),
+            }
         }
-        Ok(positions)
+        let produced = async {
+            let outcome = self
+                .engine
+                .produce(
+                    partition_key(shard),
+                    payload,
+                    record_count,
+                    (),
+                    Durability::Sequenced,
+                )
+                .await
+                .map_err(store_err)?;
+            let base = outcome.base_offset.ok_or_else(|| {
+                EngineError::Storage("sequenced produce missing base_offset".into())
+            })? as u64;
+            let positions: Vec<CommandPosition> = (0..commands.len() as u64)
+                .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
+                .collect();
+            if let Some(last) = positions.last() {
+                self.advance_high_water_held(shard, last).await?;
+            }
+            EngineResult::Ok(positions)
+        };
+        match tokio::time::timeout(post_timeout, produced).await {
+            Ok(Ok(positions)) => Ok(positions),
+            Ok(Err(error)) => Err(PackedAppendError::PostPositionAmbiguous {
+                shard: shard.clone(),
+                reason: error.to_string(),
+            }),
+            Err(_) => Err(PackedAppendError::PostPositionAmbiguous {
+                shard: shard.clone(),
+                reason: "object-log post-position produce timed out".into(),
+            }),
+        }
     }
 
     /// Advance high-water after a sequenced produce.
@@ -1387,33 +1653,29 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     }
 }
 
-fn estimate_pack_bytes(commands: &[CommandEnvelope]) -> usize {
-    commands.len().saturating_mul(256)
-        + commands
-            .iter()
-            .map(|c| match &c.command {
-                QueueCommand::UpdateFieldsBatch(b) => b
-                    .updates
-                    .iter()
-                    .map(|u| {
-                        u.set_fields
-                            .as_ref()
-                            .map(|m| m.values().map(|v| v.len()).sum::<usize>())
-                            .unwrap_or(0)
-                            + match &u.payload {
-                                PayloadUpdate::Set(Some(p)) => p.len(),
-                                _ => 0,
-                            }
-                    })
-                    .sum::<usize>(),
-                QueueCommand::Push(p) => p
-                    .items
-                    .iter()
-                    .map(|i| i.payload.as_ref().map(|b| b.len()).unwrap_or(0))
-                    .sum(),
-                _ => 128,
-            })
-            .sum::<usize>()
+pub(crate) fn exact_envelope_bytes(commands: &[CommandEnvelope]) -> EngineResult<u64> {
+    let mut total = 0_u64;
+    for command in commands {
+        let encoded = fireweed_engine::command_codec::encode_command_envelope(command)?;
+        total = total.saturating_add(encoded.len() as u64);
+    }
+    Ok(total)
+}
+
+fn take_group(state: &mut PackState, group: &PackGroupKey) -> Vec<PackWaiter> {
+    let mut taken = Vec::new();
+    let mut remain = Vec::new();
+    for waiter in state.pending.drain(..) {
+        if waiter.shard == group.shard && waiter.epoch == group.epoch && waiter.lane == group.lane {
+            taken.push(waiter);
+        } else {
+            remain.push(waiter);
+        }
+    }
+    state.pending = remain;
+    state.bytes = state.pending.iter().map(|waiter| waiter.bytes).sum();
+    state.oldest = state.pending.iter().map(|waiter| waiter.joined_at).min();
+    taken
 }
 
 impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S> {
@@ -1468,8 +1730,9 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
             if epoch != expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
-            self.produce_immediate(&shard, commands, expected_epoch)
+            self.produce_immediate(&shard, commands, expected_epoch, None)
                 .await
+                .map_err(PackedAppendError::into_engine)
         }
     }
 
@@ -1688,17 +1951,25 @@ fn _parse_partition_smoke(key: &PartitionKey) -> Option<QueueKey> {
 mod tests {
     use std::sync::Arc;
 
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
     use fireweed_core::{
         EligibilityPolicy, ItemId, OrderingMode, PriorityModel, QueueDefinition, QueueId,
         RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
     };
     use fireweed_engine::{
-        AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, CommandPosition, EngineError,
-        FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionSnapshot, QueueCommand, QueueKey,
-        SnapshotRef,
+        AsyncLogStore, AsyncProjectionSpec, CommandChecksum, CommandEnvelope, CommandId,
+        CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+        ProjectionSnapshot, QueueCommand, QueueKey, SnapshotRef,
     };
+    use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
 
-    use super::ObjectLogEngineStore;
+    use super::{
+        OBJECT_LOG_POST_POSITION_TIMEOUT, OBJECT_LOG_PRE_POSITION_TIMEOUT, ObjectLogEngineStore,
+        PackedAppendError,
+    };
+    use crate::async_projection_apply::AsyncProjectionApplyCoordinator;
     use object_log::FlushConfig;
 
     fn temp_root(tag: &str) -> std::path::PathBuf {
@@ -2447,7 +2718,7 @@ mod tests {
         assert_eq!(
             production.matches(".produce_immediate(").count(),
             3,
-            "append, append_exclusive, and seal_packed must share produce_immediate"
+            "append, append_exclusive, and seal_group must share produce_immediate"
         );
         assert_eq!(
             production
@@ -2461,7 +2732,7 @@ mod tests {
         let held = between(
             production,
             "async fn advance_high_water_held(",
-            "fn estimate_pack_bytes(",
+            "fn exact_envelope_bytes(",
         );
         assert!(
             !held.contains("metadata_permit") && !held.contains("produce_lock"),
@@ -2549,6 +2820,7 @@ mod tests {
                         log.packed_append(shard, vec![pause_env(&format!("pack-{i}"))], epoch)
                             .await
                             .map(|_| ())
+                            .map_err(PackedAppendError::into_engine)
                     }));
                 }
                 {
@@ -2611,6 +2883,332 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    fn qdef_named(queue: &str) -> QueueDefinition {
+        let mut definition = qdef();
+        definition.queue_id = QueueId::new(queue).unwrap();
+        definition
+    }
+
+    async fn test_coordinator() -> AsyncProjectionApplyCoordinator<AsyncInMemoryProjection> {
+        AsyncProjectionApplyCoordinator::new(
+            Arc::new(AsyncInMemoryProjection::new(InMemoryProjection::new())),
+            AsyncProjectionSpec::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn object_log_append_phase_timeouts_default_to_thirty_seconds() {
+        assert_eq!(OBJECT_LOG_PRE_POSITION_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(OBJECT_LOG_POST_POSITION_TIMEOUT, Duration::from_secs(30));
+        let production = production_source();
+        assert!(
+            production.contains("OBJECT_LOG_PRE_POSITION_TIMEOUT.as_millis() as u64"),
+            "constructors must store the 30s pre-position default"
+        );
+        assert!(
+            production.contains("OBJECT_LOG_POST_POSITION_TIMEOUT.as_millis() as u64"),
+            "constructors must store the 30s post-position default"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn driver_vector_force_seals_and_charges_own_group() {
+        let log = Arc::new(
+            ObjectLogEngineStore::open_memory(FlushConfig {
+                linger: Duration::ZERO,
+                ..FlushConfig::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let coordinator = test_coordinator().await;
+        let own = qdef_named("own");
+        let other = qdef_named("other");
+        let own_shard = QueueKey::new(own.tenant_id.clone(), own.queue_id.clone());
+        let other_shard = QueueKey::new(other.tenant_id.clone(), other.queue_id.clone());
+        log.create_or_read_definition(own).await.unwrap();
+        log.create_or_read_definition(other).await.unwrap();
+        log.ensure_shard(own_shard.clone()).await.unwrap();
+        log.ensure_shard(other_shard.clone()).await.unwrap();
+        let own_epoch = log.acquire_epoch(own_shard.clone()).await.unwrap();
+        let other_epoch = log.acquire_epoch(other_shard.clone()).await.unwrap();
+
+        let follower_cmds = vec![pause_env("follower")];
+        let driver_cmds = vec![pause_env("driver-a"), pause_env("driver-b")];
+        let exact_own = super::exact_envelope_bytes(
+            &follower_cmds
+                .iter()
+                .cloned()
+                .chain(driver_cmds.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let follower_res = coordinator
+            .reserve(own_shard.clone(), &follower_cmds)
+            .await
+            .unwrap();
+        let driver_res = coordinator
+            .reserve(own_shard.clone(), &driver_cmds)
+            .await
+            .unwrap();
+        let other_res = coordinator
+            .reserve(other_shard.clone(), &[pause_env("other")])
+            .await
+            .unwrap();
+
+        let other_log = Arc::clone(&log);
+        let other_handle = tokio::spawn(async move {
+            other_log
+                .packed_append_owned(
+                    other_shard,
+                    vec![pause_env("other")],
+                    other_epoch,
+                    Some(other_res.id()),
+                    false,
+                )
+                .await
+        });
+        let follower_log = Arc::clone(&log);
+        let follower_shard = own_shard.clone();
+        let follower_id = follower_res.id();
+        let follower_handle = tokio::spawn(async move {
+            follower_log
+                .packed_append_owned(
+                    follower_shard,
+                    follower_cmds,
+                    own_epoch,
+                    Some(follower_id),
+                    false,
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let started = Instant::now();
+        let driver_outcome = log
+            .packed_append_force_seal(
+                own_shard.clone(),
+                driver_cmds,
+                own_epoch,
+                Some(driver_res.id()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(20),
+            "force-seal must not wait pack linger, elapsed {:?}",
+            started.elapsed()
+        );
+        let follower_outcome = follower_handle.await.unwrap().unwrap();
+        assert!(
+            !other_handle.is_finished(),
+            "force-seal must not steal a different shard/lane group"
+        );
+
+        let stats = log.packer_stats();
+        assert_eq!(stats.seals, 1);
+        assert_eq!(stats.waiters, 2);
+        assert_eq!(stats.commands, 3);
+        assert_eq!(stats.bytes, exact_own);
+
+        let (leader_outcome, leader_res, follower_wait) = if driver_outcome.apply_batch.is_some() {
+            (driver_outcome, driver_res, follower_res)
+        } else {
+            (follower_outcome, follower_res, driver_res)
+        };
+        let batch = leader_outcome.apply_batch.expect("leader owns publication");
+        assert_eq!(batch.commands.len(), 3);
+        assert_eq!(batch.positions.len(), 3);
+        assert_eq!(batch.transferred_reservation_ids, vec![follower_wait.id()]);
+        coordinator
+            .transfer_followers_and_recharge(
+                &leader_res,
+                &batch.transferred_reservation_ids,
+                &batch.commands,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !coordinator.reservation_outstanding(&follower_wait).await,
+            "followers transfer into the leader instead of remaining independent debt"
+        );
+        assert!(coordinator.reservation_outstanding(&leader_res).await);
+        coordinator
+            .enqueue_reserved(leader_res, batch.positions, batch.commands)
+            .await
+            .unwrap();
+        let snap = coordinator.snapshot(&own_shard).await;
+        assert_eq!(snap.apply_queue_depth, 1);
+        assert_eq!(snap.apply_lag_commands, 3);
+        assert_eq!(snap.apply_debt_bytes, exact_own);
+
+        let other_outcome = tokio::time::timeout(Duration::from_secs(2), other_handle)
+            .await
+            .expect("other group linger")
+            .unwrap()
+            .unwrap();
+        assert_eq!(other_outcome.positions.len(), 1);
+        let stats = log.packer_stats();
+        assert_eq!(stats.seals, 2);
+        assert_eq!(stats.waiters, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn post_produce_high_water_failure_never_cancels_or_reuses_position() {
+        let log = Arc::new(
+            ObjectLogEngineStore::open_memory(FlushConfig {
+                linger: Duration::ZERO,
+                ..FlushConfig::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let coordinator = test_coordinator().await;
+        let def = qdef_named("hw-fail");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        log.create_or_read_definition(def).await.unwrap();
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let commands = vec![pause_env("ambiguous")];
+        let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
+        log.fail_high_water_puts.store(1, Ordering::SeqCst);
+        let error = log
+            .packed_append_force_seal(shard.clone(), commands, epoch, Some(reservation.id()))
+            .await
+            .expect_err("high-water put_json failure is post-position");
+        assert!(
+            matches!(
+                error,
+                PackedAppendError::PostPositionAmbiguous { ref reason, .. }
+                    if reason.contains("injected high-water put_json failure")
+            ),
+            "typed disposition must be post-position, got {error:?}"
+        );
+        assert!(
+            coordinator.reservation_outstanding(&reservation).await,
+            "post-position failure must not cancel the reservation"
+        );
+        coordinator
+            .latch_poison(shard.clone(), "high-water put_json failure".into())
+            .await;
+        assert!(coordinator.snapshot(&shard).await.poison_reason.is_some());
+        assert!(
+            coordinator
+                .reserve(shard.clone(), &[pause_env("next")])
+                .await
+                .is_err(),
+            "poisoned shard must reject new reservations"
+        );
+        let page = log.read_from(shard.clone(), None, 16).await.unwrap();
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "produce allocated a durable position that must remain occupied"
+        );
+        let used = page.entries[0].0.clone();
+        let later = log
+            .append_exclusive(shard.clone(), vec![pause_env("after")], epoch)
+            .await
+            .unwrap();
+        assert_eq!(later.len(), 1);
+        assert!(
+            later[0].sequence > used.sequence,
+            "later produce must not reuse the ambiguous position {} vs {}",
+            later[0].sequence,
+            used.sequence
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn all_waiters_receive_same_typed_append_disposition() {
+        let log = Arc::new(
+            ObjectLogEngineStore::open_memory(FlushConfig {
+                linger: Duration::ZERO,
+                ..FlushConfig::default()
+            })
+            .await
+            .unwrap(),
+        );
+        log.pre_position_timeout_ms.store(100, Ordering::SeqCst);
+        log.post_position_timeout_ms.store(100, Ordering::SeqCst);
+        let def = qdef_named("typed");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        log.create_or_read_definition(def).await.unwrap();
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+
+        async fn join_three(
+            log: &Arc<ObjectLogEngineStore>,
+            shard: &QueueKey,
+            epoch: u64,
+            tag: &str,
+        ) -> Vec<PackedAppendError> {
+            let mut handles = Vec::new();
+            for i in 0..2 {
+                let log = Arc::clone(log);
+                let shard = shard.clone();
+                let env = pause_env(&format!("{tag}-{i}"));
+                handles.push(tokio::spawn(async move {
+                    log.packed_append_owned(shard, vec![env], epoch, None, false)
+                        .await
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            {
+                let log = Arc::clone(log);
+                let shard = shard.clone();
+                let env = pause_env(&format!("{tag}-leader"));
+                handles.push(tokio::spawn(async move {
+                    log.packed_append_owned(shard, vec![env], epoch, None, true)
+                        .await
+                }));
+            }
+            let mut errors = Vec::new();
+            for handle in handles {
+                errors.push(handle.await.unwrap().expect_err("injected failure"));
+            }
+            errors
+        }
+
+        log.fail_high_water_puts.store(1, Ordering::SeqCst);
+        let post = join_three(&log, &shard, epoch, "post").await;
+        assert_eq!(post.len(), 3);
+        for error in &post {
+            assert!(
+                matches!(error, PackedAppendError::PostPositionAmbiguous { .. }),
+                "every co-sealed waiter must see post-position, got {error:?}"
+            );
+            assert_eq!(error, &post[0]);
+        }
+
+        let def_pre = qdef_named("typed-pre");
+        let pre_shard = QueueKey::new(def_pre.tenant_id.clone(), def_pre.queue_id.clone());
+        log.create_or_read_definition(def_pre).await.unwrap();
+        log.ensure_shard(pre_shard.clone()).await.unwrap();
+        let pre_epoch = log.acquire_epoch(pre_shard.clone()).await.unwrap();
+        log.pre_position_stall_ms.store(250, Ordering::SeqCst);
+        let pre = join_three(&log, &pre_shard, pre_epoch, "pre").await;
+        log.pre_position_stall_ms.store(0, Ordering::SeqCst);
+        assert_eq!(pre.len(), 3);
+        for error in &pre {
+            assert!(
+                matches!(
+                    error,
+                    PackedAppendError::BeforePosition(EngineError::Backpressure {
+                        resource: "object-log-append-pre-position"
+                    })
+                ),
+                "every co-sealed waiter must see retryable pre-position, got {error:?}"
+            );
+            assert_eq!(error, &pre[0]);
+        }
+        assert!(
+            !matches!(pre[0], PackedAppendError::PostPositionAmbiguous { .. }),
+            "followers must not independently poison a live pre-position leader"
         );
     }
 }
