@@ -363,6 +363,29 @@ CREATE TABLE IF NOT EXISTS fireweed_instance_fences (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BYTEA NOT NULL, fence BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, instance_key)
 );
+-- Class S claim outbox (one-projection-cleanup): the transactional `ClaimPort::claim` below leases items,
+-- advances the cursor, and records the full Claim envelope in this table BEFORE clearing it in the SAME
+-- transaction — a crash between those two statements leaves a durable row a reopen can drain and replay.
+-- Mirrors `fireweed-relational`'s `fireweed_claim_outbox` (`crates/fireweed-relational/src/schema.rs:266`),
+-- translated to the postgres dialect (BIGINT nanos timestamps, no sqlite-only replay trigger/backfill: those
+-- back `fireweed_request_idempotency`'s `claim_by_query` replay path, which the postgres backend does not use).
+CREATE TABLE IF NOT EXISTS fireweed_claim_outbox (
+    tenant_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    outbox_id TEXT NOT NULL,
+    item_ids TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    lease_expires_at BIGINT NOT NULL,
+    request_id TEXT,
+    request_fingerprint BIGINT,
+    worker_id TEXT,
+    claim_unit TEXT NOT NULL DEFAULT 'item',
+    cohort_id TEXT,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, outbox_id)
+);
+CREATE INDEX IF NOT EXISTS fireweed_claim_outbox_queue_idx
+    ON fireweed_claim_outbox (tenant_id, queue_id, created_at);
 "#;
 
 const COMMAND_LOG_MIGRATION: &str = r#"
@@ -5714,6 +5737,7 @@ impl PostgresRelationalBackend {
             ))?;
         }
         migrate_id_high_water(&mut client)?;
+        migrate_claim_outbox(&mut client)?;
         verify_group_summary_indexes(&mut client, fresh)?;
         let mut inner = Inner {
             client,
@@ -6277,6 +6301,33 @@ fn migrate_id_high_water(client: &mut Client) -> EngineResult<()> {
         ))?;
     }
     st(tx.commit())
+}
+
+/// Unconditional, idempotent (`CREATE TABLE`/`CREATE INDEX ... IF NOT EXISTS`) upgrade for databases opened
+/// before the Class S claim outbox table existed on the postgres dialect. Run on EVERY open —
+/// fresh or not — mirroring [`migrate_id_high_water`]: the fresh-only `RELATIONAL_SCHEMA` batch above already
+/// creates this table for a brand-new database, but an existing schema created before this table was added to
+/// `RELATIONAL_SCHEMA` never sees that batch run again, so `ClaimPort::claim` would otherwise keep failing
+/// with `relation "fireweed_claim_outbox" does not exist` on every reopen.
+fn migrate_claim_outbox(client: &mut Client) -> EngineResult<()> {
+    st(client.batch_execute(
+        "CREATE TABLE IF NOT EXISTS fireweed_claim_outbox ( \
+           tenant_id TEXT NOT NULL, \
+           queue_id TEXT NOT NULL, \
+           outbox_id TEXT NOT NULL, \
+           item_ids TEXT NOT NULL, \
+           lease_token TEXT NOT NULL, \
+           lease_expires_at BIGINT NOT NULL, \
+           request_id TEXT, \
+           request_fingerprint BIGINT, \
+           worker_id TEXT, \
+           claim_unit TEXT NOT NULL DEFAULT 'item', \
+           cohort_id TEXT, \
+           created_at BIGINT NOT NULL, \
+           PRIMARY KEY (tenant_id, queue_id, outbox_id)); \
+         CREATE INDEX IF NOT EXISTS fireweed_claim_outbox_queue_idx \
+           ON fireweed_claim_outbox (tenant_id, queue_id, created_at);",
+    ))
 }
 
 fn migrate_metrics_batch(
@@ -9920,6 +9971,7 @@ impl PostgresRelational {
             &[],
         ))?;
         migrate_id_high_water(&mut client)?;
+        migrate_claim_outbox(&mut client)?;
         verify_group_summary_indexes(&mut client, fresh)?;
         let mut inner = Inner {
             client,
@@ -12468,6 +12520,43 @@ mod gated_group_summary_tests {
             1,
             "claim must refresh fireweed_group_summary (leased item leaves the eligible count)"
         );
+    }
+
+    /// Regression for the missing `fireweed_claim_outbox` DDL on a genuinely fresh postgres schema (the
+    /// v0.31.17+ Class-S claim lease-then-log path). Before the fix, `RELATIONAL_SCHEMA` never created this
+    /// table, so this test's `claim()` call failed with `relation "fireweed_claim_outbox" does not exist
+    /// (42P01)` on the very first claim against a brand-new database.
+    #[test]
+    fn fresh_schema_push_claim_complete_uses_class_s_outbox() {
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
+        let schema = format!("fireweed_rel_outbox_fresh_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(qdef())).unwrap();
+        let ids = block_on(b.push(&shard(), vec![PushSpec::default()], ts(0), None)).unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let claimed = block_on(b.claim(claim_req(1, 500, 10))).unwrap();
+        assert_eq!(claimed.items.len(), 1, "the pushed item must be claimable");
+        assert_eq!(claimed.items[0].item_id, ids[0]);
+
+        block_on(b.finalize(
+            &shard(),
+            vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
+            ts(2),
+            None,
+        ))
+        .unwrap();
+
+        let metrics = block_on(b.metrics(&shard())).unwrap();
+        assert_eq!(metrics.pending, 0);
+        assert_eq!(metrics.complete, 1);
     }
 
     #[test]
