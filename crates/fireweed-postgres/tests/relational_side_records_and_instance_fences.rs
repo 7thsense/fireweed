@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use fireweed_conformance::{envelope, qdef, qkey};
 use fireweed_engine::{
-    AdvanceInstanceFenceCommand, Backend, ControlPlaneStore, QueueCommand, QueueKey, SideRecord,
-    WriteSideRecordsCommand,
+    AdvanceInstanceFenceCommand, Backend, ControlPlaneStore, QueueCommand, QueueKey,
+    RecoveryReadPort, SideRecord, WriteSideRecordsCommand,
 };
 use fireweed_postgres::{PostgresConnectConfig, PostgresRelationalBackend, connect};
 
@@ -170,4 +170,102 @@ fn write_side_records_and_advance_instance_fence_persist_and_survive_reconnect()
         Some(8),
         "instance fence must survive reconnect and accept a post-reconnect advance"
     );
+}
+
+/// Postgres parity for `fireweed-sqlite`'s
+/// `relational_side_records_by_prefix_pages_ordered_and_survives_reopen` (bead fireweed-e47e9287):
+/// `RecoveryReadPort::side_records_by_prefix` reads back one instance's records in key order, stays
+/// isolated from a sibling prefix, pages via `next_cursor`, and reads from the durable table after a
+/// reconnect. Before this landed the postgres relational backend inherited the port's `Unavailable`
+/// default, which made Snorri's cold-open instance census fail closed on Postgres (snorri-b1e53a64).
+#[test]
+fn relational_side_records_by_prefix_pages_ordered_and_survives_reconnect() {
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
+    let schema = fresh_schema();
+    let shard = qkey();
+
+    futures::executor::block_on(async {
+        let backend =
+            PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect postgres");
+        backend.create_queue(qdef()).await.expect("create queue");
+        commit(
+            &backend,
+            &shard,
+            QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: vec![
+                    SideRecord {
+                        key: b"audit:instance-1:001".to_vec(),
+                        payload: Bytes::from_static(b"a1"),
+                    },
+                    SideRecord {
+                        key: b"audit:instance-1:003".to_vec(),
+                        payload: Bytes::from_static(b"a3"),
+                    },
+                    SideRecord {
+                        key: b"audit:instance-1:002".to_vec(),
+                        payload: Bytes::from_static(b"a2"),
+                    },
+                    SideRecord {
+                        key: b"audit:instance-2:001".to_vec(),
+                        payload: Bytes::from_static(b"other-instance"),
+                    },
+                ],
+            }),
+        )
+        .await;
+    });
+
+    futures::executor::block_on(async {
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
+            .expect("reconnect postgres");
+
+        let first_page = backend
+            .side_records_by_prefix(&shard, b"audit:instance-1:", 2, None)
+            .await
+            .expect("first page");
+        assert_eq!(
+            first_page.entries,
+            vec![
+                (b"audit:instance-1:001".to_vec(), Bytes::from_static(b"a1")),
+                (b"audit:instance-1:002".to_vec(), Bytes::from_static(b"a2")),
+            ]
+        );
+        let cursor = first_page
+            .next_cursor
+            .clone()
+            .expect("a third matching entry remains");
+        assert_eq!(cursor, b"audit:instance-1:003".to_vec());
+
+        let second_page = backend
+            .side_records_by_prefix(&shard, b"audit:instance-1:", 2, Some(cursor))
+            .await
+            .expect("second page");
+        assert_eq!(
+            second_page.entries,
+            vec![(b"audit:instance-1:003".to_vec(), Bytes::from_static(b"a3"))]
+        );
+        assert_eq!(
+            second_page.next_cursor, None,
+            "the prefix's key range is exhausted"
+        );
+
+        let other = backend
+            .side_records_by_prefix(&shard, b"audit:instance-2:", 10, None)
+            .await
+            .expect("sibling prefix");
+        assert_eq!(
+            other.entries,
+            vec![(
+                b"audit:instance-2:001".to_vec(),
+                Bytes::from_static(b"other-instance")
+            )]
+        );
+        let none = backend
+            .side_records_by_prefix(&shard, b"audit:instance-9:", 10, None)
+            .await
+            .expect("absent prefix");
+        assert!(none.entries.is_empty());
+        assert_eq!(none.next_cursor, None);
+    });
 }

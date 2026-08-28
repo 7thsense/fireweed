@@ -8317,6 +8317,50 @@ impl CommitTransitionPort for PostgresRelationalBackend {
     }
 }
 
+/// Paged, key-ascending scan of opaque side records whose key starts with `prefix`
+/// (fireweed-e47e9287 parity for the postgres relational projection; mirrors
+/// `fireweed-sqlite`'s `side_records_by_prefix_sql`). One index seek on the
+/// `(tenant_id, queue_id, key)` primary key from `cursor` (or `prefix` itself), fetching
+/// `page_size + 1` rows so the extra row becomes `next_cursor`; a fetched row that no longer
+/// starts with `prefix` ends the range without a computed upper bound.
+pub(crate) fn side_records_by_prefix_sql(
+    client: &mut Client,
+    shard: &QueueKey,
+    prefix: &[u8],
+    page_size: usize,
+    cursor: Option<Vec<u8>>,
+) -> EngineResult<fireweed_engine::SideRecordPage> {
+    const SIDE_RECORD_MAX_PAGE_SIZE: usize = 1_000;
+    let page_size = page_size.min(SIDE_RECORD_MAX_PAGE_SIZE);
+    let (t, q) = parts(shard);
+    let start = cursor.unwrap_or_else(|| prefix.to_vec());
+    let limit = (page_size as i64).saturating_add(1);
+    let rows = st(client.query(
+        "SELECT key, payload FROM fireweed_side_records \
+         WHERE tenant_id=$1 AND queue_id=$2 AND key>=$3 \
+         ORDER BY key ASC LIMIT $4",
+        &[&t, &q, &start.as_slice(), &limit],
+    ))?;
+    let mut entries = Vec::new();
+    let mut next_cursor = None;
+    for row in rows {
+        let key: Vec<u8> = row.get(0);
+        if !key.starts_with(prefix) {
+            break;
+        }
+        if entries.len() == page_size {
+            next_cursor = Some(key);
+            break;
+        }
+        let payload: Vec<u8> = row.get(1);
+        entries.push((key, Bytes::from(payload)));
+    }
+    Ok(fireweed_engine::SideRecordPage {
+        entries,
+        next_cursor,
+    })
+}
+
 impl RecoveryReadPort for PostgresRelationalBackend {
     fn explain_commit(
         &self,
@@ -8350,6 +8394,21 @@ impl RecoveryReadPort for PostgresRelationalBackend {
             .map(|row| row.get(0));
             Ok(payload.map(Bytes::from))
         })();
+        std::future::ready(result)
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            side_records_by_prefix_sql(&mut g.client, shard, prefix, page_size, cursor)
+        };
         std::future::ready(result)
     }
 }
@@ -10936,6 +10995,17 @@ impl ProjectionStore for PostgresRelational {
             &[&tenant, &queue, &key],
         ))?
         .map(|row| Bytes::from(row.get::<_, Vec<u8>>(0))))
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<fireweed_engine::SideRecordPage> {
+        let mut inner = self.lock();
+        side_records_by_prefix_sql(&mut inner.client, shard, prefix, page_size, cursor)
     }
 
     fn select_rich_claim(

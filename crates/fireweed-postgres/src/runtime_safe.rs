@@ -370,6 +370,20 @@ impl<B: ProductBackend + 'static> RecoveryReadPort for RuntimeSafeBackend<B> {
             move |i| async move { i.side_record(&q, &key).await },
         )
     }
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send {
+        let q = shard.clone();
+        let prefix = prefix.to_vec();
+        self.offload(q.clone(), move |i| async move {
+            i.side_records_by_prefix(&q, &prefix, page_size, cursor)
+                .await
+        })
+    }
 }
 impl<B: ProductBackend + 'static> RenewLeasePort for RuntimeSafeBackend<B> {
     fn renew(

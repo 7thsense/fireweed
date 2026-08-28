@@ -1085,6 +1085,30 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogPostgresBackend {
             objectlog_side_record(projection.as_ref(), &shard, &key).await
         }
     }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        let prefix = prefix.to_vec();
+        async move {
+            self.ensure_projection_healthy(&shard)?;
+            fireweed_objectlog::commit_surface::side_records_by_prefix(
+                projection.as_ref(),
+                &shard,
+                &prefix,
+                page_size,
+                cursor,
+            )
+            .await
+        }
+    }
 }
 
 impl fireweed_engine::BatchUpdatePort for AsyncObjectLogPostgresBackend {

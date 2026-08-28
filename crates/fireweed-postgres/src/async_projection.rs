@@ -592,6 +592,25 @@ impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
         }
     }
 
+    fn side_records_by_prefix(
+        &self,
+        shard: QueueKey,
+        prefix: Vec<u8>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    ProjectionStore::side_records_by_prefix(
+                        store, &shard, &prefix, page_size, cursor,
+                    )
+                })
+                .await
+        }
+    }
+
     fn renew_validate(
         &self,
         shard: QueueKey,
