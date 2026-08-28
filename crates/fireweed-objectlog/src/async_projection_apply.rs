@@ -5,12 +5,15 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use fireweed_engine::{
-    AsyncProjectionSpec, AsyncProjectionStore, CommandEnvelope, CommandPosition, EngineError,
-    EngineResult, QueueCommand, QueueKey,
+    AsyncProjectionSpec, AsyncProjectionStore, CLAIM_GENERATION_MAX_REQUESTS, CommandEnvelope,
+    CommandPosition, EngineError, EngineResult, GENERATION_MAX_ITEMS,
+    GENERATION_MAX_RESPONSE_BYTES, QueueCommand, QueueKey,
 };
 use tokio::sync::{Mutex, Notify};
 
@@ -77,7 +80,11 @@ where
     poisoned: std::sync::RwLock<HashMap<QueueKey, String>>,
     changed: Notify,
     #[cfg(test)]
-    injected_apply_failures: std::sync::atomic::AtomicU32,
+    injected_apply_failures: AtomicU32,
+    #[cfg(test)]
+    apply_live_calls: AtomicU32,
+    #[cfg(test)]
+    apply_live_command_counts: std::sync::Mutex<Vec<usize>>,
 }
 
 #[derive(Default)]
@@ -145,6 +152,14 @@ struct ApplyBatch {
     enqueued_at: Instant,
 }
 
+/// One writer-side apply generation: a strict-log-order prefix of same-shard Ready packs.
+struct ApplyGeneration {
+    shard: QueueKey,
+    entry_ids: Vec<u64>,
+    positions: Vec<CommandPosition>,
+    commands: Vec<CommandEnvelope>,
+}
+
 #[derive(Default)]
 struct ShardApplyState {
     retry_count: u32,
@@ -178,7 +193,11 @@ where
                 poisoned: std::sync::RwLock::new(HashMap::new()),
                 changed: Notify::new(),
                 #[cfg(test)]
-                injected_apply_failures: std::sync::atomic::AtomicU32::new(0),
+                injected_apply_failures: AtomicU32::new(0),
+                #[cfg(test)]
+                apply_live_calls: AtomicU32::new(0),
+                #[cfg(test)]
+                apply_live_command_counts: std::sync::Mutex::new(Vec::new()),
             }),
         })
     }
@@ -593,6 +612,20 @@ where
             .store(count, Ordering::Release);
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_live_call_count(&self) -> u32 {
+        self.inner.apply_live_calls.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_live_command_counts(&self) -> Vec<usize> {
+        self.inner
+            .apply_live_command_counts
+            .lock()
+            .expect("apply command-count mutex")
+            .clone()
+    }
+
     async fn poison(&self, shard: QueueKey, reason: String) -> EngineResult<()> {
         let mut state = self.inner.state.lock().await;
         state.shards.entry(shard.clone()).or_default().poison_reason = Some(reason.clone());
@@ -643,13 +676,13 @@ where
         }
         let next = {
             let state = inner.state.lock().await;
-            next_runnable(&state)
+            next_coalesced_generation(&state)
         };
-        let Some((_index, batch)) = next else {
+        let Some(generation) = next else {
             inner.worker_running.store(false, Ordering::Release);
             let has_work = {
                 let state = inner.state.lock().await;
-                next_runnable(&state).is_some()
+                next_coalesced_generation(&state).is_some()
             };
             if !inner.paused.load(Ordering::Acquire)
                 && has_work
@@ -664,6 +697,16 @@ where
         };
 
         #[cfg(test)]
+        {
+            inner.apply_live_calls.fetch_add(1, Ordering::AcqRel);
+            inner
+                .apply_live_command_counts
+                .lock()
+                .expect("apply command-count mutex")
+                .push(generation.commands.len());
+        }
+
+        #[cfg(test)]
         let injected_failure = inner
             .injected_apply_failures
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -673,12 +716,12 @@ where
         #[cfg(not(test))]
         let injected_failure = false;
 
-        if inner.spec.apply_start_delay_ms > 0 && batch_is_produce(&batch.commands) {
+        if inner.spec.apply_start_delay_ms > 0 && batch_is_produce(&generation.commands) {
             let needs_delay = {
                 let state = inner.state.lock().await;
                 !state
                     .shards
-                    .get(&batch.shard)
+                    .get(&generation.shard)
                     .is_some_and(|shard| shard.produce_delay_spent)
             };
             if needs_delay {
@@ -689,7 +732,7 @@ where
                 let mut state = inner.state.lock().await;
                 state
                     .shards
-                    .entry(batch.shard.clone())
+                    .entry(generation.shard.clone())
                     .or_default()
                     .produce_delay_spent = true;
             }
@@ -702,8 +745,8 @@ where
         } else {
             AsyncProjectionStore::apply_live(
                 inner.projection.as_ref(),
-                batch.positions.clone(),
-                batch.commands.clone(),
+                generation.positions.clone(),
+                generation.commands.clone(),
             )
             .await
         };
@@ -711,27 +754,32 @@ where
         let mut state = inner.state.lock().await;
         match result {
             Ok(()) => {
-                let matching_index = state
-                    .entries
-                    .iter()
-                    .position(|entry| entry.id() == batch.id);
-                if let Some(matching_index) = matching_index {
-                    state.entries.remove(matching_index);
-                    let shard_state = state.shards.entry(batch.shard.clone()).or_default();
+                let all_present = generation.entry_ids.iter().all(|id| {
+                    state
+                        .entries
+                        .iter()
+                        .any(|entry| entry.id() == *id && entry.shard() == &generation.shard)
+                });
+                if all_present {
+                    state.entries.retain(|entry| {
+                        entry.shard() != &generation.shard
+                            || !generation.entry_ids.contains(&entry.id())
+                    });
+                    let shard_state = state.shards.entry(generation.shard.clone()).or_default();
                     shard_state.retry_count = 0;
-                    shard_state.applied_high_water = batch.positions.last().cloned();
+                    shard_state.applied_high_water = generation.positions.last().cloned();
                 } else {
-                    let shard_state = state.shards.entry(batch.shard.clone()).or_default();
+                    let shard_state = state.shards.entry(generation.shard.clone()).or_default();
                     let reason: String =
                         "async projection apply queue changed while a batch was in flight".into();
                     shard_state.poison_reason = Some(reason.clone());
                     if let Ok(mut poisoned) = inner.poisoned.write() {
-                        poisoned.insert(batch.shard.clone(), reason);
+                        poisoned.insert(generation.shard.clone(), reason);
                     }
                 }
             }
             Err(error) => {
-                let shard_state = state.shards.entry(batch.shard.clone()).or_default();
+                let shard_state = state.shards.entry(generation.shard.clone()).or_default();
                 shard_state.retry_count = shard_state.retry_count.saturating_add(1);
                 if shard_state.retry_count >= inner.spec.apply_poison_retry_threshold {
                     let reason = format!(
@@ -740,7 +788,7 @@ where
                     );
                     shard_state.poison_reason = Some(reason.clone());
                     if let Ok(mut poisoned) = inner.poisoned.write() {
-                        poisoned.insert(batch.shard.clone(), reason);
+                        poisoned.insert(generation.shard.clone(), reason);
                     }
                 }
             }
@@ -760,6 +808,107 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
                 | QueueCommand::UpdateFieldsBatch(_)
         )
     })
+}
+
+fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration> {
+    let (_, first) = next_runnable(state)?;
+    let Some(mut last) = first.positions.last().cloned() else {
+        return None;
+    };
+    let mut envelopes = generation_envelope_count(&first);
+    let mut items = represented_item_mutations(&first);
+    let mut debt = first.debt_bytes;
+    let mut generation = ApplyGeneration {
+        shard: first.shard.clone(),
+        entry_ids: vec![first.id],
+        positions: first.positions.clone(),
+        commands: first.commands.clone(),
+    };
+
+    let mut candidates: Vec<&ApplyBatch> = state
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ApplyEntry::Ready(batch) if batch.shard == first.shard && batch.id != first.id => {
+                Some(batch)
+            }
+            _ => None,
+        })
+        .collect();
+    candidates.sort_by_key(|batch| {
+        batch
+            .positions
+            .first()
+            .map(|position| (position.backend_epoch, position.sequence))
+            .unwrap_or((u64::MAX, u64::MAX))
+    });
+
+    for batch in candidates {
+        let Some(next_first) = batch.positions.first() else {
+            continue;
+        };
+        if !ready_contiguous_follow(&last, next_first) {
+            break;
+        }
+        if reserved_between(state, &first.shard, first.id, batch.id) {
+            break;
+        }
+        let add_envelopes = generation_envelope_count(batch);
+        let add_items = represented_item_mutations(batch);
+        if envelopes.saturating_add(add_envelopes) > CLAIM_GENERATION_MAX_REQUESTS
+            || items.saturating_add(add_items) > GENERATION_MAX_ITEMS
+            || debt.saturating_add(batch.debt_bytes) > GENERATION_MAX_RESPONSE_BYTES as u64
+        {
+            break;
+        }
+        envelopes = envelopes.saturating_add(add_envelopes);
+        items = items.saturating_add(add_items);
+        debt = debt.saturating_add(batch.debt_bytes);
+        generation.entry_ids.push(batch.id);
+        generation.positions.extend(batch.positions.iter().cloned());
+        generation.commands.extend(batch.commands.iter().cloned());
+        if let Some(next_last) = batch.positions.last() {
+            last = next_last.clone();
+        }
+    }
+    Some(generation)
+}
+
+fn generation_envelope_count(batch: &ApplyBatch) -> usize {
+    if batch.commands.is_empty() {
+        usize::try_from(batch.command_count).unwrap_or(usize::MAX)
+    } else {
+        batch.commands.len()
+    }
+}
+
+fn represented_item_mutations(batch: &ApplyBatch) -> usize {
+    batch
+        .commands
+        .iter()
+        .map(|envelope| envelope.item_ids.len())
+        .sum()
+}
+
+fn reserved_between(state: &CoordinatorState, shard: &QueueKey, left: u64, right: u64) -> bool {
+    let (lo, hi) = if left < right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    state.entries.iter().any(|entry| {
+        matches!(entry, ApplyEntry::Reserved { .. })
+            && entry.shard() == shard
+            && entry.id() > lo
+            && entry.id() < hi
+    })
+}
+
+fn ready_contiguous_follow(prev_last: &CommandPosition, next_first: &CommandPosition) -> bool {
+    prev_last.queue == next_first.queue
+        && prev_last.precedes(next_first)
+        && (prev_last.backend_epoch != next_first.backend_epoch
+            || prev_last.sequence.checked_add(1) == Some(next_first.sequence))
 }
 
 fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
@@ -899,26 +1048,164 @@ fn poisoned(reason: &str) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fireweed_core::{QueueId, TenantId};
+    use fireweed_core::{
+        ClientItemKey, EligibilityPolicy, ItemId, OrderingMode, PriorityModel, QueueDefinition,
+        QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    };
+    use fireweed_engine::{CommandChecksum, CommandId, ProjectionStore, PushCommand, PushItem};
 
     fn shard() -> QueueKey {
         QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap())
+    }
+
+    fn shard_named(queue: &str) -> QueueKey {
+        QueueKey::new(TenantId::new("t").unwrap(), QueueId::new(queue).unwrap())
     }
 
     fn pos(sequence: u64) -> CommandPosition {
         CommandPosition::new(shard(), 0, sequence)
     }
 
+    fn pos_on(queue: QueueKey, sequence: u64) -> CommandPosition {
+        CommandPosition::new(queue, 0, sequence)
+    }
+
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new("q").unwrap(),
+            priority_model: PriorityModel::timestamp_ascending(),
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn pause_env(id: &str) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: Vec::new(),
+            command: QueueCommand::PauseQueue(Default::default()),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        }
+    }
+
+    fn push_env(id: &str, item: u32) -> CommandEnvelope {
+        let item_id = ItemId::mint(1, 0, item);
+        CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: ClientItemKey::new(id).unwrap(),
+                    item_id,
+                    priority: None,
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: Default::default(),
+                    metadata: Default::default(),
+                    cohort_size: None,
+                    gate_keys: Vec::new(),
+                    index_fields: Default::default(),
+                    entity_document: None,
+                }],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        }
+    }
+
+    fn items_env(id: &str, items: usize) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: (0..items)
+                .map(|index| ItemId::mint(1, 0, u32::try_from(index).expect("item index")))
+                .collect(),
+            command: QueueCommand::PauseQueue(Default::default()),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        }
+    }
+
     fn ready(id: u64, sequence: u64) -> ApplyEntry {
+        ready_sized(id, sequence, 1, 0, 0)
+    }
+
+    fn ready_sized(
+        id: u64,
+        sequence: u64,
+        envelopes: u64,
+        items: usize,
+        debt_bytes: u64,
+    ) -> ApplyEntry {
+        ready_on(shard(), id, sequence, envelopes, items, debt_bytes)
+    }
+
+    fn ready_on(
+        queue: QueueKey,
+        id: u64,
+        sequence: u64,
+        envelopes: u64,
+        items: usize,
+        debt_bytes: u64,
+    ) -> ApplyEntry {
+        let commands = if items == 0 {
+            Vec::new()
+        } else {
+            vec![items_env(&id.to_string(), items)]
+        };
         ApplyEntry::Ready(ApplyBatch {
             id,
+            shard: queue.clone(),
+            positions: vec![pos_on(queue, sequence)],
+            commands,
+            command_count: envelopes,
+            debt_bytes,
+            enqueued_at: Instant::now(),
+        })
+    }
+
+    fn reserved(id: u64) -> ApplyEntry {
+        ApplyEntry::Reserved {
+            id,
             shard: shard(),
-            positions: vec![pos(sequence)],
-            commands: Vec::new(),
             command_count: 1,
             debt_bytes: 0,
             enqueued_at: Instant::now(),
-        })
+        }
+    }
+
+    fn generation_ids(state: &CoordinatorState) -> Vec<u64> {
+        next_coalesced_generation(state)
+            .map(|generation| generation.entry_ids)
+            .unwrap_or_default()
     }
 
     #[test]
@@ -958,13 +1245,221 @@ mod tests {
         assert_eq!(batch.positions[0].sequence, 301);
     }
 
+    #[test]
+    fn coalesces_contiguous_underfilled_ready_entries() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready(1, 1));
+        state.entries.push_back(ready(2, 2));
+        state.entries.push_back(ready(3, 3));
+        assert_eq!(generation_ids(&state), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn does_not_coalesce_across_sequence_gap() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready(1, 1));
+        state.entries.push_back(ready(2, 3));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn does_not_coalesce_across_outstanding_earlier_reservation() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready(1, 1));
+        state.entries.push_back(reserved(2));
+        state.entries.push_back(ready(3, 2));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn does_not_coalesce_across_shard() {
+        let mut state = CoordinatorState::default();
+        let other = shard_named("other");
+        state.shards.entry(other.clone()).or_default().poison_reason = Some("other".into());
+        state.entries.push_back(ready(1, 1));
+        state.entries.push_back(ready_on(other, 2, 1, 1, 0, 0));
+        state.entries.push_back(ready(3, 2));
+        assert_eq!(generation_ids(&state), vec![1, 3]);
+    }
+
+    #[test]
+    fn does_not_coalesce_poisoned_shard() {
+        let mut state = CoordinatorState::default();
+        state.shards.entry(shard()).or_default().poison_reason = Some("poison".into());
+        state.entries.push_back(ready(1, 1));
+        state.entries.push_back(ready(2, 2));
+        assert!(next_coalesced_generation(&state).is_none());
+    }
+
+    #[test]
+    fn stops_at_eight_envelope_bound() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready_sized(
+            1,
+            1,
+            CLAIM_GENERATION_MAX_REQUESTS as u64,
+            0,
+            0,
+        ));
+        state.entries.push_back(ready(2, 2));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn joins_underfilled_packs_up_to_eight_envelopes() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready_sized(1, 1, 5, 0, 0));
+        state.entries.push_back(ready_sized(2, 2, 3, 0, 0));
+        assert_eq!(generation_ids(&state), vec![1, 2]);
+    }
+
+    #[test]
+    fn stops_at_eight_hundred_item_bound() {
+        let mut state = CoordinatorState::default();
+        state
+            .entries
+            .push_back(ready_sized(1, 1, 1, GENERATION_MAX_ITEMS - 1, 0));
+        state.entries.push_back(ready_sized(2, 2, 1, 2, 0));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn stops_at_four_mib_debt_bound() {
+        let mut state = CoordinatorState::default();
+        let almost_full = GENERATION_MAX_RESPONSE_BYTES as u64 - 1;
+        state
+            .entries
+            .push_back(ready_sized(1, 1, 1, 0, almost_full));
+        state.entries.push_back(ready_sized(2, 2, 1, 0, 2));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    async fn enqueue_pause(
+        coordinator: &AsyncProjectionApplyCoordinator<fireweed_projection::AsyncInMemoryProjection>,
+        sequence: u64,
+        command_id: &str,
+    ) {
+        let commands = vec![pause_env(command_id)];
+        let reservation = coordinator
+            .reserve(shard(), &commands)
+            .await
+            .expect("reserve");
+        coordinator
+            .enqueue_reserved(reservation, vec![pos(sequence)], commands)
+            .await
+            .expect("enqueue");
+    }
+
+    #[tokio::test]
+    async fn coordinator_coalesces_contiguous_underfilled_ready_entries() {
+        let coordinator = coordinator();
+        coordinator.pause();
+        enqueue_pause(&coordinator, 1, "p1").await;
+        enqueue_pause(&coordinator, 2, "p2").await;
+        enqueue_pause(&coordinator, 3, "p3").await;
+        assert_eq!(coordinator.snapshot(&shard()).await.apply_queue_depth, 3);
+        coordinator.resume();
+        coordinator
+            .wait_for_catch_up(&shard())
+            .await
+            .expect("catch up");
+        assert_eq!(
+            coordinator.apply_live_call_count(),
+            1,
+            "contiguous underfilled Ready entries must drain as one apply_live"
+        );
+        assert_eq!(coordinator.apply_live_command_counts(), vec![3]);
+        assert_eq!(coordinator.snapshot(&shard()).await.apply_queue_depth, 0);
+        assert_eq!(
+            coordinator
+                .snapshot(&shard())
+                .await
+                .applied_high_water
+                .map(|position| position.sequence),
+            Some(3)
+        );
+        coordinator
+            .wait_until_covers(&shard(), &pos(3), Duration::from_millis(40))
+            .await
+            .expect("combined high-water covers the prefix");
+    }
+
+    #[tokio::test]
+    async fn injected_failure_retries_the_same_combined_prefix() {
+        let coordinator = coordinator();
+        coordinator.pause();
+        enqueue_pause(&coordinator, 1, "p1").await;
+        enqueue_pause(&coordinator, 2, "p2").await;
+        coordinator.inject_apply_failures(3);
+        coordinator.resume();
+        let error = coordinator
+            .wait_for_catch_up(&shard())
+            .await
+            .expect_err("poison after retry threshold");
+        assert!(
+            format!("{error}").contains("async projection poisoned"),
+            "{error}"
+        );
+        let snapshot = coordinator.snapshot(&shard()).await;
+        assert_eq!(
+            snapshot.apply_queue_depth, 2,
+            "failure must keep both entries"
+        );
+        assert!(snapshot.applied_high_water.is_none());
+        assert_eq!(coordinator.apply_live_command_counts(), vec![2, 2, 2]);
+    }
+
+    #[tokio::test]
+    async fn first_produce_delay_is_not_multiplied_across_coalesced_packs() {
+        let coordinator = AsyncProjectionApplyCoordinator::new(
+            seeded_projection(),
+            fireweed_engine::AsyncProjectionSpec {
+                apply_start_delay_ms: 80,
+                ..AsyncProjectionSpec::new(32, 4096, 16, 30_000, 3).unwrap()
+            },
+        )
+        .expect("coordinator");
+        coordinator.pause();
+        let first = vec![push_env("p1", 1)];
+        let first_res = coordinator.reserve(shard(), &first).await.expect("reserve");
+        coordinator
+            .enqueue_reserved(first_res, vec![pos(1)], first)
+            .await
+            .expect("enqueue");
+        let second = vec![push_env("p2", 2)];
+        let second_res = coordinator
+            .reserve(shard(), &second)
+            .await
+            .expect("reserve");
+        coordinator
+            .enqueue_reserved(second_res, vec![pos(2)], second)
+            .await
+            .expect("enqueue");
+        let started = Instant::now();
+        coordinator.resume();
+        coordinator
+            .wait_for_catch_up(&shard())
+            .await
+            .expect("catch up");
+        let elapsed = started.elapsed();
+        assert_eq!(coordinator.apply_live_call_count(), 1);
+        assert!(
+            elapsed >= Duration::from_millis(80) && elapsed < Duration::from_millis(140),
+            "one-shot produce delay must run once for the coalesced prefix, elapsed {elapsed:?}"
+        );
+    }
+
+    fn seeded_projection() -> Arc<fireweed_projection::AsyncInMemoryProjection> {
+        let mut inner = fireweed_projection::InMemoryProjection::new();
+        ProjectionStore::ensure_shard(&mut inner, &qdef()).expect("ensure shard");
+        Arc::new(fireweed_projection::AsyncInMemoryProjection::new(inner))
+    }
+
     fn coordinator() -> AsyncProjectionApplyCoordinator<fireweed_projection::AsyncInMemoryProjection>
     {
         AsyncProjectionApplyCoordinator::new(
-            Arc::new(fireweed_projection::AsyncInMemoryProjection::new(
-                fireweed_projection::InMemoryProjection::new(),
-            )),
-            AsyncProjectionSpec::new(32, 1024, 16, 30_000, 3).unwrap(),
+            seeded_projection(),
+            AsyncProjectionSpec::new(32, 4096, 16, 30_000, 3).unwrap(),
         )
         .expect("coordinator")
     }
