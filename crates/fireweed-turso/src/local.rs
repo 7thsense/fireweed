@@ -1,15 +1,24 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use crate::tx::TursoRel;
 use bytes::Bytes;
-use fireweed_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, QueueId, TenantId};
-use fireweed_engine::{Claimed, ClaimedItem, EngineError, EngineResult, QueueKey};
+use fireweed_core::{
+    ClientItemKey, GroupKey, ItemId, LeaseToken, QueueDefinition, QueueId, RequestId, TenantId,
+    UtcTimestamp,
+};
+use fireweed_engine::{
+    BatchUpdateSnapshotItem, Claimed, ClaimedItem, EngineError, EngineResult, IdempotencyDecision,
+    ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage, PushFingerprint,
+    QueueKey, QueueMetrics,
+};
 use fireweed_relational::{
     ClaimOutboxRow, ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES,
     RELATIONAL_SCHEMA, RelValue, class_s_claim, delete_claim_outbox, entity_from_json,
@@ -287,6 +296,7 @@ struct CommittedReaderLaneInner {
     deadline: Duration,
     connections: StdMutex<Vec<Connection>>,
     available: Semaphore,
+    borrows: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -302,6 +312,7 @@ impl CommittedReaderLane {
                 deadline,
                 available: Semaphore::new(connections.len()),
                 connections: StdMutex::new(connections),
+                borrows: AtomicU64::new(0),
             }),
         }
     }
@@ -310,16 +321,31 @@ impl CommittedReaderLane {
         self.inner.available.available_permits()
     }
 
+    fn borrow_count(&self) -> u64 {
+        self.inner.borrows.load(Ordering::Relaxed)
+    }
+
     async fn borrow(&self) -> EngineResult<CommittedReaderGuard> {
-        match tokio::time::timeout(self.inner.deadline, self.inner.available.acquire()).await {
-            Ok(Ok(permit)) => {
-                permit.forget();
-                self.take()
+        let permit = if tokio::runtime::Handle::try_current().is_ok() {
+            match tokio::time::timeout(self.inner.deadline, self.inner.available.acquire()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) | Err(_) => {
+                    return Err(EngineError::Backpressure {
+                        resource: self.inner.resource,
+                    });
+                }
             }
-            Ok(Err(_)) | Err(_) => Err(EngineError::Backpressure {
-                resource: self.inner.resource,
-            }),
-        }
+        } else {
+            self.inner
+                .available
+                .acquire()
+                .await
+                .map_err(|_| EngineError::Backpressure {
+                    resource: self.inner.resource,
+                })?
+        };
+        permit.forget();
+        self.take()
     }
 
     fn try_borrow(&self) -> EngineResult<CommittedReaderGuard> {
@@ -344,6 +370,7 @@ impl CommittedReaderLane {
             .ok_or(EngineError::Backpressure {
                 resource: self.inner.resource,
             })?;
+        self.inner.borrows.fetch_add(1, Ordering::Relaxed);
         Ok(CommittedReaderGuard {
             connection: Some(connection),
             lane: Arc::clone(&self.inner),
@@ -412,9 +439,9 @@ impl TransientRecoveryReader {
     }
 }
 
-/// Inert sixteen-driver / eight-outcome committed-reader pools.
+/// Sixteen-driver / eight-outcome committed-reader pools.
 ///
-/// Serving reads stay on [`TursoRelational`]'s shared reader until S3c. Recovery
+/// Public serving reads borrow these lanes after OutcomeReadAdmission. Recovery
 /// seeding opens one extra 4 MiB reader and drops it before these lanes are
 /// borrowable.
 #[derive(Clone)]
@@ -481,6 +508,14 @@ impl CommittedReaderPools {
 
     pub fn try_borrow_outcome(&self) -> EngineResult<CommittedReaderGuard> {
         self.outcome.try_borrow()
+    }
+
+    pub fn driver_borrow_count(&self) -> u64 {
+        self.driver.borrow_count()
+    }
+
+    pub fn outcome_borrow_count(&self) -> u64 {
+        self.outcome.borrow_count()
     }
 }
 
@@ -587,9 +622,288 @@ impl TursoRelational {
         &self.config
     }
 
-    /// Inert committed-reader pools. Serving reads still use [`Self::query`].
+    /// Committed-reader pools used by serving reads after Outcome/driver admission.
     pub fn committed_pools(&self) -> Option<&CommittedReaderPools> {
         self.committed_pools.as_ref()
+    }
+
+    pub async fn server_peek_committed(
+        &self,
+        shard: &QueueKey,
+        limit: usize,
+    ) -> EngineResult<Vec<ItemView>> {
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(
+                async move { crate::projection::server_peek_on(connection, &shard, limit).await },
+            )
+        })
+        .await
+    }
+
+    pub async fn server_pending_committed(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        let rows = self
+            .with_outcome_connection(|connection| {
+                let shard = shard.clone();
+                Box::pin(async move {
+                    crate::projection::server_pending_rows_on(connection, &shard).await
+                })
+            })
+            .await?;
+        let tokens = self.live_tokens.lock().await;
+        let mut pending = Vec::new();
+        for (item_id, expires, retry_count) in rows {
+            let Some(lease_token) = tokens.get(&(shard.clone(), item_id)).cloned() else {
+                continue;
+            };
+            let Some(expires) = expires else {
+                continue;
+            };
+            pending.push(LeaseView {
+                item_id,
+                lease_token,
+                lease_expires_at: nanos_ts(expires),
+                attempt_count: committed_nonnegative_u32(retry_count, "retry_count")?,
+            });
+        }
+        Ok(pending)
+    }
+
+    pub async fn server_pending_by_ids_committed(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> EngineResult<Vec<LeaseView>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = ids.to_vec();
+        let by_id = self
+            .with_outcome_connection(|connection| {
+                let shard = shard.clone();
+                let ids = ids.clone();
+                Box::pin(async move {
+                    crate::projection::server_pending_by_ids_on(connection, &shard, &ids).await
+                })
+            })
+            .await?;
+        let tokens = self.live_tokens.lock().await;
+        Ok(ids
+            .iter()
+            .filter_map(|id| {
+                let token = tokens.get(&(shard.clone(), *id))?;
+                let (expires, attempts) = by_id.get(id)?;
+                Some(LeaseView {
+                    item_id: *id,
+                    lease_token: token.clone(),
+                    lease_expires_at: nanos_ts(*expires),
+                    attempt_count: *attempts,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn server_pending_page_committed(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        use std::ops::Bound::Included;
+        let tokens = self.live_tokens.lock().await;
+        let ids: Vec<_> = tokens
+            .range((
+                Included((shard.clone(), start.unwrap_or_else(|| ItemId::from_u64(0)))),
+                Included((shard.clone(), ItemId::from_u64(u64::MAX))),
+            ))
+            .map(|((_, id), _)| *id)
+            .take(limit.saturating_add(1))
+            .collect();
+        drop(tokens);
+        let next = ids.get(limit).copied();
+        let entries = self
+            .server_pending_by_ids_committed(shard, &ids[..ids.len().min(limit)])
+            .await?;
+        Ok(PendingPage { entries, next })
+    }
+
+    pub async fn server_pending_range_committed(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        use std::ops::Bound::Included;
+        let start = start.unwrap_or_else(|| ItemId::from_u64(0));
+        let end = end.unwrap_or_else(|| ItemId::from_u64(u64::MAX));
+        let ids: Vec<_> = if let Some(consumer) = consumer {
+            self.live_tokens_by_consumer
+                .lock()
+                .await
+                .range((
+                    Included((shard.clone(), consumer.as_str().to_string(), start)),
+                    Included((shard.clone(), consumer.as_str().to_string(), end)),
+                ))
+                .map(|((_, _, id), _)| *id)
+                .take(limit)
+                .collect()
+        } else {
+            self.live_tokens
+                .lock()
+                .await
+                .range((
+                    Included((shard.clone(), start)),
+                    Included((shard.clone(), end)),
+                ))
+                .map(|((_, id), _)| *id)
+                .take(limit)
+                .collect()
+        };
+        self.server_pending_by_ids_committed(shard, &ids).await
+    }
+
+    pub async fn server_live_items_committed(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        let keys = keys.to_vec();
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move {
+                crate::projection::server_live_items_on(connection, &shard, &keys).await
+            })
+        })
+        .await
+    }
+
+    pub async fn server_metrics_committed(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move { crate::projection::server_metrics_on(connection, &shard).await })
+        })
+        .await
+    }
+
+    pub async fn server_update_snapshot_committed(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        let keys = keys.to_vec();
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move {
+                crate::projection::server_update_snapshot_on(connection, &shard, &keys).await
+            })
+        })
+        .await
+    }
+
+    pub async fn push_idempotency_committed(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: &PushFingerprint,
+        now: UtcTimestamp,
+    ) -> EngineResult<IdempotencyDecision<Vec<ItemId>>> {
+        let request_id = request_id.clone();
+        let fingerprint = *fingerprint;
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move {
+                crate::projection::push_idempotency_on(
+                    connection,
+                    &shard,
+                    &request_id,
+                    &fingerprint,
+                    now,
+                )
+                .await
+            })
+        })
+        .await
+    }
+
+    pub async fn mutation_driver_snapshot(
+        &self,
+        shard: &QueueKey,
+        definition: QueueDefinition,
+        keys: &[ClientItemKey],
+        batch_keys: &[ClientItemKey],
+    ) -> EngineResult<MutationDriverSnapshot> {
+        let keys = keys.to_vec();
+        let batch_keys = batch_keys.to_vec();
+        self.with_driver_connection(|connection| {
+            let shard = shard.clone();
+            let definition = definition.clone();
+            Box::pin(async move {
+                load_mutation_driver_snapshot(connection, &shard, definition, &keys, &batch_keys)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn materialize_grouped_cohort_committed(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+        lease_token: &LeaseToken,
+        lease_expires_at: UtcTimestamp,
+    ) -> EngineResult<Vec<ClaimedItem>> {
+        let ids = ids.to_vec();
+        let lease_token = lease_token.clone();
+        self.with_driver_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move {
+                crate::projection::materialize_grouped_cohort_claimed_on(
+                    connection,
+                    &shard,
+                    &ids,
+                    &lease_token,
+                    lease_expires_at,
+                )
+                .await
+            })
+        })
+        .await
+    }
+
+    async fn with_outcome_connection<T, F>(&self, f: F) -> EngineResult<T>
+    where
+        F: for<'a> FnOnce(
+            &'a Connection,
+        ) -> Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>,
+    {
+        with_pooled_snapshot(
+            self.committed_pools
+                .as_ref()
+                .map(|pools| pools.outcome.clone()),
+            &self.reader,
+            COMMITTED_OUTCOME_POOL_RESOURCE,
+            f,
+        )
+        .await
+    }
+
+    async fn with_driver_connection<T, F>(&self, f: F) -> EngineResult<T>
+    where
+        F: for<'a> FnOnce(
+            &'a Connection,
+        ) -> Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>,
+    {
+        with_pooled_snapshot(
+            self.committed_pools
+                .as_ref()
+                .map(|pools| pools.driver.clone()),
+            &self.reader,
+            COMMITTED_DRIVER_POOL_RESOURCE,
+            f,
+        )
+        .await
     }
 
     /// Most recent API-001 BatchUpdate statement trace for structural qualification.
@@ -874,11 +1188,7 @@ impl TursoRelational {
                 RelValue::Text(queue_id.to_string()),
                 RelValue::Blob(lease_hash(lease_token)),
             ];
-            params.extend(
-                item_ids
-                    .iter()
-                    .map(|id| RelValue::Text(id.to_string())),
-            );
+            params.extend(item_ids.iter().map(|id| RelValue::Text(id.to_string())));
             rel_exec(
                 &rel,
                 &format!(
@@ -893,11 +1203,7 @@ impl TursoRelational {
                 RelValue::Text(tenant_id.to_string()),
                 RelValue::Text(queue_id.to_string()),
             ];
-            bearer_params.extend(
-                item_ids
-                    .iter()
-                    .map(|id| RelValue::Text(id.to_string())),
-            );
+            bearer_params.extend(item_ids.iter().map(|id| RelValue::Text(id.to_string())));
             rel_exec(
                 &rel,
                 &format!(
@@ -2259,6 +2565,30 @@ mod committed_pool_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serving_peek_committed_borrows_outcome_pool_not_shared_reader() {
+        let root = tempfile::tempdir().expect("peek tempdir");
+        let path = root.path().join("peek-committed.db");
+        let store = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .expect("open peek store");
+        let pools = store.committed_pools().expect("pools").clone();
+        let before = pools.outcome_borrow_count();
+        let shard = QueueKey::new(
+            fireweed_core::TenantId::new("t").unwrap(),
+            fireweed_core::QueueId::new("q").unwrap(),
+        );
+        let peeked = store
+            .server_peek_committed(&shard, 8)
+            .await
+            .expect("committed peek");
+        assert!(peeked.is_empty());
+        assert!(
+            pools.outcome_borrow_count() > before,
+            "committed peek must borrow the outcome pool"
+        );
+    }
+
     #[test]
     fn busy_reads_map_to_retryable_pool_backpressure() {
         assert_eq!(
@@ -2688,6 +3018,119 @@ async fn load_grouped_shards(
         ));
     }
     Ok(shards)
+}
+
+fn committed_nonnegative_u32(value: i64, field: &str) -> EngineResult<u32> {
+    u32::try_from(value)
+        .map_err(|_| EngineError::Storage(format!("negative or invalid {field}: {value}")))
+}
+
+async fn with_pooled_snapshot<T, F>(
+    lane: Option<CommittedReaderLane>,
+    reader: &Mutex<Connection>,
+    resource: &'static str,
+    f: F,
+) -> EngineResult<T>
+where
+    F: for<'a> FnOnce(&'a Connection) -> Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>,
+{
+    match lane {
+        Some(lane) => {
+            let mut guard = lane.borrow().await?;
+            let snapshot = guard
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .await
+                .map_err(|error| map_pooled_reader_error(error, resource))?;
+            let result = f(&snapshot).await;
+            if result.is_ok() {
+                snapshot
+                    .commit()
+                    .await
+                    .map_err(|error| map_pooled_reader_error(error, resource))?;
+            } else {
+                let _ = snapshot.rollback().await;
+            }
+            result
+        }
+        None => {
+            let connection = reader.lock().await;
+            f(&connection).await
+        }
+    }
+}
+
+async fn load_mutation_driver_snapshot(
+    connection: &Connection,
+    shard: &QueueKey,
+    definition: QueueDefinition,
+    keys: &[ClientItemKey],
+    batch_keys: &[ClientItemKey],
+) -> EngineResult<MutationDriverSnapshot> {
+    let pause_rows = collect_rows(
+        connection,
+        "SELECT pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
+        vec![
+            Value::Text(shard.tenant_id.as_str().to_string()),
+            Value::Text(shard.queue_id.as_str().to_string()),
+        ],
+    )
+    .await
+    .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let paused_drain_intake = match pause_rows.first().and_then(|row| row.values.first()) {
+        Some(Value::Integer(value)) => *value != 0,
+        Some(Value::Null) | None => false,
+        other => {
+            return Err(EngineError::Storage(format!(
+                "pause_drain_intake read back as {other:?}"
+            )));
+        }
+    };
+    let mut client_keys = HashSet::new();
+    if !keys.is_empty() {
+        for chunk in keys.chunks(500) {
+            let placeholders = (0..chunk.len())
+                .map(|index| format!("?{}", index + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut params = vec![
+                Value::Text(shard.tenant_id.as_str().to_string()),
+                Value::Text(shard.queue_id.as_str().to_string()),
+            ];
+            params.extend(
+                chunk
+                    .iter()
+                    .map(|key| Value::Text(key.as_str().to_string())),
+            );
+            let rows = collect_rows(
+                connection,
+                &format!(
+                    "SELECT client_item_key FROM fireweed_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND client_item_key IN ({placeholders}) \
+                     AND lifecycle_state IN ('Pending','Leased') AND superseded=0"
+                ),
+                params,
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+            for row in rows {
+                if let Some(Value::Text(key)) = row.values.first() {
+                    client_keys.insert(key.clone());
+                }
+            }
+        }
+    }
+    let batch_items =
+        crate::projection::server_update_snapshot_on(connection, shard, batch_keys).await?;
+    Ok(MutationDriverSnapshot {
+        definition,
+        paused_drain_intake,
+        client_keys,
+        request_fingerprints: HashMap::new(),
+        unique_index_values: HashSet::new(),
+        group_counts: HashMap::new(),
+        batch_items,
+    })
 }
 
 async fn collect_rows(

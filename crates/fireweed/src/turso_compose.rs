@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fireweed_core::{
@@ -23,23 +24,28 @@ use fireweed_engine::{
     AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecycleError, AsyncLogStore,
     AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
     AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand,
-    ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
-    CommandPosition, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
-    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
-    ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome, FinalizePort, FinalizeTarget,
-    HistoricalProjectionRead, HotProjectionQueryPort, IdGen, InProcessControlPlane,
-    InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
-    ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
-    OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, PendingPage, PendingSummary, PreparedClaim,
-    PreparedFinalize, PreparedMutationGeneration, PreparedPush, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError,
-    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
-    SnapshotRef, SnapshotStore, TaskOutcome, TaskOutcomeError, TaskOutcomeSender,
-    TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-    UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, task_outcome_channel,
+    ClaimCompatibility, ClaimDriverReadAdmission, ClaimPort, ClaimQueueTurn, ClaimRequest, Claimed,
+    CommandChecksum, CommandEnvelope, CommandPosition, ControlPlane, ControlPlaneStore,
+    CoordinationError, CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError,
+    DurabilityClass, EngineError, EngineResult, ExpiredLeaseCursor, ExpiredLeasePage,
+    FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
+    HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane, InProcessLogStore,
+    IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest,
+    ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
+    MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationGenerationMemberOutcome, MutationGenerationWork,
+    MutationIngress, MutationSequencer, MutationSequencerKey, OutcomeReadAdmission, OwnedTask,
+    OwnedTaskDispatcher, OwnedTaskFactory, PendingPage, PendingSummary, PreparedClaim,
+    PreparedClaimedResult, PreparedFinalize, PreparedMutationGeneration, PreparedPush,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushFingerprint, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueGateError, QueueKey, QueueMetrics, RawCommitFault,
+    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeasePort, RenewTarget, S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
+    SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
+    SharedDriverReadAdmission, SnapshotRef, SnapshotStore, TaskOutcome, TaskOutcomeError,
+    TaskOutcomeSender, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
+    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    retain_sequencer_after_slot_release, task_outcome_channel, validate_inert_mutation_generation,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -157,15 +163,29 @@ fn map_lifecycle(error: AsyncLifecycleError) -> EngineError {
     }
 }
 
-/// Inert S3g post-apply send of a pre-materialized grouped/cohort envelope.
-/// Serving still uses `dispatch_claim_legacy` until S3c selects this carrier.
-#[allow(dead_code)]
+fn map_coord(error: CoordinationError) -> EngineError {
+    EngineError::Backpressure {
+        resource: error.resource(),
+    }
+}
+
+#[derive(Clone, Default)]
+struct QueueFrontiers {
+    last_claim: Option<CommandPosition>,
+    last_candidate_mutation: Option<CommandPosition>,
+}
+
+struct GenerationJoin {
+    notify: tokio::sync::Notify,
+    outcome: Mutex<Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>>,
+}
+
+/// Post-apply send of a pre-materialized grouped/cohort envelope.
 fn finish_retained_grouped_cohort_response(claimed: Claimed) -> EngineResult<Claimed> {
     Ok(claimed)
 }
 
-/// Inert S3q co-seal after the shared slot/connection is released. Serving stays per-request until S3c.
-#[allow(dead_code)]
+/// Co-seal after the shared slot/connection is released. Sequencer remains held by the caller.
 fn finish_inert_mutation_generation_append(
     generation: PreparedMutationGeneration<
         QueueKey,
@@ -190,6 +210,39 @@ fn finish_inert_mutation_generation_append(
             | fireweed_engine::MutationGenerationMemberOutcome::Rejected(_) => None,
         })
         .collect())
+}
+
+fn member_for_work(
+    work: &MutationGenerationWork,
+    members: Vec<fireweed_engine::MutationGenerationMember>,
+) -> EngineResult<MutationGenerationMemberOutcome> {
+    let matched = match work {
+        MutationGenerationWork::Push { request, .. } => members.into_iter().find(|member| {
+            matches!(
+                &member.outcome,
+                MutationGenerationMemberOutcome::Push(PreparedPush::Commit { request: commit, .. })
+                    if commit.shard() == &request.shard
+            ) || matches!(
+                &member.outcome,
+                MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_))
+                    | MutationGenerationMemberOutcome::Rejected(_)
+            )
+        }),
+        MutationGenerationWork::BatchUpdate { request, .. } => members.into_iter().find(|member| {
+            matches!(
+                &member.outcome,
+                MutationGenerationMemberOutcome::BatchUpdate { response, .. }
+                    if response.request_id == request.request_id
+            ) || matches!(
+                &member.outcome,
+                MutationGenerationMemberOutcome::Rejected(_)
+            )
+        }),
+        MutationGenerationWork::Singleton { .. } => members.into_iter().next(),
+    };
+    matched
+        .map(|member| member.outcome)
+        .ok_or_else(|| EngineError::Storage("mutation generation lost member outcome".into()))
 }
 
 #[cfg(test)]
@@ -309,9 +362,18 @@ mod contention_mapping_tests {
         assert!(atomic_commit.contains("into_parts_with_append_admission"));
         assert!(atomic_commit.contains("AppendAdmissionClass::AtomicNative"));
 
-        let direct_batch = between(compose, "impl BatchUpdatePort", "impl FinalizePort");
-        assert!(direct_batch.contains("AppendAdmissionClass::AtomicNative"));
-        assert!(direct_batch.contains("AppendAdmissionClass::SelectionRequired"));
+        let atomic_batch = between(
+            compose,
+            "async fn atomic_batch_update<",
+            "macro_rules! impl_turso_product_ports",
+        );
+        assert!(atomic_batch.contains("AppendAdmissionClass::AtomicNative"));
+        let derived_generation = between(
+            compose,
+            "async fn drive_started_generation(",
+            "async fn dispatch_claim(",
+        );
+        assert!(derived_generation.contains("AppendAdmissionClass::SelectionRequired"));
 
         let object_log_commit = between(
             compose,
@@ -457,25 +519,48 @@ mod contention_mapping_tests {
         let (preamble, production) = compose_file
             .rsplit_once("// Atomic log-replay × Turso")
             .expect("production Turso composition boundary");
-        assert!(
-            production.contains("return self.dispatch_claim_legacy(request).await;"),
-            "existing serving must keep grouped/cohort on dispatch_claim_legacy until S3c"
-        );
-        let legacy = between(
+        let grouped = between(
             production,
-            "async fn dispatch_claim_legacy(&self, request: ClaimRequest) -> EngineResult<Claimed>",
-            "async fn dispatch_finalize(",
+            "async fn dispatch_grouped_cohort_claim(",
+            "async fn dispatch_class_s_claim(",
         );
         assert!(
-            legacy.contains("render_prepared_claim(request, item_ids, cohort_id)"),
-            "legacy grouped/cohort serving must keep post-append render_prepared_claim until S3c"
+            grouped.contains("claim_turns"),
+            "grouped/cohort planning must take ClaimQueueTurn"
         );
-        assert!(!legacy.contains("PreparedClaimedResult"));
-        assert!(!legacy.contains("finish_retained_grouped_cohort_response"));
+        assert!(
+            grouped.contains("claim_slots"),
+            "grouped/cohort planning must take ClaimDriverReadAdmission"
+        );
+        assert!(
+            grouped.contains("materialize_grouped_cohort_committed")
+                || grouped.contains("PreparedClaimedResult"),
+            "grouped/cohort must use the S3g retained carrier"
+        );
+        assert!(grouped.contains("finish_retained_grouped_cohort_response"));
+        assert!(
+            !grouped.contains("render_prepared_claim"),
+            "grouped/cohort must not post-append render_prepared_claim"
+        );
+        assert!(
+            !grouped.contains("SelectionFence"),
+            "selection fence remains inert"
+        );
+        let class_s = between(
+            production,
+            "async fn dispatch_class_s_claim(",
+            "async fn append_class_s_claim(",
+        );
+        assert!(
+            class_s.contains("class_s_claim_for_queue"),
+            "default item Claim stays on the writer-transaction lane"
+        );
+        assert!(!class_s.contains("claim_turns.acquire"));
+        assert!(!class_s.contains("ClaimQueueTurn"));
         let continuation = between(
             preamble,
             "fn finish_retained_grouped_cohort_response(",
-            "#[cfg(test)]",
+            "fn finish_inert_mutation_generation_append(",
         );
         assert!(continuation.contains("Ok(claimed)"));
         for needle in ["render_claimed", "render_prepared_claim", "self.projection"] {
@@ -487,7 +572,7 @@ mod contention_mapping_tests {
     }
 
     #[test]
-    fn push_and_mutation_generations_stay_inert_on_serving_paths() {
+    fn mutation_generations_are_live_for_compatible_push_and_batch_update() {
         use std::collections::HashSet;
         use std::sync::Arc;
         use std::time::{Duration, Instant};
@@ -508,7 +593,7 @@ mod contention_mapping_tests {
             production.contains("self.engine.push(request).await.map_err(map_push)"),
             "atomic products keep native push"
         );
-        assert!(production.contains("self.engine.prepare_push(request).await.map_err(map_push)?"));
+        assert!(production.contains("prepare_push(request.clone())"));
         let atomic_push = between(
             production,
             "self.engine.push(request).await.map_err(map_push)",
@@ -519,11 +604,12 @@ mod contention_mapping_tests {
         assert!(!atomic_push.contains("SelectionFence"));
         let derived_push = between(
             production,
-            "self.engine.prepare_push(request).await.map_err(map_push)?",
+            "async fn drive_candidate_mutation(",
             "async fn dispatch_claim(",
         );
-        assert!(!derived_push.contains("validate_inert_mutation_generation"));
-        assert!(!derived_push.contains("SharedDriverReadAdmission"));
+        assert!(derived_push.contains("validate_inert_mutation_generation"));
+        assert!(derived_push.contains("shared_slots"));
+        assert!(derived_push.contains("sequencer"));
         assert!(!derived_push.contains("SelectionFence"));
 
         let helper = between(
@@ -662,6 +748,44 @@ mod contention_mapping_tests {
             }
         );
     }
+
+    #[test]
+    fn public_reads_wait_then_take_outcome_admission_before_pool() {
+        let compose_file = include_str!("turso_compose.rs");
+        let (_, production) = compose_file
+            .rsplit_once("// Atomic log-replay × Turso")
+            .expect("production Turso composition boundary");
+        let derived = between(
+            production,
+            "async fn acquire_outcome_read(",
+            "async fn dispatch_push(",
+        );
+        assert!(derived.contains("wait_request_entry_coverage"));
+        assert!(derived.contains("outcome_slots.acquire"));
+        assert!(derived.contains("server_peek_committed"));
+        assert!(derived.contains("server_pending_committed"));
+        assert!(derived.contains("server_metrics_committed"));
+        assert!(
+            !derived.contains("self.projection.server_peek("),
+            "public reads must not use the shared serving reader"
+        );
+        let class_s = between(
+            production,
+            "async fn dispatch_class_s_claim(",
+            "async fn append_class_s_claim(",
+        );
+        assert!(class_s.contains("class_s_claim_for_queue"));
+        assert!(!class_s.contains("claim_turns.acquire"));
+        assert!(!class_s.contains("SelectionFence"));
+        assert!(
+            !production
+                .split("async fn dispatch_class_s_claim(")
+                .nth(1)
+                .unwrap()
+                .contains("self.claim_slots.acquire()"),
+            "item Claim must not take ClaimDriverReadAdmission"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +872,7 @@ pub struct AtomicTursoBackend<L: AsyncLogStore + 'static> {
     counters: Arc<QueueCounters>,
     #[allow(dead_code)]
     node_id: u8,
+    outcome_slots: OutcomeReadAdmission,
 }
 
 impl<L> AtomicTursoBackend<L>
@@ -797,12 +922,87 @@ where
 
     fn finish_planned(&self, _planned: Option<PlannedReservation>, _ok: bool) {}
 
+    #[allow(dead_code)]
     async fn catch_up_projection(&self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn catch_up_produce(&self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
+    }
+
+    async fn committed_peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection.server_peek_committed(shard, limit).await
+    }
+
+    async fn committed_pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection.server_pending_committed(shard).await
+    }
+
+    async fn committed_pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection
+            .server_pending_page_committed(shard, start, limit)
+            .await
+    }
+
+    async fn committed_pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection
+            .server_pending_range_committed(shard, start, end, consumer, limit)
+            .await
+    }
+
+    async fn committed_pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> EngineResult<Vec<LeaseView>> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection
+            .server_pending_by_ids_committed(shard, ids)
+            .await
+    }
+
+    async fn committed_live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection
+            .server_live_items_committed(shard, keys)
+            .await
+    }
+
+    async fn committed_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection.server_metrics_committed(shard).await
+    }
+
+    async fn dispatch_batch_update(
+        &self,
+        shard: QueueKey,
+        request: fireweed_engine::BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<fireweed_engine::BatchUpdateResponse> {
+        atomic_batch_update(self, shard, request, now, expected_epoch).await
     }
 
     pub async fn assemble(
@@ -869,6 +1069,7 @@ where
             ids,
             counters,
             node_id,
+            outcome_slots: OutcomeReadAdmission::default(),
         };
         backend.recover_async().await?;
         Ok(backend)
@@ -1165,6 +1366,104 @@ where
     }
 }
 
+async fn atomic_batch_update<L>(
+    backend: &AtomicTursoBackend<L>,
+    shard: QueueKey,
+    request: fireweed_engine::BatchUpdateRequest,
+    now: UtcTimestamp,
+    expected_epoch: Option<u64>,
+) -> EngineResult<fireweed_engine::BatchUpdateResponse>
+where
+    L: AsyncLogStore + 'static,
+{
+    use fireweed_engine::{
+        AsyncCommitStrategy, BatchUpdateItemRef, batch_update_body_hash, plan_batch_update,
+        plan_batch_update_pipelined,
+    };
+
+    if request.updates.is_empty() {
+        return Err(EngineError::Invalid("empty batch update"));
+    }
+    if request.updates.len() > 1_000 {
+        return Err(EngineError::BatchTooLarge);
+    }
+
+    let definition =
+        AsyncControlPlane::queue_definition(backend.control.as_ref(), shard.clone()).await?;
+    let request_id = request.request_id.clone();
+    let fingerprint = batch_update_body_hash(&request)?;
+
+    let mut keys = Vec::new();
+    let mut ids = Vec::new();
+    for update in &request.updates {
+        match &update.item_ref {
+            BatchUpdateItemRef::ClientItemKey(key)
+            | BatchUpdateItemRef::Both {
+                client_item_key: key,
+                ..
+            } => keys.push(key.clone()),
+            BatchUpdateItemRef::ItemId(item_id) => ids.push(*item_id),
+        }
+    }
+    let needs_version_peek = request
+        .updates
+        .iter()
+        .any(|update| update.expected_item_version.is_some());
+    let snapshot = if backend.pipeline_unresolved_updates() && !needs_version_peek {
+        Vec::new()
+    } else {
+        backend.planner_update_snapshot(&shard, &keys, &ids).await?
+    };
+
+    let plan = if backend.pipeline_unresolved_updates() {
+        plan_batch_update_pipelined(&definition, true, request.updates, snapshot)
+    } else {
+        plan_batch_update(&definition, true, request.updates, snapshot)
+    };
+    let updates: Vec<_> = plan
+        .commands
+        .into_iter()
+        .map(|(_idx, update)| update)
+        .collect();
+    let response = fireweed_engine::BatchUpdateResponse {
+        request_id: request_id.clone(),
+        results: plan.outcomes,
+    };
+    if !updates.is_empty() {
+        let planned = backend.reserve_planned_updates(&shard, &updates)?;
+        let item_ids: Vec<_> = updates
+            .iter()
+            .map(|u| u.item_id)
+            .filter(|id| id.as_u64() != 0)
+            .collect();
+        let envelope = CommandEnvelope {
+            command_id: backend.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: None,
+            item_ids,
+            command: QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        let epoch = match expected_epoch {
+            Some(e) => e,
+            None => AsyncLogStore::current_epoch(backend.log.as_ref(), shard.clone()).await?,
+        };
+        let committed = backend
+            .engine
+            .commit_strategy()
+            .commit(
+                RawCommitRequest::new(shard, vec![envelope], epoch)
+                    .with_append_admission(AppendAdmissionClass::AtomicNative),
+            )
+            .await;
+        backend.finish_planned(planned, committed.is_ok());
+        committed?;
+    }
+    Ok(response)
+}
+
 macro_rules! impl_turso_product_ports {
     ($ty:ty, $durability:expr, $consistency:expr) => {
         impl Backend for $ty {
@@ -1395,111 +1694,8 @@ macro_rules! impl_turso_product_ports {
             > + Send {
                 let shard = shard.clone();
                 async move {
-                    use fireweed_engine::{
-                        BatchUpdateItemRef, CommandChecksum,
-                        CommandEnvelope, QueueCommand, batch_update_body_hash, plan_batch_update,
-                        plan_batch_update_pipelined,
-                    };
-
-                    if request.updates.is_empty() {
-                        return Err(EngineError::Invalid("empty batch update"));
-                    }
-                    if request.updates.len() > 1_000 {
-                        return Err(EngineError::BatchTooLarge);
-                    }
-
-                    let definition =
-                        AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone())
-                            .await?;
-                    let request_id = request.request_id.clone();
-                    let fingerprint = batch_update_body_hash(&request)?;
-
-                    let mut keys = Vec::new();
-                    let mut ids = Vec::new();
-                    for update in &request.updates {
-                        match &update.item_ref {
-                            BatchUpdateItemRef::ClientItemKey(key)
-                            | BatchUpdateItemRef::Both {
-                                client_item_key: key,
-                                ..
-                            } => keys.push(key.clone()),
-                            BatchUpdateItemRef::ItemId(item_id) => ids.push(*item_id),
-                        }
-                    }
-                    let needs_version_peek = request
-                        .updates
-                        .iter()
-                        .any(|update| update.expected_item_version.is_some());
-                    let snapshot = if self.pipeline_unresolved_updates() && !needs_version_peek
-                    {
-                        Vec::new()
-                    } else {
-                        self.planner_update_snapshot(&shard, &keys, &ids).await?
-                    };
-
-                    let plan = if self.pipeline_unresolved_updates() {
-                        plan_batch_update_pipelined(
-                            &definition,
-                            true,
-                            request.updates,
-                            snapshot,
-                        )
-                    } else {
-                        plan_batch_update(&definition, true, request.updates, snapshot)
-                    };
-                    let updates: Vec<_> = plan
-                        .commands
-                        .into_iter()
-                        .map(|(_idx, update)| update)
-                        .collect();
-                    let response = fireweed_engine::BatchUpdateResponse {
-                        request_id: request_id.clone(),
-                        results: plan.outcomes,
-                    };
-                    if !updates.is_empty() {
-                        let planned = self.reserve_planned_updates(&shard, &updates)?;
-                        let item_ids: Vec<_> = updates
-                            .iter()
-                            .map(|u| u.item_id)
-                            .filter(|id| id.as_u64() != 0)
-                            .collect();
-                        let envelope = CommandEnvelope {
-                            command_id: self.ids.next_command_id(),
-                            request_id: Some(request_id),
-                            request_fingerprint: Some(fingerprint.0),
-                            request_outcome: None,
-                            item_ids,
-                            command: QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
-                                updates,
-                            }),
-                            checksum: CommandChecksum(0),
-                            created_at: now,
-                        };
-                        let epoch = match expected_epoch {
-                            Some(e) => e,
-                            None => {
-                                AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone())
-                                    .await?
-                            }
-                        };
-                        use fireweed_engine::AsyncCommitStrategy;
-                        let strategy = self.engine.commit_strategy();
-                        let append_admission = match $durability {
-                            DurabilityClass::Atomic => AppendAdmissionClass::AtomicNative,
-                            DurabilityClass::EventualApply => {
-                                AppendAdmissionClass::SelectionRequired
-                            }
-                        };
-                        let committed = strategy
-                            .commit(
-                                RawCommitRequest::new(shard, vec![envelope], epoch)
-                                    .with_append_admission(append_admission),
-                            )
-                            .await;
-                        self.finish_planned(planned, committed.is_ok());
-                        committed?;
-                    }
-                    Ok(response)
+                    self.dispatch_batch_update(shard, request, now, expected_epoch)
+                        .await
                 }
             }
         }
@@ -1835,13 +2031,13 @@ macro_rules! impl_turso_product_ports {
                 shard: &QueueKey,
                 limit: usize,
             ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
-                self.projection.server_peek(shard, limit)
+                self.committed_peek(shard, limit)
             }
             fn pending(
                 &self,
                 shard: &QueueKey,
             ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
-                self.projection.server_pending(shard)
+                self.committed_pending(shard)
             }
             fn pending_summary(
                 &self,
@@ -1855,7 +2051,7 @@ macro_rules! impl_turso_product_ports {
                 start: Option<ItemId>,
                 limit: usize,
             ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
-                self.projection.server_pending_page(shard, start, limit)
+                self.committed_pending_page(shard, start, limit)
             }
             fn pending_range(
                 &self,
@@ -1865,15 +2061,14 @@ macro_rules! impl_turso_product_ports {
                 consumer: Option<&LeaseToken>,
                 limit: usize,
             ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
-                self.projection
-                    .server_pending_range(shard, start, end, consumer, limit)
+                self.committed_pending_range(shard, start, end, consumer, limit)
             }
             fn pending_by_ids(
                 &self,
                 shard: &QueueKey,
                 ids: &[ItemId],
             ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
-                self.projection.server_pending_by_ids(shard, ids)
+                self.committed_pending_by_ids(shard, ids)
             }
             fn claimed_view(
                 &self,
@@ -1893,22 +2088,13 @@ macro_rules! impl_turso_product_ports {
                 keys: &[ClientItemKey],
             ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send
             {
-                let shard = shard.clone();
-                let keys = keys.to_vec();
-                async move {
-                    self.catch_up_produce(&shard).await?;
-                    self.projection.server_live_items(&shard, &keys).await
-                }
+                self.committed_live_items(shard, keys)
             }
             fn metrics(
                 &self,
                 shard: &QueueKey,
             ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
-                let shard = shard.clone();
-                async move {
-                    self.catch_up_projection(&shard).await?;
-                    self.projection.server_metrics(&shard).await
-                }
+                self.committed_metrics(shard)
             }
             fn terminal_emission_metrics(
                 &self,
@@ -2380,6 +2566,13 @@ pub struct DerivedObjectLogTursoBackend {
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
+    frontiers: Arc<tokio::sync::Mutex<HashMap<QueueKey, QueueFrontiers>>>,
+    sequencer: MutationSequencer<QueueKey, MutationSequencerKey, MutationGenerationWork>,
+    claim_turns: ClaimQueueTurn<QueueKey>,
+    claim_slots: ClaimDriverReadAdmission,
+    shared_slots: SharedDriverReadAdmission,
+    outcome_slots: OutcomeReadAdmission,
+    generation_joins: Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>,
     #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
     drivers: CoordinatorDriverRegistry,
 }
@@ -2412,6 +2605,7 @@ impl DerivedObjectLogTursoBackend {
         };
         let last_produce = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let produce_caught_up = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let frontiers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let committer = ObjectLogTursoCommitter {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
@@ -2467,6 +2661,13 @@ impl DerivedObjectLogTursoBackend {
             async_apply,
             last_produce,
             produce_caught_up,
+            frontiers,
+            sequencer: MutationSequencer::new(),
+            claim_turns: ClaimQueueTurn::default(),
+            claim_slots: ClaimDriverReadAdmission::default(),
+            shared_slots: SharedDriverReadAdmission::default(),
+            outcome_slots: OutcomeReadAdmission::default(),
+            generation_joins: Arc::new(Mutex::new(HashMap::new())),
             drivers,
         };
         backend.recover_async().await?;
@@ -2491,6 +2692,7 @@ impl DerivedObjectLogTursoBackend {
             })
     }
 
+    #[allow(dead_code)]
     async fn catch_up_projection(&self, shard: &QueueKey) -> EngineResult<()> {
         let Some(coordinator) = &self.async_apply else {
             return Ok(());
@@ -2541,21 +2743,13 @@ impl DerivedObjectLogTursoBackend {
             if position_covers(snap.applied_high_water.as_ref(), target) {
                 return Ok(());
             }
-            let projected =
-                AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), shard.clone())
-                    .await?;
-            if position_covers(projected.as_ref(), target) {
-                return Ok(());
-            }
-            if snap.apply_queue_depth == 0 || !coordinator.has_ready(shard).await {
-                // Reserved sibling claims are not produce work. The lease txn
-                // uses the writer and sees committed SQL.
-                return Ok(());
-            }
-            coordinator.wait_for_progress(shard).await?;
+            coordinator
+                .wait_until_covers(shard, target, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
+                .await?;
         }
     }
 
+    #[allow(dead_code)]
     async fn snapshot_live_items(
         &self,
         shard: &QueueKey,
@@ -2581,14 +2775,16 @@ impl DerivedObjectLogTursoBackend {
                 return Ok(views);
             }
             if let Some(coordinator) = &self.async_apply {
-                coordinator.ensure_healthy(shard)?;
-                coordinator.wait_for_progress(shard).await?;
+                coordinator
+                    .wait_until_covers(shard, &target, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
+                    .await?;
             } else {
                 return Ok(views);
             }
         }
     }
 
+    #[allow(dead_code)]
     async fn planner_update_snapshot(
         &self,
         shard: &QueueKey,
@@ -2598,10 +2794,12 @@ impl DerivedObjectLogTursoBackend {
         self.projection.server_update_snapshot(shard, keys).await
     }
 
+    #[allow(dead_code)]
     fn pipeline_unresolved_updates(&self) -> bool {
         self.async_apply.is_some()
     }
 
+    #[allow(dead_code)]
     fn reserve_planned_updates(
         &self,
         _shard: &QueueKey,
@@ -2610,6 +2808,7 @@ impl DerivedObjectLogTursoBackend {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     fn finish_planned(&self, _planned: Option<PlannedReservation>, _ok: bool) {}
 
     async fn recover_async(&self) -> EngineResult<()> {
@@ -2664,6 +2863,21 @@ impl DerivedObjectLogTursoBackend {
                 }
             }
             self.drain_claim_outbox(&shard).await?;
+            if let Some(coordinator) = &self.async_apply {
+                let recovered = AsyncProjectionStore::recovery_high_water(
+                    self.projection.as_ref(),
+                    shard.clone(),
+                )
+                .await?;
+                let log_hw = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?;
+                if match (recovered.as_ref(), log_hw.as_ref()) {
+                    (None, None) => true,
+                    (Some(recovered), Some(log_hw)) => position_covers(Some(recovered), log_hw),
+                    _ => false,
+                } {
+                    coordinator.seed_high_water(shard, recovered).await;
+                }
+            }
         }
         Ok(())
     }
@@ -2744,6 +2958,7 @@ impl DerivedObjectLogTursoBackend {
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> EngineResult<Vec<fireweed_engine::ClaimedItem>> {
+        self.wait_request_entry_coverage(shard).await?;
         let claimed = AsyncProjectionStore::render_claimed(
             self.projection.as_ref(),
             shard.clone(),
@@ -2795,27 +3010,434 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
+    async fn wait_request_entry_coverage(&self, shard: &QueueKey) -> EngineResult<()> {
+        let Some(coordinator) = &self.async_apply else {
+            return Ok(());
+        };
+        coordinator.ensure_healthy(shard)?;
+        let Some(target) = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?
+        else {
+            return Ok(());
+        };
+        coordinator
+            .wait_until_covers(shard, &target, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
+            .await
+    }
+
+    async fn wait_queue_frontiers(&self, shard: &QueueKey) -> EngineResult<()> {
+        let Some(coordinator) = &self.async_apply else {
+            return Ok(());
+        };
+        let frontiers = self
+            .frontiers
+            .lock()
+            .await
+            .get(shard)
+            .cloned()
+            .unwrap_or_default();
+        for target in [frontiers.last_claim, frontiers.last_candidate_mutation]
+            .into_iter()
+            .flatten()
+        {
+            coordinator
+                .wait_until_covers(shard, &target, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn record_frontier(&self, shard: &QueueKey, claim: bool) -> EngineResult<()> {
+        let Some(position) = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?
+        else {
+            return Ok(());
+        };
+        let mut frontiers = self.frontiers.lock().await;
+        let entry = frontiers.entry(shard.clone()).or_default();
+        if claim {
+            entry.last_claim = Some(position);
+        } else {
+            entry.last_candidate_mutation = Some(position);
+        }
+        Ok(())
+    }
+
+    async fn acquire_outcome_read(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<fireweed_engine::SlotPermit> {
+        self.wait_request_entry_coverage(shard).await?;
+        self.outcome_slots.acquire().await.map_err(map_coord)
+    }
+
+    async fn committed_peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection.server_peek_committed(shard, limit).await
+    }
+
+    async fn committed_pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection.server_pending_committed(shard).await
+    }
+
+    async fn committed_pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection
+            .server_pending_page_committed(shard, start, limit)
+            .await
+    }
+
+    async fn committed_pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection
+            .server_pending_range_committed(shard, start, end, consumer, limit)
+            .await
+    }
+
+    async fn committed_pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> EngineResult<Vec<LeaseView>> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection
+            .server_pending_by_ids_committed(shard, ids)
+            .await
+    }
+
+    async fn committed_live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection
+            .server_live_items_committed(shard, keys)
+            .await
+    }
+
+    async fn committed_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection.server_metrics_committed(shard).await
+    }
+
     async fn dispatch_push(
         &self,
         request: AsyncPushRequest,
     ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
-        match self.engine.prepare_push(request).await.map_err(map_push)? {
+        self.wait_request_entry_coverage(&request.shard).await?;
+        if let (Some(request_id), items) = (request.request_id.clone(), &request.items) {
+            let fingerprint = PushFingerprint {
+                canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(items)?,
+                legacy_body_hash: fireweed_engine::push_body_hash(items)?,
+            };
+            let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+            match self
+                .projection
+                .push_idempotency_committed(&request.shard, &request_id, &fingerprint, request.now)
+                .await?
+            {
+                IdempotencyDecision::Replay(item_ids) => {
+                    return Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids));
+                }
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+        }
+        match self
+            .engine
+            .prepare_push(request.clone())
+            .await
+            .map_err(map_push)?
+        {
             PreparedPush::Replay(item_ids) => {
                 Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids))
             }
-            PreparedPush::Commit { request, item_ids } => {
-                self.commit_prepared(request, AppendAdmissionClass::SelectionRequired)
-                    .await?;
-                Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids))
+            PreparedPush::Commit {
+                request: commit,
+                item_ids,
+            } => {
+                let items = match commit.commands().first().map(|envelope| &envelope.command) {
+                    Some(QueueCommand::Push(command)) => command.items.clone(),
+                    _ => Vec::new(),
+                };
+                let fingerprint = request.request_id.as_ref().map(|_| PushFingerprint {
+                    canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(
+                        &request.items,
+                    )
+                    .unwrap_or([0; 32]),
+                    legacy_body_hash: fireweed_engine::push_body_hash(&request.items)
+                        .unwrap_or(fireweed_core::BodyHash(0)),
+                });
+                let work = MutationGenerationWork::Push {
+                    fingerprint,
+                    request,
+                    commit,
+                    item_ids: item_ids.clone(),
+                    items,
+                };
+                match self.drive_candidate_mutation(work).await? {
+                    MutationGenerationMemberOutcome::Push(PreparedPush::Replay(ids)) => {
+                        Ok(fireweed_engine::PushBatchOutcome::replayed(ids))
+                    }
+                    MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
+                        item_ids,
+                        ..
+                    }) => Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids)),
+                    MutationGenerationMemberOutcome::Rejected(error) => Err(error),
+                    MutationGenerationMemberOutcome::BatchUpdate { .. }
+                    | MutationGenerationMemberOutcome::Singleton { .. } => Err(
+                        EngineError::Storage("push generation produced a non-push outcome".into()),
+                    ),
+                }
             }
         }
     }
 
+    async fn dispatch_batch_update(
+        &self,
+        shard: QueueKey,
+        request: fireweed_engine::BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<fireweed_engine::BatchUpdateResponse> {
+        self.wait_request_entry_coverage(&shard).await?;
+        if request.updates.is_empty() {
+            return Err(EngineError::Invalid("empty batch update"));
+        }
+        if request.updates.len() > 1_000 {
+            return Err(EngineError::BatchTooLarge);
+        }
+        let fingerprint = fireweed_engine::batch_update_body_hash(&request)?;
+        let epoch = match expected_epoch {
+            Some(epoch) => epoch,
+            None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
+        };
+        let work = MutationGenerationWork::BatchUpdate {
+            shard,
+            request,
+            now,
+            expected_epoch: epoch,
+            fingerprint,
+            command_id: self.ids.next_command_id(),
+        };
+        match self.drive_candidate_mutation(work).await? {
+            MutationGenerationMemberOutcome::BatchUpdate { response, .. } => Ok(response),
+            MutationGenerationMemberOutcome::Rejected(error) => Err(error),
+            MutationGenerationMemberOutcome::Push(_)
+            | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
+                "batch-update generation produced a non-batch outcome".into(),
+            )),
+        }
+    }
+
+    async fn drive_candidate_mutation(
+        &self,
+        work: MutationGenerationWork,
+    ) -> EngineResult<MutationGenerationMemberOutcome> {
+        let queue = work.queue();
+        let items = work.items();
+        let response_bytes = work.response_bytes();
+        let key = work.sequencer_key();
+        let work = Arc::new(work);
+        let ticket = self
+            .sequencer
+            .admit(
+                queue.clone(),
+                key,
+                MutationIngress::Direct,
+                Arc::clone(&work),
+                items,
+                response_bytes,
+            )
+            .map_err(map_coord)?;
+        tokio::task::yield_now().await;
+        let generation_id = ticket.generation_id();
+        if let Some(generation) = self.sequencer.start_generation(&queue) {
+            let join = Arc::new(GenerationJoin {
+                notify: tokio::sync::Notify::new(),
+                outcome: Mutex::new(None),
+            });
+            self.generation_joins
+                .lock()
+                .expect("generation join map")
+                .insert((queue.clone(), generation_id), Arc::clone(&join));
+            let driven = self.drive_started_generation(generation).await;
+            *join.outcome.lock().expect("generation outcome") = Some(driven.clone());
+            join.notify.notify_waiters();
+            self.generation_joins
+                .lock()
+                .expect("generation join map")
+                .remove(&(queue, generation_id));
+            drop(ticket);
+            return member_for_work(&work, driven?);
+        }
+        let started = Instant::now();
+        loop {
+            if let Some(generation) = self.sequencer.start_generation(&queue) {
+                let join = Arc::new(GenerationJoin {
+                    notify: tokio::sync::Notify::new(),
+                    outcome: Mutex::new(None),
+                });
+                self.generation_joins
+                    .lock()
+                    .expect("generation join map")
+                    .insert((queue.clone(), generation_id), Arc::clone(&join));
+                let driven = self.drive_started_generation(generation).await;
+                *join.outcome.lock().expect("generation outcome") = Some(driven.clone());
+                join.notify.notify_waiters();
+                self.generation_joins
+                    .lock()
+                    .expect("generation join map")
+                    .remove(&(queue, generation_id));
+                drop(ticket);
+                return member_for_work(&work, driven?);
+            }
+            let join = self
+                .generation_joins
+                .lock()
+                .expect("generation join map")
+                .get(&(queue.clone(), generation_id))
+                .cloned();
+            if let Some(join) = join {
+                join.notify.notified().await;
+                let outcome = join
+                    .outcome
+                    .lock()
+                    .expect("generation outcome")
+                    .clone()
+                    .ok_or_else(|| EngineError::Storage("generation join lost outcome".into()))?;
+                drop(ticket);
+                return member_for_work(&work, outcome?);
+            }
+            if started.elapsed() >= MUTATION_SEQUENCER_DEFAULT_MAX_WAIT {
+                drop(ticket);
+                return Err(EngineError::Backpressure {
+                    resource: "mutation sequencer wait",
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn drive_started_generation(
+        &self,
+        generation: fireweed_engine::MutationGenerationBatch<
+            QueueKey,
+            MutationSequencerKey,
+            MutationGenerationWork,
+        >,
+    ) -> EngineResult<Vec<fireweed_engine::MutationGenerationMember>> {
+        let queue = generation.requests()[0].queue();
+        self.wait_queue_frontiers(&queue).await?;
+        let _slot = self.shared_slots.acquire().await.map_err(map_coord)?;
+        let works: Vec<MutationGenerationWork> = generation
+            .requests()
+            .iter()
+            .map(|work| work.as_ref().clone())
+            .collect();
+        let mut keys = Vec::new();
+        let mut batch_keys = Vec::new();
+        for work in &works {
+            match work {
+                MutationGenerationWork::Push { items, .. } => {
+                    keys.extend(items.iter().map(|item| item.client_item_key.clone()));
+                }
+                MutationGenerationWork::BatchUpdate { request, .. } => {
+                    for update in &request.updates {
+                        if let fireweed_engine::BatchUpdateItemRef::ClientItemKey(key)
+                        | fireweed_engine::BatchUpdateItemRef::Both {
+                            client_item_key: key,
+                            ..
+                        } = &update.item_ref
+                        {
+                            batch_keys.push(key.clone());
+                        }
+                    }
+                }
+                MutationGenerationWork::Singleton { .. } => {}
+            }
+        }
+        let definition =
+            AsyncControlPlane::queue_definition(self.control.as_ref(), queue.clone()).await?;
+        let snapshot = self
+            .projection
+            .mutation_driver_snapshot(&queue, definition, &keys, &batch_keys)
+            .await?;
+        let members = validate_inert_mutation_generation(&snapshot, &works)?;
+        drop(_slot);
+        let prepared = retain_sequencer_after_slot_release(members.clone(), generation);
+        let commits = finish_inert_mutation_generation_append(prepared)?;
+        if !commits.is_empty() {
+            for commit in commits {
+                self.commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
+                    .await?;
+            }
+            self.record_frontier(&queue, false).await?;
+        }
+        Ok(members)
+    }
+
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
         if request.compatibility != ClaimCompatibility::default() {
-            return self.dispatch_claim_legacy(request).await;
+            return self.dispatch_grouped_cohort_claim(request).await;
         }
         self.dispatch_class_s_claim(request).await
+    }
+
+    async fn dispatch_grouped_cohort_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        let _turn = self
+            .claim_turns
+            .acquire(request.shard.clone())
+            .await
+            .map_err(map_coord)?;
+        self.wait_queue_frontiers(&request.shard).await?;
+        let slot = self.claim_slots.acquire().await.map_err(map_coord)?;
+        let prepared = self
+            .engine
+            .prepare_claim(request.clone())
+            .await
+            .map_err(map_claim)?;
+        match prepared {
+            PreparedClaim::Empty => Ok(Claimed::default()),
+            PreparedClaim::Commit {
+                request: commit,
+                item_ids,
+                cohort_id,
+            } => {
+                let items = self
+                    .projection
+                    .materialize_grouped_cohort_committed(
+                        &request.shard,
+                        &item_ids,
+                        &request.lease_token,
+                        request.lease_expires_at,
+                    )
+                    .await?;
+                drop(slot);
+                let retained =
+                    PreparedClaimedResult::from_rendered(&request, &item_ids, items, cohort_id)?;
+                self.commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
+                    .await?;
+                self.wait_request_entry_coverage(&request.shard).await?;
+                self.projection
+                    .remember_leases(&request.shard, &item_ids, request.lease_token.clone())
+                    .await;
+                self.record_frontier(&request.shard, true).await?;
+                finish_retained_grouped_cohort_response(retained.into_claimed())
+            }
+        }
     }
 
     async fn dispatch_class_s_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
@@ -2966,6 +3588,7 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn dispatch_claim_legacy(&self, request: ClaimRequest) -> EngineResult<Claimed> {
         match self
             .engine
@@ -3442,6 +4065,207 @@ mod s4b_lifecycle {
                 EngineError::Storage(_)
             ),
             "closed product admission must reject new appends"
+        );
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+mod s3c_activation {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use fireweed_core::{
+        EligibilityPolicy, GroupKey, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    };
+    use fireweed_engine::{ClaimCompatibility, ClaimPort, ProjectionRead, PushPort, PushSpec};
+    use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
+
+    use super::*;
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    fn qdef(queue: &str) -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new(queue).unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn spec() -> AsyncProjectionSpec {
+        AsyncProjectionSpec::new(32, 1024 * 1024, 16, 30_000, 3).unwrap()
+    }
+
+    async fn open(root: &std::path::Path) -> DerivedObjectLogTursoBackend {
+        let log_root = root.join("log");
+        let projection_path = root.join("projection.db");
+        std::fs::create_dir_all(&log_root).unwrap();
+        let log =
+            ObjectLogEngineStore::open_local(&log_root, flush_config_from_segment(256 * 1_024, 50))
+                .await
+                .unwrap();
+        let projection = open_turso_projection_async(&projection_path).await.unwrap();
+        DerivedObjectLogTursoBackend::from_log_and_projection(
+            log,
+            projection,
+            projection_path,
+            0,
+            Some(spec()),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_reads_use_outcome_pool_after_request_entry_high_water() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3c-reads-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let definition = qdef("q-s3c-reads");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let before = backend
+            .projection()
+            .committed_pools()
+            .expect("file-backed pools")
+            .outcome_borrow_count();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("s3c-read").unwrap()),
+                    payload: None,
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let peeked = backend.peek(&shard, 8).await.unwrap();
+        assert_eq!(peeked.len(), 1);
+        let metrics = backend.metrics(&shard).await.unwrap();
+        assert_eq!(metrics.pending, 1);
+        let after = backend
+            .projection()
+            .committed_pools()
+            .expect("file-backed pools")
+            .outcome_borrow_count();
+        assert!(
+            after > before,
+            "public reads must borrow the outcome pool, before={before} after={after}"
+        );
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grouped_claim_uses_retained_carrier_and_item_claim_stays_provisional() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3c-claim-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let definition = qdef("q-s3c-claim");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("s3c-item").unwrap()),
+                    group_key: Some(GroupKey::new("g1").unwrap()),
+                    payload: Some(Bytes::from_static(b"body")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let item_claimed = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w").unwrap(),
+                max_items: 1,
+                lease_token: LeaseToken::new("tok-item").unwrap(),
+                lease_expires_at: UtcTimestamp::new(30, 0).unwrap(),
+                now: UtcTimestamp::new(2, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(item_claimed.items.len(), 1);
+        assert_eq!(
+            item_claimed.items[0].payload.as_ref().map(Bytes::as_ref),
+            Some(&b"body"[..])
+        );
+        backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("s3c-grouped").unwrap()),
+                    group_key: Some(GroupKey::new("g2").unwrap()),
+                    payload: Some(Bytes::from_static(b"grouped")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(3, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let grouped = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w2").unwrap(),
+                max_items: 1,
+                lease_token: LeaseToken::new("tok-group").unwrap(),
+                lease_expires_at: UtcTimestamp::new(40, 0).unwrap(),
+                now: UtcTimestamp::new(4, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility {
+                    group_key: Some(GroupKey::new("g2").unwrap()),
+                    ..ClaimCompatibility::default()
+                },
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(grouped.items.len(), 1);
+        assert_eq!(
+            grouped.items[0].payload.as_ref().map(Bytes::as_ref),
+            Some(&b"grouped"[..])
         );
         drop(backend);
         let _ = std::fs::remove_dir_all(root);

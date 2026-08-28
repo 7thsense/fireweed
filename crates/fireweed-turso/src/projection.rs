@@ -3673,7 +3673,27 @@ mod committed_pool_helper_tests {
         let apply_live = between(projection, "fn apply_live(", "fn apply_recovery(");
         asserts_no_pool_borrow(apply_live, "apply_live");
 
-        asserts_no_pool_borrow(compose, "turso_compose post-publication");
+        let class_s = between(
+            compose,
+            "async fn dispatch_class_s_claim(",
+            "async fn append_class_s_claim(",
+        );
+        asserts_no_pool_borrow(class_s, "class-s post-publication response");
+        let retained = between(
+            compose,
+            "fn finish_retained_grouped_cohort_response(",
+            "fn finish_inert_mutation_generation_append(",
+        );
+        asserts_no_pool_borrow(retained, "turso_compose retained post-publication");
+        let grouped = between(
+            compose,
+            "async fn dispatch_grouped_cohort_claim(",
+            "async fn dispatch_class_s_claim(",
+        );
+        assert!(
+            !grouped.contains("render_prepared_claim") && !grouped.contains("render_claimed("),
+            "grouped/cohort post-publication must use the retained carrier"
+        );
         let production_local = local
             .split("#[cfg(test)]")
             .next()

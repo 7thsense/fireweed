@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fireweed_engine::{
     AsyncProjectionSpec, AsyncProjectionStore, CommandEnvelope, CommandPosition, EngineError,
@@ -512,10 +512,54 @@ where
         }
     }
 
-    /// Seed diagnostic high-water after authoritative recovery has rebuilt the selected projection.
+    /// Wait until coordinator-authoritative `applied_high_water` covers `target`.
+    ///
+    /// Empty apply queues and not-yet-ready reservations are not coverage. Expiry is retryable
+    /// `Backpressure { resource: "projection coverage" }`.
+    pub async fn wait_until_covers(
+        &self,
+        shard: &QueueKey,
+        target: &CommandPosition,
+        deadline: Duration,
+    ) -> EngineResult<()> {
+        let started = Instant::now();
+        loop {
+            self.ensure_healthy(shard)?;
+            let changed = self.inner.changed.notified();
+            let snapshot = self.snapshot(shard).await;
+            if let Some(reason) = snapshot.poison_reason {
+                return Err(poisoned(&reason));
+            }
+            if position_covers(snapshot.applied_high_water.as_ref(), target) {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(backpressure("projection coverage"));
+            }
+            match tokio::time::timeout(remaining, changed).await {
+                Ok(()) => {}
+                Err(_) => {
+                    self.ensure_healthy(shard)?;
+                    let snapshot = self.snapshot(shard).await;
+                    if let Some(reason) = snapshot.poison_reason {
+                        return Err(poisoned(&reason));
+                    }
+                    if position_covers(snapshot.applied_high_water.as_ref(), target) {
+                        return Ok(());
+                    }
+                    return Err(backpressure("projection coverage"));
+                }
+            }
+        }
+    }
+
+    /// Seed applied high-water after authoritative tail equality.
     pub async fn seed_high_water(&self, shard: QueueKey, high_water: Option<CommandPosition>) {
         let mut state = self.inner.state.lock().await;
         state.shards.entry(shard).or_default().applied_high_water = high_water;
+        drop(state);
+        self.inner.changed.notify_waiters();
     }
 
     /// Reset one shard after an operator-driven projection rebuild.
@@ -841,6 +885,13 @@ fn backpressure(resource: &'static str) -> EngineError {
     EngineError::Backpressure { resource }
 }
 
+fn position_covers(have: Option<&CommandPosition>, target: &CommandPosition) -> bool {
+    have.is_some_and(|have| {
+        have.backend_epoch > target.backend_epoch
+            || (have.backend_epoch == target.backend_epoch && have.sequence >= target.sequence)
+    })
+}
+
 fn poisoned(reason: &str) -> EngineError {
     EngineError::Storage(format!("async projection poisoned: {reason}"))
 }
@@ -905,5 +956,43 @@ mod tests {
         state.entries.push_back(ready(2, 301));
         let (_index, batch) = next_runnable(&state).expect("ready 301 despite reserved");
         assert_eq!(batch.positions[0].sequence, 301);
+    }
+
+    fn coordinator() -> AsyncProjectionApplyCoordinator<fireweed_projection::AsyncInMemoryProjection>
+    {
+        AsyncProjectionApplyCoordinator::new(
+            Arc::new(fireweed_projection::AsyncInMemoryProjection::new(
+                fireweed_projection::InMemoryProjection::new(),
+            )),
+            AsyncProjectionSpec::new(32, 1024, 16, 30_000, 3).unwrap(),
+        )
+        .expect("coordinator")
+    }
+
+    #[tokio::test]
+    async fn empty_queue_is_not_applied_high_water_coverage() {
+        let coordinator = coordinator();
+        assert!(coordinator.snapshot(&shard()).await.apply_queue_depth == 0);
+        assert!(!coordinator.has_ready(&shard()).await);
+        let error = coordinator
+            .wait_until_covers(&shard(), &pos(1), Duration::from_millis(40))
+            .await
+            .expect_err("empty/not-ready is not coverage");
+        assert_eq!(
+            error,
+            EngineError::Backpressure {
+                resource: "projection coverage",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_high_water_covers_without_ready_entries() {
+        let coordinator = coordinator();
+        coordinator.seed_high_water(shard(), Some(pos(1))).await;
+        coordinator
+            .wait_until_covers(&shard(), &pos(1), Duration::from_millis(40))
+            .await
+            .expect("seeded high-water is coverage");
     }
 }
