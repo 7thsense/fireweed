@@ -2890,7 +2890,7 @@ async fn validate_objectlog_postgres_catalog(
         }
         let projected_high_water =
             AsyncProjectionStore::recovery_high_water(projection, key.clone()).await?;
-        let authoritative_high_water = AsyncLogStore::high_water(log, key).await?;
+        let authoritative_high_water = AsyncLogStore::high_water(log, key.clone()).await?;
         match (projected_high_water, authoritative_high_water) {
             (Some(_), None) => {
                 return Err(EngineError::Storage(
@@ -2902,9 +2902,24 @@ async fn validate_objectlog_postgres_catalog(
                     || (projected.backend_epoch == authoritative.backend_epoch
                         && projected.sequence > authoritative.sequence) =>
             {
-                return Err(EngineError::Storage(
-                    "projection is ahead of the authoritative object log".into(),
-                ));
+                // fireweed-6fcc28a8 parity for the postgres projection: the log's durable
+                // high-water is a throttled reopen hint that can trail the true tail after a
+                // plain restart, so walk the tail forward before declaring the projection ahead.
+                let reconciled =
+                    reconcile_objectlog_sqlite_high_water(log, &key, Some(authoritative)).await?;
+                let still_ahead = match &reconciled {
+                    Some(reconciled) => {
+                        projected.backend_epoch > reconciled.backend_epoch
+                            || (projected.backend_epoch == reconciled.backend_epoch
+                                && projected.sequence > reconciled.sequence)
+                    }
+                    None => true,
+                };
+                if still_ahead {
+                    return Err(EngineError::Storage(
+                        "projection is ahead of the authoritative object log".into(),
+                    ));
+                }
             }
             _ => {}
         }
@@ -2928,8 +2943,18 @@ impl ObjectLogPostgresLifecycle {
         for definition in definitions {
             let key = QueueKey::new(definition.tenant_id, definition.queue_id);
             let projected_position = backend.projection_high_water(&key).await?;
-            let authoritative_position =
+            let mut authoritative_position =
                 AsyncLogStore::high_water(log.as_ref(), key.clone()).await?;
+            if projected_position != authoritative_position {
+                // Throttled reopen hint (fireweed-2be7894a / fireweed-6fcc28a8): walk the tail
+                // before concluding the postgres projection has actually drifted.
+                authoritative_position = reconcile_objectlog_sqlite_high_water(
+                    log.as_ref(),
+                    &key,
+                    authoritative_position,
+                )
+                .await?;
+            }
             compatible &= projected_position == authoritative_position;
             projection_sequence = projection_sequence.max(
                 projected_position
@@ -2979,12 +3004,23 @@ impl ObjectLogPostgresLifecycle {
                 }
             }
         }
+        let mut last_position = None;
         for chunk in replay.chunks(1_024) {
             let positions: Vec<_> = chunk.iter().map(|(position, _)| position.clone()).collect();
             let commands: Vec<_> = chunk.iter().map(|(_, command)| command.clone()).collect();
+            last_position = positions.last().cloned().or(last_position);
             backend
                 .apply_projection_recovery(positions, commands)
                 .await?;
+        }
+        // fireweed-2be7894a parity: the durable high-water hint is throttled, so re-persist the
+        // position this rebuild just proved by reading the tail (see the sqlite rebuild path).
+        if let Some(last_position) = last_position {
+            let key = last_position.queue.clone();
+            match AsyncLogStore::set_high_water(log.as_ref(), key, last_position).await {
+                Ok(()) | Err(EngineError::Invalid("high-water regression")) => {}
+                Err(other) => return Err(other),
+            }
         }
         let verification = Self::verify_backend(backend).await?;
         Ok(ProjectionRebuildState {
@@ -3079,7 +3115,7 @@ struct ObjectLogSqliteLifecycle {
 /// Note for callers: this mutates durable log metadata (`set_high_water`) as a side effect —
 /// it is not a read-only check, even though both call sites below live inside functions named
 /// `validate_*`/`verify_*`.
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(all(feature = "objectlog", any(feature = "sqlite", feature = "postgres")))]
 async fn reconcile_objectlog_sqlite_high_water(
     log: &fireweed_objectlog::ObjectLogEngineStore,
     key: &QueueKey,

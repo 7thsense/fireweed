@@ -394,6 +394,70 @@ fn objectlog_postgres_hot_mutations_and_query_claim_replay_after_reopen() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Postgres parity for `objectlog_sqlite_composition::public_objectlog_sqlite_reopen_survives_high_water_checkpoint_gap`
+/// (fireweed-6fcc28a8): the object log's durable high-water is a throttled reopen hint, so after
+/// ordinary live traffic and a plain restart the strictly-applied postgres projection is legitimately
+/// past the hint. The postgres catalog validation compared against the stale hint and misreported
+/// "projection is ahead of the authoritative object log" (snorri-b1e53a64) instead of walking the tail.
+#[test]
+fn public_objectlog_postgres_reopen_survives_high_water_checkpoint_gap() {
+    let url = runtime_env("PG_TEST_URL").expect(
+        "SKIP public_objectlog_postgres_reopen_survives_high_water_checkpoint_gap: FIREWEED_PG_TEST_URL (fail-closed; no LOUD skip)",
+    );
+    let (root, schema) = unique_fixture("public_objectlog_postgres_gap");
+    let durability = public_config(&root, &schema, &url);
+    let key = queue();
+
+    let fireweed =
+        fireweed::open_objectlog_postgres(durability.clone(), Arc::new(ManualClock::at(1_000)))
+            .unwrap();
+    block_on(fireweed.create_queue(definition())).unwrap();
+    // First append persists the hint; the next two are throttled, so the durable hint stays at the
+    // first batch while the synchronously-applied postgres projection reaches the fifth item.
+    block_on(fireweed.push_batch(&key, vec![item(1), item(2), item(3)])).unwrap();
+    block_on(fireweed.push(&key, item(4))).unwrap();
+    let last = block_on(fireweed.push(&key, item(5))).unwrap();
+    let live = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(live.projection_sequence, live.authoritative_sequence);
+    drop(fireweed);
+
+    let reopened =
+        fireweed::open_objectlog_postgres(durability, Arc::new(ManualClock::at(2_000))).unwrap();
+    assert_eq!(
+        block_on(reopened.peek(&key, 10))
+            .unwrap()
+            .into_iter()
+            .map(|view| view.item_id)
+            .next_back(),
+        Some(last),
+        "reopen must recover every durably-committed item, not just the ones up to the stale hint"
+    );
+    let reopened_verification = block_on(
+        reopened
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened_verification.projection_sequence, reopened_verification.authoritative_sequence,
+        "a plain reopen must not report the caught-up projection as ahead of a stale high-water hint"
+    );
+    assert_eq!(
+        reopened_verification.authoritative_sequence, live.authoritative_sequence,
+        "reopen must reconcile the stale hint to the true tail, not merely avoid erroring"
+    );
+    drop(reopened);
+    drop_schema(&url, &schema);
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn public_objectlog_postgres_delete_and_rebuild() {
     let url = runtime_env("PG_TEST_URL").expect(
