@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fireweed_core::{
@@ -25,20 +25,21 @@ use fireweed_engine::{
     AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand,
     ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
     CommandPosition, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
-    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult,
+    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
     ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome, FinalizePort, FinalizeTarget,
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, InProcessControlPlane,
     InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
     ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
-    OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize,
-    PreparedMutationGeneration, PreparedPush, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError, QueueKey, QueueMetrics,
-    RawCommitFault, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit,
-    SeparateReplayCommitter, SeqIdGen, SetGatesPort, SnapshotRef, SnapshotStore,
+    OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, PendingPage, PendingSummary, PreparedClaim,
+    PreparedFinalize, PreparedMutationGeneration, PreparedPush, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
+    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError,
+    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
+    SnapshotRef, SnapshotStore, TaskOutcome, TaskOutcomeError, TaskOutcomeSender,
     TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-    UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, task_outcome_channel,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -2193,10 +2194,159 @@ async fn wait_turso_apply_turn(
     }
 }
 
+/// Coordinator-owned active-driver registry.
+///
+/// `ObjectLogTaskDispatcher::drain` resolves immediately, so the Turso product tracks dispatched
+/// append/apply work here and waits for those registrations through publication.
+#[cfg(feature = "objectlog")]
+#[derive(Clone)]
+struct CoordinatorDriverRegistry {
+    inner: Arc<Mutex<CoordinatorDriverState>>,
+}
+
+#[cfg(feature = "objectlog")]
+struct CoordinatorDriverState {
+    closed: bool,
+    next_id: u64,
+    drivers: HashMap<u64, ()>,
+    drainers: Vec<TaskOutcomeSender<()>>,
+}
+
+/// RAII registration held through append/apply publication.
+#[cfg(feature = "objectlog")]
+pub(crate) struct RegisteredDriver {
+    inner: Arc<Mutex<CoordinatorDriverState>>,
+    id: u64,
+}
+
+#[cfg(feature = "objectlog")]
+impl CoordinatorDriverRegistry {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(CoordinatorDriverState {
+                closed: false,
+                next_id: 0,
+                drivers: HashMap::new(),
+                drainers: Vec::new(),
+            })),
+        }
+    }
+
+    fn register(&self) -> Result<RegisteredDriver, DispatchError> {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("coordinator driver registry poisoned");
+        if state.closed {
+            return Err(DispatchError::Closed);
+        }
+        let id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        state.drivers.insert(id, ());
+        Ok(RegisteredDriver {
+            inner: Arc::clone(&self.inner),
+            id,
+        })
+    }
+
+    fn close(&self) {
+        self.inner
+            .lock()
+            .expect("coordinator driver registry poisoned")
+            .closed = true;
+    }
+
+    fn drain(&self) -> TaskOutcome<()> {
+        let (sender, outcome) = task_outcome_channel();
+        let mut state = self
+            .inner
+            .lock()
+            .expect("coordinator driver registry poisoned");
+        if state.drivers.is_empty() {
+            sender.send(());
+        } else {
+            state.drainers.push(sender);
+        }
+        outcome
+    }
+}
+
+#[cfg(feature = "objectlog")]
+impl Drop for RegisteredDriver {
+    fn drop(&mut self) {
+        let drainers = {
+            let mut state = self
+                .inner
+                .lock()
+                .expect("coordinator driver registry poisoned");
+            state.drivers.remove(&self.id);
+            if state.drivers.is_empty() {
+                std::mem::take(&mut state.drainers)
+            } else {
+                Vec::new()
+            }
+        };
+        for drainer in drainers {
+            drainer.send(());
+        }
+    }
+}
+
+/// Dispatched object-log work is registered independently of the best-effort dispatcher drain.
+#[cfg(feature = "objectlog")]
+struct CoordinatorOwnedDispatcher {
+    inner: ObjectLogTaskDispatcher,
+    registry: CoordinatorDriverRegistry,
+}
+
+#[cfg(feature = "objectlog")]
+impl CoordinatorOwnedDispatcher {
+    fn new() -> Self {
+        Self {
+            inner: ObjectLogTaskDispatcher::new(),
+            registry: CoordinatorDriverRegistry::new(),
+        }
+    }
+
+    fn registry(&self) -> CoordinatorDriverRegistry {
+        self.registry.clone()
+    }
+}
+
+#[cfg(feature = "objectlog")]
+impl OwnedTaskDispatcher for CoordinatorOwnedDispatcher {
+    fn submit<T: Send + 'static>(
+        &self,
+        factory: OwnedTaskFactory<T>,
+    ) -> Result<TaskOutcome<T>, DispatchError> {
+        let driver = self.registry.register()?;
+        self.inner.submit(Box::new(move || {
+            let work = factory();
+            Box::pin(async move {
+                let _driver = driver;
+                work.await
+            })
+        }))
+    }
+
+    fn close(&self) {
+        self.registry.close();
+        self.inner.close();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    fn drain(&self) -> TaskOutcome<()> {
+        self.registry.drain()
+    }
+}
+
 #[cfg(feature = "objectlog")]
 type ObjectLogEngine = AsyncComposedBackend<
     SeparateReplayCommit<ObjectLogTursoCommitter>,
-    ObjectLogTaskDispatcher,
+    CoordinatorOwnedDispatcher,
     ProjectionClaimPlanner<InProcessControlPlane, ObjectLogEngineStore, TursoRelational, SeqIdGen>,
     ProjectionPushPlanner<InProcessControlPlane, ObjectLogEngineStore, TursoRelational, SeqIdGen>,
     ProjectionLifecyclePlanner<
@@ -2230,6 +2380,8 @@ pub struct DerivedObjectLogTursoBackend {
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
+    #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
+    drivers: CoordinatorDriverRegistry,
 }
 
 #[cfg(feature = "objectlog")]
@@ -2295,16 +2447,13 @@ impl DerivedObjectLogTursoBackend {
             Arc::clone(&projection),
             Arc::clone(&ids),
         );
-        let engine = AsyncComposedBackend::new_with_planners(
-            strategy,
-            ObjectLogTaskDispatcher::new(),
-            claim,
-            push,
-            1024,
-        )
-        .with_lifecycle_planner(lifecycle)
-        .with_reclaim_planner(reclaim)
-        .with_append_admission(AppendAdmissionClass::KeyedPermitLive);
+        let dispatcher = CoordinatorOwnedDispatcher::new();
+        let drivers = dispatcher.registry();
+        let engine =
+            AsyncComposedBackend::new_with_planners(strategy, dispatcher, claim, push, 1024)
+                .with_lifecycle_planner(lifecycle)
+                .with_reclaim_planner(reclaim)
+                .with_append_admission(AppendAdmissionClass::KeyedPermitLive);
 
         let backend = Self {
             engine,
@@ -2318,9 +2467,28 @@ impl DerivedObjectLogTursoBackend {
             async_apply,
             last_produce,
             produce_caught_up,
+            drivers,
         };
         backend.recover_async().await?;
         Ok(backend)
+    }
+
+    /// Register in-flight coordinator work that must complete through append/apply publication.
+    #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
+    pub(crate) fn register_driver(&self) -> Result<RegisteredDriver, DispatchError> {
+        self.drivers.register()
+    }
+
+    /// Close admission and wait registered drivers through append/apply publication.
+    pub async fn close_and_drain(&self) -> EngineResult<()> {
+        self.engine
+            .close_and_drain()
+            .await
+            .map_err(|error: TaskOutcomeError| {
+                EngineError::Storage(format!(
+                    "object-log turso coordinator drain failed: {error:?}"
+                ))
+            })
     }
 
     async fn catch_up_projection(&self, shard: &QueueKey) -> EngineResult<()> {
@@ -3163,6 +3331,119 @@ mod s3v_after_append {
             "reopen must rebuild the durable reservation authoritatively"
         );
         drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+mod s4b_lifecycle {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use fireweed_engine::{DispatchError, PushPort};
+    use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
+
+    use super::*;
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    async fn open(root: &std::path::Path) -> DerivedObjectLogTursoBackend {
+        let log_root = root.join("log");
+        let projection_path = root.join("projection.db");
+        std::fs::create_dir_all(&log_root).unwrap();
+        let log =
+            ObjectLogEngineStore::open_local(&log_root, flush_config_from_segment(256 * 1_024, 50))
+                .await
+                .unwrap();
+        let projection = open_turso_projection_async(&projection_path).await.unwrap();
+        DerivedObjectLogTursoBackend::from_log_and_projection(
+            log,
+            projection,
+            projection_path,
+            0,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_objectlog_turso_drains_registered_driver() {
+        let lib = include_str!("lib.rs");
+        assert!(
+            lib.contains("struct ObjectLogTursoLifecycle"),
+            "S4b installs ObjectLogTursoLifecycle on the object-log × Turso product"
+        );
+        let shutdown = lib
+            .split("impl ProjectionLifecycle for ObjectLogTursoLifecycle")
+            .nth(1)
+            .and_then(|rest| rest.split("fn shutdown(&mut self)").nth(1))
+            .expect("ObjectLogTursoLifecycle::shutdown");
+        let shutdown_body = shutdown.split("fn ").next().expect("shutdown body");
+        assert!(
+            shutdown_body.contains("block_on_objectlog"),
+            "sync shutdown must use the flavor-safe object-log runtime bridge"
+        );
+        assert!(
+            !shutdown_body.contains("futures::executor::block_on")
+                && !shutdown_body.contains("block_in_place"),
+            "shutdown must never nest block_on on the caller's runtime"
+        );
+        assert!(
+            shutdown_body.contains("close_and_drain"),
+            "shutdown must close admission and await the coordinator registry"
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s4b-turso-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = Arc::new(open(&root).await);
+        let driver = backend
+            .register_driver()
+            .expect("open coordinator registry accepts a driver");
+        let published = Arc::new(AtomicBool::new(false));
+        let published_flag = Arc::clone(&published);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            published_flag.store(true, Ordering::Release);
+            drop(driver);
+        });
+
+        let lifecycle = crate::ObjectLogTursoLifecycle {
+            backend: Some(Arc::clone(&backend)),
+        };
+        drop(lifecycle);
+
+        assert!(
+            published.load(Ordering::Acquire),
+            "dropping ObjectLogTursoLifecycle must wait registered drivers through publication"
+        );
+        assert!(
+            matches!(backend.register_driver(), Err(DispatchError::Closed)),
+            "close admission must reject queued/unsubmitted drivers"
+        );
+        assert!(
+            matches!(
+                backend
+                    .push(
+                        &fireweed_engine::QueueKey::new(
+                            fireweed_core::TenantId::new("t").unwrap(),
+                            fireweed_core::QueueId::new("closed").unwrap(),
+                        ),
+                        vec![PushSpec::default()],
+                        fireweed_core::UtcTimestamp::new(1, 0).unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap_err(),
+                EngineError::Storage(_)
+            ),
+            "closed product admission must reject new appends"
+        );
+        drop(backend);
         let _ = std::fs::remove_dir_all(root);
     }
 }

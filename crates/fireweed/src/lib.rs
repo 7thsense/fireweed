@@ -3386,6 +3386,47 @@ impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
     fn shutdown(&mut self) {}
 }
 
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+struct ObjectLogTursoLifecycle {
+    backend: Option<Arc<turso_compose::DerivedObjectLogTursoBackend>>,
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+impl ProjectionLifecycle for ObjectLogTursoLifecycle {
+    fn capabilities(&self) -> ProjectionLifecycleCapabilities {
+        ProjectionLifecycleCapabilities::default()
+    }
+
+    fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
+    fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
+    fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(backend) = self.backend.take() {
+            // Flavor-safe object-log runtime bridge: never nest `block_on` on the caller.
+            let _ =
+                fireweed_objectlog::block_on_objectlog(
+                    async move { backend.close_and_drain().await },
+                );
+        }
+    }
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+impl Drop for ObjectLogTursoLifecycle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[cfg(feature = "objectlog")]
 fn open_composed_object_log_engine(
     root: &std::path::Path,
@@ -6160,24 +6201,34 @@ fn open_filesystem_log_cell(
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
                 {
-                    let _ = (authority, sqlite_projection_deferred_flush_chunk, recovery);
+                    let config = composed_storage_config(
+                        ObjectLogConfig::Local { root: root.clone() },
+                        authority,
+                        ComposedProjectionConfig::Sqlite { path: path.clone() },
+                        response_barrier,
+                        async_projection,
+                        sqlite_projection_deferred_flush_chunk,
+                        segments,
+                        namespace.clone(),
+                        recovery,
+                    );
                     let log = open_composed_object_log_engine(
                         &root,
                         &namespace,
                         SegmentSettings {
-                            target_bytes: segments.target_bytes,
-                            max_latency_ms: segments.max_latency_ms,
+                            target_bytes: config.segments.target_bytes,
+                            max_latency_ms: config.segments.max_latency_ms,
                         },
                     )?;
                     let async_spec = match response_barrier {
                         ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => async_projection,
+                        ResponseBarrier::AsyncProjection => config.async_projection.clone(),
                     };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log, path, async_spec,
                     )?);
                     // Product ports are natively async (LogEngine + Turso); no process-wide BLB.
-                    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+                    Ok(finish_objectlog_turso(config, clock, backend))
                 }
                 #[cfg(not(feature = "turso"))]
                 {
@@ -6326,24 +6377,34 @@ fn open_s3_log_cell(
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
                 {
-                    let _ = (authority, recovery);
+                    let config = composed_storage_config(
+                        s3_object_log_config(provider.clone()),
+                        authority,
+                        ComposedProjectionConfig::Sqlite { path: path.clone() },
+                        response_barrier,
+                        async_projection,
+                        sqlite_projection_deferred_flush_chunk,
+                        segments,
+                        namespace.clone(),
+                        recovery,
+                    );
                     let log = open_s3_composed_object_log_engine(
                         &provider,
                         &namespace,
                         SegmentSettings {
-                            target_bytes: segments.target_bytes,
-                            max_latency_ms: segments.max_latency_ms,
+                            target_bytes: config.segments.target_bytes,
+                            max_latency_ms: config.segments.max_latency_ms,
                         },
                     )?;
                     // Forward the caller's AsyncProjectionSpec; never re-default at the S3 boundary.
                     let async_spec = match response_barrier {
                         ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => async_projection,
+                        ResponseBarrier::AsyncProjection => config.async_projection.clone(),
                     };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log, path, async_spec,
                     )?);
-                    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+                    Ok(finish_objectlog_turso(config, clock, backend))
                 }
                 #[cfg(not(feature = "turso"))]
                 {
@@ -6445,6 +6506,23 @@ fn composed_storage_config(
             max_tail_commands: recovery.max_tail_commands,
         },
     }
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+fn finish_objectlog_turso(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+    backend: Arc<turso_compose::DerivedObjectLogTursoBackend>,
+) -> Fireweed {
+    let lifecycle = ProjectionLifecycleHandle {
+        inner: Arc::new(ProjectionLifecycleHandleInner {
+            _config: config,
+            lifecycle: Box::new(ObjectLogTursoLifecycle {
+                backend: Some(Arc::clone(&backend)),
+            }),
+        }),
+    };
+    Fireweed::from_runtime_with_projection(RuntimeCore::new(backend, clock), lifecycle)
 }
 
 #[cfg(feature = "objectlog")]
