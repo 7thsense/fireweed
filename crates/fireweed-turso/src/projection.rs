@@ -29,12 +29,17 @@ use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
 
 use crate::{
-    TursoApplyPhaseObservation, TursoRelational,
+    COMMITTED_OUTCOME_POOL_RESOURCE, TursoApplyPhaseObservation, TursoRelational,
     local::{ConsumerLeaseIndex, TursoBatchUpdateStatementShape},
+    map_pooled_reader_error,
 };
 
 fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
+}
+
+fn outcome_read_error(error: turso::Error) -> EngineError {
+    map_pooled_reader_error(error, COMMITTED_OUTCOME_POOL_RESOURCE)
 }
 
 fn text(value: &Value) -> EngineResult<String> {
@@ -104,6 +109,45 @@ async fn one_row(
         values.push(row.get_value(index).map_err(storage)?);
     }
     Ok(Some(values))
+}
+
+async fn one_outcome_row(
+    connection: &Connection,
+    query: &str,
+    params: Vec<Value>,
+) -> EngineResult<Option<Vec<Value>>> {
+    let mut rows = connection
+        .query(query, params)
+        .await
+        .map_err(outcome_read_error)?;
+    let Some(row) = rows.next().await.map_err(outcome_read_error)? else {
+        return Ok(None);
+    };
+    let mut values = Vec::with_capacity(row.column_count());
+    for index in 0..row.column_count() {
+        values.push(row.get_value(index).map_err(outcome_read_error)?);
+    }
+    Ok(Some(values))
+}
+
+async fn query_value_rows(
+    connection: &Connection,
+    query: impl AsRef<str>,
+    params: Vec<Value>,
+) -> EngineResult<Vec<Vec<Value>>> {
+    let mut rows = connection
+        .query(query, params)
+        .await
+        .map_err(outcome_read_error)?;
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next().await.map_err(outcome_read_error)? {
+        let mut values = Vec::with_capacity(row.column_count());
+        for index in 0..row.column_count() {
+            values.push(row.get_value(index).map_err(outcome_read_error)?);
+        }
+        collected.push(values);
+    }
+    Ok(collected)
 }
 
 async fn ensure_shard_owned(
@@ -1636,6 +1680,269 @@ async fn apply_owned(
     Ok(())
 }
 
+/// Pre-position observation helper over a borrowed OutcomeReadAdmission connection
+/// or Deferred snapshot. Serving still calls this with the shared reader.
+pub(crate) async fn server_peek_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    limit: usize,
+) -> EngineResult<Vec<ItemView>> {
+    let limit = i64::try_from(limit).map_err(storage)?;
+    let rows = query_value_rows(
+        connection,
+        "SELECT item_id,client_item_key,priority,item_version FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+             ORDER BY priority_sort,created_seq LIMIT ?3",
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+            limit.into(),
+        ],
+    )
+    .await?;
+    rows.into_iter()
+        .map(|values| {
+            Ok(ItemView {
+                item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
+                client_item_key: ClientItemKey::new(text(&values[1])?).map_err(storage)?,
+                priority: parse_priority(optional_text(&values[2])?)?,
+                item_version: nonnegative_u64(integer(&values[3])?, "item_version")?,
+            })
+        })
+        .collect()
+}
+
+pub(crate) async fn server_pending_rows_on(
+    connection: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<Vec<(ItemId, Option<i64>, i64)>> {
+    let rows = query_value_rows(
+        connection,
+        "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND superseded=0 \
+             ORDER BY item_id",
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ],
+    )
+    .await?;
+    rows.into_iter()
+        .map(|values| {
+            Ok((
+                ItemId::new(text(&values[0])?).map_err(storage)?,
+                optional_integer(&values[1])?,
+                integer(&values[2])?,
+            ))
+        })
+        .collect()
+}
+
+pub(crate) async fn server_pending_by_ids_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    ids: &[ItemId],
+) -> EngineResult<HashMap<ItemId, (i64, u32)>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut by_id = HashMap::<ItemId, (i64, u32)>::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let placeholders = (0..chunk.len())
+            .map(|index| format!("?{}", index + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
+                 AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
+        );
+        let mut params = vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ];
+        params.extend(chunk.iter().map(|id| id.to_string().into()));
+        for values in query_value_rows(connection, sql, params).await? {
+            let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+            by_id.insert(
+                id,
+                (
+                    integer(&values[1])?,
+                    nonnegative_u32(integer(&values[2])?, "retry_count")?,
+                ),
+            );
+        }
+    }
+    Ok(by_id)
+}
+
+pub(crate) async fn server_update_snapshot_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    keys: &[ClientItemKey],
+) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut by_key = HashMap::with_capacity(keys.len());
+    for chunk in keys.chunks(VALIDATION_ITEM_CHUNK) {
+        let mut params = vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ];
+        params.extend(
+            chunk
+                .iter()
+                .map(|key| Value::Text(key.as_str().to_string())),
+        );
+        let placeholders = (0..chunk.len())
+            .map(|offset| format!("?{}", offset + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let rows = query_value_rows(
+            connection,
+            format!(
+                "SELECT item_id,client_item_key,item_version,lifecycle_state,fenced \
+                         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+                         AND client_item_key IN ({placeholders}) \
+                         AND lifecycle_state IN ('Pending','Leased') AND superseded=0"
+            ),
+            params,
+        )
+        .await?;
+        for values in rows {
+            let key = ClientItemKey::new(text(&values[1])?).map_err(storage)?;
+            by_key.insert(
+                key.clone(),
+                BatchUpdateSnapshotItem {
+                    item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
+                    client_item_key: key,
+                    item_version: nonnegative_u64(integer(&values[2])?, "item_version")?,
+                    state: parse_state(&text(&values[3])?).map_err(storage)?,
+                    fenced: integer(&values[4])? != 0,
+                    superseded: false,
+                },
+            );
+        }
+    }
+    Ok(keys.iter().filter_map(|key| by_key.remove(key)).collect())
+}
+
+pub(crate) async fn server_live_items_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    keys: &[ClientItemKey],
+) -> EngineResult<Vec<Option<LiveItemView>>> {
+    let mut result = Vec::with_capacity(keys.len());
+    for key in keys {
+        let rows = query_value_rows(
+            connection,
+            "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,group_key,not_before,retry_count,payload,fields \
+                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
+                 AND lifecycle_state IN ('Pending','Leased') AND superseded=0 LIMIT 1",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                key.as_str().to_string().into(),
+            ],
+        )
+        .await?;
+        let Some(values) = rows.into_iter().next() else {
+            result.push(None);
+            continue;
+        };
+        result.push(Some(LiveItemView {
+            item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
+            client_item_key: ClientItemKey::new(text(&values[1])?).map_err(storage)?,
+            item_version: nonnegative_u64(integer(&values[2])?, "item_version")?,
+            lifecycle_state: parse_state(&text(&values[3])?).map_err(storage)?,
+            priority: parse_priority(optional_text(&values[4])?)?,
+            group_key: optional_text(&values[5])?
+                .map(GroupKey::new)
+                .transpose()
+                .map_err(storage)?,
+            not_before: optional_integer(&values[6])?.map(nanos_ts),
+            attempt_count: nonnegative_u32(integer(&values[7])?, "retry_count")?,
+            payload: optional_blob(&values[8])?.map(Bytes::from),
+            fields: fields_from_json(text(&values[9])?)?,
+        }));
+    }
+    Ok(result)
+}
+
+pub(crate) async fn server_metrics_on(
+    connection: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<QueueMetrics> {
+    let rows = query_value_rows(
+        connection,
+        "SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND superseded=0 GROUP BY lifecycle_state",
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ],
+    )
+    .await?;
+    let mut metrics = QueueMetrics::default();
+    for values in rows {
+        let count = nonnegative_u64(integer(&values[1])?, "lifecycle count")?;
+        match text(&values[0])?.as_str() {
+            "Pending" => metrics.pending = count,
+            "Leased" => metrics.leased = count,
+            "Complete" => metrics.complete = count,
+            "Failed" => metrics.failed = count,
+            _ => {}
+        }
+    }
+    metrics.resident_terminal_count = metrics.complete.saturating_add(metrics.failed);
+    Ok(metrics)
+}
+
+pub(crate) async fn push_idempotency_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &PushFingerprint,
+    now: UtcTimestamp,
+) -> EngineResult<IdempotencyDecision<Vec<ItemId>>> {
+    let row = one_outcome_row(
+        connection,
+        "SELECT request_fingerprint,response_payload,expires_at FROM fireweed_request_idempotency \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND operation='push' AND request_id=?3",
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+            request_id.as_str().to_string().into(),
+        ],
+    )
+    .await?;
+    let Some(row) = row else {
+        return Ok(IdempotencyDecision::Proceed);
+    };
+    if integer(&row[2])? <= ts_nanos(now) {
+        return Ok(IdempotencyDecision::Expired);
+    }
+    let stored = blob(&row[0])?;
+    if stored != fingerprint.canonical_sha256
+        && stored != fingerprint.legacy_body_hash.0.to_be_bytes()
+    {
+        return Ok(IdempotencyDecision::Conflict);
+    }
+    let raw: Vec<String> = serde_json::from_str(&text(&row[1])?).map_err(storage)?;
+    let ids = raw
+        .into_iter()
+        .map(|id| ItemId::new(id).map_err(storage))
+        .collect::<EngineResult<Vec<_>>>()?;
+    Ok(IdempotencyDecision::Replay(ids))
+}
+
+/// Post-publication response continuation. Retained results only; no pool borrow.
+#[allow(dead_code)]
+pub fn finish_retained_claimed(items: Vec<ClaimedItem>) -> EngineResult<Vec<ClaimedItem>> {
+    Ok(items)
+}
+
 impl TursoRelational {
     /// Atomically create the queue or return its exact durable definition.
     pub async fn create_or_read_queue(
@@ -1723,60 +2030,29 @@ impl TursoRelational {
 
     /// RESP/server read surface over the same native-async projection used by commit apply.
     pub async fn server_peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
-        let limit = i64::try_from(limit).map_err(storage)?;
-        let rows = self
-            .query(
-                "SELECT item_id,client_item_key,priority,item_version FROM fireweed_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-             ORDER BY priority_sort,created_seq LIMIT ?3",
-                vec![
-                    shard.tenant_id.as_str().to_string().into(),
-                    shard.queue_id.as_str().to_string().into(),
-                    limit.into(),
-                ],
-            )
-            .await
-            .map_err(storage)?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(ItemView {
-                    item_id: ItemId::new(text(&row.values[0])?).map_err(storage)?,
-                    client_item_key: ClientItemKey::new(text(&row.values[1])?).map_err(storage)?,
-                    priority: parse_priority(optional_text(&row.values[2])?)?,
-                    item_version: nonnegative_u64(integer(&row.values[3])?, "item_version")?,
-                })
-            })
-            .collect()
+        let connection = self.reader.lock().await;
+        server_peek_on(&connection, shard, limit).await
     }
 
     pub async fn server_pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
-        let rows = self
-            .query(
-                "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND superseded=0 \
-             ORDER BY item_id",
-                vec![
-                    shard.tenant_id.as_str().to_string().into(),
-                    shard.queue_id.as_str().to_string().into(),
-                ],
-            )
-            .await
-            .map_err(storage)?;
+        let rows = {
+            let connection = self.reader.lock().await;
+            server_pending_rows_on(&connection, shard).await?
+        };
         let tokens = self.live_tokens.lock().await;
         let mut pending = Vec::new();
-        for row in rows {
-            let item_id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+        for (item_id, expires, retry_count) in rows {
             let Some(lease_token) = tokens.get(&(shard.clone(), item_id)).cloned() else {
                 continue;
             };
-            let Some(expires) = optional_integer(&row.values[1])? else {
+            let Some(expires) = expires else {
                 continue;
             };
             pending.push(LeaseView {
                 item_id,
                 lease_token,
                 lease_expires_at: nanos_ts(expires),
-                attempt_count: nonnegative_u32(integer(&row.values[2])?, "retry_count")?,
+                attempt_count: nonnegative_u32(retry_count, "retry_count")?,
             });
         }
         Ok(pending)
@@ -1818,33 +2094,10 @@ impl TursoRelational {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut by_id = HashMap::<ItemId, (i64, u32)>::with_capacity(ids.len());
-        for chunk in ids.chunks(500) {
-            let placeholders = (0..chunk.len())
-                .map(|index| format!("?{}", index + 3))
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
-                 AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
-            );
-            let mut params = vec![
-                shard.tenant_id.as_str().to_string().into(),
-                shard.queue_id.as_str().to_string().into(),
-            ];
-            params.extend(chunk.iter().map(|id| id.to_string().into()));
-            for row in self.query(sql, params).await.map_err(storage)? {
-                let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
-                by_id.insert(
-                    id,
-                    (
-                        integer(&row.values[1])?,
-                        nonnegative_u32(integer(&row.values[2])?, "retry_count")?,
-                    ),
-                );
-            }
-        }
+        let by_id = {
+            let connection = self.reader.lock().await;
+            server_pending_by_ids_on(&connection, shard, ids).await?
+        };
         let tokens = self.live_tokens.lock().await;
         Ok(ids
             .iter()
@@ -1927,53 +2180,8 @@ impl TursoRelational {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut by_key = HashMap::with_capacity(keys.len());
-        for chunk in keys.chunks(VALIDATION_ITEM_CHUNK) {
-            let mut params = vec![
-                shard.tenant_id.as_str().to_string().into(),
-                shard.queue_id.as_str().to_string().into(),
-            ];
-            params.extend(
-                chunk
-                    .iter()
-                    .map(|key| Value::Text(key.as_str().to_string())),
-            );
-            let placeholders = (0..chunk.len())
-                .map(|offset| format!("?{}", offset + 3))
-                .collect::<Vec<_>>()
-                .join(",");
-            let rows = self
-                .query(
-                    format!(
-                        "SELECT item_id,client_item_key,item_version,lifecycle_state,fenced \
-                         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
-                         AND client_item_key IN ({placeholders}) \
-                         AND lifecycle_state IN ('Pending','Leased') AND superseded=0"
-                    ),
-                    params,
-                )
-                .await
-                .map_err(storage)?;
-            for row in rows {
-                let values = &row.values;
-                let key = ClientItemKey::new(text(&values[1])?).map_err(storage)?;
-                by_key.insert(
-                    key.clone(),
-                    BatchUpdateSnapshotItem {
-                        item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
-                        client_item_key: key,
-                        item_version: nonnegative_u64(integer(&values[2])?, "item_version")?,
-                        state: parse_state(&text(&values[3])?).map_err(storage)?,
-                        fenced: integer(&values[4])? != 0,
-                        superseded: false,
-                    },
-                );
-            }
-        }
-        Ok(keys.iter().filter_map(|key| by_key.remove(key)).collect())
+        let connection = self.reader.lock().await;
+        server_update_snapshot_on(&connection, shard, keys).await
     }
 
     pub async fn server_live_items(
@@ -1981,57 +2189,13 @@ impl TursoRelational {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
-        let mut result = Vec::with_capacity(keys.len());
-        for key in keys {
-            let rows = self.query(
-                "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,group_key,not_before,retry_count,payload,fields \
-                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
-                 AND lifecycle_state IN ('Pending','Leased') AND superseded=0 LIMIT 1",
-                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), key.as_str().to_string().into()],
-            ).await.map_err(storage)?;
-            let Some(row) = rows.first() else {
-                result.push(None);
-                continue;
-            };
-            let values = &row.values;
-            result.push(Some(LiveItemView {
-                item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
-                client_item_key: ClientItemKey::new(text(&values[1])?).map_err(storage)?,
-                item_version: nonnegative_u64(integer(&values[2])?, "item_version")?,
-                lifecycle_state: parse_state(&text(&values[3])?).map_err(storage)?,
-                priority: parse_priority(optional_text(&values[4])?)?,
-                group_key: optional_text(&values[5])?
-                    .map(GroupKey::new)
-                    .transpose()
-                    .map_err(storage)?,
-                not_before: optional_integer(&values[6])?.map(nanos_ts),
-                attempt_count: nonnegative_u32(integer(&values[7])?, "retry_count")?,
-                payload: optional_blob(&values[8])?.map(Bytes::from),
-                fields: fields_from_json(text(&values[9])?)?,
-            }));
-        }
-        Ok(result)
+        let connection = self.reader.lock().await;
+        server_live_items_on(&connection, shard, keys).await
     }
 
     pub async fn server_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
-        let rows = self.query(
-            "SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND superseded=0 GROUP BY lifecycle_state",
-            vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into()],
-        ).await.map_err(storage)?;
-        let mut metrics = QueueMetrics::default();
-        for row in rows {
-            let count = nonnegative_u64(integer(&row.values[1])?, "lifecycle count")?;
-            match text(&row.values[0])?.as_str() {
-                "Pending" => metrics.pending = count,
-                "Leased" => metrics.leased = count,
-                "Complete" => metrics.complete = count,
-                "Failed" => metrics.failed = count,
-                _ => {}
-            }
-        }
-        metrics.resident_terminal_count = metrics.complete.saturating_add(metrics.failed);
-        Ok(metrics)
+        let connection = self.reader.lock().await;
+        server_metrics_on(&connection, shard).await
     }
 
     pub async fn server_terminal_emission_metrics(
@@ -2230,28 +2394,7 @@ impl AsyncProjectionStore for TursoRelational {
         let reader = self.reader.clone();
         async move {
             let connection = reader.lock().await;
-            let row = one_row(&connection,
-                "SELECT request_fingerprint,response_payload,expires_at FROM fireweed_request_idempotency \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND operation='push' AND request_id=?3",
-                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), request_id.as_str().to_string().into()]).await?;
-            let Some(row) = row else {
-                return Ok(IdempotencyDecision::Proceed);
-            };
-            if integer(&row[2])? <= ts_nanos(now) {
-                return Ok(IdempotencyDecision::Expired);
-            }
-            let stored = blob(&row[0])?;
-            if stored != fingerprint.canonical_sha256
-                && stored != fingerprint.legacy_body_hash.0.to_be_bytes()
-            {
-                return Ok(IdempotencyDecision::Conflict);
-            }
-            let raw: Vec<String> = serde_json::from_str(&text(&row[1])?).map_err(storage)?;
-            let ids = raw
-                .into_iter()
-                .map(|id| ItemId::new(id).map_err(storage))
-                .collect::<EngineResult<Vec<_>>>()?;
-            Ok(IdempotencyDecision::Replay(ids))
+            push_idempotency_on(&connection, &shard, &request_id, &fingerprint, now).await
         }
     }
 
@@ -3344,6 +3487,111 @@ mod push_batch_lowering_tests {
             let awaited_sql_statements = usize::from(cardinality > 0);
             assert_eq!(awaited_sql_statements, 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod committed_pool_helper_tests {
+    use fireweed_engine::ClaimedItem;
+
+    use super::finish_retained_claimed;
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, tail) = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing source-audit start marker: {start}"));
+        let (body, _) = tail
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing source-audit end marker: {end}"));
+        body
+    }
+
+    fn asserts_no_pool_borrow(source: &str, label: &str) {
+        for needle in [
+            "borrow_driver",
+            "borrow_outcome",
+            "try_borrow_driver",
+            "try_borrow_outcome",
+            "committed_pools",
+            "CommittedReaderGuard",
+            "OutcomeReadAdmission",
+        ] {
+            assert!(
+                !source.contains(needle),
+                "{label} must not borrow a committed pool ({needle})"
+            );
+        }
+    }
+
+    #[test]
+    fn post_publication_response_never_borrows_committed_pool() {
+        let projection = include_str!("projection.rs");
+        let local = include_str!("local.rs");
+        let compose = include_str!("../../fireweed/src/turso_compose.rs");
+
+        let retained = between(
+            projection,
+            "pub fn finish_retained_claimed(",
+            "impl TursoRelational {",
+        );
+        assert!(
+            retained.contains("Ok(items)"),
+            "post-publication continuation must accept retained results"
+        );
+        asserts_no_pool_borrow(retained, "finish_retained_claimed");
+        assert!(
+            !retained.contains("Connection"),
+            "finish_retained_claimed must have no connection parameter"
+        );
+
+        let render = between(projection, "fn render_claimed(", "fn item_state(");
+        asserts_no_pool_borrow(render, "render_claimed");
+        assert!(
+            render.contains("self.query("),
+            "post-append render_claimed must keep the serving reader, not a pool"
+        );
+
+        let apply_live = between(projection, "fn apply_live(", "fn apply_recovery(");
+        asserts_no_pool_borrow(apply_live, "apply_live");
+
+        asserts_no_pool_borrow(compose, "turso_compose post-publication");
+        let production_local = local
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production local.rs");
+        assert!(
+            !production_local.contains("PRAGMA wal_checkpoint"),
+            "committed-reader construction must not invoke wal_checkpoint"
+        );
+
+        let items = finish_retained_claimed(Vec::<ClaimedItem>::new()).expect("retained");
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn pre_position_outcome_helpers_accept_borrowed_connection() {
+        let projection = include_str!("projection.rs");
+        for helper in [
+            "pub(crate) async fn server_peek_on(",
+            "pub(crate) async fn server_pending_rows_on(",
+            "pub(crate) async fn server_pending_by_ids_on(",
+            "pub(crate) async fn server_update_snapshot_on(",
+            "pub(crate) async fn server_live_items_on(",
+            "pub(crate) async fn server_metrics_on(",
+            "pub(crate) async fn push_idempotency_on(",
+        ] {
+            assert!(
+                projection.contains(helper),
+                "missing borrowed-connection helper {helper}"
+            );
+            let (_, tail) = projection.split_once(helper).expect(helper);
+            let signature = tail.split('{').next().expect("helper signature");
+            assert!(
+                signature.contains("connection: &Connection"),
+                "{helper} must accept a borrowed connection/Deferred snapshot"
+            );
+        }
+        assert!(projection.contains("let connection = self.reader.lock().await;"));
     }
 }
 
