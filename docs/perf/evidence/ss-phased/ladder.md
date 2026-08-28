@@ -163,3 +163,23 @@ P1 p50 35 ms / 100 items vs 39 ms at N=1k. Objects at N=10k: 484 (was 648).
 P4 is the remaining pole (claim still selects on Turso after catch-up of apply
 debt). T1 (8k/s P1 at N=100k) is a plausible later measurement; T2 is not until
 claim leaves the Turso writer.
+
+### S3s mutation-generation and pool-admission calibration
+
+S3s records structural admission bounds without switching serving or activating
+generations. Independent `ss_mixed_overlap` capacity subtests establish the
+exact cliffs (request 17, key 17, Claim queue 9, shared queue 25, outcome
+reader 17) against the reconstructed S3c composition. Production defaults stay
+on the reviewed caps: turn/sequencer 255 s, Claim/shared slot 95 s,
+OutcomeReadAdmission 10 s, coverage/outcome work 5 s, all floored at 500 ms.
+The 75 s fence-acquire term is carried, not measured, while dispositions stay
+inert. No new rate row.
+
+S3r kept the serving reader at 128 MiB and recorded a predicted 352 MiB
+interim ceiling (writer 128 + serving 128 + sixteen 4 MiB drivers + eight
+4 MiB outcomes). S3s keeps the 16/8 connection counts and does not repartition
+the 224 MiB post-S3c envelope; S3c still sees that predicted-regression flag.
+
+N=100k mixed non-regression and the full closed-cohort publication budgets
+(2,021.075 s / 17,246.775 s) remain comments on
+`shadow_mutation_generation_calibration`.
