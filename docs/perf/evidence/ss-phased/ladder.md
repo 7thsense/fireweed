@@ -87,12 +87,15 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | 1787274546 | lease group-commit | 10000 | **diagnostic/fidelity-reduced**: 8 Class S waiters one IMMEDIATE; Claim omitted fields/metadata/entity/satisfied gates | **31780** | **34898** | **49912** | **1290** | 119 | 139.9 | 14667 | 214 |
 | 1787301436 | B-1 worktree | 10000 | fidelity-restored diagnostic; anomalous P1, not an S0 baseline | 420 | 15559 | 35950 | 1240 | 142 | 133.0 | 13945 | 247.1 |
 | 1787310542 | b64d68fc | 10000 | **S0 v4 settled baseline**; fidelity-restored; same SHA as mixed control | **12628** | **284** | **317** | **1057** | 108.6 | 146.7 | 15380 | 215.0 |
+| 1787954751 | a7b04a50 | 10000 | **S8q post-S8c** log-first Claim + packed Complete; schema v4; inflight=8 | 142 | 658 | 555 | 168 | 236.3 | 131.4 | 13779 | 324.1 |
 
 ### S0 settlement-aware same-SHA controls
 
 S3a landed: metadata-permit→produce-lock is the terminal object-log produce suffix, with permit-held high-water and append/epoch-acquire/emission-cursor wait counters. No new rate row.
 
 Post-S3a/S3r/S7/S3p N=10k `filesystem--turso` inflight=8 on `sindri` (`1787891324`, SHA after those slices plus Class-S BeforePosition abort): settled P1 1122/s, P2 14512/s, P3 9839/s, P4 664/s. T1/T2 remain unmet. P4 is retrying `object-log-append-pre-position` Backpressure.
+
+Post-S8c N=10k `filesystem--turso` inflight=8 on `sindri` (`1787954751`, SHA `a7b04a50` after SQL-first serving removal; log-first Claim + packed Complete): settled P1 142/s, P2 658/s, P3 555/s, P4 168/s; process wall 236.3 s; residual `pending=0, leased=0, complete=10000`. T1/T2 unmet / not measured at N=100k. T3 holds at N=10k. M1/M2/M3 not scored (N=100k not run); N=10k RSS delta 131.4 MiB, HWM 138.2 MiB, Turso file 324.1 MiB. P1 p99 10.23 s and Claim p50 4.22 s dominate the measured lifecycle.
 
 The authoritative pre-activation controls are [phased v4](1787310542/summary.json)
 and [mixed v1](1787310419/mixed-summary.json), both from

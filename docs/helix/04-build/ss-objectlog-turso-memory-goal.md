@@ -1,7 +1,8 @@
 # Goal: object-log × Turso capacity with a cache-bound working set
 
-**Status**: active iteration (2026-08-21). S0 now measures the settled
-boundary; T/M gates remain unscored at N=100k.
+**Status**: active iteration (2026-08-28). Post-S8c N=10k qualification is
+recorded; T1/T2 remain unmet / not measured at N=100k. M1/M2/M3 are not
+scored at N=100k.
 
 The 2026-08-17 planner-map artifacts (`1786977588` and `1786977711`) remain
 historical diagnostics. They are not the current design or release evidence:
@@ -46,6 +47,22 @@ is recorded in `docs/perf/evidence/ss-phased/1787310542/summary.json` and
 | N | P1 settled | P2 settled | P3 settled | P4 settled | RSS delta |
 |---|---:|---:|---:|---:|---:|
 | 10,000 | 12,628/s | 284/s | 317/s | 1,057/s | 146.7 MiB |
+
+Post-S8c measured row (2026-08-28) at source
+`a7b04a50deffd3c2fc5092f967e899539d5fd6a9` is recorded in
+`docs/perf/evidence/ss-phased/1787954751/summary.json`. This is the log-first
+Claim + packed Complete serving path after SQL-first removal. N=100k was not
+run.
+
+| date | utc | sha | N | P1 settled | P2 settled | P3 settled | P4 settled | RSS delta | HWM after |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 2026-08-28 | 1787954751 | a7b04a50 | 10,000 | 142/s | 658/s | 555/s | 168/s | 131.4 MiB | 138.2 MiB |
+
+Gate score on this SHA: T1 unmet / not measured at N=100k (N=10k P1 settled
+142/s vs ≥8,000 at N=100k). T2 unmet / not measured at N=100k (N=10k P4
+settled 168/s vs ≥4,000 at N=100k). T3 holds at N=10k (`pending=0`,
+`leased=0`, `complete=10000`); not measured at N=100k. M1/M2/M3 recorded from
+the N=10k summary only and are **not** claimed as passes.
 
 P2/P3 append acknowledgements were 29,163/s and 41,633/s, but settlement lag
 was 34.906 s and 31.335 s. The result isolates ordered background Turso apply,
