@@ -160,7 +160,8 @@ async fn ss_phased_capacity_smoke() {
                 .collect();
             async move {
                 let c0 = Instant::now();
-                let ids = fw.push_batch(&queue, items).await.expect("P1 push");
+                let ids =
+                    retry_backpressure("P1 push", || fw.push_batch(&queue, items.clone())).await;
                 (c0.elapsed(), ids.len(), end - chunk)
             }
         });
@@ -211,7 +212,8 @@ async fn ss_phased_capacity_smoke() {
                     updates,
                 };
                 let c0 = Instant::now();
-                let resp = fw.batch_update(&queue, req).await.expect("P2 update");
+                let resp =
+                    retry_backpressure("P2 update", || fw.batch_update(&queue, req.clone())).await;
                 let ok = resp
                     .results
                     .iter()
@@ -283,7 +285,8 @@ async fn ss_phased_capacity_smoke() {
                     updates,
                 };
                 let c0 = Instant::now();
-                let resp = fw.batch_update(&queue, req).await.expect("P3 update");
+                let resp =
+                    retry_backpressure("P3 update", || fw.batch_update(&queue, req.clone())).await;
                 let ok = resp
                     .results
                     .iter()
@@ -339,10 +342,8 @@ async fn ss_phased_capacity_smoke() {
             let queue = queue.clone();
             async move {
                 let c0 = Instant::now();
-                let items = fw
-                    .claim(&queue, claim_batch, 30_000)
-                    .await
-                    .expect("P4 claim");
+                let items =
+                    retry_backpressure("P4 claim", || fw.claim(&queue, claim_batch, 30_000)).await;
                 (c0.elapsed(), items)
             }
         });
@@ -358,7 +359,34 @@ async fn ss_phased_capacity_smoke() {
             .filter(|items| !items.is_empty())
             .collect();
         if batches.is_empty() {
-            break;
+            if completed >= n {
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(180),
+                "P4 did not drain remaining items: completed={completed} n={n}"
+            );
+            // One empty wave is not done: apply debt can still catch up.
+            tokio::time::sleep(RETRY_CADENCE).await;
+            prev = {
+                let futs = (0..claim_wave).map(|_| {
+                    let fw = Arc::clone(&fw);
+                    let queue = queue.clone();
+                    async move {
+                        let c0 = Instant::now();
+                        let items = retry_backpressure("P4 claim", || {
+                            fw.claim(&queue, claim_batch, 30_000)
+                        })
+                        .await;
+                        (c0.elapsed(), items)
+                    }
+                });
+                futures::future::join_all(futs).await
+            };
+            for (elapsed, _) in &prev {
+                p4_claim.record(*elapsed);
+            }
+            continue;
         }
         completed += batches.iter().map(|batch| batch.len()).sum::<usize>();
         let finishing = completed >= n;
@@ -374,7 +402,8 @@ async fn ss_phased_capacity_smoke() {
                     async move {
                         let ids: Vec<_> = batch.iter().map(|item| item.item_id).collect();
                         let c1 = Instant::now();
-                        fw.complete(&queue, ids).await.expect("P4 complete");
+                        retry_backpressure("P4 complete", || fw.complete(&queue, ids.clone()))
+                            .await;
                         c1.elapsed()
                     }
                 });
@@ -389,10 +418,10 @@ async fn ss_phased_capacity_smoke() {
                     let queue = queue_claim.clone();
                     async move {
                         let c0 = Instant::now();
-                        let items = fw
-                            .claim(&queue, claim_batch, 30_000)
-                            .await
-                            .expect("P4 claim");
+                        let items = retry_backpressure("P4 claim", || {
+                            fw.claim(&queue, claim_batch, 30_000)
+                        })
+                        .await;
                         (c0.elapsed(), items)
                     }
                 });

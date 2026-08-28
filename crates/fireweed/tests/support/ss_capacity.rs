@@ -13,6 +13,31 @@ use serde_json::{Value, json};
 
 pub const STUB_BYTES: usize = 512;
 pub const PROFILE_BYTES: usize = 1024;
+pub const RETRY_CADENCE: Duration = Duration::from_millis(25);
+
+/// Retry retryable append/admission Backpressure. S3p maps pre-position pack
+/// expiry to `object-log-append-pre-position`; evidence clients must retry.
+pub async fn retry_backpressure<T, F, Fut>(label: &str, mut make: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = EngineResult<T>>,
+{
+    let mut retries = 0u32;
+    loop {
+        match make().await {
+            Ok(value) => return value,
+            Err(EngineError::Backpressure { .. }) => {
+                retries += 1;
+                assert!(
+                    retries < 100_000,
+                    "{label} backpressure did not converge after {retries} retries"
+                );
+                tokio::time::sleep(RETRY_CADENCE).await;
+            }
+            Err(error) => panic!("{label}: {error}"),
+        }
+    }
+}
 
 pub fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)

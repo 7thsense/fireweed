@@ -2262,6 +2262,17 @@ impl DerivedObjectLogTursoBackend {
             )
             .await;
         if let Err(error) = committed {
+            let _ = self
+                .projection
+                .abort_class_s_claim(
+                    request.shard.tenant_id.as_str(),
+                    request.shard.queue_id.as_str(),
+                    &leased.outbox_id,
+                    &item_ids,
+                    &request.lease_token,
+                    now_nanos,
+                )
+                .await;
             return Err(error);
         }
         self.projection

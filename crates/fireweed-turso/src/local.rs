@@ -12,8 +12,9 @@ use fireweed_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, QueueId, Tenant
 use fireweed_engine::{Claimed, ClaimedItem, EngineError, EngineResult, QueueKey};
 use fireweed_relational::{
     ClaimOutboxRow, ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES,
-    RELATIONAL_SCHEMA, class_s_claim, delete_claim_outbox, entity_from_json, fields_from_json,
-    metadata_from_json, nanos_ts, parse_priority, select_claim_outbox,
+    RELATIONAL_SCHEMA, RelValue, class_s_claim, delete_claim_outbox, entity_from_json,
+    fields_from_json, lease_hash, metadata_from_json, nanos_ts, parse_priority, rel_exec,
+    select_claim_outbox,
 };
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -842,6 +843,81 @@ impl TursoRelational {
             cohort_id: None,
         })
         .await
+    }
+
+    /// Undo a Class-S SQL lease when the following object-log append is cancelled
+    /// before a position is allocated. BeforePosition must have no durable effect.
+    pub async fn abort_class_s_claim(
+        &self,
+        tenant_id: &str,
+        queue_id: &str,
+        outbox_id: &str,
+        item_ids: &[ItemId],
+        lease_token: &LeaseToken,
+        now_nanos: i64,
+    ) -> EngineResult<()> {
+        let mut writer = self.writer.lock().await;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| EngineError::Storage(e.to_string()))?;
+        let rel = TursoRel(&tx);
+        let result = (|| {
+            delete_claim_outbox(&rel, tenant_id, queue_id, outbox_id)?;
+            if item_ids.is_empty() {
+                return Ok(());
+            }
+            let placeholders = vec!["?"; item_ids.len()].join(",");
+            let mut params = vec![
+                RelValue::Integer(now_nanos),
+                RelValue::Text(tenant_id.to_string()),
+                RelValue::Text(queue_id.to_string()),
+                RelValue::Blob(lease_hash(lease_token)),
+            ];
+            params.extend(
+                item_ids
+                    .iter()
+                    .map(|id| RelValue::Text(id.to_string())),
+            );
+            rel_exec(
+                &rel,
+                &format!(
+                    "UPDATE fireweed_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
+                     lease_expires_at=NULL, worker_id=NULL, updated_at=? \
+                     WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' \
+                     AND lease_token_hash=? AND superseded=0 AND item_id IN ({placeholders})"
+                ),
+                params,
+            )?;
+            let mut bearer_params = vec![
+                RelValue::Text(tenant_id.to_string()),
+                RelValue::Text(queue_id.to_string()),
+            ];
+            bearer_params.extend(
+                item_ids
+                    .iter()
+                    .map(|id| RelValue::Text(id.to_string())),
+            );
+            rel_exec(
+                &rel,
+                &format!(
+                    "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? \
+                     AND item_id IN ({placeholders})"
+                ),
+                bearer_params,
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => tx
+                .commit()
+                .await
+                .map_err(|e| EngineError::Storage(e.to_string())),
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_claim_outbox_row(

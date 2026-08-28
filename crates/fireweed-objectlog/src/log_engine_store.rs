@@ -1437,11 +1437,9 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .counters
             .bytes
             .fetch_add(byte_n, Ordering::Relaxed);
-        let pre_deadline = waiters
-            .iter()
-            .map(|w| w.joined_at)
-            .min()
-            .unwrap_or_else(Instant::now)
+        // Linger already elapsed. The pre-position budget covers this group's
+        // lock+encode only, not time spent waiting behind other sealed groups.
+        let pre_deadline = Instant::now()
             + Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
         {
             let mut state = self.packer.state.lock().expect("packer");
