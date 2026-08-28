@@ -1231,6 +1231,11 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         self.lock_wait.snapshot()
     }
 
+    /// Fail the next `count` high-water `put_json` calls (post-position fault injection).
+    pub fn inject_high_water_put_failures(&self, count: u32) {
+        self.fail_high_water_puts.store(count, Ordering::SeqCst);
+    }
+
     /// Group-commit path for ports that do not hold the per-queue admit permit
     /// (BatchUpdate / upsert). Concurrent callers of the same shard share one
     /// object PUT when they arrive within [`PACK_LINGER`] or fill [`PACK_TARGET_BYTES`].

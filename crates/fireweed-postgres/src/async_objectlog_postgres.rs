@@ -120,20 +120,26 @@ impl SeparateReplayCommitter for Committer {
                 Some(coordinator) => Some(coordinator.reserve(shard.clone(), &commands).await?),
                 None => None,
             };
-            let positions = match AsyncLogStore::append(
-                log.as_ref(),
-                shard.clone(),
-                commands.clone(),
-                expected_epoch,
-            )
-            .await
+            let positions = match log
+                .packed_append_owned(
+                    shard.clone(),
+                    commands.clone(),
+                    expected_epoch,
+                    reservation.as_ref().map(|reserved| reserved.id()),
+                    true,
+                )
+                .await
             {
-                Ok(positions) => positions,
+                Ok(outcome) => outcome.positions,
                 Err(error) => {
-                    if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
-                        coordinator.cancel(reservation).await;
-                    }
-                    return Err(error);
+                    return Err(
+                        AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+                            async_apply.as_ref(),
+                            reservation,
+                            error,
+                        )
+                        .await,
+                    );
                 }
             };
             if matches!(
@@ -2150,6 +2156,67 @@ mod async_projection {
                 .unwrap()
                 .sequence,
             2
+        );
+        reopened
+            .postgres_projection
+            .close_and_drain()
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn all_async_products_preserve_ambiguous_durable_reservations() {
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
+        let (schema, root) = fixture("s3f-poison");
+        let backend = open(&url, &schema, &root, Some(spec())).await;
+        let shard = create(&backend).await;
+        backend.log.inject_high_water_put_failures(1);
+        let error = push_one(&backend, &shard, 1)
+            .await
+            .expect_err("high-water put_json failure is post-position and must not succeed");
+        assert!(
+            matches!(
+                error,
+                EngineError::Storage(ref message)
+                    if message.contains("object-log post-position ambiguous")
+            ),
+            "typed post-position must surface as storage, got {error:?}"
+        );
+        let snap = backend.async_projection_snapshot(&shard).await.unwrap();
+        assert!(
+            snap.poison_reason.is_some(),
+            "post-position must latch coordinator poison"
+        );
+        assert_eq!(
+            snap.apply_queue_depth, 1,
+            "post-position failure must not cancel the reservation"
+        );
+        let page = AsyncLogStore::read_from(backend.log.as_ref(), shard.clone(), None, 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "produce allocated a durable position that must remain occupied"
+        );
+        assert!(
+            matches!(
+                push_one(&backend, &shard, 2).await.unwrap_err(),
+                EngineError::Storage(message)
+                    if message.contains("async projection poisoned")
+            ),
+            "poisoned shard must reject new reservations"
+        );
+        backend.postgres_projection.close_and_drain().await.unwrap();
+        drop(backend);
+
+        let reopened = open(&url, &schema, &root, Some(spec())).await;
+        assert_eq!(
+            reopened.metrics(&shard).await.unwrap().pending,
+            1,
+            "reopen must rebuild the durable reservation authoritatively"
         );
         reopened
             .postgres_projection
