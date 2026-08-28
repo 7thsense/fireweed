@@ -13,16 +13,15 @@ use fireweed_core::{
 use crate::{
     AppendAdmissionClass, AsyncCohortFinalizeRequest, AsyncCohortLifecyclePlanner,
     AsyncCohortRenewRequest, AsyncCommitStrategy, AsyncReclaimPlanner, AsyncReclaimRequest,
-    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateSnapshotItem, CLAIM_TURN_DEFAULT_MAX_WAIT,
-    ClaimCommand, ClaimRequest, ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand,
-    CommandChecksum, CommandEnvelope, CommandId, CoordinationError, DispatchError, DurabilityClass,
-    EngineError, EngineResult, KeyedQueueGate, MUTATION_SEQUENCER_WAIT_RESOURCE,
-    MutationGenerationBatch, MutationGenerationKind, MutationSequencer, MutationTicket,
-    NoAsyncCohortLifecyclePlanner, OwnedTask, OwnedTaskDispatcher, PreparedAsyncCommitStrategy,
-    PushCommand, PushItem, PushSpec, QueueCommand, QueueGateError, QueueKey, RawCommitFault,
-    RawCommitOutcome, RawCommitRequest, RequestOutcome, TaskOutcomeError, UpdateFieldsBatchCommand,
-    compile_entity_schema, plan_batch_update, validate_claim_compatibility, validate_entity,
-    validate_gate_push,
+    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateSnapshotItem, ClaimCommand, ClaimRequest,
+    ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CommandChecksum, CommandEnvelope,
+    CommandId, CoordinationError, DispatchError, DurabilityClass, EngineError, EngineResult,
+    KeyedQueueGate, MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationBatch,
+    MutationGenerationKind, MutationSequencer, MutationTicket, NoAsyncCohortLifecyclePlanner,
+    OwnedTask, OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
+    QueueCommand, QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    RequestOutcome, TaskOutcomeError, UpdateFieldsBatchCommand, compile_entity_schema,
+    plan_batch_update, validate_claim_compatibility, validate_entity, validate_gate_push,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,8 +236,8 @@ pub enum MutationSequencerKey {
     Singleton(u64),
 }
 
-/// Default queued-generation wait until S3s derives the live bound (turn-cap 255 s).
-pub const MUTATION_SEQUENCER_DEFAULT_MAX_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
+/// S3s-derived queued-generation wait (floor 500 ms, structural cap 255 s). Not activated until S3c.
+pub const MUTATION_SEQUENCER_DEFAULT_MAX_WAIT: Duration = crate::S3S_DERIVED_TURN_WAIT;
 
 /// Committed driver-snapshot facts plus in-generation overlay inputs. Inert until S3c.
 #[derive(Debug, Clone)]

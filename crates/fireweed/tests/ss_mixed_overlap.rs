@@ -9,22 +9,47 @@
 //!
 //! `SS_MIXED_N` may be lowered for local calibration. Set
 //! `SS_EVIDENCE_WRITE=0` to avoid writing a non-authoritative calibration run.
+//!
+//! S3s shadow calibration (inert S3c composition; serving is unchanged):
+//!
+//! ```text
+//! cargo test -p fireweed --test ss_mixed_overlap -- --exact --nocapture shadow_
+//! cargo test -p fireweed --test ss_mixed_overlap -- --ignored --exact --nocapture \
+//!   shadow_mutation_generation_calibration
+//! ```
 
 #![cfg(all(feature = "objectlog", feature = "turso"))]
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use fireweed::turso_compose::open_turso_projection_async;
 use fireweed::*;
 use fireweed_core::{Metadata, MetadataValue};
-use fireweed_engine::AsyncLogStore;
+use fireweed_engine::{
+    AsyncLogStore, CLAIM_DRIVER_INGRESS_RESOURCE, CLAIM_DRIVER_SLOTS_RESOURCE,
+    CLAIM_GENERATION_MAX_REQUESTS, CLAIM_MAX_DRIVERS, CLAIM_QUEUE_TURN_RESOURCE,
+    CLAIM_TURN_DEFAULT_MAX_WAIT, ClaimCoordinator, ClaimDriverReadAdmission, ClaimQueueTurn,
+    CoordinationError, DEFAULT_KEYED_QUEUE_MAX_PER_KEY, DRIVER_SLOT_DEFAULT_MAX_WAIT,
+    GENERATION_MAX_ITEMS, KeyedQueueGate, MUTATION_MAX_REQUESTS_PER_QUEUE,
+    MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MUTATION_SEQUENCER_RESOURCE,
+    MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationKind, MutationIngress, MutationSequencer,
+    OUTCOME_READ_SLOTS_RESOURCE, OUTCOME_SLOT_DEFAULT_MAX_WAIT, OutcomeReadAdmission,
+    QueueGateError, S3S_COVERAGE_OR_WORK_CAP, S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
+    S3S_DERIVED_DRIVER_SLOT_WAIT, S3S_DERIVED_OUTCOME_SLOT_WAIT, S3S_DERIVED_TURN_WAIT,
+    S3S_FENCE_ACQUIRE_CARRIED_CAP, S3S_WAIT_FLOOR, SHARED_DRIVER_SLOTS_RESOURCE,
+    SharedDriverReadAdmission, abort_unplanned_generation_on_deadline, derive_structural_wait,
+};
 use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
-use fireweed_turso::TursoRelational;
+use fireweed_turso::{
+    COMMITTED_DRIVER_POOL_SIZE, COMMITTED_OUTCOME_POOL_SIZE, TursoConfig, TursoRelational,
+};
 use serde_json::{Value, json};
 
 const DEFAULT_N: usize = 10_000;
@@ -33,6 +58,8 @@ const CLAIM_BATCH: usize = 100;
 const RETRY_CADENCE: Duration = Duration::from_millis(25);
 const OBSERVATION_SAMPLES: usize = 16;
 const PACK_LINGER_MS: u64 = 20;
+const KEYED_QUEUE_PER_KEY_WAITERS: &str = "keyed queue per-key waiters";
+const SEVENTEEN_READER_DEADLINE: Duration = Duration::from_millis(31_050);
 
 type MixedRuntime = Fireweed;
 
@@ -176,6 +203,18 @@ impl RequestTiming {
     }
 }
 
+fn retryable_admission(error: &EngineError) -> bool {
+    match error {
+        EngineError::Backpressure { .. } => true,
+        EngineError::Storage(message)
+            if message.contains("PerKeyFull") || message.contains(KEYED_QUEUE_PER_KEY_WAITERS) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn retry_25ms<T, F, Fut>(
     request_id: String,
     mut operation: F,
@@ -200,7 +239,7 @@ where
                     },
                 ));
             }
-            Err(EngineError::Backpressure { .. }) => {
+            Err(error) if retryable_admission(&error) => {
                 retries += 1;
                 assert!(retries < 100_000, "fixed-cadence retry failed to converge");
                 tokio::time::sleep(RETRY_CADENCE).await;
@@ -1062,6 +1101,824 @@ async fn ss_mixed_overlap_baseline() -> EngineResult<()> {
 
     drop(fireweed);
     drop(observation_reader);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// S3s shadow calibration: reconstruct the S3c composition without switching serving.
+//
+// Remaining calibration not landed in the default lane (too expensive here):
+// - N=100k mixed soak versus S0 >=90% settled-rate / <=125% p95/p99 non-regression
+// - Full closed-cohort publication budgets 2,021.075 s / 17,246.775 s
+// - Pool-cache repartition inside the 224 MiB post-S3c envelope (S3r predicted 352 MiB)
+// ---------------------------------------------------------------------------
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+    let waker = Waker::from(Arc::new(NoopWake));
+    Pin::new(future).poll(&mut Context::from_waker(&waker))
+}
+
+#[derive(Debug, Default)]
+struct ShadowCounters {
+    fill: Vec<usize>,
+    capacity: BTreeMap<&'static str, usize>,
+    deadline: BTreeMap<&'static str, usize>,
+    retries: usize,
+    first_third_generation_index: Option<usize>,
+}
+
+impl ShadowCounters {
+    fn capacity(&mut self, resource: &'static str) {
+        *self.capacity.entry(resource).or_insert(0) += 1;
+    }
+
+    fn deadline(&mut self, resource: &'static str) {
+        *self.deadline.entry(resource).or_insert(0) += 1;
+    }
+
+    fn evidence(&self) -> Value {
+        json!({
+            "fill": self.fill,
+            "ingress_capacity_rejections": self.capacity,
+            "deadline_expiries": self.deadline,
+            "retry_count": self.retries,
+            "first_third_generation_index": self.first_third_generation_index,
+            "fixed_retry_cadence_ms": RETRY_CADENCE.as_millis(),
+        })
+    }
+}
+
+/// Reconstructs inert S3c admissions. Serving still uses the live Fireweed path.
+struct ShadowS3cComposition {
+    sequencer: MutationSequencer<String, MutationGenerationKind, usize>,
+    claim_turns: ClaimQueueTurn<String>,
+    claim_coordinator: ClaimCoordinator<String, usize>,
+    claim_slots: ClaimDriverReadAdmission,
+    shared_slots: SharedDriverReadAdmission,
+    outcome_slots: OutcomeReadAdmission,
+    keyed_gate: KeyedQueueGate<String>,
+}
+
+impl ShadowS3cComposition {
+    fn new() -> Self {
+        Self {
+            sequencer: MutationSequencer::new(),
+            claim_turns: ClaimQueueTurn::default(),
+            claim_coordinator: ClaimCoordinator::default(),
+            claim_slots: ClaimDriverReadAdmission::default(),
+            shared_slots: SharedDriverReadAdmission::default(),
+            outcome_slots: OutcomeReadAdmission::default(),
+            keyed_gate: KeyedQueueGate::new_with_per_key_limit(
+                1_024,
+                DEFAULT_KEYED_QUEUE_MAX_PER_KEY,
+            ),
+        }
+    }
+}
+
+fn request_17_compatible_mutations(counters: &mut ShadowCounters) {
+    let sequencer = MutationSequencer::<&'static str, MutationGenerationKind, u8>::new();
+    let payloads: Vec<_> = (0..32).map(|index| Arc::new(index as u8)).collect();
+    let mut tickets = Vec::new();
+    let mut first_rejected = None;
+    for (index, payload) in payloads.iter().enumerate() {
+        match sequencer.admit(
+            "q",
+            MutationGenerationKind::Push,
+            if index % 2 == 0 {
+                MutationIngress::Direct
+            } else {
+                MutationIngress::KeyedPermitLive
+            },
+            Arc::clone(payload),
+            1,
+            1,
+        ) {
+            Ok(ticket) => {
+                assert!(Arc::ptr_eq(ticket.request(), payload));
+                tickets.push(ticket);
+            }
+            Err(CoordinationError::Capacity { resource }) => {
+                assert_eq!(resource, MUTATION_SEQUENCER_RESOURCE);
+                counters.capacity(resource);
+                if first_rejected.is_none() {
+                    first_rejected = Some(index + 1);
+                }
+            }
+            Err(error) => panic!("compatible mutation {index} failed: {error:?}"),
+        }
+    }
+    assert_eq!(first_rejected, Some(17));
+    assert_eq!(
+        sequencer.request_count(&"q"),
+        MUTATION_MAX_REQUESTS_PER_QUEUE
+    );
+    assert_eq!(sequencer.generation_count(&"q"), 2);
+    let first = sequencer
+        .start_generation(&"q")
+        .expect("active compatible generation");
+    counters.fill.push(first.requests().len());
+    assert_eq!(first.requests().len(), CLAIM_GENERATION_MAX_REQUESTS);
+    assert!(
+        first
+            .requests()
+            .iter()
+            .zip(&payloads)
+            .all(|(retained, original)| Arc::ptr_eq(retained, original))
+    );
+    assert_eq!(tickets.len(), MUTATION_MAX_REQUESTS_PER_QUEUE);
+    drop(first);
+    drop(tickets);
+    assert_eq!(sequencer.request_count(&"q"), 0);
+}
+
+fn four_incompatible_claim_keys(counters: &mut ShadowCounters) {
+    let turns = ClaimQueueTurn::<&'static str>::default();
+    let coordinator = ClaimCoordinator::<u8, usize>::default();
+    let mut callers = Vec::new();
+    for key in 0..4u8 {
+        callers.push(
+            coordinator
+                .join(key, Arc::new(key as usize), 1, 8)
+                .expect("four Claim keys fit the eight-driver budget"),
+        );
+    }
+    let mut first = turns.acquire("q");
+    let active = match poll_once(&mut first) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("first Claim turn: unexpected"),
+    };
+    let mut second = turns.acquire("q");
+    assert!(
+        matches!(poll_once(&mut second), Poll::Pending),
+        "second incompatible Claim key must queue on the one-queue turn"
+    );
+    for key in 2..4 {
+        let mut extra = turns.acquire("q");
+        match poll_once(&mut extra) {
+            Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+                assert_eq!(resource, CLAIM_QUEUE_TURN_RESOURCE);
+                counters.capacity(resource);
+            }
+            _ => panic!("Claim key {key} must be turn-capacity, got unexpected"),
+        }
+    }
+    drop(second);
+    drop(active);
+    drop(callers);
+    assert_eq!(turns.queued(), 0);
+    assert_eq!(turns.entry_count(), 0);
+}
+
+fn request_17_keyed_queue_gate(counters: &mut ShadowCounters) {
+    let gate = KeyedQueueGate::new_with_per_key_limit(1_024, DEFAULT_KEYED_QUEUE_MAX_PER_KEY);
+    let mut first = gate.acquire("q");
+    let active = match poll_once(&mut first) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("first same-key command: unexpected"),
+    };
+    let mut waiters = Vec::new();
+    for _ in 0..15 {
+        let mut waiter = gate.acquire("q");
+        assert!(
+            matches!(poll_once(&mut waiter), Poll::Pending),
+            "same-key commands 2-16 must queue"
+        );
+        waiters.push(waiter);
+    }
+    let mut first_rejected = None;
+    for index in 17..=32 {
+        let mut extra = gate.acquire("q");
+        match poll_once(&mut extra) {
+            Poll::Ready(Err(QueueGateError::PerKeyFull)) => {
+                counters.capacity(KEYED_QUEUE_PER_KEY_WAITERS);
+                if first_rejected.is_none() {
+                    first_rejected = Some(index);
+                }
+            }
+            _ => panic!("same-key command {index}: unexpected"),
+        }
+    }
+    assert_eq!(first_rejected, Some(17));
+    assert_eq!(gate.queued(), 15);
+    drop(active);
+    drop(waiters);
+    assert_eq!(gate.queued(), 0);
+}
+
+fn claim_queue_9(counters: &mut ShadowCounters) {
+    let coordinator = ClaimCoordinator::<u8, usize>::default();
+    let turns = ClaimQueueTurn::<u8>::default();
+    let slots = ClaimDriverReadAdmission::default();
+    let mut callers = Vec::new();
+    let mut held_turns = Vec::new();
+    for queue in 0..CLAIM_MAX_DRIVERS as u8 {
+        callers.push(
+            coordinator
+                .join(queue, Arc::new(queue as usize), 1, 8)
+                .expect("Claim queue within eight-driver budget"),
+        );
+        let mut turn = turns.acquire(queue);
+        held_turns.push(match poll_once(&mut turn) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("Claim queue {queue} turn: unexpected"),
+        });
+    }
+    match coordinator.join(CLAIM_MAX_DRIVERS as u8, Arc::new(9), 1, 8) {
+        Err(CoordinationError::Capacity { resource }) => {
+            assert_eq!(resource, CLAIM_DRIVER_INGRESS_RESOURCE);
+            counters.capacity(resource);
+        }
+        _ => panic!("Claim queue 9 must miss driver ingress, got unexpected"),
+    }
+    assert_eq!(turns.entry_count(), CLAIM_MAX_DRIVERS);
+
+    let mut slot_active = Vec::new();
+    let mut slot_queued = Vec::new();
+    for _ in 0..4 {
+        let mut acquire = slots.acquire();
+        slot_active.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("Claim slot: unexpected"),
+        });
+    }
+    for _ in 0..4 {
+        let mut acquire = slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        slot_queued.push(acquire);
+    }
+    let mut ninth_slot = slots.acquire();
+    match poll_once(&mut ninth_slot) {
+        Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+            assert_eq!(resource, CLAIM_DRIVER_SLOTS_RESOURCE);
+            counters.capacity(resource);
+        }
+        _ => panic!("ninth Claim slot: unexpected"),
+    }
+    drop(slot_queued);
+    drop(slot_active);
+    drop(held_turns);
+    drop(callers);
+}
+
+fn shared_generation_queue_25(counters: &mut ShadowCounters) {
+    let sequencer = MutationSequencer::<u8, u8, u8>::new();
+    let slots = SharedDriverReadAdmission::default();
+    let mut tickets = Vec::new();
+    let mut active = Vec::new();
+    let mut queued = Vec::new();
+    for queue in 0..24u8 {
+        assert!(
+            slots.active() + slots.queued() < 24,
+            "shared slot cap reached before queue {}",
+            queue + 1
+        );
+        tickets.push(
+            sequencer
+                .admit(queue, 1, MutationIngress::Direct, Arc::new(queue), 1, 1)
+                .expect("shared generation within 24-queue budget"),
+        );
+        let mut acquire = slots.acquire();
+        match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => active.push(permit),
+            Poll::Pending => queued.push(acquire),
+            _ => panic!("shared slot queue {}: unexpected", queue + 1),
+        }
+    }
+    assert_eq!(active.len(), 12);
+    assert_eq!(queued.len(), 12);
+    let mut queue_25 = slots.acquire();
+    match poll_once(&mut queue_25) {
+        Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+            assert_eq!(resource, SHARED_DRIVER_SLOTS_RESOURCE);
+            counters.capacity(resource);
+        }
+        _ => panic!("shared queue 25: unexpected"),
+    }
+    assert_eq!(sequencer.request_count(&24), 0);
+    drop(queued);
+    drop(active);
+    drop(tickets);
+}
+
+fn realistic_first_third_generation_index(counters: &mut ShadowCounters) {
+    let sequencer = MutationSequencer::<&'static str, MutationGenerationKind, u8>::new();
+    let items = GENERATION_MAX_ITEMS / 2;
+    let response_bytes = items.saturating_mul(1_400);
+    let mut tickets = Vec::new();
+    for index in 0..32u8 {
+        match sequencer.admit(
+            "q",
+            MutationGenerationKind::BatchUpdate,
+            MutationIngress::Direct,
+            Arc::new(index),
+            items,
+            response_bytes,
+        ) {
+            Ok(ticket) => tickets.push(ticket),
+            Err(CoordinationError::Capacity { resource }) => {
+                assert_eq!(resource, MUTATION_SEQUENCER_RESOURCE);
+                counters.capacity(resource);
+                if counters.first_third_generation_index.is_none() {
+                    counters.first_third_generation_index = Some(index as usize + 1);
+                }
+            }
+            Err(error) => panic!("realistic mutation {index}: {error:?}"),
+        }
+    }
+    assert_eq!(sequencer.generation_count(&"q"), 2);
+    assert!(
+        counters
+            .first_third_generation_index
+            .is_some_and(|index| index != 17),
+        "realistic payloads must report the observed third-generation index, not assume request 17; got {:?}",
+        counters.first_third_generation_index
+    );
+    drop(tickets);
+}
+
+fn combined_soak_one_below_every_cap(counters: &mut ShadowCounters) {
+    let shadow = ShadowS3cComposition::new();
+    let mut mutation_tickets = Vec::new();
+    for index in 0..15 {
+        mutation_tickets.push(
+            shadow
+                .sequencer
+                .admit(
+                    "q-mut".to_owned(),
+                    MutationGenerationKind::Push,
+                    MutationIngress::Direct,
+                    Arc::new(index),
+                    1,
+                    1,
+                )
+                .expect("combined soak stays below the 16-request sequencer cap"),
+        );
+    }
+    let active_generation = shadow.sequencer.start_generation(&"q-mut".to_owned());
+    if let Some(batch) = &active_generation {
+        counters.fill.push(batch.requests().len());
+    }
+
+    let mut claim_turn = shadow.claim_turns.acquire("q-claim".to_owned());
+    let claim_turn = match poll_once(&mut claim_turn) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("combined Claim turn: unexpected"),
+    };
+
+    let mut claim_slots = Vec::new();
+    let mut claim_queued = Vec::new();
+    for _ in 0..4 {
+        let mut acquire = shadow.claim_slots.acquire();
+        claim_slots.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("combined Claim slot: unexpected"),
+        });
+    }
+    for _ in 0..3 {
+        let mut acquire = shadow.claim_slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        claim_queued.push(acquire);
+    }
+
+    let mut shared_slots = Vec::new();
+    let mut shared_queued = Vec::new();
+    for _ in 0..12 {
+        let mut acquire = shadow.shared_slots.acquire();
+        shared_slots.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("combined shared slot: unexpected"),
+        });
+    }
+    for _ in 0..11 {
+        let mut acquire = shadow.shared_slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        shared_queued.push(acquire);
+    }
+
+    let mut outcome_slots = Vec::new();
+    let mut outcome_queued = Vec::new();
+    for _ in 0..8 {
+        let mut acquire = shadow.outcome_slots.acquire();
+        outcome_slots.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("combined outcome slot: unexpected"),
+        });
+    }
+    for _ in 0..7 {
+        let mut acquire = shadow.outcome_slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        outcome_queued.push(acquire);
+    }
+
+    let mut gate = shadow.keyed_gate.acquire("q-gate".to_owned());
+    let gate_active = match poll_once(&mut gate) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("combined keyed gate: unexpected"),
+    };
+    let mut gate_waiters = Vec::new();
+    for _ in 0..14 {
+        let mut waiter = shadow.keyed_gate.acquire("q-gate".to_owned());
+        assert!(matches!(poll_once(&mut waiter), Poll::Pending));
+        gate_waiters.push(waiter);
+    }
+
+    assert!(shadow.claim_coordinator.driver_count() <= CLAIM_MAX_DRIVERS);
+    assert_eq!(shadow.sequencer.request_count(&"q-mut".to_owned()), 15);
+    assert_eq!(shadow.claim_slots.active() + shadow.claim_slots.queued(), 7);
+    assert_eq!(
+        shadow.shared_slots.active() + shadow.shared_slots.queued(),
+        23
+    );
+    assert_eq!(
+        shadow.outcome_slots.active() + shadow.outcome_slots.queued(),
+        15
+    );
+    assert_eq!(shadow.keyed_gate.queued(), 14);
+    drop(gate_waiters);
+    drop(gate_active);
+    drop(outcome_queued);
+    drop(outcome_slots);
+    drop(shared_queued);
+    drop(shared_slots);
+    drop(claim_queued);
+    drop(claim_slots);
+    drop(claim_turn);
+    drop(active_generation);
+    drop(mutation_tickets);
+}
+
+fn deadline_expiry_distinct_from_capacity(counters: &mut ShadowCounters) {
+    let admission = ClaimDriverReadAdmission::new(Duration::ZERO);
+    let mut active = Vec::new();
+    for _ in 0..4 {
+        let mut acquire = admission.acquire();
+        active.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("deadline-probe slot: unexpected"),
+        });
+    }
+    let mut queued = admission.acquire();
+    match poll_once(&mut queued) {
+        Poll::Ready(Err(CoordinationError::Deadline { resource })) => {
+            assert_eq!(resource, CLAIM_DRIVER_SLOTS_RESOURCE);
+            counters.deadline(resource);
+        }
+        Poll::Pending => match poll_once(&mut queued) {
+            Poll::Ready(Err(CoordinationError::Deadline { resource })) => {
+                assert_eq!(resource, CLAIM_DRIVER_SLOTS_RESOURCE);
+                counters.deadline(resource);
+            }
+            _ => panic!("queued slot deadline: unexpected"),
+        },
+        Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+            panic!("deadline probe must not report ingress capacity {resource}")
+        }
+        _ => panic!("deadline probe: unexpected"),
+    }
+    drop(active);
+
+    let expired = abort_unplanned_generation_on_deadline(
+        Vec::<fireweed_engine::MutationTicket<&str, u8, u8>>::new(),
+        Instant::now() - Duration::from_secs(1),
+        Duration::ZERO,
+    );
+    match expired {
+        Err(EngineError::Backpressure { resource }) => {
+            assert_eq!(resource, MUTATION_SEQUENCER_WAIT_RESOURCE);
+            counters.deadline(resource);
+        }
+        _ => panic!("sequencer wait expiry: unexpected"),
+    }
+}
+
+#[test]
+fn shadow_compatible_mutation_request_17_is_capacity_rejected() {
+    let mut counters = ShadowCounters::default();
+    request_17_compatible_mutations(&mut counters);
+    assert_eq!(
+        counters.capacity.get(MUTATION_SEQUENCER_RESOURCE).copied(),
+        Some(16)
+    );
+    assert!(counters.deadline.is_empty());
+}
+
+#[test]
+fn shadow_four_incompatible_claim_keys_reject_third_turn() {
+    let mut counters = ShadowCounters::default();
+    four_incompatible_claim_keys(&mut counters);
+    assert_eq!(
+        counters.capacity.get(CLAIM_QUEUE_TURN_RESOURCE).copied(),
+        Some(2)
+    );
+}
+
+#[test]
+fn shadow_same_keyed_queue_gate_request_17_is_capacity_rejected() {
+    let mut counters = ShadowCounters::default();
+    request_17_keyed_queue_gate(&mut counters);
+    assert_eq!(
+        counters.capacity.get(KEYED_QUEUE_PER_KEY_WAITERS).copied(),
+        Some(16)
+    );
+}
+
+#[test]
+fn shadow_claim_queue_9_is_capacity_rejected() {
+    let mut counters = ShadowCounters::default();
+    claim_queue_9(&mut counters);
+    assert_eq!(
+        counters
+            .capacity
+            .get(CLAIM_DRIVER_INGRESS_RESOURCE)
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        counters.capacity.get(CLAIM_DRIVER_SLOTS_RESOURCE).copied(),
+        Some(1)
+    );
+}
+
+#[test]
+fn shadow_shared_generation_queue_25_is_capacity_rejected() {
+    let mut counters = ShadowCounters::default();
+    shared_generation_queue_25(&mut counters);
+    assert_eq!(
+        counters.capacity.get(SHARED_DRIVER_SLOTS_RESOURCE).copied(),
+        Some(1)
+    );
+}
+
+#[test]
+fn shadow_realistic_payloads_report_first_third_generation_index() {
+    let mut counters = ShadowCounters::default();
+    realistic_first_third_generation_index(&mut counters);
+    eprintln!(
+        "s3s realistic first_third_generation_index={:?}",
+        counters.first_third_generation_index
+    );
+}
+
+#[test]
+fn shadow_combined_soak_stays_one_below_every_cap() {
+    let mut counters = ShadowCounters::default();
+    combined_soak_one_below_every_cap(&mut counters);
+    assert!(counters.capacity.is_empty());
+    assert!(counters.deadline.is_empty());
+}
+
+#[test]
+fn shadow_deadline_expiry_is_distinct_from_ingress_capacity() {
+    let mut counters = ShadowCounters::default();
+    deadline_expiry_distinct_from_capacity(&mut counters);
+    assert!(counters.capacity.is_empty());
+    assert_eq!(
+        counters.deadline.get(CLAIM_DRIVER_SLOTS_RESOURCE).copied(),
+        Some(1)
+    );
+    assert_eq!(
+        counters
+            .deadline
+            .get(MUTATION_SEQUENCER_WAIT_RESOURCE)
+            .copied(),
+        Some(1)
+    );
+}
+
+#[test]
+fn shadow_s3s_structural_bounds_match_reviewed_caps() {
+    assert_eq!(S3S_WAIT_FLOOR, Duration::from_millis(500));
+    assert_eq!(S3S_DERIVED_TURN_WAIT, CLAIM_TURN_DEFAULT_MAX_WAIT);
+    assert_eq!(S3S_DERIVED_DRIVER_SLOT_WAIT, DRIVER_SLOT_DEFAULT_MAX_WAIT);
+    assert_eq!(S3S_DERIVED_OUTCOME_SLOT_WAIT, OUTCOME_SLOT_DEFAULT_MAX_WAIT);
+    assert_eq!(S3S_DERIVED_COVERAGE_OR_WORK_WAIT, S3S_COVERAGE_OR_WORK_CAP);
+    assert_eq!(MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, S3S_DERIVED_TURN_WAIT);
+    assert_eq!(S3S_FENCE_ACQUIRE_CARRIED_CAP, Duration::from_secs(75));
+    assert_eq!(
+        derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(250),
+            S3S_WAIT_FLOOR,
+            CLAIM_TURN_DEFAULT_MAX_WAIT,
+        ),
+        Some(S3S_DERIVED_TURN_WAIT)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shadow_outcome_reader_17_is_capacity_rejected() -> EngineResult<()> {
+    let mut counters = ShadowCounters::default();
+    let root = unique_root();
+    std::fs::create_dir_all(&root).expect("s3s outcome root");
+    let path = root.join("s3s-outcome.db");
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let pools = store.committed_pools().expect("file-backed pools").clone();
+    assert_eq!(pools.driver_size(), COMMITTED_DRIVER_POOL_SIZE);
+    assert_eq!(pools.outcome_size(), COMMITTED_OUTCOME_POOL_SIZE);
+    let admission = OutcomeReadAdmission::default();
+    let started = Instant::now();
+
+    let mut first_wave = Vec::new();
+    for _ in 0..8 {
+        let mut acquire = admission.acquire();
+        first_wave.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("outcome first wave: unexpected"),
+        });
+    }
+    let mut second_wave = Vec::new();
+    for _ in 0..8 {
+        let mut acquire = admission.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        second_wave.push(acquire);
+    }
+    let mut reader_17 = admission.acquire();
+    match poll_once(&mut reader_17) {
+        Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+            assert_eq!(resource, OUTCOME_READ_SLOTS_RESOURCE);
+            counters.capacity(resource);
+        }
+        _ => panic!("reader 17: unexpected"),
+    }
+
+    let mut first_guards = Vec::new();
+    for permit in first_wave {
+        first_guards.push((permit, pools.borrow_outcome().await?));
+    }
+    drop(first_guards);
+
+    let mut second_permits = Vec::new();
+    for mut queued in second_wave {
+        second_permits.push(match poll_once(&mut queued) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("outcome second wave: unexpected"),
+        });
+    }
+    drop(second_permits);
+
+    let mut completed_17 = false;
+    while started.elapsed() < SEVENTEEN_READER_DEADLINE {
+        let mut acquire = admission.acquire();
+        match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => {
+                let guard = pools.borrow_outcome().await?;
+                drop(guard);
+                drop(permit);
+                completed_17 = true;
+                break;
+            }
+            Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+                assert_eq!(resource, OUTCOME_READ_SLOTS_RESOURCE);
+                counters.capacity(resource);
+                counters.retries += 1;
+                tokio::time::sleep(RETRY_CADENCE).await;
+            }
+            Poll::Pending => {
+                let permit = acquire.await.expect("reader 17 queued then admitted");
+                let guard = pools.borrow_outcome().await?;
+                drop(guard);
+                drop(permit);
+                completed_17 = true;
+                break;
+            }
+            Poll::Ready(Err(error)) => panic!("reader 17 retry: {error:?}"),
+        }
+    }
+    assert!(completed_17, "reader 17 did not complete");
+    assert!(started.elapsed() <= SEVENTEEN_READER_DEADLINE);
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+/// Ignored/opt-in S3s harness. Reconstructs the S3c composition without switching serving.
+///
+/// Remaining work documented at the S3s section header: N=100k soak, full publication
+/// budgets, and 224 MiB pool-cache repartition.
+#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shadow_mutation_generation_calibration() -> EngineResult<()> {
+    let mut counters = ShadowCounters::default();
+    request_17_compatible_mutations(&mut counters);
+    four_incompatible_claim_keys(&mut counters);
+    request_17_keyed_queue_gate(&mut counters);
+    claim_queue_9(&mut counters);
+    shared_generation_queue_25(&mut counters);
+    realistic_first_third_generation_index(&mut counters);
+    deadline_expiry_distinct_from_capacity(&mut counters);
+    combined_soak_one_below_every_cap(&mut counters);
+
+    let root = unique_root();
+    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let due = now();
+    let compatible =
+        compatible_mutation_cohort(Arc::clone(&fireweed), queue_key("q-s3s-compatible"), due)
+            .await?;
+    let incompatible =
+        incompatible_claim_cohort(Arc::clone(&fireweed), queue_key("q-s3s-claim-keys"), due)
+            .await?;
+    let keyed =
+        same_keyed_gate_cohort(Arc::clone(&fireweed), queue_key("q-s3s-keyed"), due).await?;
+
+    let reclaim_queue = queue_key("q-s3s-reclaim");
+    fireweed
+        .create_queue(qdef(reclaim_queue.queue_id.as_str()))
+        .await?;
+    let reclaim_ids = fireweed
+        .push_batch(
+            &reclaim_queue,
+            vec![
+                realistic_item("s3s-reclaim", 0, due),
+                realistic_item("s3s-reclaim", 1, due),
+            ],
+        )
+        .await?;
+    settle(fireweed.as_ref(), &reclaim_queue).await?;
+    let claimed = fireweed.claim(&reclaim_queue, 2, 1).await?;
+    assert_eq!(claimed.len(), 2);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let reclaim_now = now();
+    let reclaimed = retry_25ms("s3s-reclaim-gate".to_owned(), || {
+        fireweed.reclaim_expired_at(&reclaim_queue, Some(8), reclaim_now)
+    })
+    .await?;
+    assert_eq!(reclaimed.0.len(), 2);
+    counters.retries += reclaimed.1.retries;
+    let after_reclaim = settle(fireweed.as_ref(), &reclaim_queue).await?;
+    assert_eq!(after_reclaim.pending, 2);
+    assert_eq!(after_reclaim.leased, 0);
+
+    let before_reject = settle(fireweed.as_ref(), &reclaim_queue).await?;
+    let sequencer = MutationSequencer::<&'static str, MutationGenerationKind, u8>::new();
+    let mut held = Vec::new();
+    for index in 0..MUTATION_MAX_REQUESTS_PER_QUEUE {
+        held.push(
+            sequencer
+                .admit(
+                    "shadow",
+                    MutationGenerationKind::Push,
+                    MutationIngress::Direct,
+                    Arc::new(index as u8),
+                    1,
+                    1,
+                )
+                .expect("held generation"),
+        );
+    }
+    assert!(matches!(
+        sequencer.admit(
+            "shadow",
+            MutationGenerationKind::Push,
+            MutationIngress::Direct,
+            Arc::new(99),
+            1,
+            1,
+        ),
+        Err(CoordinationError::Capacity {
+            resource: MUTATION_SEQUENCER_RESOURCE,
+        })
+    ));
+    let after_reject = settle(fireweed.as_ref(), &reclaim_queue).await?;
+    assert_eq!(after_reject.pending, before_reject.pending);
+    assert_eq!(after_reject.leased, before_reject.leased);
+    assert_eq!(after_reject.complete, before_reject.complete);
+    drop(held);
+
+    let evidence = json!({
+        "schema": "ss-s3s-shadow-calibration/v1",
+        "serving_switched": false,
+        "predicted_interim_ceiling_mib": 352,
+        "committed_driver_pool_size": COMMITTED_DRIVER_POOL_SIZE,
+        "committed_outcome_pool_size": COMMITTED_OUTCOME_POOL_SIZE,
+        "derived_bounds": {
+            "floor_ms": S3S_WAIT_FLOOR.as_millis(),
+            "turn_s": S3S_DERIVED_TURN_WAIT.as_secs(),
+            "driver_slot_s": S3S_DERIVED_DRIVER_SLOT_WAIT.as_secs(),
+            "outcome_slot_s": S3S_DERIVED_OUTCOME_SLOT_WAIT.as_secs(),
+            "coverage_or_work_s": S3S_DERIVED_COVERAGE_OR_WORK_WAIT.as_secs(),
+            "fence_acquire_carried_s": S3S_FENCE_ACQUIRE_CARRIED_CAP.as_secs(),
+        },
+        "shadow": counters.evidence(),
+        "public_cohorts": [compatible, incompatible, keyed],
+        "reclaim_original_ids": reclaim_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "rejected_pre_position_had_no_durable_effect": true,
+    });
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&evidence).expect("s3s evidence")
+    );
+
+    drop(fireweed);
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }

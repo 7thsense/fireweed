@@ -29,6 +29,21 @@ pub const CLAIM_TURN_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(255);
 pub const DRIVER_SLOT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(95);
 pub const OUTCOME_SLOT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(10);
 
+/// S3s structural wait floor applied before the reviewed hard caps.
+pub const S3S_WAIT_FLOOR: Duration = Duration::from_millis(500);
+/// Coverage, delta-coverage, and outcome-work cap. Not activated here.
+pub const S3S_COVERAGE_OR_WORK_CAP: Duration = Duration::from_secs(5);
+/// Fence-acquire term carried from legal composition; not measured while dispositions are inert.
+pub const S3S_FENCE_ACQUIRE_CARRIED_CAP: Duration = Duration::from_secs(75);
+/// S3s-derived Claim/mutation turn wait. Equals the reviewed 255 s cap; S3c activates it.
+pub const S3S_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
+/// S3s-derived Claim/shared driver-slot wait. Equals the reviewed 95 s cap; S3c activates it.
+pub const S3S_DERIVED_DRIVER_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
+/// S3s-derived OutcomeReadAdmission wait. Equals the reviewed 10 s cap; S3c activates it.
+pub const S3S_DERIVED_OUTCOME_SLOT_WAIT: Duration = OUTCOME_SLOT_DEFAULT_MAX_WAIT;
+/// S3s-derived coverage/outcome-work wait. Equals the reviewed 5 s cap; S3c activates it.
+pub const S3S_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
+
 pub const CLAIM_COORDINATOR_WAITERS_RESOURCE: &str = "claim coordinator waiters";
 pub const CLAIM_DRIVER_INGRESS_RESOURCE: &str = "claim driver ingress";
 pub const CLAIM_QUEUE_TURN_RESOURCE: &str = "claim queue turn";
@@ -213,6 +228,42 @@ pub fn audited_mutation_sequencer_join(
         AppendAdmissionClass::KeyedPermitLive | AppendAdmissionClass::SelectionRequired => {
             Some(matches!(disposition, Compatible(_) | Singleton))
         }
+    }
+}
+
+fn next_power_of_two_ms_above(duration: Duration) -> Duration {
+    let ms = duration.as_millis();
+    if ms == 0 {
+        return Duration::ZERO;
+    }
+    let strictly_above = ms.saturating_add(1);
+    if strictly_above > u128::from(u64::MAX / 2) {
+        return Duration::MAX;
+    }
+    Duration::from_millis((strictly_above as u64).next_power_of_two())
+}
+
+/// Derive a wait bound from measured p99 using the S3s composition rule.
+///
+/// Start at `max(floor, next power of two above 2×p99)`, then raise to cover one legal
+/// predecessor hold plus 5 s scheduling slack. Returns `None` when the required value exceeds
+/// `cap`, which blocks later activation. This does not change production defaults.
+pub fn derive_structural_wait(
+    measured_p99: Duration,
+    predecessor_hold: Duration,
+    floor: Duration,
+    cap: Duration,
+) -> Option<Duration> {
+    let twice_p99 = measured_p99.saturating_mul(2);
+    let mut candidate = floor.max(next_power_of_two_ms_above(twice_p99));
+    let required = predecessor_hold.saturating_add(Duration::from_secs(5));
+    if required > candidate {
+        candidate = required;
+    }
+    if candidate > cap {
+        None
+    } else {
+        Some(candidate)
     }
 }
 
@@ -3234,5 +3285,70 @@ mod tests {
         };
         drop(later_reader);
         assert_eq!(fence.entry_count(), 0);
+    }
+
+    #[test]
+    fn s3s_records_structural_bounds_without_activating_them() {
+        assert_eq!(S3S_WAIT_FLOOR, Duration::from_millis(500));
+        assert_eq!(S3S_COVERAGE_OR_WORK_CAP, Duration::from_secs(5));
+        assert_eq!(S3S_FENCE_ACQUIRE_CARRIED_CAP, Duration::from_secs(75));
+        assert_eq!(S3S_DERIVED_TURN_WAIT, CLAIM_TURN_DEFAULT_MAX_WAIT);
+        assert_eq!(S3S_DERIVED_DRIVER_SLOT_WAIT, DRIVER_SLOT_DEFAULT_MAX_WAIT);
+        assert_eq!(S3S_DERIVED_OUTCOME_SLOT_WAIT, OUTCOME_SLOT_DEFAULT_MAX_WAIT);
+        assert_eq!(S3S_DERIVED_COVERAGE_OR_WORK_WAIT, S3S_COVERAGE_OR_WORK_CAP);
+        assert_eq!(CLAIM_TURN_DEFAULT_MAX_WAIT, Duration::from_secs(255));
+        assert_eq!(DRIVER_SLOT_DEFAULT_MAX_WAIT, Duration::from_secs(95));
+        assert_eq!(OUTCOME_SLOT_DEFAULT_MAX_WAIT, Duration::from_secs(10));
+
+        let turn = derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(250),
+            S3S_WAIT_FLOOR,
+            CLAIM_TURN_DEFAULT_MAX_WAIT,
+        );
+        assert_eq!(turn, Some(S3S_DERIVED_TURN_WAIT));
+
+        let slot = derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(90),
+            S3S_WAIT_FLOOR,
+            DRIVER_SLOT_DEFAULT_MAX_WAIT,
+        );
+        assert_eq!(slot, Some(S3S_DERIVED_DRIVER_SLOT_WAIT));
+
+        let outcome = derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(5),
+            S3S_WAIT_FLOOR,
+            OUTCOME_SLOT_DEFAULT_MAX_WAIT,
+        );
+        assert_eq!(outcome, Some(S3S_DERIVED_OUTCOME_SLOT_WAIT));
+
+        let coverage = derive_structural_wait(
+            Duration::ZERO,
+            Duration::ZERO,
+            S3S_WAIT_FLOOR,
+            S3S_COVERAGE_OR_WORK_CAP,
+        );
+        assert_eq!(coverage, Some(S3S_DERIVED_COVERAGE_OR_WORK_WAIT));
+
+        assert_eq!(
+            derive_structural_wait(
+                Duration::ZERO,
+                Duration::from_secs(251),
+                S3S_WAIT_FLOOR,
+                CLAIM_TURN_DEFAULT_MAX_WAIT,
+            ),
+            None
+        );
+        assert_eq!(
+            derive_structural_wait(
+                Duration::from_secs(200),
+                Duration::ZERO,
+                S3S_WAIT_FLOOR,
+                Duration::from_secs(10),
+            ),
+            None
+        );
     }
 }
