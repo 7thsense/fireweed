@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -13,12 +15,24 @@ use fireweed_relational::{
     RELATIONAL_SCHEMA, class_s_claim, delete_claim_outbox, entity_from_json, fields_from_json,
     metadata_from_json, nanos_ts, parse_priority, select_claim_outbox,
 };
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Semaphore, oneshot};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
 
 const LEASE_PACK_MAX: usize = 8;
 const LEASE_PACK_LINGER: Duration = Duration::from_millis(20);
+/// Shared serving reader stays at 128 MiB until a same-SHA S0 cache trial lands.
 const SERVING_READER_CACHE_KIB: i64 = -131_072;
+const POOLED_READER_CACHE_KIB: i64 = -4_096;
+const POOLED_READER_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+const DRIVER_POOL_BORROW_DEADLINE: Duration = Duration::from_secs(5);
+const OUTCOME_POOL_BORROW_DEADLINE: Duration = Duration::from_millis(100);
+
+/// Sixteen committed driver connections, each with a 4 MiB page-cache ceiling.
+pub const COMMITTED_DRIVER_POOL_SIZE: usize = 16;
+/// Eight committed outcome connections, each with a 4 MiB page-cache ceiling.
+pub const COMMITTED_OUTCOME_POOL_SIZE: usize = 8;
+pub const COMMITTED_DRIVER_POOL_RESOURCE: &str = "committed driver read pool";
+pub const COMMITTED_OUTCOME_POOL_RESOURCE: &str = "committed outcome read pool";
 
 struct LeasePackWaiter {
     tenant_id: String,
@@ -250,6 +264,241 @@ pub struct TursoApplyPhaseObservation {
 
 pub(crate) type ConsumerLeaseIndex = BTreeMap<(QueueKey, String, ItemId), ()>;
 
+fn pooled_reader_settings() -> CommittedReaderSettings {
+    CommittedReaderSettings {
+        cache_size_kib: POOLED_READER_CACHE_KIB,
+        busy_timeout: POOLED_READER_BUSY_TIMEOUT,
+    }
+}
+
+/// Map Turso Busy/BusySnapshot on a pooled committed reader to retryable Backpressure.
+pub fn map_pooled_reader_error(error: turso::Error, resource: &'static str) -> EngineError {
+    match error {
+        turso::Error::Busy(_) | turso::Error::BusySnapshot(_) => {
+            EngineError::Backpressure { resource }
+        }
+        other => EngineError::Storage(other.to_string()),
+    }
+}
+
+struct CommittedReaderLaneInner {
+    resource: &'static str,
+    deadline: Duration,
+    connections: StdMutex<Vec<Connection>>,
+    available: Semaphore,
+}
+
+#[derive(Clone)]
+struct CommittedReaderLane {
+    inner: Arc<CommittedReaderLaneInner>,
+}
+
+impl CommittedReaderLane {
+    fn new(resource: &'static str, deadline: Duration, connections: Vec<Connection>) -> Self {
+        Self {
+            inner: Arc::new(CommittedReaderLaneInner {
+                resource,
+                deadline,
+                available: Semaphore::new(connections.len()),
+                connections: StdMutex::new(connections),
+            }),
+        }
+    }
+
+    fn idle(&self) -> usize {
+        self.inner.available.available_permits()
+    }
+
+    async fn borrow(&self) -> EngineResult<CommittedReaderGuard> {
+        match tokio::time::timeout(self.inner.deadline, self.inner.available.acquire()).await {
+            Ok(Ok(permit)) => {
+                permit.forget();
+                self.take()
+            }
+            Ok(Err(_)) | Err(_) => Err(EngineError::Backpressure {
+                resource: self.inner.resource,
+            }),
+        }
+    }
+
+    fn try_borrow(&self) -> EngineResult<CommittedReaderGuard> {
+        match self.inner.available.try_acquire() {
+            Ok(permit) => {
+                permit.forget();
+                self.take()
+            }
+            Err(_) => Err(EngineError::Backpressure {
+                resource: self.inner.resource,
+            }),
+        }
+    }
+
+    fn take(&self) -> EngineResult<CommittedReaderGuard> {
+        let connection = self
+            .inner
+            .connections
+            .lock()
+            .expect("committed reader pool poisoned")
+            .pop()
+            .ok_or(EngineError::Backpressure {
+                resource: self.inner.resource,
+            })?;
+        Ok(CommittedReaderGuard {
+            connection: Some(connection),
+            lane: Arc::clone(&self.inner),
+        })
+    }
+}
+
+/// Borrowed pooled committed reader. Returns the connection on drop.
+pub struct CommittedReaderGuard {
+    connection: Option<Connection>,
+    lane: Arc<CommittedReaderLaneInner>,
+}
+
+impl CommittedReaderGuard {
+    pub fn resource(&self) -> &'static str {
+        self.lane.resource
+    }
+}
+
+impl Deref for CommittedReaderGuard {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+            .as_ref()
+            .expect("committed reader guard is empty")
+    }
+}
+
+impl DerefMut for CommittedReaderGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+            .as_mut()
+            .expect("committed reader guard is empty")
+    }
+}
+
+impl Drop for CommittedReaderGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            self.lane
+                .connections
+                .lock()
+                .expect("committed reader pool poisoned")
+                .push(connection);
+            self.lane.available.add_permits(1);
+        }
+    }
+}
+
+/// One 4 MiB committed reader used only while serving pools are closed.
+pub struct TransientRecoveryReader {
+    connection: Connection,
+}
+
+impl TransientRecoveryReader {
+    async fn open(database: &Database, config: &TursoConfig) -> Result<Self> {
+        let connection = database.connect()?;
+        configure_connection(&connection, config).await?;
+        configure_committed_reader(&connection, pooled_reader_settings()).await?;
+        Ok(Self { connection })
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+/// Inert sixteen-driver / eight-outcome committed-reader pools.
+///
+/// Serving reads stay on [`TursoRelational`]'s shared reader until S3c. Recovery
+/// seeding opens one extra 4 MiB reader and drops it before these lanes are
+/// borrowable.
+#[derive(Clone)]
+pub struct CommittedReaderPools {
+    driver: CommittedReaderLane,
+    outcome: CommittedReaderLane,
+    explicit_checkpoint_invocations: Arc<AtomicU64>,
+}
+
+impl CommittedReaderPools {
+    async fn connect(database: &Database, config: &TursoConfig) -> Result<Self> {
+        let recovery = TransientRecoveryReader::open(database, config).await?;
+        drop(recovery);
+        let driver =
+            connect_committed_readers(database, config, COMMITTED_DRIVER_POOL_SIZE).await?;
+        let outcome =
+            connect_committed_readers(database, config, COMMITTED_OUTCOME_POOL_SIZE).await?;
+        Ok(Self {
+            driver: CommittedReaderLane::new(
+                COMMITTED_DRIVER_POOL_RESOURCE,
+                DRIVER_POOL_BORROW_DEADLINE,
+                driver,
+            ),
+            outcome: CommittedReaderLane::new(
+                COMMITTED_OUTCOME_POOL_RESOURCE,
+                OUTCOME_POOL_BORROW_DEADLINE,
+                outcome,
+            ),
+            explicit_checkpoint_invocations: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    pub fn driver_size(&self) -> usize {
+        COMMITTED_DRIVER_POOL_SIZE
+    }
+
+    pub fn outcome_size(&self) -> usize {
+        COMMITTED_OUTCOME_POOL_SIZE
+    }
+
+    pub fn idle_driver(&self) -> usize {
+        self.driver.idle()
+    }
+
+    pub fn idle_outcome(&self) -> usize {
+        self.outcome.idle()
+    }
+
+    pub fn explicit_checkpoint_invocations(&self) -> u64 {
+        self.explicit_checkpoint_invocations.load(Ordering::Relaxed)
+    }
+
+    pub async fn borrow_driver(&self) -> EngineResult<CommittedReaderGuard> {
+        self.driver.borrow().await
+    }
+
+    pub async fn borrow_outcome(&self) -> EngineResult<CommittedReaderGuard> {
+        self.outcome.borrow().await
+    }
+
+    pub fn try_borrow_driver(&self) -> EngineResult<CommittedReaderGuard> {
+        self.driver.try_borrow()
+    }
+
+    pub fn try_borrow_outcome(&self) -> EngineResult<CommittedReaderGuard> {
+        self.outcome.try_borrow()
+    }
+}
+
+async fn connect_committed_readers(
+    database: &Database,
+    config: &TursoConfig,
+    count: usize,
+) -> Result<Vec<Connection>> {
+    let settings = pooled_reader_settings();
+    let mut connections = Vec::with_capacity(count);
+    for _ in 0..count {
+        let connection = database.connect()?;
+        configure_connection(&connection, config).await?;
+        configure_committed_reader(&connection, settings).await?;
+        connections.push(connection);
+    }
+    Ok(connections)
+}
+
 /// Async embedded Turso store with a single serialized write connection.
 ///
 /// SQLite-family stores have one durable writer. The async mutex preserves that invariant without
@@ -269,6 +518,7 @@ pub struct TursoRelational {
     pub(crate) grouped_shards: Arc<StdMutex<std::collections::HashSet<QueueKey>>>,
     lease_pack: Arc<StdMutex<LeasePackState>>,
     config: TursoConfig,
+    committed_pools: Option<CommittedReaderPools>,
 }
 
 impl TursoRelational {
@@ -297,7 +547,7 @@ impl TursoRelational {
         verify_schema(&writer).await?;
         let reader = database.connect()?;
         configure_connection(&reader, &config).await?;
-        if config.path != Path::new(":memory:") {
+        let committed_pools = if config.path != Path::new(":memory:") {
             configure_committed_reader(
                 &reader,
                 CommittedReaderSettings {
@@ -306,7 +556,10 @@ impl TursoRelational {
                 },
             )
             .await?;
-        }
+            Some(CommittedReaderPools::connect(&database, &config).await?)
+        } else {
+            None
+        };
         let grouped_shards = load_grouped_shards(&writer).await?;
         Ok(Self {
             database,
@@ -321,6 +574,7 @@ impl TursoRelational {
             grouped_shards: Arc::new(StdMutex::new(grouped_shards)),
             lease_pack: Arc::new(StdMutex::new(LeasePackState::default())),
             config,
+            committed_pools,
         })
     }
 
@@ -330,6 +584,11 @@ impl TursoRelational {
 
     pub fn config(&self) -> &TursoConfig {
         &self.config
+    }
+
+    /// Inert committed-reader pools. Serving reads still use [`Self::query`].
+    pub fn committed_pools(&self) -> Option<&CommittedReaderPools> {
+        self.committed_pools.as_ref()
     }
 
     /// Most recent API-001 BatchUpdate statement trace for structural qualification.
@@ -1428,6 +1687,532 @@ mod committed_reader_tests {
     }
 }
 
+#[cfg(test)]
+mod committed_pool_tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::time::{Duration, Instant};
+
+    use fireweed_engine::{
+        CoordinationError, OUTCOME_READ_SLOTS_RESOURCE, OutcomeReadAdmission, SlotPermit,
+    };
+    use turso::transaction::TransactionBehavior;
+
+    use super::*;
+
+    const POOL_ROW_COUNT: i64 = 800;
+    const POOL_PAYLOAD_BYTES: i64 = 6_144;
+    const ISOLATION_ROUNDS: i64 = 8;
+    const WAL_FREEZE_WRITES: i64 = 32;
+    const SEVENTEEN_READER_DEADLINE: Duration = Duration::from_millis(31_050);
+    const EVIDENCE_RETRY: Duration = Duration::from_millis(25);
+
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        let waker = Waker::from(Arc::new(NoopWake));
+        Pin::new(future).poll(&mut Context::from_waker(&waker))
+    }
+
+    fn wal_path(database_path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}-wal", database_path.display()))
+    }
+
+    fn file_len(path: &Path) -> u64 {
+        std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default()
+    }
+
+    fn current_rss_bytes() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+                return Some(kb.saturating_mul(1024));
+            }
+        }
+        None
+    }
+
+    async fn seed_probe(writer: &Connection) -> Result<()> {
+        writer
+            .execute_batch(
+                "CREATE TABLE committed_pool_probe(\
+                     id INTEGER PRIMARY KEY,\
+                     version INTEGER NOT NULL,\
+                     payload BLOB NOT NULL\
+                 );",
+            )
+            .await?;
+        let seed_values = (1..=POOL_ROW_COUNT)
+            .map(|id| format!("({id},0,zeroblob({POOL_PAYLOAD_BYTES}))"))
+            .collect::<Vec<_>>()
+            .join(",");
+        writer
+            .execute(
+                format!(
+                    "INSERT INTO committed_pool_probe(id,version,payload) VALUES {seed_values}"
+                ),
+                (),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn collect_round_versions(connection: &Connection) -> Result<Vec<i64>> {
+        let rows = collect_rows(
+            connection,
+            "SELECT id,version FROM committed_pool_probe ORDER BY id",
+            vec![],
+        )
+        .await?;
+        if rows.len() != usize::try_from(POOL_ROW_COUNT).expect("row count fits usize") {
+            return Err(TursoRelationalError::Configuration(format!(
+                "probe returned {} rows, expected {POOL_ROW_COUNT}",
+                rows.len()
+            )));
+        }
+        let mut versions = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row.values.as_slice() {
+                [Value::Integer(_), Value::Integer(version)] => versions.push(*version),
+                other => {
+                    return Err(TursoRelationalError::Configuration(format!(
+                        "probe row was {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(versions)
+    }
+
+    async fn assert_pool_settings(connection: &Connection) -> Result<()> {
+        verify_committed_reader_settings(connection, pooled_reader_settings()).await?;
+        let read_uncommitted = collect_rows(connection, "PRAGMA read_uncommitted", vec![]).await?;
+        assert!(
+            read_uncommitted.is_empty(),
+            "pooled readers must not configure read_uncommitted; got {read_uncommitted:?}"
+        );
+        Ok(())
+    }
+
+    async fn borrow_all_pooled(
+        pools: &CommittedReaderPools,
+    ) -> EngineResult<Vec<CommittedReaderGuard>> {
+        let mut guards =
+            Vec::with_capacity(COMMITTED_DRIVER_POOL_SIZE + COMMITTED_OUTCOME_POOL_SIZE);
+        for _ in 0..COMMITTED_DRIVER_POOL_SIZE {
+            guards.push(pools.borrow_driver().await?);
+        }
+        for _ in 0..COMMITTED_OUTCOME_POOL_SIZE {
+            guards.push(pools.borrow_outcome().await?);
+        }
+        Ok(guards)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn committed_pools_construct_isolated_connections() {
+        let rss_before = current_rss_bytes();
+        let root = tempfile::tempdir().expect("pool tempdir");
+        let path = root.path().join("committed-pools.db");
+        let store = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .expect("open pooled store");
+        {
+            let serving = store.reader.lock().await;
+            verify_committed_reader_settings(
+                &serving,
+                CommittedReaderSettings {
+                    cache_size_kib: SERVING_READER_CACHE_KIB,
+                    busy_timeout: DEFAULT_BUSY_TIMEOUT,
+                },
+            )
+            .await
+            .expect("serving reader stays at 128 MiB");
+        }
+        let pools = store.committed_pools().expect("file-backed pools").clone();
+        assert_eq!(pools.driver_size(), COMMITTED_DRIVER_POOL_SIZE);
+        assert_eq!(pools.outcome_size(), COMMITTED_OUTCOME_POOL_SIZE);
+        assert_eq!(pools.idle_driver(), COMMITTED_DRIVER_POOL_SIZE);
+        assert_eq!(pools.idle_outcome(), COMMITTED_OUTCOME_POOL_SIZE);
+        assert_eq!(pools.explicit_checkpoint_invocations(), 0);
+
+        {
+            let writer = store.writer.lock().await;
+            seed_probe(&writer).await.expect("seed isolation probe");
+        }
+
+        let mut guards = borrow_all_pooled(&pools).await.expect("borrow 24 readers");
+        assert!(matches!(
+            pools.try_borrow_driver(),
+            Err(EngineError::Backpressure {
+                resource: COMMITTED_DRIVER_POOL_RESOURCE,
+            })
+        ));
+        assert!(matches!(
+            pools.try_borrow_outcome(),
+            Err(EngineError::Backpressure {
+                resource: COMMITTED_OUTCOME_POOL_RESOURCE,
+            })
+        ));
+
+        for (index, guard) in guards.iter_mut().enumerate() {
+            assert_pool_settings(guard)
+                .await
+                .unwrap_or_else(|error| panic!("pooled reader {index} settings: {error}"));
+        }
+
+        for round in 1..=ISOLATION_ROUNDS {
+            {
+                let writer = store.writer.lock().await;
+                writer
+                    .execute(
+                        format!(
+                            "UPDATE committed_pool_probe \
+                             SET version={round},payload=zeroblob({POOL_PAYLOAD_BYTES})"
+                        ),
+                        (),
+                    )
+                    .await
+                    .expect("commit isolation round");
+            }
+            let mut writer = store.writer.lock().await;
+            let dirty = writer
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .expect("live next writer");
+            dirty
+                .execute(
+                    format!("UPDATE committed_pool_probe SET version={}", round + 1),
+                    (),
+                )
+                .await
+                .expect("dirty next round");
+            for (index, guard) in guards.iter_mut().enumerate() {
+                let snapshot = guard
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .await
+                    .unwrap_or_else(|error| panic!("reader {index} snapshot: {error}"));
+                let versions = collect_round_versions(&snapshot)
+                    .await
+                    .unwrap_or_else(|error| panic!("reader {index} round {round}: {error}"));
+                assert!(
+                    versions.iter().all(|version| *version == round),
+                    "reader {index} round {round} observed {versions:?}"
+                );
+                snapshot.commit().await.expect("close isolation snapshot");
+            }
+            dirty.rollback().await.expect("rollback dirty next writer");
+        }
+
+        drop(guards);
+        assert_eq!(pools.idle_driver(), COMMITTED_DRIVER_POOL_SIZE);
+        assert_eq!(pools.idle_outcome(), COMMITTED_OUTCOME_POOL_SIZE);
+        let rss_after = current_rss_bytes();
+        eprintln!(
+            "committed_pools rss_before_bytes={rss_before:?} rss_after_bytes={rss_after:?} \
+             serving_cache_kib={SERVING_READER_CACHE_KIB} pool_cache_kib={POOLED_READER_CACHE_KIB} \
+             predicted_interim_ceiling_mib=352"
+        );
+        let serving_rows = store
+            .query("SELECT COUNT(*) FROM committed_pool_probe", vec![])
+            .await
+            .expect("serving reader still answers queries");
+        assert_eq!(serving_rows[0].values[0], Value::Integer(POOL_ROW_COUNT));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn twenty_four_pooled_committed_readers_do_not_restore_47b1a223_wal_freeze() {
+        let source = include_str!("local.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production local.rs");
+        let pool_source = production
+            .split("pub struct CommittedReaderPools")
+            .nth(1)
+            .expect("pool type")
+            .split("/// Async embedded Turso store")
+            .next()
+            .expect("pool impl");
+        assert!(
+            !pool_source.contains("wal_checkpoint"),
+            "pooled construction must not invoke an explicit checkpoint"
+        );
+        assert!(
+            !production.contains("PRAGMA wal_checkpoint"),
+            "production fireweed-turso must not issue an explicit wal checkpoint"
+        );
+
+        let root = tempfile::tempdir().expect("wal-freeze tempdir");
+        let path = root.path().join("wal-freeze.db");
+        let store = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .expect("open wal-freeze store");
+        let pools = store.committed_pools().expect("pools").clone();
+        {
+            let writer = store.writer.lock().await;
+            seed_probe(&writer).await.expect("seed wal probe");
+        }
+        let wal = wal_path(&path);
+        let wal_before = file_len(&wal);
+        let writer = store.writer.lock().await;
+        for write in 1..=WAL_FREEZE_WRITES {
+            writer
+                .execute(
+                    format!(
+                        "UPDATE committed_pool_probe \
+                         SET version={write},payload=zeroblob({POOL_PAYLOAD_BYTES})"
+                    ),
+                    (),
+                )
+                .await
+                .expect("known write");
+        }
+        let wal_after_writes = file_len(&wal);
+        drop(writer);
+
+        let started = Instant::now();
+        let mut handles = Vec::new();
+        for reader in 0..(COMMITTED_DRIVER_POOL_SIZE + COMMITTED_OUTCOME_POOL_SIZE) {
+            let pools = pools.clone();
+            let is_driver = reader < COMMITTED_DRIVER_POOL_SIZE;
+            handles.push(tokio::spawn(async move {
+                let mut guard = if is_driver {
+                    pools.borrow_driver().await
+                } else {
+                    pools.borrow_outcome().await
+                }
+                .expect("borrow pooled reader");
+                let snapshot = guard
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .await
+                    .expect("deferred snapshot");
+                let versions = collect_round_versions(&snapshot)
+                    .await
+                    .expect("live pooled SELECT");
+                snapshot.commit().await.expect("close snapshot");
+                versions
+            }));
+        }
+        let mut observed = Vec::new();
+        for handle in handles {
+            observed.push(
+                tokio::time::timeout(Duration::from_secs(5), handle)
+                    .await
+                    .expect("pooled reader froze")
+                    .expect("pooled reader task"),
+            );
+        }
+        let elapsed = started.elapsed();
+        let wal_after_reads = file_len(&wal);
+        let write_bytes = u64::try_from(WAL_FREEZE_WRITES * POOL_PAYLOAD_BYTES * POOL_ROW_COUNT)
+            .expect("write bound");
+        assert!(
+            wal_after_reads <= wal_before.saturating_add(write_bytes.saturating_mul(4)),
+            "WAL grew without bound: before={wal_before} after_writes={wal_after_writes} \
+             after_reads={wal_after_reads} write_bytes={write_bytes}"
+        );
+        for versions in &observed {
+            assert!(
+                versions.iter().all(|version| *version == WAL_FREEZE_WRITES),
+                "pooled reader observed {versions:?}"
+            );
+        }
+        assert_eq!(pools.explicit_checkpoint_invocations(), 0);
+        eprintln!(
+            "wal_freeze readers={} elapsed_us={} wal_before={} wal_after_writes={} \
+             wal_after_reads={} checkpoint_invocations={} \
+             wal_autocheckpoint_readback=unavailable_not_inferred",
+            observed.len(),
+            elapsed.as_micros(),
+            wal_before,
+            wal_after_writes,
+            wal_after_reads,
+            pools.explicit_checkpoint_invocations()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn seventeen_outcome_readers_bound_to_two_waves_and_retry() {
+        let root = tempfile::tempdir().expect("seventeen-reader tempdir");
+        let path = root.path().join("seventeen-readers.db");
+        let store = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .expect("open seventeen-reader store");
+        let pools = store.committed_pools().expect("pools").clone();
+        {
+            let writer = store.writer.lock().await;
+            seed_probe(&writer).await.expect("seed seventeen-reader");
+        }
+        let admission = OutcomeReadAdmission::default();
+        let started = Instant::now();
+
+        let mut first_wave = Vec::new();
+        for _ in 0..8 {
+            let mut acquire = admission.acquire();
+            match poll_once(&mut acquire) {
+                Poll::Ready(Ok(permit)) => first_wave.push(permit),
+                Poll::Ready(Err(error)) => {
+                    panic!("first-wave slot was not admitted: {error:?}")
+                }
+                Poll::Pending => panic!("first-wave slot was queued"),
+            }
+        }
+        let mut second_wave = Vec::new();
+        for _ in 0..8 {
+            let mut acquire = admission.acquire();
+            assert!(
+                matches!(poll_once(&mut acquire), Poll::Pending),
+                "readers 9-16 must queue as the second wave"
+            );
+            second_wave.push(acquire);
+        }
+        let mut reader_17 = admission.acquire();
+        match poll_once(&mut reader_17) {
+            Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+                assert_eq!(resource, OUTCOME_READ_SLOTS_RESOURCE);
+            }
+            Poll::Ready(Ok(_)) => panic!("reader 17 borrowed a slot before retry"),
+            Poll::Pending => panic!("reader 17 queued instead of capacity Backpressure"),
+            Poll::Ready(Err(error)) => {
+                panic!("reader 17 must get pre-borrow capacity Backpressure, got {error:?}")
+            }
+        }
+        assert_eq!(admission.active(), 8);
+        assert_eq!(admission.queued(), 8);
+
+        async fn outcome_work(
+            permit: SlotPermit,
+            pools: &CommittedReaderPools,
+            expected: i64,
+        ) -> EngineResult<()> {
+            let mut guard = pools.borrow_outcome().await?;
+            let snapshot = guard
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .await
+                .map_err(|error| map_pooled_reader_error(error, COMMITTED_OUTCOME_POOL_RESOURCE))?;
+            let versions = collect_round_versions(&snapshot)
+                .await
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            assert!(versions.iter().all(|version| *version == expected));
+            snapshot
+                .commit()
+                .await
+                .map_err(|error| map_pooled_reader_error(error, COMMITTED_OUTCOME_POOL_RESOURCE))?;
+            drop(guard);
+            drop(permit);
+            Ok(())
+        }
+
+        let mut first_handles = Vec::new();
+        for permit in first_wave {
+            let pools = pools.clone();
+            first_handles.push(tokio::spawn(async move {
+                outcome_work(permit, &pools, 0).await.expect("first wave")
+            }));
+        }
+        for handle in first_handles {
+            handle.await.expect("first wave join");
+        }
+
+        let mut second_permits = Vec::new();
+        for mut queued in second_wave {
+            match poll_once(&mut queued) {
+                Poll::Ready(Ok(permit)) => second_permits.push(permit),
+                Poll::Ready(Err(error)) => {
+                    panic!("second wave was not admitted after first-wave release: {error:?}")
+                }
+                Poll::Pending => {
+                    panic!("second wave still queued after first-wave release")
+                }
+            }
+        }
+        let mut second_handles = Vec::new();
+        for permit in second_permits {
+            let pools = pools.clone();
+            second_handles.push(tokio::spawn(async move {
+                outcome_work(permit, &pools, 0).await.expect("second wave")
+            }));
+        }
+        for handle in second_handles {
+            handle.await.expect("second wave join");
+        }
+
+        let mut completed_17 = false;
+        while started.elapsed() < SEVENTEEN_READER_DEADLINE {
+            let mut acquire = admission.acquire();
+            match poll_once(&mut acquire) {
+                Poll::Ready(Ok(permit)) => {
+                    outcome_work(permit, &pools, 0)
+                        .await
+                        .expect("reader 17 after retry");
+                    completed_17 = true;
+                    break;
+                }
+                Poll::Ready(Err(CoordinationError::Capacity { resource })) => {
+                    assert_eq!(resource, OUTCOME_READ_SLOTS_RESOURCE);
+                    tokio::time::sleep(EVIDENCE_RETRY).await;
+                }
+                Poll::Pending => {
+                    let permit = acquire.await.expect("reader 17 queued then admitted");
+                    outcome_work(permit, &pools, 0)
+                        .await
+                        .expect("reader 17 queued work");
+                    completed_17 = true;
+                    break;
+                }
+                Poll::Ready(Err(error)) => panic!("reader 17 retry failed: {error:?}"),
+            }
+        }
+        assert!(
+            completed_17,
+            "reader 17 did not complete within {:?}",
+            SEVENTEEN_READER_DEADLINE
+        );
+        assert!(
+            started.elapsed() <= SEVENTEEN_READER_DEADLINE,
+            "seventeen-reader lane took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn busy_reads_map_to_retryable_pool_backpressure() {
+        assert_eq!(
+            map_pooled_reader_error(
+                turso::Error::Busy("locked".into()),
+                COMMITTED_DRIVER_POOL_RESOURCE,
+            ),
+            EngineError::Backpressure {
+                resource: COMMITTED_DRIVER_POOL_RESOURCE,
+            }
+        );
+        assert_eq!(
+            map_pooled_reader_error(
+                turso::Error::BusySnapshot("snapshot".into()),
+                COMMITTED_OUTCOME_POOL_RESOURCE,
+            ),
+            EngineError::Backpressure {
+                resource: COMMITTED_OUTCOME_POOL_RESOURCE,
+            }
+        );
+        assert!(matches!(
+            map_pooled_reader_error(
+                turso::Error::Error("other".into()),
+                COMMITTED_OUTCOME_POOL_RESOURCE,
+            ),
+            EngineError::Storage(_)
+        ));
+    }
+}
+
 pub fn claimed_from_class_s(
     lease_token: &LeaseToken,
     result: ClassSClaimResult,
@@ -1627,7 +2412,7 @@ pub(crate) async fn configure_committed_reader(
     verify_committed_reader_settings(connection, settings).await
 }
 
-async fn verify_committed_reader_settings(
+pub(crate) async fn verify_committed_reader_settings(
     connection: &Connection,
     expected: CommittedReaderSettings,
 ) -> Result<()> {
