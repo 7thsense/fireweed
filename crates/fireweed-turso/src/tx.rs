@@ -1047,4 +1047,56 @@ mod packed_authority_first_tests {
             row_model(&solo, &solo_shard, ids[0]).await,
         );
     }
+
+    #[tokio::test]
+    async fn packed_claim_run_then_complete_run_fuses_like_adjacent_pairs() {
+        let items: Vec<_> = (1..=3)
+            .map(|index| fifo_item(&index.to_string(), &format!("cf{index}")))
+            .collect();
+        let ids: Vec<ItemId> = items.iter().map(|item| item.item_id).collect();
+        let (packed, shard) = open_store().await;
+        let (solo, solo_shard) = open_store().await;
+        let push = envelope(
+            QueueCommand::Push(PushCommand {
+                items: items.clone(),
+            }),
+            ids.clone(),
+        );
+        apply(&packed, &shard, 0, vec![push.clone()]).await.unwrap();
+        apply(&solo, &solo_shard, 0, vec![push]).await.unwrap();
+
+        let claims: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(offset, id)| {
+                claim_envelope(vec![*id], &format!("tok-cf{offset}"), 50, "w", true)
+            })
+            .collect();
+        let completes: Vec<_> = ids.iter().map(|id| complete_envelope(vec![*id])).collect();
+        let mut packed_vector = claims.clone();
+        packed_vector.extend(completes.clone());
+        apply(&packed, &shard, 1, packed_vector)
+            .await
+            .expect("claim run then complete run");
+        let mut seq = 1u64;
+        for command in claims.into_iter().chain(completes) {
+            apply(&solo, &solo_shard, seq, vec![command])
+                .await
+                .expect("solo neighbor");
+            seq += 1;
+        }
+        for id in ids {
+            assert_eq!(
+                row_model(&packed, &shard, id).await,
+                row_model(&solo, &solo_shard, id).await,
+                "fused run model {id}"
+            );
+            assert_eq!(
+                AsyncProjectionStore::item_state(&packed, shard.clone(), id)
+                    .await
+                    .unwrap(),
+                Some(ItemState::Complete)
+            );
+        }
+    }
 }

@@ -11,13 +11,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use fireweed_engine::{
-    AsyncProjectionSpec, AsyncProjectionStore, CLAIM_GENERATION_MAX_REQUESTS, CommandEnvelope,
-    CommandPosition, EngineError, EngineResult, GENERATION_MAX_ITEMS,
-    GENERATION_MAX_RESPONSE_BYTES, QueueCommand, QueueKey,
+    AsyncProjectionSpec, AsyncProjectionStore, CommandEnvelope, CommandPosition, EngineError,
+    EngineResult, QueueCommand, QueueKey,
 };
 use tokio::sync::{Mutex, Notify};
 
 use crate::PackedAppendError;
+
+/// Admit stays 8/800/4MiB. Apply may join one Claim wave with the following
+/// Complete wave (16 envelopes / 1600 items) so those ids fuse in one IMMEDIATE.
+const APPLY_COALESCE_MAX_REQUESTS: usize = 16;
+const APPLY_COALESCE_MAX_ITEMS: usize = 1_600;
+const APPLY_COALESCE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One admission reserved before the authoritative append begins.
 #[derive(Debug)]
@@ -855,9 +860,9 @@ fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration
         }
         let add_envelopes = generation_envelope_count(batch);
         let add_items = represented_item_mutations(batch);
-        if envelopes.saturating_add(add_envelopes) > CLAIM_GENERATION_MAX_REQUESTS
-            || items.saturating_add(add_items) > GENERATION_MAX_ITEMS
-            || debt.saturating_add(batch.debt_bytes) > GENERATION_MAX_RESPONSE_BYTES as u64
+        if envelopes.saturating_add(add_envelopes) > APPLY_COALESCE_MAX_REQUESTS
+            || items.saturating_add(add_items) > APPLY_COALESCE_MAX_ITEMS
+            || debt.saturating_add(batch.debt_bytes) > APPLY_COALESCE_MAX_BYTES
         {
             break;
         }
@@ -1052,7 +1057,10 @@ mod tests {
         ClientItemKey, EligibilityPolicy, ItemId, OrderingMode, PriorityModel, QueueDefinition,
         QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
     };
-    use fireweed_engine::{CommandChecksum, CommandId, ProjectionStore, PushCommand, PushItem};
+    use fireweed_engine::{
+        CLAIM_GENERATION_MAX_REQUESTS, CommandChecksum, CommandId, ProjectionStore, PushCommand,
+        PushItem,
+    };
 
     fn shard() -> QueueKey {
         QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap())
@@ -1292,7 +1300,17 @@ mod tests {
     }
 
     #[test]
-    fn stops_at_eight_envelope_bound() {
+    fn stops_at_apply_envelope_bound() {
+        let mut state = CoordinatorState::default();
+        state
+            .entries
+            .push_back(ready_sized(1, 1, APPLY_COALESCE_MAX_REQUESTS as u64, 0, 0));
+        state.entries.push_back(ready(2, 2));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn joins_claim_wave_with_following_complete_wave() {
         let mut state = CoordinatorState::default();
         state.entries.push_back(ready_sized(
             1,
@@ -1301,32 +1319,30 @@ mod tests {
             0,
             0,
         ));
-        state.entries.push_back(ready(2, 2));
-        assert_eq!(generation_ids(&state), vec![1]);
-    }
-
-    #[test]
-    fn joins_underfilled_packs_up_to_eight_envelopes() {
-        let mut state = CoordinatorState::default();
-        state.entries.push_back(ready_sized(1, 1, 5, 0, 0));
-        state.entries.push_back(ready_sized(2, 2, 3, 0, 0));
+        state.entries.push_back(ready_sized(
+            2,
+            2,
+            CLAIM_GENERATION_MAX_REQUESTS as u64,
+            0,
+            0,
+        ));
         assert_eq!(generation_ids(&state), vec![1, 2]);
     }
 
     #[test]
-    fn stops_at_eight_hundred_item_bound() {
+    fn stops_at_apply_item_bound() {
         let mut state = CoordinatorState::default();
         state
             .entries
-            .push_back(ready_sized(1, 1, 1, GENERATION_MAX_ITEMS - 1, 0));
+            .push_back(ready_sized(1, 1, 1, APPLY_COALESCE_MAX_ITEMS - 1, 0));
         state.entries.push_back(ready_sized(2, 2, 1, 2, 0));
         assert_eq!(generation_ids(&state), vec![1]);
     }
 
     #[test]
-    fn stops_at_four_mib_debt_bound() {
+    fn stops_at_apply_debt_bound() {
         let mut state = CoordinatorState::default();
-        let almost_full = GENERATION_MAX_RESPONSE_BYTES as u64 - 1;
+        let almost_full = APPLY_COALESCE_MAX_BYTES - 1;
         state
             .entries
             .push_back(ready_sized(1, 1, 1, 0, almost_full));

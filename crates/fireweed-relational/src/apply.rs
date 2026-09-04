@@ -401,6 +401,46 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
             continue;
         }
 
+        if let Some((claim_end, complete_end)) =
+            coalescible_claim_complete_runs(positions, envelopes, i)
+        {
+            let shard = pos.queue.clone();
+            apply_fused_claim_complete_run_sql(
+                tx,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                token_ops,
+                &shard,
+                &positions[i..claim_end],
+                &envelopes[i..claim_end],
+                &positions[claim_end..complete_end],
+                &envelopes[claim_end..complete_end],
+            )?;
+            let mut exp = incoming;
+            for (p, e) in positions[i..complete_end]
+                .iter()
+                .zip(&envelopes[i..complete_end])
+            {
+                if matches!(e.command, QueueCommand::Claim(_)) {
+                    let (tenant, queue) = parts(&p.queue);
+                    crate::delete_claim_outbox(tx, &tenant, &queue, &e.command_id.0)?;
+                }
+                persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
+                exp = (p.sequence as i64)
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                let ep = p.backend_epoch as i64;
+                let slot = max_epoch.entry(p.queue.clone()).or_insert(ep);
+                if ep > *slot {
+                    *slot = ep;
+                }
+            }
+            next_seq.insert(shard, exp);
+            i = complete_end;
+            continue;
+        }
+
         if let Some(run_end) = coalescible_claim_run_end(positions, envelopes, i) {
             let shard = pos.queue.clone();
             apply_claim_run_sql(
@@ -711,6 +751,70 @@ fn finalize_is_complete_only(command: &QueueCommand) -> bool {
         }
         _ => false,
     }
+}
+
+fn consecutive_claim_run_end(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    start: usize,
+) -> Option<usize> {
+    if !matches!(envelopes.get(start)?.command, QueueCommand::Claim(_)) {
+        return None;
+    }
+    let shard = &positions[start].queue;
+    let mut expected = positions[start].sequence;
+    let mut end = start;
+    while end < positions.len() {
+        let position = &positions[end];
+        let envelope = &envelopes[end];
+        if position.queue != *shard || position.sequence != expected {
+            break;
+        }
+        if !matches!(envelope.command, QueueCommand::Claim(_)) {
+            break;
+        }
+        expected = expected.saturating_add(1);
+        end += 1;
+    }
+    (end > start).then_some(end)
+}
+
+fn coalescible_claim_complete_runs(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    start: usize,
+) -> Option<(usize, usize)> {
+    if claim_fuses_with_next(positions, envelopes, start) {
+        return None;
+    }
+    let claim_end = consecutive_claim_run_end(positions, envelopes, start)?;
+    let complete_end = coalescible_complete_run_end(positions, envelopes, claim_end)?;
+    let mut claimed = BTreeSet::new();
+    for envelope in &envelopes[start..claim_end] {
+        let QueueCommand::Claim(claim) = &envelope.command else {
+            return None;
+        };
+        for id in &claim.item_ids {
+            if !claimed.insert(*id) {
+                return None;
+            }
+        }
+    }
+    let mut completed = BTreeSet::new();
+    for envelope in &envelopes[claim_end..complete_end] {
+        let QueueCommand::Finalize(finalize) = &envelope.command else {
+            return None;
+        };
+        for outcome in &finalize.outcomes {
+            if !matches!(outcome.kind, FinalizeKind::Complete) {
+                return None;
+            }
+            if !completed.insert(outcome.item_id) {
+                return None;
+            }
+        }
+    }
+    (claimed == completed && !claimed.is_empty()).then_some((claim_end, complete_end))
 }
 
 fn coalescible_complete_run_end(
@@ -3225,6 +3329,106 @@ pub fn apply_fused_claim_complete_sql(
     }
     if pending_moved > 0 {
         maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
+    }
+    Ok(())
+}
+
+fn apply_fused_claim_complete_run_sql(
+    tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    _claim_positions: &[CommandPosition],
+    claim_envelopes: &[CommandEnvelope],
+    complete_positions: &[CommandPosition],
+    complete_envelopes: &[CommandEnvelope],
+) -> EngineResult<()> {
+    let mut named = 0usize;
+    let mut authority_first = false;
+    let mut all_ids = Vec::new();
+    let mut last_now = complete_envelopes[0].created_at;
+    for envelope in claim_envelopes {
+        let QueueCommand::Claim(claim) = &envelope.command else {
+            return Err(EngineError::Storage(
+                "fused claim-complete run: non-claim envelope".into(),
+            ));
+        };
+        authority_first |= claim.authority_first;
+        named += claim.item_ids.len();
+        all_ids.extend_from_slice(&claim.item_ids);
+    }
+    let mut rows: Vec<(String, i64, i64, i64)> = Vec::new();
+    for (position, envelope) in complete_positions.iter().zip(complete_envelopes) {
+        let QueueCommand::Finalize(finalize) = &envelope.command else {
+            return Err(EngineError::Storage(
+                "fused claim-complete run: non-complete envelope".into(),
+            ));
+        };
+        last_now = envelope.created_at;
+        let seq = position.sequence as i64;
+        let epoch = position.backend_epoch as i64;
+        let now_n = ts_nanos(envelope.created_at);
+        for outcome in &finalize.outcomes {
+            rows.push((outcome.item_id.to_string(), seq, epoch, now_n));
+            token_ops.push(TokenOp::Clear(shard.clone(), outcome.item_id));
+        }
+    }
+    let (t, q) = parts(shard);
+    exec_items_in(
+        tx,
+        "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        &[],
+        &t,
+        &q,
+        &rows
+            .iter()
+            .map(|(id, _, _, _)| id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    const ROW_BINDS: usize = 4;
+    let mut pending_moved = 0usize;
+    for chunk in rows.chunks(bind_chunk_size(ROW_BINDS, 2)) {
+        let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
+        let sql = format!(
+            "WITH incoming(item_id, last_command_sequence, terminal_command_epoch, terminal_at) \
+             AS (VALUES {values}) \
+             UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+             retry_count=retry_count+1, item_version=item_version+2, \
+             terminal_at=incoming.terminal_at, \
+             terminal_command_epoch=incoming.terminal_command_epoch, \
+             updated_at=incoming.terminal_at, \
+             last_command_sequence=incoming.last_command_sequence \
+             FROM incoming WHERE tenant_id=? AND queue_id=? \
+             AND fireweed_items.item_id=incoming.item_id \
+             AND lifecycle_state='Pending' AND superseded=0"
+        );
+        let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + 2);
+        for (item_id, seq, epoch, now_n) in chunk {
+            params.extend([
+                RelValue::Text(item_id.clone()),
+                RelValue::Integer(*seq),
+                RelValue::Integer(*epoch),
+                RelValue::Integer(*now_n),
+            ]);
+        }
+        params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
+        pending_moved += crate::rel_exec(tx, &sql, params)?;
+    }
+    if authority_first && pending_moved != named {
+        return Err(authority_first_short_move(pending_moved, named));
+    }
+    advance_claim_scan_hint_for_ids(
+        tx,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        shard,
+        &all_ids,
+    )?;
+    if pending_moved > 0 {
+        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &all_ids, last_now)?;
     }
     Ok(())
 }
