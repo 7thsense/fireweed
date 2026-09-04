@@ -488,12 +488,12 @@ pub async fn settle_phase(
     // `metrics` on the derived object-log × Turso composition catches the
     // projection up to the durable log frontier before reading counts. `peek`
     // then records residual eligible work from that same settled projection.
-    let metrics = fw.metrics(queue).await.expect("phase settlement metrics");
-    let eligible = fw
-        .peek(queue, eligible_limit)
-        .await
-        .expect("phase settlement eligible residual")
-        .len();
+    let metrics = retry_backpressure("phase settlement metrics", || fw.metrics(queue)).await;
+    let eligible = retry_backpressure("phase settlement eligible residual", || {
+        fw.peek(queue, eligible_limit)
+    })
+    .await
+    .len();
     (
         phase_started.elapsed(),
         ResidualSnapshot {

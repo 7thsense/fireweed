@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fireweed_core::{
-    BodyHash, CohortId, GateKeyPolicy, ItemId, LeaseToken, PriorityModelKind, PriorityValue,
-    QueueDefinition, RequestId, TypedValue, UtcTimestamp,
+    BodyHash, CohortId, GateKeyPolicy, ItemId, ItemState, LeaseToken, PriorityModelKind,
+    PriorityValue, QueueDefinition, RequestId, TypedValue, UtcTimestamp,
 };
 
 use crate::{
@@ -16,9 +16,10 @@ use crate::{
     BatchUpdateRequest, BatchUpdateResponse, BatchUpdateSnapshotItem, ClaimCommand, ClaimRequest,
     ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CommandChecksum, CommandEnvelope,
     CommandId, CoordinationError, DispatchError, DurabilityClass, EngineError, EngineResult,
-    KeyedQueueGate, MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationBatch,
-    MutationGenerationKind, MutationSequencer, MutationTicket, NoAsyncCohortLifecyclePlanner,
-    OwnedTask, OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, KeyedQueueGate,
+    MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationBatch, MutationGenerationKind,
+    MutationSequencer, MutationTicket, NoAsyncCohortLifecyclePlanner, OwnedTask,
+    OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
     QueueCommand, QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
     RequestOutcome, TaskOutcomeError, UpdateFieldsBatchCommand, compile_entity_schema,
     plan_batch_update, validate_claim_compatibility, validate_entity, validate_gate_push,
@@ -258,7 +259,7 @@ impl PreparedClaimedResult {
     }
 }
 
-/// Sequencer compatibility: same-kind Push/BatchUpdate overlay; keyed/complex mutations stay singleton.
+/// Sequencer compatibility: same-kind Push/Update overlay; keyed/complex mutations stay singleton.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MutationSequencerKey {
     Compatible(MutationGenerationKind),
@@ -268,7 +269,10 @@ pub enum MutationSequencerKey {
 /// S3s-derived queued-generation wait (floor 500 ms, structural cap 255 s). Not activated until S3c.
 pub const MUTATION_SEQUENCER_DEFAULT_MAX_WAIT: Duration = crate::S3S_DERIVED_TURN_WAIT;
 
-/// Committed driver-snapshot facts plus in-generation overlay inputs. Inert until S3c.
+/// Committed driver-snapshot facts plus in-generation overlay inputs.
+///
+/// `leased_ids` / `terminal_ids` are the unpublished Update overlay: Claim assigns, Complete/Fail
+/// consumes. They replace an exclusive selection fence for ordinary item Claim.
 #[derive(Debug, Clone)]
 pub struct MutationDriverSnapshot {
     pub definition: QueueDefinition,
@@ -278,17 +282,19 @@ pub struct MutationDriverSnapshot {
     pub unique_index_values: HashSet<String>,
     pub group_counts: HashMap<String, u64>,
     pub batch_items: Vec<BatchUpdateSnapshotItem>,
+    pub leased_ids: HashSet<ItemId>,
+    pub terminal_ids: HashSet<ItemId>,
 }
 
-/// One already-allocated mutation that may join an inert generation.
+/// One mutation that may join a packed add (`Push`) or update generation.
+///
+/// Update work is field-update, ordinary item Claim, and Complete/Fail. Those share one overlay
+/// because they are the same bulk modify: assign, rewrite, or consume candidate rows.
 #[derive(Debug, Clone)]
 pub enum MutationGenerationWork {
     Push {
         request: AsyncPushRequest,
         fingerprint: Option<PushFingerprint>,
-        commit: RawCommitRequest,
-        item_ids: Vec<ItemId>,
-        items: Vec<PushItem>,
     },
     BatchUpdate {
         shard: QueueKey,
@@ -296,6 +302,17 @@ pub enum MutationGenerationWork {
         now: UtcTimestamp,
         expected_epoch: u64,
         fingerprint: BodyHash,
+        command_id: CommandId,
+    },
+    Claim {
+        id: u64,
+        request: ClaimRequest,
+    },
+    Finalize {
+        shard: QueueKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: u64,
         command_id: CommandId,
     },
     Singleton {
@@ -308,9 +325,23 @@ pub enum MutationGenerationWork {
 #[derive(Debug, Clone)]
 pub enum MutationGenerationMemberOutcome {
     Push(PreparedPush),
+    /// Overlay accepted an unprepared add. The driver allocates ids/blobs before append.
+    PushAccepted,
     BatchUpdate {
         request: RawCommitRequest,
         response: BatchUpdateResponse,
+    },
+    /// Overlay accepted an unprepared Claim. The driver selects against the serving reader next.
+    ClaimAccepted {
+        id: u64,
+    },
+    Claim {
+        id: u64,
+        request: Option<RawCommitRequest>,
+        claimed: Claimed,
+    },
+    Finalize {
+        request: RawCommitRequest,
     },
     Singleton {
         request: RawCommitRequest,
@@ -339,8 +370,8 @@ impl MutationGenerationWork {
     pub fn sequencer_key(&self) -> MutationSequencerKey {
         match self {
             Self::Push { .. } => MutationSequencerKey::Compatible(MutationGenerationKind::Push),
-            Self::BatchUpdate { .. } => {
-                MutationSequencerKey::Compatible(MutationGenerationKind::BatchUpdate)
+            Self::BatchUpdate { .. } | Self::Claim { .. } | Self::Finalize { .. } => {
+                MutationSequencerKey::Compatible(MutationGenerationKind::Update)
             }
             Self::Singleton { id, .. } => MutationSequencerKey::Singleton(*id),
         }
@@ -349,29 +380,34 @@ impl MutationGenerationWork {
     pub fn queue(&self) -> QueueKey {
         match self {
             Self::Push { request, .. } => request.shard.clone(),
-            Self::BatchUpdate { shard, .. } => shard.clone(),
+            Self::BatchUpdate { shard, .. } | Self::Finalize { shard, .. } => shard.clone(),
+            Self::Claim { request, .. } => request.shard.clone(),
             Self::Singleton { commit, .. } => commit.shard().clone(),
         }
     }
 
     pub fn items(&self) -> usize {
         match self {
-            Self::Push { items, .. } => items.len(),
+            Self::Push { request, .. } => request.items.len(),
             Self::BatchUpdate { request, .. } => request.updates.len(),
+            Self::Claim { request, .. } => request.max_items.max(1),
+            Self::Finalize { outcomes, .. } => outcomes.len().max(1),
             Self::Singleton { .. } => 1,
         }
     }
 
     pub fn response_bytes(&self) -> usize {
         match self {
-            Self::Push { items, .. } => items.iter().map(push_item_rendered_bytes).sum(),
+            Self::Push { request, .. } => request.items.iter().map(push_spec_rendered_bytes).sum(),
             Self::BatchUpdate { request, .. } => request.updates.len().saturating_mul(64),
+            Self::Claim { request, .. } => request.max_items.saturating_mul(4 * 1024),
+            Self::Finalize { outcomes, .. } => outcomes.len().saturating_mul(64),
             Self::Singleton { .. } => 64,
         }
     }
 }
 
-fn push_item_rendered_bytes(item: &PushItem) -> usize {
+fn push_spec_rendered_bytes(item: &crate::PushSpec) -> usize {
     item.payload.as_ref().map_or(0, |payload| payload.len())
         + item.fields.values().map(|value| value.len()).sum::<usize>()
 }
@@ -433,6 +469,15 @@ pub fn validate_inert_mutation_generation(
     snapshot: &MutationDriverSnapshot,
     works: &[MutationGenerationWork],
 ) -> EngineResult<Vec<MutationGenerationMember>> {
+    Ok(validate_inert_mutation_generation_folding(snapshot, works)?.0)
+}
+
+/// Same FIFO overlay as [`validate_inert_mutation_generation`], plus the folded identity
+/// facts the next generation must see before this generation's apply covers.
+pub fn validate_inert_mutation_generation_folding(
+    snapshot: &MutationDriverSnapshot,
+    works: &[MutationGenerationWork],
+) -> EngineResult<(Vec<MutationGenerationMember>, MutationDriverSnapshot)> {
     if works.len() > crate::CLAIM_GENERATION_MAX_REQUESTS {
         return Err(EngineError::Backpressure {
             resource: crate::MUTATION_SEQUENCER_RESOURCE,
@@ -445,7 +490,20 @@ pub fn validate_inert_mutation_generation(
             outcome: overlay.validate_one(snapshot, work),
         });
     }
-    Ok(members)
+    Ok((
+        members,
+        MutationDriverSnapshot {
+            definition: snapshot.definition.clone(),
+            paused_drain_intake: snapshot.paused_drain_intake,
+            client_keys: overlay.client_keys,
+            request_fingerprints: overlay.request_fingerprints,
+            unique_index_values: overlay.unique_index_values,
+            group_counts: overlay.group_counts,
+            batch_items: overlay.batch_items,
+            leased_ids: overlay.leased_ids,
+            terminal_ids: overlay.terminal_ids,
+        },
+    ))
 }
 
 /// Record that the shared driver slot and pooled connection are gone; retain only the sequencer.
@@ -471,6 +529,8 @@ struct MutationGenerationOverlay {
     unique_index_values: HashSet<String>,
     group_counts: HashMap<String, u64>,
     batch_items: Vec<BatchUpdateSnapshotItem>,
+    leased_ids: HashSet<ItemId>,
+    terminal_ids: HashSet<ItemId>,
 }
 
 impl MutationGenerationOverlay {
@@ -481,6 +541,8 @@ impl MutationGenerationOverlay {
             unique_index_values: snapshot.unique_index_values.clone(),
             group_counts: snapshot.group_counts.clone(),
             batch_items: snapshot.batch_items.clone(),
+            leased_ids: snapshot.leased_ids.clone(),
+            terminal_ids: snapshot.terminal_ids.clone(),
         }
     }
 
@@ -493,10 +555,7 @@ impl MutationGenerationOverlay {
             MutationGenerationWork::Push {
                 request,
                 fingerprint,
-                commit,
-                item_ids,
-                items,
-            } => self.validate_push(snapshot, request, *fingerprint, items, commit, item_ids),
+            } => self.validate_push(snapshot, request, *fingerprint),
             MutationGenerationWork::BatchUpdate {
                 shard,
                 request,
@@ -513,6 +572,16 @@ impl MutationGenerationOverlay {
                 *fingerprint,
                 command_id.clone(),
             ),
+            MutationGenerationWork::Claim { id, .. } => {
+                MutationGenerationMemberOutcome::ClaimAccepted { id: *id }
+            }
+            MutationGenerationWork::Finalize {
+                shard,
+                outcomes,
+                now,
+                expected_epoch,
+                command_id,
+            } => self.validate_finalize(shard, outcomes, *now, *expected_epoch, command_id.clone()),
             MutationGenerationWork::Singleton { commit, .. } => {
                 MutationGenerationMemberOutcome::Singleton {
                     request: commit.clone(),
@@ -526,9 +595,6 @@ impl MutationGenerationOverlay {
         snapshot: &MutationDriverSnapshot,
         request: &AsyncPushRequest,
         fingerprint: Option<PushFingerprint>,
-        items: &[PushItem],
-        commit: &RawCommitRequest,
-        item_ids: &[ItemId],
     ) -> MutationGenerationMemberOutcome {
         if snapshot.paused_drain_intake {
             return MutationGenerationMemberOutcome::Rejected(EngineError::Paused {
@@ -536,12 +602,9 @@ impl MutationGenerationOverlay {
             });
         }
         if let (Some(request_id), Some(fingerprint)) = (request.request_id.as_ref(), fingerprint) {
-            if let Some(stored) = self.request_fingerprints.get(request_id) {
-                return if *stored == fingerprint.legacy_body_hash {
-                    MutationGenerationMemberOutcome::Push(PreparedPush::Replay(item_ids.to_vec()))
-                } else {
-                    MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict)
-                };
+            if self.request_fingerprints.contains_key(request_id) {
+                let _ = fingerprint;
+                return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);
             }
         }
         if let Err(error) = validate_push_shape(&snapshot.definition, &request.items) {
@@ -550,8 +613,11 @@ impl MutationGenerationOverlay {
         let mut keys = Vec::new();
         let mut indexes = Vec::new();
         let mut groups = Vec::new();
-        for item in items {
-            let key = item.client_item_key.as_str().to_string();
+        for item in &request.items {
+            let Some(key) = item.client_item_key.as_ref() else {
+                continue;
+            };
+            let key = key.as_str().to_string();
             if self.client_keys.contains(&key) {
                 return MutationGenerationMemberOutcome::Rejected(EngineError::Conflict);
             }
@@ -593,10 +659,7 @@ impl MutationGenerationOverlay {
             self.request_fingerprints
                 .insert(request_id, fingerprint.legacy_body_hash);
         }
-        MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
-            request: commit.clone(),
-            item_ids: item_ids.to_vec(),
-        })
+        MutationGenerationMemberOutcome::PushAccepted
     }
 
     fn validate_batch_update(
@@ -667,6 +730,66 @@ impl MutationGenerationOverlay {
                 request_id: request.request_id.clone(),
                 results: plan.outcomes,
             },
+        }
+    }
+
+    fn validate_finalize(
+        &mut self,
+        shard: &QueueKey,
+        outcomes: &[FinalizeOutcome],
+        now: UtcTimestamp,
+        expected_epoch: u64,
+        command_id: CommandId,
+    ) -> MutationGenerationMemberOutcome {
+        if outcomes.is_empty() {
+            return MutationGenerationMemberOutcome::Rejected(EngineError::Invalid(
+                "finalize item batch must not be empty",
+            ));
+        }
+        let mut sealed = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            if matches!(
+                outcome.kind,
+                FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm
+            ) {
+                return MutationGenerationMemberOutcome::Rejected(EngineError::Invalid(
+                    "retry/release/rearm stay on the singleton path",
+                ));
+            }
+            if outcome.not_before.is_some() {
+                return MutationGenerationMemberOutcome::Rejected(EngineError::Invalid(
+                    "not_before is invalid for finalize disposition",
+                ));
+            }
+            let applied_state = match outcome.kind {
+                FinalizeKind::Complete => ItemState::Complete,
+                FinalizeKind::Fail => ItemState::Failed,
+                FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm => {
+                    unreachable!("singleton finalize kinds rejected above")
+                }
+            };
+            self.leased_ids.remove(&outcome.item_id);
+            self.terminal_ids.insert(outcome.item_id);
+            sealed.push(FinalizeOutcome {
+                item_id: outcome.item_id,
+                kind: outcome.kind,
+                applied_state: Some(applied_state),
+                not_before: None,
+            });
+        }
+        let item_ids: Vec<_> = sealed.iter().map(|outcome| outcome.item_id).collect();
+        let envelope = CommandEnvelope {
+            command_id,
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids,
+            command: QueueCommand::Finalize(FinalizeCommand { outcomes: sealed }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        MutationGenerationMemberOutcome::Finalize {
+            request: RawCommitRequest::new(shard.clone(), vec![envelope], expected_epoch),
         }
     }
 }
@@ -5105,30 +5228,12 @@ mod tests {
             now: UtcTimestamp::new(1, 0).unwrap(),
             expected_epoch: Some(1),
         };
-        let (items, item_ids) = build_push_items(vec![spec], 1, 1, u32::from(index), 3);
-        let envelope = CommandEnvelope {
-            command_id: CommandId::new(format!("push-{index}")),
-            request_id: request.request_id.clone(),
-            request_fingerprint: Some(index as u64),
-            request_outcome: Some(RequestOutcome::Push {
-                item_ids: item_ids.clone(),
-            }),
-            item_ids: item_ids.clone(),
-            command: QueueCommand::Push(PushCommand {
-                items: items.clone(),
-            }),
-            checksum: CommandChecksum(0),
-            created_at: request.now,
-        };
         MutationGenerationWork::Push {
             fingerprint: Some(PushFingerprint {
                 canonical_sha256: [index; 32],
                 legacy_body_hash: BodyHash(index as u64),
             }),
             request,
-            commit: RawCommitRequest::new(shard, vec![envelope], 1),
-            item_ids,
-            items,
         }
     }
 
@@ -5141,6 +5246,8 @@ mod tests {
             unique_index_values: HashSet::new(),
             group_counts: HashMap::new(),
             batch_items: Vec::new(),
+            leased_ids: HashSet::new(),
+            terminal_ids: HashSet::new(),
         }
     }
 
@@ -5164,7 +5271,7 @@ mod tests {
         assert!(members.iter().all(|member| {
             matches!(
                 member.outcome,
-                MutationGenerationMemberOutcome::Push(PreparedPush::Commit { .. })
+                MutationGenerationMemberOutcome::PushAccepted
             )
         }));
 
@@ -5173,16 +5280,16 @@ mod tests {
             push_work(2, "shared"),
             push_work(3, "other"),
         ];
-        if let MutationGenerationWork::Push { items, .. } = &mut conflict_works[0] {
-            items[0].group_key = Some(GroupKey::new("g").unwrap());
+        if let MutationGenerationWork::Push { request, .. } = &mut conflict_works[0] {
+            request.items[0].group_key = Some(GroupKey::new("g").unwrap());
         }
-        if let MutationGenerationWork::Push { items, .. } = &mut conflict_works[2] {
-            items[0].group_key = Some(GroupKey::new("g").unwrap());
+        if let MutationGenerationWork::Push { request, .. } = &mut conflict_works[2] {
+            request.items[0].group_key = Some(GroupKey::new("g").unwrap());
         }
         let overlay = validate_inert_mutation_generation(&snapshot, &conflict_works).unwrap();
         assert!(matches!(
             overlay[0].outcome,
-            MutationGenerationMemberOutcome::Push(PreparedPush::Commit { .. })
+            MutationGenerationMemberOutcome::PushAccepted
         ));
         assert!(matches!(
             overlay[1].outcome,
@@ -5190,7 +5297,7 @@ mod tests {
         ));
         assert!(matches!(
             overlay[2].outcome,
-            MutationGenerationMemberOutcome::Push(PreparedPush::Commit { .. })
+            MutationGenerationMemberOutcome::PushAccepted
         ));
 
         let sequencer =

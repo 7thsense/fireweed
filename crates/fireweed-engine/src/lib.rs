@@ -76,7 +76,7 @@ pub use async_composed::{
     PreparedFinalize, PreparedMutationGeneration, PreparedPush, PushFingerprint, RenewTarget,
     abort_unplanned_generation_on_deadline, admit_inert_mutation_generation,
     finish_retained_grouped_cohort_claim, retain_sequencer_after_slot_release,
-    validate_inert_mutation_generation,
+    validate_inert_mutation_generation, validate_inert_mutation_generation_folding,
 };
 pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
 pub use async_log_replay_product::{
@@ -86,6 +86,7 @@ pub use async_log_replay_product::{
 };
 pub use async_projection_spec::AsyncProjectionSpec;
 pub use async_push_planner::ProjectionPushPlanner;
+pub use async_push_planner::allocate_push_epoch_blob_and_counters;
 pub use async_reclaim_planner::{
     AsyncReclaimPlan, AsyncReclaimPlanner, AsyncReclaimRequest, ProjectionReclaimPlanner,
 };

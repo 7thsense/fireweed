@@ -22,7 +22,7 @@ use fireweed_engine::{
 use fireweed_relational::{
     ClaimOutboxRow, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
     delete_claim_outbox, entity_from_json, fields_from_json, metadata_from_json, nanos_ts,
-    parse_priority, select_claim_outbox,
+    parse_priority, select_claim_outbox, ts_nanos,
 };
 use tokio::sync::{Mutex, Semaphore};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -623,9 +623,10 @@ impl TursoRelational {
         &self,
         shard: &QueueKey,
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+        exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
         let mut connection = self.reader.lock().await;
-        Self::item_claim_microbatch_on_connection(&mut connection, shard, members).await
+        Self::item_claim_microbatch_on_connection(&mut connection, shard, members, exclude).await
     }
 
     /// FIFO item-Claim selects on one Deferred snapshot against an already-borrowed driver.
@@ -633,13 +634,14 @@ impl TursoRelational {
         connection: &mut Connection,
         shard: &QueueKey,
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+        exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
         let snapshot = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .await
             .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
         let result = async {
-            let mut assigned = Vec::new();
+            let mut assigned = exclude.to_vec();
             let mut out = Vec::with_capacity(members.len());
             for (now, max, token, expires) in members {
                 let ids = crate::projection::select_item_claim_ids_on(
@@ -680,13 +682,15 @@ impl TursoRelational {
         definition: QueueDefinition,
         keys: &[ClientItemKey],
         batch_keys: &[ClientItemKey],
+        now: UtcTimestamp,
     ) -> EngineResult<MutationDriverSnapshot> {
         let snapshot = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .await
             .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
         let loaded =
-            load_mutation_driver_snapshot(&snapshot, shard, definition, keys, batch_keys).await;
+            load_mutation_driver_snapshot(&snapshot, shard, definition, keys, batch_keys, now)
+                .await;
         match &loaded {
             Ok(_) => {
                 snapshot.commit().await.map_err(|error| {
@@ -900,12 +904,25 @@ impl TursoRelational {
         .await
     }
 
+    pub async fn mutation_driver_snapshot_on_serving_reader(
+        &self,
+        shard: &QueueKey,
+        definition: QueueDefinition,
+        keys: &[ClientItemKey],
+        batch_keys: &[ClientItemKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<MutationDriverSnapshot> {
+        let connection = self.reader.lock().await;
+        load_mutation_driver_snapshot(&connection, shard, definition, keys, batch_keys, now).await
+    }
+
     pub async fn mutation_driver_snapshot(
         &self,
         shard: &QueueKey,
         definition: QueueDefinition,
         keys: &[ClientItemKey],
         batch_keys: &[ClientItemKey],
+        now: UtcTimestamp,
     ) -> EngineResult<MutationDriverSnapshot> {
         let keys = keys.to_vec();
         let batch_keys = batch_keys.to_vec();
@@ -913,8 +930,15 @@ impl TursoRelational {
             let shard = shard.clone();
             let definition = definition.clone();
             Box::pin(async move {
-                load_mutation_driver_snapshot(connection, &shard, definition, &keys, &batch_keys)
-                    .await
+                load_mutation_driver_snapshot(
+                    connection,
+                    &shard,
+                    definition,
+                    &keys,
+                    &batch_keys,
+                    now,
+                )
+                .await
             })
         })
         .await
@@ -1104,6 +1128,28 @@ impl TursoRelational {
         for item_id in item_ids {
             tokens.insert((shard.clone(), *item_id), token.clone());
             by_consumer.insert((shard.clone(), token.as_str().to_string(), *item_id), ());
+        }
+    }
+
+    pub async fn remembered_lease_ids(&self, shard: &QueueKey) -> Vec<ItemId> {
+        use std::ops::Bound::Included;
+        let tokens = self.live_tokens.lock().await;
+        tokens
+            .range((
+                Included((shard.clone(), ItemId::from_u64(0))),
+                Included((shard.clone(), ItemId::from_u64(u64::MAX))),
+            ))
+            .map(|((_, id), _)| *id)
+            .collect()
+    }
+
+    pub async fn forget_leases(&self, shard: &QueueKey, item_ids: &[ItemId]) {
+        let mut tokens = self.live_tokens.lock().await;
+        let mut by_consumer = self.live_tokens_by_consumer.lock().await;
+        for item_id in item_ids {
+            if let Some(token) = tokens.remove(&(shard.clone(), *item_id)) {
+                by_consumer.remove(&(shard.clone(), token.as_str().to_string(), *item_id));
+            }
         }
     }
 }
@@ -2947,6 +2993,7 @@ async fn load_mutation_driver_snapshot(
     definition: QueueDefinition,
     keys: &[ClientItemKey],
     batch_keys: &[ClientItemKey],
+    now: UtcTimestamp,
 ) -> EngineResult<MutationDriverSnapshot> {
     let pause_rows = collect_rows(
         connection,
@@ -3000,6 +3047,36 @@ async fn load_mutation_driver_snapshot(
                     client_keys.insert(key.clone());
                 }
             }
+            let mut retention_params = vec![
+                Value::Text(shard.tenant_id.as_str().to_string()),
+                Value::Text(shard.queue_id.as_str().to_string()),
+                Value::Integer(ts_nanos(now)),
+            ];
+            retention_params.extend(
+                chunk
+                    .iter()
+                    .map(|key| Value::Text(key.as_str().to_string())),
+            );
+            let retention_placeholders = (0..chunk.len())
+                .map(|index| format!("?{}", index + 4))
+                .collect::<Vec<_>>()
+                .join(",");
+            let retained = collect_rows(
+                connection,
+                &format!(
+                    "SELECT client_item_key FROM fireweed_item_key_retention \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND expires_at>?3 \
+                     AND client_item_key IN ({retention_placeholders})"
+                ),
+                retention_params,
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+            for row in retained {
+                if let Some(Value::Text(key)) = row.values.first() {
+                    client_keys.insert(key.clone());
+                }
+            }
         }
     }
     let batch_items =
@@ -3012,6 +3089,8 @@ async fn load_mutation_driver_snapshot(
         unique_index_values: HashSet::new(),
         group_counts: HashMap::new(),
         batch_items,
+        leased_ids: HashSet::new(),
+        terminal_ids: HashSet::new(),
     })
 }
 

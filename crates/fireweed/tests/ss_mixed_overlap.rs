@@ -1431,7 +1431,7 @@ fn realistic_first_third_generation_index(counters: &mut ShadowCounters) {
     for index in 0..32u8 {
         match sequencer.admit(
             "q",
-            MutationGenerationKind::BatchUpdate,
+            MutationGenerationKind::Update,
             MutationIngress::Direct,
             Arc::new(index),
             items,

@@ -134,7 +134,7 @@ pub(crate) fn classify_mutate_items(command: &MutateItemsCommand) {
 
 fn finalize_kind_disposition(kind: FinalizeKind) -> SelectionFenceDisposition {
     match kind {
-        FinalizeKind::Complete | FinalizeKind::Fail => SelectionFenceDisposition::Bypass,
+        FinalizeKind::Complete | FinalizeKind::Fail => SelectionFenceDisposition::Shared,
         FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm => {
             SelectionFenceDisposition::Shared
         }
@@ -149,7 +149,7 @@ pub fn selection_fence_disposition(command: &QueueCommand) -> SelectionFenceDisp
     match command {
         QueueCommand::CreateQueue(_) => Shared,
         QueueCommand::Push(_) => Shared,
-        QueueCommand::Claim(_) => Exclusive,
+        QueueCommand::Claim(_) => Shared,
         QueueCommand::CohortClaim(_) => Exclusive,
         QueueCommand::RenewLease(_) => Bypass,
         QueueCommand::CohortRenewLease(_) => Bypass,

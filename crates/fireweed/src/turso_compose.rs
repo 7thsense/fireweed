@@ -24,31 +24,32 @@ use fireweed_engine::{
     AppendAdmissionClass, AsyncClaimError, AsyncCommitSubmitError, AsyncComposedBackend,
     AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecycleError, AsyncLogStore,
     AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
-    AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand,
-    ClaimCompatibility, ClaimCoordinator, ClaimDriverReadAdmission, ClaimPort, ClaimQueueTurn,
-    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandPosition, ControlPlane,
-    ControlPlaneStore, CoordinationError, CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT,
-    DispatchError, DurabilityClass, EngineError, EngineResult, ExpiredLeaseCursor,
-    ExpiredLeasePage, FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
-    HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane, InProcessLogStore,
-    IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest,
-    ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
-    MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationGenerationMemberOutcome, MutationGenerationWork,
-    MutationIngress, MutationSequencer, MutationSequencerKey, OutcomeReadAdmission, OwnedTask,
-    OwnedTaskDispatcher, OwnedTaskFactory, PendingPage, PendingSummary, PreparedClaim,
-    PreparedClaimedResult, PreparedFinalize, PreparedMutationGeneration, PreparedPush,
-    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
-    ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushFingerprint, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueGateError, QueueKey, QueueMetrics, RawCommitFault,
-    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeasePort, RenewTarget, S3S_DERIVED_COVERAGE_OR_WORK_WAIT, SelectionFence,
+    AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort,
+    CLAIM_GENERATION_MAX_REQUESTS, ClaimCommand, ClaimCompatibility, ClaimDriverReadAdmission,
+    ClaimPort, ClaimQueueTurn, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
+    CommandPosition, ControlPlane, ControlPlaneStore, CoordinationError, CreateQueueOutcome,
+    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
+    ExpiredLeaseCursor, ExpiredLeasePage, FinalizeKind, FinalizeOutcome, FinalizePort,
+    FinalizeTarget, HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IdempotencyDecision,
+    InProcessControlPlane, InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher,
+    ItemMutationPort, ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView,
+    LogStore, MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationDriverSnapshot,
+    MutationGenerationMemberOutcome, MutationGenerationWork, MutationIngress, MutationSequencer,
+    MutationSequencerKey, OutcomeReadAdmission, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory,
+    PendingPage, PendingSummary, PreparedClaim, PreparedClaimedResult, PreparedFinalize,
+    PreparedMutationGeneration, PreparedPush, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort,
+    PushCommand, PushFingerprint, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError,
+    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    RenewTarget, RequestOutcome, S3S_DERIVED_COVERAGE_OR_WORK_WAIT, SelectionFence,
     SelectionFenceAdmission, SelectionFenceDisposition, SeparateReplayCommit,
     SeparateReplayCommitter, SeqIdGen, SetGatesPort, SharedDriverReadAdmission, SnapshotRef,
     SnapshotStore, TaskOutcome, TaskOutcomeError, TaskOutcomeSender, TerminalEmissionMetrics,
     TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, retain_sequencer_after_slot_release,
-    selection_fence_disposition_for_commands, task_outcome_channel,
-    validate_inert_mutation_generation,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, allocate_push_epoch_blob_and_counters,
+    retain_sequencer_after_slot_release, selection_fence_disposition_for_commands,
+    task_outcome_channel, validate_inert_mutation_generation_folding,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, materialize_grouped_cohort_claimed_on};
@@ -178,37 +179,6 @@ struct QueueFrontiers {
     last_candidate_mutation: Option<CommandPosition>,
 }
 
-#[cfg(feature = "objectlog")]
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ItemClaimKey {
-    shard: QueueKey,
-    expected_epoch: Option<u64>,
-    eligibility_time: Option<UtcTimestamp>,
-}
-
-#[cfg(feature = "objectlog")]
-impl ItemClaimKey {
-    fn from_request(request: &ClaimRequest) -> Self {
-        Self {
-            shard: request.shard.clone(),
-            expected_epoch: request.expected_epoch,
-            eligibility_time: request.eligibility_time,
-        }
-    }
-}
-
-#[cfg(feature = "objectlog")]
-struct ItemClaimWork {
-    id: u64,
-    request: ClaimRequest,
-}
-
-#[cfg(feature = "objectlog")]
-struct ItemClaimJoin {
-    notify: tokio::sync::Notify,
-    outcomes: Mutex<HashMap<u64, EngineResult<Claimed>>>,
-}
-
 struct GenerationJoin {
     notify: tokio::sync::Notify,
     outcome: Mutex<Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>>,
@@ -237,46 +207,203 @@ fn finish_inert_mutation_generation_append(
                 ..
             }) => Some(request),
             fireweed_engine::MutationGenerationMemberOutcome::BatchUpdate { request, .. }
+            | fireweed_engine::MutationGenerationMemberOutcome::Finalize { request }
             | fireweed_engine::MutationGenerationMemberOutcome::Singleton { request } => {
                 Some(request)
             }
+            fireweed_engine::MutationGenerationMemberOutcome::Claim { request, .. } => request,
             fireweed_engine::MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_))
+            | fireweed_engine::MutationGenerationMemberOutcome::PushAccepted
+            | fireweed_engine::MutationGenerationMemberOutcome::ClaimAccepted { .. }
             | fireweed_engine::MutationGenerationMemberOutcome::Rejected(_) => None,
         })
         .collect())
+}
+
+/// Same 20 ms linger as the object-log packer. Without it, `start_generation` /
+/// `start_driver` fire on the first waiter and compatible inflight=8 work
+/// becomes eight serial apply rounds.
+const MICROBATCH_LINGER: Duration = Duration::from_millis(20);
+
+fn merge_unpublished_into_snapshot(
+    snapshot: &mut MutationDriverSnapshot,
+    unpublished: &MutationDriverSnapshot,
+) {
+    snapshot
+        .client_keys
+        .extend(unpublished.client_keys.iter().cloned());
+    for (request_id, fingerprint) in &unpublished.request_fingerprints {
+        snapshot
+            .request_fingerprints
+            .insert(request_id.clone(), *fingerprint);
+    }
+    snapshot
+        .unique_index_values
+        .extend(unpublished.unique_index_values.iter().cloned());
+    for (group, count) in &unpublished.group_counts {
+        let current = snapshot.group_counts.get(group).copied().unwrap_or(0);
+        snapshot
+            .group_counts
+            .insert(group.clone(), current.max(*count));
+    }
+    for item in &unpublished.batch_items {
+        match snapshot
+            .batch_items
+            .iter_mut()
+            .find(|existing| existing.item_id == item.item_id)
+        {
+            Some(existing) => {
+                if existing.item_version < item.item_version {
+                    *existing = item.clone();
+                }
+            }
+            None => snapshot.batch_items.push(item.clone()),
+        }
+    }
+    snapshot
+        .leased_ids
+        .extend(unpublished.leased_ids.iter().copied());
+    snapshot
+        .leased_ids
+        .retain(|id| !unpublished.terminal_ids.contains(id));
+    snapshot
+        .terminal_ids
+        .extend(unpublished.terminal_ids.iter().copied());
+}
+
+fn coalesce_generation_commits(
+    commits: Vec<RawCommitRequest>,
+) -> EngineResult<Vec<RawCommitRequest>> {
+    if commits.len() <= 1 {
+        return Ok(commits);
+    }
+    let mut groups: HashMap<
+        (QueueKey, u64),
+        (Vec<CommandEnvelope>, RawCommitFault, AppendAdmissionClass),
+    > = HashMap::new();
+    let mut order: Vec<(QueueKey, u64)> = Vec::new();
+    for commit in commits {
+        let (shard, commands, epoch, fault, admission) = commit.into_parts_with_append_admission();
+        let key = (shard, epoch);
+        match groups.get_mut(&key) {
+            Some((existing, existing_fault, existing_admission)) => {
+                if *existing_fault != fault || *existing_admission != admission {
+                    return Err(EngineError::Storage(
+                        "generation commits mixed fault or admission class".into(),
+                    ));
+                }
+                existing.extend(commands);
+            }
+            None => {
+                order.push(key.clone());
+                groups.insert(key, (commands, fault, admission));
+            }
+        }
+    }
+    Ok(order
+        .into_iter()
+        .map(|key| {
+            let (commands, fault, admission) = groups.remove(&key).expect("coalesced commit");
+            RawCommitRequest::new(key.0, commands, key.1)
+                .with_fault(fault)
+                .with_append_admission(admission)
+        })
+        .collect())
+}
+
+fn push_spec_keys(request: &AsyncPushRequest) -> Vec<String> {
+    request
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.client_item_key
+                .as_ref()
+                .map(|key| key.as_str().to_string())
+        })
+        .collect()
+}
+
+fn push_commit_keys(commit: &RawCommitRequest) -> Vec<String> {
+    commit
+        .commands()
+        .iter()
+        .flat_map(|envelope| match &envelope.command {
+            QueueCommand::Push(command) => command
+                .items
+                .iter()
+                .map(|item| item.client_item_key.as_str().to_string())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn push_member_matches(
+    request: &AsyncPushRequest,
+    outcome: &MutationGenerationMemberOutcome,
+) -> bool {
+    match outcome {
+        MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
+            request: commit, ..
+        }) => {
+            let id_match = request.request_id.is_some()
+                && request.request_id
+                    == commit
+                        .commands()
+                        .first()
+                        .and_then(|envelope| envelope.request_id.clone());
+            let spec_keys = push_spec_keys(request);
+            let key_match = !spec_keys.is_empty() && spec_keys == push_commit_keys(commit);
+            id_match || key_match
+        }
+        MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_)) => {
+            request.request_id.is_some()
+        }
+        _ => false,
+    }
 }
 
 fn member_for_work(
     work: &MutationGenerationWork,
     members: Vec<fireweed_engine::MutationGenerationMember>,
 ) -> EngineResult<MutationGenerationMemberOutcome> {
-    let matched = match work {
-        MutationGenerationWork::Push { request, .. } => members.into_iter().find(|member| {
-            matches!(
-                &member.outcome,
-                MutationGenerationMemberOutcome::Push(PreparedPush::Commit { request: commit, .. })
-                    if commit.shard() == &request.shard
-            ) || matches!(
-                &member.outcome,
-                MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_))
-                    | MutationGenerationMemberOutcome::Rejected(_)
-            )
-        }),
-        MutationGenerationWork::BatchUpdate { request, .. } => members.into_iter().find(|member| {
-            matches!(
-                &member.outcome,
-                MutationGenerationMemberOutcome::BatchUpdate { response, .. }
-                    if response.request_id == request.request_id
-            ) || matches!(
-                &member.outcome,
+    let mut rejected = None;
+    for member in members {
+        match (work, &member.outcome) {
+            (MutationGenerationWork::Push { request, .. }, outcome)
+                if push_member_matches(request, outcome) =>
+            {
+                return Ok(member.outcome);
+            }
+            (
+                MutationGenerationWork::BatchUpdate { request, .. },
+                MutationGenerationMemberOutcome::BatchUpdate { response, .. },
+            ) if response.request_id == request.request_id => return Ok(member.outcome),
+            (
+                MutationGenerationWork::Claim { id, .. },
+                MutationGenerationMemberOutcome::Claim { id: claimed_id, .. },
+            ) if id == claimed_id => return Ok(member.outcome),
+            (
+                MutationGenerationWork::Finalize { command_id, .. },
+                MutationGenerationMemberOutcome::Finalize { request },
+            ) if request
+                .commands()
+                .first()
+                .map(|envelope| &envelope.command_id)
+                == Some(command_id) =>
+            {
+                return Ok(member.outcome);
+            }
+            (MutationGenerationWork::Singleton { .. }, _) => return Ok(member.outcome),
+            (
+                _,
                 MutationGenerationMemberOutcome::Rejected(_)
-            )
-        }),
-        MutationGenerationWork::Singleton { .. } => members.into_iter().next(),
-    };
-    matched
-        .map(|member| member.outcome)
-        .ok_or_else(|| EngineError::Storage("mutation generation lost member outcome".into()))
+                | MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_)),
+            ) => rejected = Some(member.outcome),
+            _ => {}
+        }
+    }
+    rejected.ok_or_else(|| EngineError::Storage("mutation generation lost member outcome".into()))
 }
 
 #[cfg(test)]
@@ -456,8 +583,15 @@ mod contention_mapping_tests {
             "async fn dispatch_finalize",
             "fn create_queue_impl",
         );
-        assert!(finalize.contains("AppendAdmissionClass::Bypass"));
+        assert!(
+            finalize.contains("drive_candidate_mutation"),
+            "Complete/Fail must join the packed Update generation"
+        );
         assert!(finalize.contains("AppendAdmissionClass::SelectionRequired"));
+        assert!(
+            !finalize.contains("AppendAdmissionClass::Bypass"),
+            "Complete/Fail must not skip the selection fence via Bypass"
+        );
     }
 
     #[test]
@@ -556,7 +690,7 @@ mod contention_mapping_tests {
         let grouped = between(
             production,
             "async fn dispatch_grouped_cohort_claim(",
-            "async fn dispatch_class_s_claim(",
+            "async fn append_class_s_claim(",
         );
         assert!(
             grouped.contains("claim_turns"),
@@ -580,26 +714,39 @@ mod contention_mapping_tests {
             grouped.contains("acquire_exclusive"),
             "grouped/cohort must take the exclusive selection fence"
         );
-        let class_s = between(
-            production,
-            "async fn dispatch_class_s_claim(",
-            "async fn append_class_s_claim(",
+        let derived_impl = production
+            .split("impl DerivedObjectLogTursoBackend {")
+            .nth(1)
+            .expect("derived Turso implementation");
+        let item_claim = between(
+            derived_impl,
+            "async fn dispatch_claim(",
+            "async fn dispatch_grouped_cohort_claim(",
         );
         assert!(
-            !class_s.contains("class_s_claim_for_queue"),
-            "default item Claim must leave the SQL-first writer lease-before-append lane"
+            item_claim.contains("drive_candidate_mutation"),
+            "ordinary item Claim must admit onto the packed Update generation"
         );
         assert!(
-            class_s.contains("claim_turns"),
-            "default item Claim must take ClaimQueueTurn"
+            !item_claim.contains("claim_coordinator"),
+            "ordinary item Claim must not use ClaimCoordinator"
         );
         assert!(
-            class_s.contains("acquire_exclusive"),
-            "default item Claim must take the exclusive selection fence"
+            !item_claim.contains("acquire_exclusive"),
+            "ordinary item Claim shares the Update generation fence"
+        );
+        let realized = between(
+            derived_impl,
+            "async fn realize_accepted_claims(",
+            "async fn dispatch_claim(",
         );
         assert!(
-            class_s.contains("authority_first: true"),
+            realized.contains("authority_first: true"),
             "new item Claim envelopes must be authority-first"
+        );
+        assert!(
+            realized.contains("item_claim_microbatch_on_serving_reader"),
+            "ordinary item Claim must select on the serving reader, not the 4 MiB driver pool"
         );
         let continuation = between(
             preamble,
@@ -622,10 +769,9 @@ mod contention_mapping_tests {
         use std::time::{Duration, Instant};
 
         use fireweed_engine::{
-            CommandChecksum, CommandEnvelope, CommandId, MutationDriverSnapshot,
-            MutationGenerationKind, MutationGenerationWork, MutationIngress, MutationSequencer,
-            MutationSequencerKey, PushCommand, PushFingerprint, PushItem, PushSpec, QueueCommand,
-            RequestOutcome, abort_unplanned_generation_on_deadline,
+            MutationDriverSnapshot, MutationGenerationKind, MutationGenerationMemberOutcome,
+            MutationGenerationWork, MutationIngress, MutationSequencer, MutationSequencerKey,
+            PushFingerprint, PushSpec, abort_unplanned_generation_on_deadline,
             retain_sequencer_after_slot_release, validate_inert_mutation_generation,
         };
 
@@ -637,7 +783,19 @@ mod contention_mapping_tests {
             production.contains("self.engine.push(request).await.map_err(map_push)"),
             "atomic products keep native push"
         );
-        assert!(production.contains("prepare_push(request.clone())"));
+        let derived_add = between(
+            production,
+            "async fn dispatch_push(",
+            "async fn dispatch_batch_update(",
+        );
+        assert!(
+            derived_add.contains("drive_candidate_mutation"),
+            "add must admit then drive like modify"
+        );
+        assert!(
+            !derived_add.contains("prepare_push("),
+            "derived add must not prepare under the per-queue submit permit"
+        );
         let atomic_push = between(
             production,
             "self.engine.push(request).await.map_err(map_push)",
@@ -654,6 +812,38 @@ mod contention_mapping_tests {
         assert!(derived_push.contains("validate_inert_mutation_generation"));
         assert!(derived_push.contains("shared_slots"));
         assert!(derived_push.contains("sequencer"));
+        assert!(
+            derived_push.contains("allocate_accepted_pushes"),
+            "add must allocate durable debt in the elected driver after overlay"
+        );
+        assert!(
+            derived_push.contains("mutation_driver_snapshot_on_serving_reader"),
+            "mutation overlay snapshots must use the warm serving reader, not the 4 MiB driver pool"
+        );
+        assert!(
+            derived_push.contains("MICROBATCH_LINGER"),
+            "compatible inflight work must linger before start_generation so fill can reach 8"
+        );
+        assert!(
+            derived_push.contains("coalesce_generation_commits"),
+            "one generation must be one packed append, not N serial commits"
+        );
+        assert!(
+            derived_push.contains("unpublished_mutations"),
+            "next generation must overlay unpublished identities instead of waiting apply"
+        );
+        assert!(
+            derived_push.contains("realize_accepted_claims"),
+            "ordinary item Claim must realize on the same packed Update generation as field-update"
+        );
+        assert!(
+            derived_push.contains("wait_selected_frontiers"),
+            "candidate mutations keep the frontier helper; overlay replaces apply waits"
+        );
+        assert!(
+            !derived_push.contains("wait_request_entry_coverage"),
+            "candidate mutations must not serialize on projection apply"
+        );
         assert!(
             derived_push.contains("acquire_shared"),
             "candidate mutations must take the shared selection fence"
@@ -684,45 +874,12 @@ mod contention_mapping_tests {
             now: UtcTimestamp::new(1, 0).unwrap(),
             expected_epoch: Some(1),
         };
-        let item_id = ItemId::mint(1, 1, 1);
-        let item = PushItem {
-            client_item_key: ClientItemKey::new("k").unwrap(),
-            item_id,
-            priority: None,
-            not_before: None,
-            group_key: None,
-            max_attempts: 3,
-            payload: None,
-            fields: BTreeMap::new(),
-            metadata: Metadata::default(),
-            cohort_size: None,
-            gate_keys: Vec::new(),
-            index_fields: BTreeMap::new(),
-            entity_document: None,
-        };
-        let envelope = CommandEnvelope {
-            command_id: CommandId::new("push-1"),
-            request_id: request.request_id.clone(),
-            request_fingerprint: Some(1),
-            request_outcome: Some(RequestOutcome::Push {
-                item_ids: vec![item_id],
-            }),
-            item_ids: vec![item_id],
-            command: QueueCommand::Push(PushCommand {
-                items: vec![item.clone()],
-            }),
-            checksum: CommandChecksum(0),
-            created_at: request.now,
-        };
         let work = MutationGenerationWork::Push {
             fingerprint: Some(PushFingerprint {
                 canonical_sha256: [1; 32],
                 legacy_body_hash: fireweed_core::BodyHash(1),
             }),
             request,
-            commit: RawCommitRequest::new(shard.clone(), vec![envelope], 1),
-            item_ids: vec![item_id],
-            items: vec![item],
         };
         let snapshot = MutationDriverSnapshot {
             definition: QueueDefinition {
@@ -754,6 +911,8 @@ mod contention_mapping_tests {
             unique_index_values: HashSet::new(),
             group_counts: std::collections::HashMap::new(),
             batch_items: Vec::new(),
+            leased_ids: HashSet::new(),
+            terminal_ids: HashSet::new(),
         };
         let sequencer =
             MutationSequencer::<QueueKey, MutationSequencerKey, MutationGenerationWork>::new();
@@ -770,10 +929,17 @@ mod contention_mapping_tests {
         let generation = sequencer.start_generation(&shard).expect("start");
         let members = validate_inert_mutation_generation(&snapshot, std::slice::from_ref(&work))
             .expect("overlay");
+        assert!(matches!(
+            members[0].outcome,
+            MutationGenerationMemberOutcome::PushAccepted
+        ));
         drop(ticket);
         let prepared = retain_sequencer_after_slot_release(members, generation);
         let commits = finish_inert_mutation_generation_append(prepared).expect("co-seal carrier");
-        assert_eq!(commits.len(), 1);
+        assert!(
+            commits.is_empty(),
+            "unprepared add overlay must not append; the driver allocates after accept"
+        );
         let expired = abort_unplanned_generation_on_deadline(
             Vec::<
                 fireweed_engine::MutationTicket<
@@ -816,25 +982,53 @@ mod contention_mapping_tests {
             !derived.contains("self.projection.server_peek("),
             "public reads must not use the shared serving reader"
         );
-        let class_s = between(
-            production,
-            "async fn dispatch_class_s_claim(",
+        let derived_impl = production
+            .split("impl DerivedObjectLogTursoBackend {")
+            .nth(1)
+            .expect("derived Turso implementation");
+        let item_claim = between(
+            derived_impl,
+            "async fn dispatch_claim(",
+            "async fn dispatch_grouped_cohort_claim(",
+        );
+        assert!(!item_claim.contains("class_s_claim_for_queue"));
+        assert!(
+            item_claim.contains("drive_candidate_mutation"),
+            "ordinary item Claim must linger and pack via the mutation sequencer"
+        );
+        assert!(
+            !item_claim.contains("acquire_exclusive"),
+            "ordinary item Claim must not take the exclusive selection fence"
+        );
+        assert!(
+            !item_claim.contains("wait_request_entry_coverage"),
+            "item Claim must not wait apply before return; Complete uses remembered leases"
+        );
+        let realized = between(
+            derived_impl,
+            "async fn realize_accepted_claims(",
+            "async fn dispatch_claim(",
+        );
+        assert!(
+            realized.contains("remembered_lease_ids"),
+            "next Claim must exclude in-process leases instead of waiting last_claim apply"
+        );
+        assert!(
+            !realized.contains("borrow_committed_driver_connection"),
+            "ordinary item Claim must not borrow the 4 MiB driver pool"
+        );
+        assert!(
+            !realized.contains("render_claimed") && !realized.contains("render_prepared_claim"),
+            "item Claim continuation must not post-publication render"
+        );
+        let grouped = between(
+            derived_impl,
+            "async fn dispatch_grouped_cohort_claim(",
             "async fn append_class_s_claim(",
         );
-        assert!(!class_s.contains("class_s_claim_for_queue"));
-        assert!(class_s.contains("claim_turns"));
-        assert!(class_s.contains("acquire_exclusive"));
         assert!(
-            production
-                .split("async fn dispatch_class_s_claim(")
-                .nth(1)
-                .unwrap()
-                .contains("self.claim_slots.acquire()"),
-            "item Claim must take ClaimDriverReadAdmission"
-        );
-        assert!(
-            !class_s.contains("render_claimed") && !class_s.contains("render_prepared_claim"),
-            "item Claim continuation must not post-publication render"
+            grouped.contains("self.claim_slots.acquire()"),
+            "grouped/cohort Claim still takes ClaimDriverReadAdmission"
         );
     }
 }
@@ -2636,22 +2830,25 @@ pub struct DerivedObjectLogTursoBackend {
     ids: Arc<SeqIdGen>,
     /// Shared with push planners; recovery observes recovered item ids into this map.
     counters: Arc<QueueCounters>,
-    #[allow(dead_code)]
     node_id: u8,
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     frontiers: Arc<tokio::sync::Mutex<HashMap<QueueKey, QueueFrontiers>>>,
+    unpublished_mutations: Arc<tokio::sync::Mutex<HashMap<QueueKey, MutationDriverSnapshot>>>,
     sequencer: MutationSequencer<QueueKey, MutationSequencerKey, MutationGenerationWork>,
     claim_turns: ClaimQueueTurn<QueueKey>,
-    claim_coordinator: ClaimCoordinator<ItemClaimKey, ItemClaimWork>,
     claim_slots: ClaimDriverReadAdmission,
     shared_slots: SharedDriverReadAdmission,
     outcome_slots: OutcomeReadAdmission,
     selection_fence: SelectionFence<QueueKey>,
     fence_admission: SelectionFenceAdmission,
     generation_joins: Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>,
-    claim_joins: Arc<Mutex<HashMap<ItemClaimKey, Arc<ItemClaimJoin>>>>,
+    generation_outcomes: Arc<
+        Mutex<
+            HashMap<(QueueKey, u64), EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>,
+        >,
+    >,
     claim_work_ids: AtomicU64,
     #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
     drivers: CoordinatorDriverRegistry,
@@ -2686,6 +2883,7 @@ impl DerivedObjectLogTursoBackend {
         let last_produce = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let produce_caught_up = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let frontiers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let unpublished_mutations = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let selection_fence = SelectionFence::default();
         let fence_admission = SelectionFenceAdmission::new(1_024);
         let committer = ObjectLogTursoCommitter {
@@ -2746,16 +2944,16 @@ impl DerivedObjectLogTursoBackend {
             last_produce,
             produce_caught_up,
             frontiers,
+            unpublished_mutations,
             sequencer: MutationSequencer::new(),
             claim_turns: ClaimQueueTurn::default(),
-            claim_coordinator: ClaimCoordinator::default(),
             claim_slots: ClaimDriverReadAdmission::default(),
             shared_slots: SharedDriverReadAdmission::default(),
             outcome_slots: OutcomeReadAdmission::default(),
             selection_fence,
             fence_admission,
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
-            claim_joins: Arc::new(Mutex::new(HashMap::new())),
+            generation_outcomes: Arc::new(Mutex::new(HashMap::new())),
             claim_work_ids: AtomicU64::new(1),
             drivers,
         };
@@ -2771,6 +2969,7 @@ impl DerivedObjectLogTursoBackend {
 
     /// Close admission and wait registered drivers through append/apply publication.
     pub async fn close_and_drain(&self) -> EngineResult<()> {
+        self.sequencer.close();
         self.engine
             .close_and_drain()
             .await
@@ -3103,6 +3302,70 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
+    fn generation_outcome(
+        &self,
+        queue: &QueueKey,
+        generation_id: u64,
+    ) -> Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>> {
+        self.generation_outcomes
+            .lock()
+            .expect("generation outcome map")
+            .get(&(queue.clone(), generation_id))
+            .cloned()
+    }
+
+    fn ensure_generation_join(&self, queue: &QueueKey, generation_id: u64) -> Arc<GenerationJoin> {
+        self.generation_joins
+            .lock()
+            .expect("generation join map")
+            .entry((queue.clone(), generation_id))
+            .or_insert_with(|| {
+                Arc::new(GenerationJoin {
+                    notify: tokio::sync::Notify::new(),
+                    outcome: Mutex::new(None),
+                })
+            })
+            .clone()
+    }
+
+    fn publish_generation_outcome(
+        &self,
+        queue: &QueueKey,
+        generation_id: u64,
+        join: &GenerationJoin,
+        driven: EngineResult<Vec<fireweed_engine::MutationGenerationMember>>,
+    ) {
+        *join.outcome.lock().expect("generation outcome") = Some(driven.clone());
+        let stale = {
+            let mut outcomes = self
+                .generation_outcomes
+                .lock()
+                .expect("generation outcome map");
+            outcomes.insert((queue.clone(), generation_id), driven);
+            if outcomes.len() > 64 {
+                let stale: Vec<_> = outcomes
+                    .keys()
+                    .filter(|(key, id)| key != queue || *id != generation_id)
+                    .take(outcomes.len().saturating_sub(32))
+                    .cloned()
+                    .collect();
+                for key in &stale {
+                    outcomes.remove(key);
+                }
+                stale
+            } else {
+                Vec::new()
+            }
+        };
+        join.notify.notify_waiters();
+        if !stale.is_empty() {
+            let mut joins = self.generation_joins.lock().expect("generation join map");
+            for key in stale {
+                joins.remove(&key);
+            }
+        }
+    }
+
     async fn wait_request_entry_coverage(&self, shard: &QueueKey) -> EngineResult<()> {
         let Some(coordinator) = &self.async_apply else {
             return Ok(());
@@ -3118,6 +3381,15 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn wait_queue_frontiers(&self, shard: &QueueKey) -> EngineResult<()> {
+        self.wait_selected_frontiers(shard, true, true).await
+    }
+
+    async fn wait_selected_frontiers(
+        &self,
+        shard: &QueueKey,
+        last_claim: bool,
+        last_mutation: bool,
+    ) -> EngineResult<()> {
         let Some(coordinator) = &self.async_apply else {
             return Ok(());
         };
@@ -3128,10 +3400,13 @@ impl DerivedObjectLogTursoBackend {
             .get(shard)
             .cloned()
             .unwrap_or_default();
-        for target in [frontiers.last_claim, frontiers.last_candidate_mutation]
-            .into_iter()
-            .flatten()
-        {
+        let targets = [
+            last_claim.then_some(frontiers.last_claim).flatten(),
+            last_mutation
+                .then_some(frontiers.last_candidate_mutation)
+                .flatten(),
+        ];
+        for target in targets.into_iter().flatten() {
             coordinator
                 .wait_until_covers(shard, &target, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
                 .await?;
@@ -3229,7 +3504,6 @@ impl DerivedObjectLogTursoBackend {
         &self,
         request: AsyncPushRequest,
     ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
-        self.wait_request_entry_coverage(&request.shard).await?;
         if let (Some(request_id), items) = (request.request_id.clone(), &request.items) {
             let fingerprint = PushFingerprint {
                 canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(items)?,
@@ -3248,53 +3522,32 @@ impl DerivedObjectLogTursoBackend {
                 IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
             }
         }
-        match self
-            .engine
-            .prepare_push(request.clone())
-            .await
-            .map_err(map_push)?
-        {
-            PreparedPush::Replay(item_ids) => {
-                Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids))
+        let fingerprint = request.request_id.as_ref().map(|_| PushFingerprint {
+            canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(&request.items)
+                .unwrap_or([0; 32]),
+            legacy_body_hash: fireweed_engine::push_body_hash(&request.items)
+                .unwrap_or(fireweed_core::BodyHash(0)),
+        });
+        let work = MutationGenerationWork::Push {
+            fingerprint,
+            request,
+        };
+        match self.drive_candidate_mutation(work).await? {
+            MutationGenerationMemberOutcome::Push(PreparedPush::Replay(ids)) => {
+                Ok(fireweed_engine::PushBatchOutcome::replayed(ids))
             }
-            PreparedPush::Commit {
-                request: commit,
-                item_ids,
-            } => {
-                let items = match commit.commands().first().map(|envelope| &envelope.command) {
-                    Some(QueueCommand::Push(command)) => command.items.clone(),
-                    _ => Vec::new(),
-                };
-                let fingerprint = request.request_id.as_ref().map(|_| PushFingerprint {
-                    canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(
-                        &request.items,
-                    )
-                    .unwrap_or([0; 32]),
-                    legacy_body_hash: fireweed_engine::push_body_hash(&request.items)
-                        .unwrap_or(fireweed_core::BodyHash(0)),
-                });
-                let work = MutationGenerationWork::Push {
-                    fingerprint,
-                    request,
-                    commit,
-                    item_ids: item_ids.clone(),
-                    items,
-                };
-                match self.drive_candidate_mutation(work).await? {
-                    MutationGenerationMemberOutcome::Push(PreparedPush::Replay(ids)) => {
-                        Ok(fireweed_engine::PushBatchOutcome::replayed(ids))
-                    }
-                    MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
-                        item_ids,
-                        ..
-                    }) => Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids)),
-                    MutationGenerationMemberOutcome::Rejected(error) => Err(error),
-                    MutationGenerationMemberOutcome::BatchUpdate { .. }
-                    | MutationGenerationMemberOutcome::Singleton { .. } => Err(
-                        EngineError::Storage("push generation produced a non-push outcome".into()),
-                    ),
-                }
+            MutationGenerationMemberOutcome::Push(PreparedPush::Commit { item_ids, .. }) => {
+                Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids))
             }
+            MutationGenerationMemberOutcome::Rejected(error) => Err(error),
+            MutationGenerationMemberOutcome::PushAccepted
+            | MutationGenerationMemberOutcome::BatchUpdate { .. }
+            | MutationGenerationMemberOutcome::ClaimAccepted { .. }
+            | MutationGenerationMemberOutcome::Claim { .. }
+            | MutationGenerationMemberOutcome::Finalize { .. }
+            | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
+                "push generation produced a non-push outcome".into(),
+            )),
         }
     }
 
@@ -3305,7 +3558,6 @@ impl DerivedObjectLogTursoBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> EngineResult<fireweed_engine::BatchUpdateResponse> {
-        self.wait_request_entry_coverage(&shard).await?;
         if request.updates.is_empty() {
             return Err(EngineError::Invalid("empty batch update"));
         }
@@ -3329,6 +3581,10 @@ impl DerivedObjectLogTursoBackend {
             MutationGenerationMemberOutcome::BatchUpdate { response, .. } => Ok(response),
             MutationGenerationMemberOutcome::Rejected(error) => Err(error),
             MutationGenerationMemberOutcome::Push(_)
+            | MutationGenerationMemberOutcome::PushAccepted
+            | MutationGenerationMemberOutcome::ClaimAccepted { .. }
+            | MutationGenerationMemberOutcome::Claim { .. }
+            | MutationGenerationMemberOutcome::Finalize { .. }
             | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
                 "batch-update generation produced a non-batch outcome".into(),
             )),
@@ -3339,6 +3595,9 @@ impl DerivedObjectLogTursoBackend {
         &self,
         work: MutationGenerationWork,
     ) -> EngineResult<MutationGenerationMemberOutcome> {
+        if self.engine.is_closed() {
+            return Err(EngineError::Storage("closed product admission".into()));
+        }
         let queue = work.queue();
         let items = work.items();
         let response_bytes = work.response_bytes();
@@ -3355,45 +3614,24 @@ impl DerivedObjectLogTursoBackend {
                 response_bytes,
             )
             .map_err(map_coord)?;
-        tokio::task::yield_now().await;
         let generation_id = ticket.generation_id();
-        if let Some(generation) = self.sequencer.start_generation(&queue) {
-            let join = Arc::new(GenerationJoin {
-                notify: tokio::sync::Notify::new(),
-                outcome: Mutex::new(None),
-            });
-            self.generation_joins
-                .lock()
-                .expect("generation join map")
-                .insert((queue.clone(), generation_id), Arc::clone(&join));
-            let driven = self.drive_started_generation(generation).await;
-            *join.outcome.lock().expect("generation outcome") = Some(driven.clone());
-            join.notify.notify_waiters();
-            self.generation_joins
-                .lock()
-                .expect("generation join map")
-                .remove(&(queue, generation_id));
-            drop(ticket);
-            return member_for_work(&work, driven?);
-        }
         let started = Instant::now();
         loop {
-            if let Some(generation) = self.sequencer.start_generation(&queue) {
-                let join = Arc::new(GenerationJoin {
-                    notify: tokio::sync::Notify::new(),
-                    outcome: Mutex::new(None),
-                });
-                self.generation_joins
-                    .lock()
-                    .expect("generation join map")
-                    .insert((queue.clone(), generation_id), Arc::clone(&join));
+            if let Some(outcome) = self.generation_outcome(&queue, generation_id) {
+                drop(ticket);
+                return member_for_work(&work, outcome?);
+            }
+            if let Some(generation) = self
+                .sequencer
+                .start_generation_after(&queue, MICROBATCH_LINGER)
+            {
+                let driven_id = generation.generation_id();
+                let join = self.ensure_generation_join(&queue, driven_id);
                 let driven = self.drive_started_generation(generation).await;
-                *join.outcome.lock().expect("generation outcome") = Some(driven.clone());
-                join.notify.notify_waiters();
-                self.generation_joins
-                    .lock()
-                    .expect("generation join map")
-                    .remove(&(queue, generation_id));
+                self.publish_generation_outcome(&queue, driven_id, &join, driven.clone());
+                if driven_id != generation_id {
+                    continue;
+                }
                 drop(ticket);
                 return member_for_work(&work, driven?);
             }
@@ -3404,17 +3642,24 @@ impl DerivedObjectLogTursoBackend {
                 .get(&(queue.clone(), generation_id))
                 .cloned();
             if let Some(join) = join {
-                join.notify.notified().await;
-                let outcome = join
-                    .outcome
-                    .lock()
-                    .expect("generation outcome")
-                    .clone()
-                    .ok_or_else(|| EngineError::Storage("generation join lost outcome".into()))?;
-                drop(ticket);
-                return member_for_work(&work, outcome?);
+                let notified = join.notify.notified();
+                tokio::pin!(notified);
+                if let Some(outcome) = join.outcome.lock().expect("generation outcome").clone() {
+                    drop(ticket);
+                    return member_for_work(&work, outcome?);
+                }
+                if let Some(outcome) = self.generation_outcome(&queue, generation_id) {
+                    drop(ticket);
+                    return member_for_work(&work, outcome?);
+                }
+                notified.await;
+                continue;
             }
-            if started.elapsed() >= MUTATION_SEQUENCER_DEFAULT_MAX_WAIT {
+            if started.elapsed() >= MUTATION_SEQUENCER_DEFAULT_MAX_WAIT
+                && !self
+                    .sequencer
+                    .generation_queued_or_active(&queue, generation_id)
+            {
                 drop(ticket);
                 return Err(EngineError::Backpressure {
                     resource: "mutation sequencer wait",
@@ -3433,21 +3678,35 @@ impl DerivedObjectLogTursoBackend {
         >,
     ) -> EngineResult<Vec<fireweed_engine::MutationGenerationMember>> {
         let queue = generation.requests()[0].queue();
-        self.wait_queue_frontiers(&queue).await?;
-        let _slot = self.shared_slots.acquire().await.map_err(map_coord)?;
+        debug_assert!(generation.requests().len() <= CLAIM_GENERATION_MAX_REQUESTS);
         let works: Vec<MutationGenerationWork> = generation
             .requests()
             .iter()
             .map(|work| work.as_ref().clone())
             .collect();
+        let wait_push_apply = works
+            .iter()
+            .any(|work| matches!(work, MutationGenerationWork::Claim { .. }));
+        self.wait_selected_frontiers(&queue, false, wait_push_apply)
+            .await?;
+        let _slot = self.shared_slots.acquire().await.map_err(map_coord)?;
         let mut keys = Vec::new();
         let mut batch_keys = Vec::new();
+        let mut claimed = false;
+        let mut records_mutation = false;
         for work in &works {
             match work {
-                MutationGenerationWork::Push { items, .. } => {
-                    keys.extend(items.iter().map(|item| item.client_item_key.clone()));
+                MutationGenerationWork::Push { request, .. } => {
+                    records_mutation = true;
+                    keys.extend(
+                        request
+                            .items
+                            .iter()
+                            .filter_map(|item| item.client_item_key.clone()),
+                    );
                 }
                 MutationGenerationWork::BatchUpdate { request, .. } => {
+                    records_mutation = true;
                     for update in &request.updates {
                         if let fireweed_engine::BatchUpdateItemRef::ClientItemKey(key)
                         | fireweed_engine::BatchUpdateItemRef::Both {
@@ -3459,56 +3718,270 @@ impl DerivedObjectLogTursoBackend {
                         }
                     }
                 }
-                MutationGenerationWork::Singleton { .. } => {}
+                MutationGenerationWork::Claim { .. } => claimed = true,
+                MutationGenerationWork::Finalize { .. }
+                | MutationGenerationWork::Singleton { .. } => {}
             }
         }
         let definition =
             AsyncControlPlane::queue_definition(self.control.as_ref(), queue.clone()).await?;
-        let mut driver = self.projection.borrow_committed_driver_connection().await?;
         let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
         let _fence = self
             .selection_fence
             .acquire_shared(queue.clone())
             .await
             .map_err(map_coord)?;
-        self.wait_queue_frontiers(&queue).await?;
-        let snapshot = match driver.as_mut() {
-            Some(connection) => {
-                TursoRelational::mutation_driver_snapshot_on(
-                    connection,
-                    &queue,
-                    definition,
-                    &keys,
-                    &batch_keys,
-                )
-                .await?
-            }
-            None => {
-                self.projection
-                    .mutation_driver_snapshot(&queue, definition, &keys, &batch_keys)
-                    .await?
-            }
+        self.wait_selected_frontiers(&queue, false, wait_push_apply)
+            .await?;
+        let now = match &works[0] {
+            MutationGenerationWork::Push { request, .. } => request.now,
+            MutationGenerationWork::BatchUpdate { now, .. }
+            | MutationGenerationWork::Finalize { now, .. } => *now,
+            MutationGenerationWork::Claim { request, .. } => request.now,
+            MutationGenerationWork::Singleton { commit, .. } => commit
+                .commands()
+                .first()
+                .map(|envelope| envelope.created_at)
+                .unwrap_or_else(|| UtcTimestamp::new(1, 0).expect("epoch")),
         };
-        drop(driver);
-        let members = validate_inert_mutation_generation(&snapshot, &works)?;
+        let mut snapshot = self
+            .projection
+            .mutation_driver_snapshot_on_serving_reader(
+                &queue,
+                definition.clone(),
+                &keys,
+                &batch_keys,
+                now,
+            )
+            .await?;
+        if let Some(unpublished) = self.unpublished_mutations.lock().await.get(&queue) {
+            merge_unpublished_into_snapshot(&mut snapshot, unpublished);
+        }
+        let (mut members, mut folded) =
+            validate_inert_mutation_generation_folding(&snapshot, &works)?;
+        self.realize_accepted_claims(&queue, &works, &mut members, &mut folded)
+            .await?;
+        self.allocate_accepted_pushes(&definition, &works, &mut members, &mut folded)
+            .await?;
         drop(_slot);
         let prepared = retain_sequencer_after_slot_release(members.clone(), generation);
-        let commits = finish_inert_mutation_generation_append(prepared)?;
+        let commits =
+            coalesce_generation_commits(finish_inert_mutation_generation_append(prepared)?)?;
         if !commits.is_empty() {
             for commit in commits {
-                self.commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
-                    .await?;
+                if let Err(error) = self
+                    .commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
+                    .await
+                {
+                    return Err(error);
+                }
             }
-            self.record_frontier(&queue, false).await?;
+            for (work, member) in works.iter().zip(&members) {
+                match (work, &member.outcome) {
+                    (
+                        MutationGenerationWork::Claim { request, .. },
+                        MutationGenerationMemberOutcome::Claim {
+                            claimed: claimed_items,
+                            ..
+                        },
+                    ) => {
+                        let ids: Vec<_> = claimed_items
+                            .items
+                            .iter()
+                            .map(|item| item.item_id)
+                            .collect();
+                        if !ids.is_empty() {
+                            self.projection
+                                .remember_leases(&queue, &ids, request.lease_token.clone())
+                                .await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut unpublished = self.unpublished_mutations.lock().await;
+            match unpublished.get_mut(&queue) {
+                Some(existing) => merge_unpublished_into_snapshot(existing, &folded),
+                None => {
+                    unpublished.insert(queue.clone(), folded);
+                }
+            }
+            if claimed {
+                self.record_frontier(&queue, true).await?;
+            }
+            if records_mutation {
+                self.record_frontier(&queue, false).await?;
+            }
         }
         Ok(members)
+    }
+
+    async fn allocate_accepted_pushes(
+        &self,
+        definition: &QueueDefinition,
+        works: &[MutationGenerationWork],
+        members: &mut [fireweed_engine::MutationGenerationMember],
+        folded: &mut MutationDriverSnapshot,
+    ) -> EngineResult<()> {
+        for (work, member) in works.iter().zip(members.iter_mut()) {
+            if !matches!(
+                member.outcome,
+                MutationGenerationMemberOutcome::PushAccepted
+            ) {
+                continue;
+            }
+            let MutationGenerationWork::Push {
+                request,
+                fingerprint,
+            } = work
+            else {
+                continue;
+            };
+            let (epoch, items, item_ids) = allocate_push_epoch_blob_and_counters(
+                self.log.as_ref(),
+                self.counters.as_ref(),
+                definition,
+                request,
+                self.node_id,
+            )
+            .await?;
+            for item in &items {
+                folded
+                    .client_keys
+                    .insert(item.client_item_key.as_str().to_string());
+            }
+            let envelope = CommandEnvelope {
+                command_id: self.ids.next_command_id(),
+                request_id: request.request_id.clone(),
+                request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0),
+                request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
+                    item_ids: item_ids.clone(),
+                }),
+                item_ids: item_ids.clone(),
+                command: QueueCommand::Push(PushCommand { items }),
+                checksum: CommandChecksum(0),
+                created_at: request.now,
+            };
+            member.outcome = MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
+                request: RawCommitRequest::new(request.shard.clone(), vec![envelope], epoch),
+                item_ids,
+            });
+        }
+        Ok(())
+    }
+
+    async fn realize_accepted_claims(
+        &self,
+        queue: &QueueKey,
+        works: &[MutationGenerationWork],
+        members: &mut [fireweed_engine::MutationGenerationMember],
+        folded: &mut MutationDriverSnapshot,
+    ) -> EngineResult<()> {
+        let mut claim_indices = Vec::new();
+        let mut claim_members = Vec::new();
+        for (index, (work, member)) in works.iter().zip(members.iter()).enumerate() {
+            if !matches!(
+                member.outcome,
+                MutationGenerationMemberOutcome::ClaimAccepted { .. }
+            ) {
+                continue;
+            }
+            let MutationGenerationWork::Claim { request, .. } = work else {
+                continue;
+            };
+            claim_indices.push(index);
+            claim_members.push((
+                request.eligibility_at(),
+                request.max_items,
+                request.lease_token.clone(),
+                request.lease_expires_at,
+            ));
+        }
+        if claim_members.is_empty() {
+            return Ok(());
+        }
+        let mut exclude: Vec<ItemId> = folded.leased_ids.iter().copied().collect();
+        exclude.extend(folded.terminal_ids.iter().copied());
+        exclude.extend(self.projection.remembered_lease_ids(queue).await);
+        exclude.sort_unstable();
+        exclude.dedup();
+        let selected = self
+            .projection
+            .item_claim_microbatch_on_serving_reader(queue, &claim_members, &exclude)
+            .await?;
+        let epoch = match claim_indices
+            .first()
+            .and_then(|&index| match &works[index] {
+                MutationGenerationWork::Claim { request, .. } => request.expected_epoch,
+                _ => None,
+            }) {
+            Some(epoch) => epoch,
+            None => AsyncLogStore::current_epoch(self.log.as_ref(), queue.clone()).await?,
+        };
+        for (index, (ids, items)) in claim_indices.into_iter().zip(selected) {
+            let MutationGenerationWork::Claim { id, request } = &works[index] else {
+                continue;
+            };
+            folded.leased_ids.extend(ids.iter().copied());
+            if ids.is_empty() {
+                members[index].outcome = MutationGenerationMemberOutcome::Claim {
+                    id: *id,
+                    request: None,
+                    claimed: Claimed::default(),
+                };
+                continue;
+            }
+            let claimed =
+                PreparedClaimedResult::from_rendered(request, &ids, items, None)?.into_claimed();
+            let envelope = CommandEnvelope {
+                command_id: self.ids.next_command_id(),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: ids.clone(),
+                command: QueueCommand::Claim(ClaimCommand {
+                    item_ids: ids,
+                    lease_token: request.lease_token.clone(),
+                    lease_expires_at: request.lease_expires_at,
+                    worker_id: Some(request.worker_id.clone()),
+                    authority_first: true,
+                }),
+                checksum: CommandChecksum(0),
+                created_at: request.now,
+            };
+            members[index].outcome = MutationGenerationMemberOutcome::Claim {
+                id: *id,
+                request: Some(RawCommitRequest::new(
+                    request.shard.clone(),
+                    vec![envelope],
+                    epoch,
+                )),
+                claimed,
+            };
+        }
+        Ok(())
     }
 
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
         if request.compatibility != ClaimCompatibility::default() {
             return self.dispatch_grouped_cohort_claim(request).await;
         }
-        self.dispatch_class_s_claim(request).await
+        let work = MutationGenerationWork::Claim {
+            id: self.claim_work_ids.fetch_add(1, Ordering::Relaxed),
+            request,
+        };
+        match self.drive_candidate_mutation(work).await? {
+            MutationGenerationMemberOutcome::Claim { claimed, .. } => Ok(claimed),
+            MutationGenerationMemberOutcome::Rejected(error) => Err(error),
+            MutationGenerationMemberOutcome::Push(_)
+            | MutationGenerationMemberOutcome::PushAccepted
+            | MutationGenerationMemberOutcome::BatchUpdate { .. }
+            | MutationGenerationMemberOutcome::ClaimAccepted { .. }
+            | MutationGenerationMemberOutcome::Finalize { .. }
+            | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
+                "claim generation produced a non-claim outcome".into(),
+            )),
+        }
     }
 
     async fn dispatch_grouped_cohort_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
@@ -3587,170 +4060,6 @@ impl DerivedObjectLogTursoBackend {
                 finish_retained_grouped_cohort_response(retained.into_claimed())
             }
         }
-    }
-
-    async fn dispatch_class_s_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
-        let key = ItemClaimKey::from_request(&request);
-        let work_id = self.claim_work_ids.fetch_add(1, Ordering::Relaxed);
-        let work = Arc::new(ItemClaimWork {
-            id: work_id,
-            request,
-        });
-        let caller = self
-            .claim_coordinator
-            .join(
-                key.clone(),
-                Arc::clone(&work),
-                work.request.max_items,
-                work.request.max_items.saturating_mul(4 * 1024),
-            )
-            .map_err(map_coord)?;
-        let join = {
-            let mut joins = self.claim_joins.lock().expect("item claim join map");
-            Arc::clone(joins.entry(key.clone()).or_insert_with(|| {
-                Arc::new(ItemClaimJoin {
-                    notify: tokio::sync::Notify::new(),
-                    outcomes: Mutex::new(HashMap::new()),
-                })
-            }))
-        };
-        loop {
-            if let Some(outcome) = join
-                .outcomes
-                .lock()
-                .expect("item claim outcomes")
-                .remove(&work_id)
-            {
-                drop(caller);
-                return outcome;
-            }
-            if let Some(batch) = self.claim_coordinator.start_driver(&key) {
-                let works: Vec<Arc<ItemClaimWork>> = batch.requests().cloned().collect();
-                let driven = self.drive_log_first_item_claim(batch, &works).await;
-                {
-                    let mut outcomes = join.outcomes.lock().expect("item claim outcomes");
-                    match driven {
-                        Ok(results) => outcomes.extend(results),
-                        Err(error) => {
-                            for work in &works {
-                                outcomes.insert(work.id, Err(error.clone()));
-                            }
-                        }
-                    }
-                }
-                join.notify.notify_waiters();
-                continue;
-            }
-            join.notify.notified().await;
-        }
-    }
-
-    async fn drive_log_first_item_claim(
-        &self,
-        batch: fireweed_engine::ClaimDriverBatch<ItemClaimKey, ItemClaimWork>,
-        works: &[Arc<ItemClaimWork>],
-    ) -> EngineResult<Vec<(u64, EngineResult<Claimed>)>> {
-        let shard = works[0].request.shard.clone();
-        let _turn = self
-            .claim_turns
-            .acquire(shard.clone())
-            .await
-            .map_err(map_coord)?;
-        self.wait_queue_frontiers(&shard).await?;
-        let slot = self.claim_slots.acquire().await.map_err(map_coord)?;
-        let mut driver = self.projection.borrow_committed_driver_connection().await?;
-        let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
-        let fence = self
-            .selection_fence
-            .acquire_exclusive(shard.clone())
-            .await
-            .map_err(map_coord)?;
-        self.wait_queue_frontiers(&shard).await?;
-        let epoch = match works[0].request.expected_epoch {
-            Some(epoch) => epoch,
-            None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
-        };
-        let members: Vec<(UtcTimestamp, usize, LeaseToken, UtcTimestamp)> = works
-            .iter()
-            .map(|work| {
-                (
-                    work.request.eligibility_at(),
-                    work.request.max_items,
-                    work.request.lease_token.clone(),
-                    work.request.lease_expires_at,
-                )
-            })
-            .collect();
-        let selected = match driver.as_mut() {
-            Some(connection) => {
-                TursoRelational::item_claim_microbatch_on_connection(connection, &shard, &members)
-                    .await?
-            }
-            None => {
-                self.projection
-                    .item_claim_microbatch_on_serving_reader(&shard, &members)
-                    .await?
-            }
-        };
-        drop(driver);
-        drop(slot);
-        let mut envelopes = Vec::new();
-        let mut retained = Vec::new();
-        let mut results = Vec::new();
-        for (work, (ids, items)) in works.iter().zip(selected) {
-            if ids.is_empty() {
-                results.push((work.id, Ok(Claimed::default())));
-                continue;
-            }
-            let claimed = PreparedClaimedResult::from_rendered(&work.request, &ids, items, None)?
-                .into_claimed();
-            let envelope = CommandEnvelope {
-                command_id: self.ids.next_command_id(),
-                request_id: None,
-                request_fingerprint: None,
-                request_outcome: None,
-                item_ids: ids.clone(),
-                command: QueueCommand::Claim(ClaimCommand {
-                    item_ids: ids.clone(),
-                    lease_token: work.request.lease_token.clone(),
-                    lease_expires_at: work.request.lease_expires_at,
-                    worker_id: Some(work.request.worker_id.clone()),
-                    authority_first: true,
-                }),
-                checksum: CommandChecksum(0),
-                created_at: work.request.now,
-            };
-            envelopes.push(envelope);
-            retained.push((work.id, ids, work.request.lease_token.clone(), claimed));
-        }
-        let published = !envelopes.is_empty();
-        if published {
-            let reservation = match &self.async_apply {
-                Some(coordinator) => Some(coordinator.reserve(shard.clone(), &envelopes).await?),
-                None => None,
-            };
-            self.append_class_s_claim(
-                RawCommitRequest::new(shard.clone(), envelopes, epoch)
-                    .with_append_admission(AppendAdmissionClass::ClaimCoordinatorLive),
-                reservation,
-            )
-            .await?;
-        }
-        drop(fence);
-        if published {
-            self.wait_request_entry_coverage(&shard).await?;
-            self.record_frontier(&shard, true).await?;
-            for (_id, ids, token, _) in &retained {
-                self.projection
-                    .remember_leases(&shard, ids, token.clone())
-                    .await;
-            }
-        }
-        drop(batch);
-        for (id, _, _, claimed) in retained {
-            results.push((id, Ok(claimed)));
-        }
-        Ok(results)
     }
 
     async fn append_class_s_claim(
@@ -3854,22 +4163,41 @@ impl DerivedObjectLogTursoBackend {
                 "finalize item batch must not be empty",
             ));
         }
-        let append_admission = if outcomes.iter().all(|outcome| {
-            matches!(
-                outcome.kind,
-                fireweed_engine::FinalizeKind::Complete | fireweed_engine::FinalizeKind::Fail
-            )
-        }) {
-            AppendAdmissionClass::Bypass
-        } else {
-            AppendAdmissionClass::SelectionRequired
-        };
+        let packed_update = outcomes
+            .iter()
+            .all(|outcome| matches!(outcome.kind, FinalizeKind::Complete | FinalizeKind::Fail));
+        if packed_update {
+            let epoch = match expected_epoch {
+                Some(epoch) => epoch,
+                None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
+            };
+            let work = MutationGenerationWork::Finalize {
+                shard: shard.clone(),
+                outcomes,
+                now,
+                expected_epoch: epoch,
+                command_id: self.ids.next_command_id(),
+            };
+            return match self.drive_candidate_mutation(work).await? {
+                MutationGenerationMemberOutcome::Finalize { .. } => Ok(()),
+                MutationGenerationMemberOutcome::Rejected(error) => Err(error),
+                MutationGenerationMemberOutcome::Push(_)
+                | MutationGenerationMemberOutcome::PushAccepted
+                | MutationGenerationMemberOutcome::BatchUpdate { .. }
+                | MutationGenerationMemberOutcome::ClaimAccepted { .. }
+                | MutationGenerationMemberOutcome::Claim { .. }
+                | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
+                    "finalize generation produced a non-finalize outcome".into(),
+                )),
+            };
+        }
         let PreparedFinalize { request, .. } = self
             .engine
             .prepare_finalize(shard.clone(), outcomes, now, expected_epoch)
             .await
             .map_err(map_lifecycle)?;
-        self.commit_prepared(request, append_admission).await
+        self.commit_prepared(request, AppendAdmissionClass::SelectionRequired)
+            .await
     }
 
     fn create_queue_impl(
@@ -4295,14 +4623,18 @@ mod s4b_lifecycle {
 
 #[cfg(all(test, feature = "objectlog"))]
 mod s3c_activation {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use bytes::Bytes;
     use fireweed_core::{
-        EligibilityPolicy, GroupKey, OrderingMode, PriorityDirection, PriorityModel,
+        ClientItemKey, EligibilityPolicy, GroupKey, OrderingMode, PriorityDirection, PriorityModel,
         PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
         RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
-    use fireweed_engine::{ClaimCompatibility, ClaimPort, ProjectionRead, PushPort, PushSpec};
+    use fireweed_engine::{
+        ClaimCompatibility, ClaimPort, EngineError, ProjectionRead, PushPort, PushSpec,
+    };
     use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
 
     use super::*;
@@ -4361,6 +4693,26 @@ mod s3c_activation {
         )
         .await
         .unwrap()
+    }
+
+    async fn push_until_admitted(
+        backend: &DerivedObjectLogTursoBackend,
+        shard: &fireweed_engine::QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+    ) -> Vec<fireweed_core::ItemId> {
+        let started = std::time::Instant::now();
+        loop {
+            match backend.push(shard, items.clone(), now, None).await {
+                Ok(ids) => return ids,
+                Err(EngineError::Backpressure { .. })
+                    if started.elapsed() < std::time::Duration::from_secs(5) =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("concurrent push: {error:?}"),
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4492,6 +4844,124 @@ mod s3c_activation {
         drop(backend);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn eight_inflight_pushes_all_land_exactly_once() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3c-fill-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = Arc::new(open(&root).await);
+        let definition = qdef("q-s3c-fill");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let now = UtcTimestamp::new(1, 0).unwrap();
+        let futs = (0..CLAIM_GENERATION_MAX_REQUESTS).map(|i| {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            async move {
+                push_until_admitted(
+                    &backend,
+                    &shard,
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("fill-{i}")).unwrap()),
+                        payload: Some(Bytes::from(format!("p{i}"))),
+                        ..PushSpec::default()
+                    }],
+                    now,
+                )
+                .await
+            }
+        });
+        let results = futures::future::join_all(futs).await;
+        assert_eq!(results.len(), CLAIM_GENERATION_MAX_REQUESTS);
+        for ids in &results {
+            assert_eq!(ids.len(), 1);
+        }
+        let mut unique = results.into_iter().flatten().collect::<Vec<_>>();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), CLAIM_GENERATION_MAX_REQUESTS);
+        assert_eq!(
+            backend.metrics(&shard).await.unwrap().pending as usize,
+            CLAIM_GENERATION_MAX_REQUESTS
+        );
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn sixteen_inflight_pushes_overlay_across_generations_exactly_once() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3c-overlay-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = Arc::new(open(&root).await);
+        let definition = qdef("q-s3c-overlay");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let now = UtcTimestamp::new(1, 0).unwrap();
+        let n = CLAIM_GENERATION_MAX_REQUESTS * 2;
+        let futs = (0..n).map(|i| {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            async move {
+                push_until_admitted(
+                    &backend,
+                    &shard,
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("overlay-{i}")).unwrap()),
+                        payload: Some(Bytes::from(format!("p{i}"))),
+                        ..PushSpec::default()
+                    }],
+                    now,
+                )
+                .await
+            }
+        });
+        let results = futures::future::join_all(futs).await;
+        assert_eq!(results.len(), n);
+        let mut unique = results.into_iter().flatten().collect::<Vec<_>>();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), n);
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending as usize, n);
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn duplicate_client_key_conflicts_before_apply_covers() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3c-dup-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let definition = qdef("q-s3c-dup");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let now = UtcTimestamp::new(1, 0).unwrap();
+        let spec = PushSpec {
+            client_item_key: Some(ClientItemKey::new("same").unwrap()),
+            payload: Some(Bytes::from_static(b"a")),
+            ..PushSpec::default()
+        };
+        backend
+            .push(&shard, vec![spec.clone()], now, None)
+            .await
+            .expect("first push");
+        let duplicate = backend.push(&shard, vec![spec], now, None).await;
+        assert!(
+            matches!(duplicate, Err(EngineError::Conflict)),
+            "unpublished overlay must reject the duplicate key, got {duplicate:?}"
+        );
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(all(test, feature = "objectlog"))]
@@ -4589,14 +5059,15 @@ mod s8c_outbox_migration {
         }
 
         let compose = include_str!("turso_compose.rs");
-        let class_s = compose
-            .split("    async fn dispatch_class_s_claim(")
+        let item_claim = compose
+            .split("async fn realize_accepted_claims(")
             .nth(1)
-            .and_then(|rest| rest.split("    async fn append_class_s_claim(").next())
-            .expect("dispatch_class_s_claim");
-        assert!(!class_s.contains("class_s_claim_for_queue"));
-        assert!(!class_s.contains("pending_claim_outbox"));
-        assert!(!class_s.contains("INSERT INTO fireweed_claim_outbox"));
+            .and_then(|rest| rest.split("async fn dispatch_grouped_cohort_claim(").next())
+            .expect("derived claim realize");
+        assert!(!item_claim.contains("class_s_claim_for_queue"));
+        assert!(!item_claim.contains("pending_claim_outbox"));
+        assert!(!item_claim.contains("INSERT INTO fireweed_claim_outbox"));
+        assert!(item_claim.contains("drive_candidate_mutation"));
         let drain = compose
             .split("    async fn drain_claim_outbox(")
             .nth(1)

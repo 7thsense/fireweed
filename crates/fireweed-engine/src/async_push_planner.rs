@@ -162,7 +162,7 @@ where
 }
 
 /// Object-log epoch, payload/index admission, and counter reservation with no projection snapshot.
-async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
+pub async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
     log: &L,
     counters: &QueueCounters,
     definition: &QueueDefinition,

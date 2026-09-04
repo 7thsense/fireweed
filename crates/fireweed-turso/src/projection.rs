@@ -2664,6 +2664,18 @@ impl AsyncProjectionStore for TursoRelational {
     {
         let reader = self.reader.clone();
         async move {
+            let remembered = {
+                let tokens = self.live_tokens.lock().await;
+                targets
+                    .iter()
+                    .filter_map(|target| {
+                        tokens
+                            .get(&(shard.clone(), target.item_id))
+                            .cloned()
+                            .map(|token| (target.item_id, token))
+                    })
+                    .collect::<HashMap<_, _>>()
+            };
             let connection = reader.lock().await;
             let tenant = shard.tenant_id.as_str().to_string();
             let queue = shard.queue_id.as_str().to_string();
@@ -2693,14 +2705,20 @@ impl AsyncProjectionStore for TursoRelational {
                     if !matches!(row[3], Value::Null) {
                         return Err(EngineError::Invalid("cohort member requires cohort lease"));
                     }
-                    if state != ItemState::Leased {
+                    let remembered_ok =
+                        remembered.get(&target.item_id) == Some(&target.lease_token);
+                    if !remembered_ok {
+                        if state != ItemState::Leased {
+                            return Err(EngineError::Invalid("item is not leased"));
+                        }
+                        if blob(&row[5])? != lease_hash(&target.lease_token)
+                            || matches!(row[4], Value::Null)
+                            || integer(&row[4])? < now_nanos
+                        {
+                            return Err(EngineError::StaleLease);
+                        }
+                    } else if state != ItemState::Leased && state != ItemState::Pending {
                         return Err(EngineError::Invalid("item is not leased"));
-                    }
-                    if blob(&row[5])? != lease_hash(&target.lease_token)
-                        || matches!(row[4], Value::Null)
-                        || integer(&row[4])? < now_nanos
-                    {
-                        return Err(EngineError::StaleLease);
                     }
                     let version = integer(&row[6])?;
                     if version < 0 || version as u64 != target.item_version {
@@ -3148,6 +3166,102 @@ impl AsyncProjectionStore for TursoRelational {
                 (Err(error), Ok(())) => Err(error),
                 (Ok(selection), Ok(())) => Ok(selection),
             }
+        }
+    }
+
+    fn resolve_lease_targets(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        async move {
+            let remembered = {
+                let tokens = self.live_tokens.lock().await;
+                ids.iter()
+                    .filter_map(|id| {
+                        tokens
+                            .get(&(shard.clone(), *id))
+                            .cloned()
+                            .map(|token| (*id, token))
+                    })
+                    .collect::<HashMap<_, _>>()
+            };
+            if remembered.len() != ids.len() {
+                return AsyncProjectionStore::render_claimed(self, shard, ids).await;
+            }
+            let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(ids.len());
+            let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
+            for chunk in ids.chunks(500) {
+                let placeholders = (0..chunk.len())
+                    .map(|index| format!("?{}", index + 3))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut params = vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                ];
+                params.extend(chunk.iter().map(|id| id.to_string().into()));
+                let item_sql = format!(
+                    "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
+                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document,index_fields \
+                     FROM fireweed_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 \
+                     AND lifecycle_state IN ('Pending','Leased') \
+                     AND item_id IN ({placeholders})"
+                );
+                for row in self
+                    .query(item_sql, params.clone())
+                    .await
+                    .map_err(storage)?
+                {
+                    let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+                    item_rows.insert(id, row.values[1..].to_vec());
+                }
+                let gate_sql = format!(
+                    "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
+                     AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+                );
+                for row in self.query(gate_sql, params).await.map_err(storage)? {
+                    let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+                    gate_keys.entry(id).or_default().push(text(&row.values[1])?);
+                }
+            }
+            let mut claimed = Vec::with_capacity(ids.len());
+            for id in ids {
+                let Some(token) = remembered.get(&id).cloned() else {
+                    return Err(EngineError::StaleLease);
+                };
+                let Some(values) = item_rows.get(&id) else {
+                    return Err(EngineError::NotFound);
+                };
+                let expires = optional_integer(&values[5])?.unwrap_or(1);
+                claimed.push(ClaimedItem {
+                    item_id: id,
+                    client_item_key: ClientItemKey::new(text(&values[0])?).map_err(storage)?,
+                    item_version: nonnegative_u64(integer(&values[1])?, "item_version")?,
+                    priority: parse_priority(optional_text(&values[2])?)?,
+                    group_key: optional_text(&values[3])?
+                        .map(GroupKey::new)
+                        .transpose()
+                        .map_err(storage)?,
+                    not_before: optional_integer(&values[4])?.map(nanos_ts),
+                    lease_token: Some(token),
+                    lease_expires_at: nanos_ts(expires),
+                    attempt_count: nonnegative_u32(integer(&values[6])?, "retry_count")?,
+                    max_attempts: nonnegative_u32(integer(&values[7])?, "max_attempts")?,
+                    payload: optional_blob(&values[8])?.map(Bytes::from),
+                    fields: fields_from_json(text(&values[9])?)?,
+                    metadata: metadata_from_json(text(&values[10])?)?,
+                    entity: fireweed_engine::index_fields::echo_entity_document(
+                        entity_from_json(optional_text(&values[11])?)?,
+                        &fireweed_engine::index_fields::decode_index_fields_blob(
+                            optional_blob(&values[12])?.as_deref(),
+                        )?,
+                    )?,
+                    gate_keys: gate_keys.remove(&id).unwrap_or_default(),
+                });
+            }
+            Ok(claimed)
         }
     }
 
@@ -3729,21 +3843,30 @@ mod committed_pool_helper_tests {
         let (_, production) = compose
             .rsplit_once("// Atomic log-replay × Turso")
             .expect("production Turso composition boundary");
-        let class_s = between(
-            production,
-            "async fn dispatch_class_s_claim(",
-            "async fn append_class_s_claim(",
+        let derived_impl = production
+            .split("impl DerivedObjectLogTursoBackend {")
+            .nth(1)
+            .expect("derived Turso implementation");
+        let item_claim = between(
+            derived_impl,
+            "async fn dispatch_claim(",
+            "async fn dispatch_grouped_cohort_claim(",
         );
         assert!(
-            class_s.contains("claim_turns") && class_s.contains("acquire_exclusive"),
-            "default item Claim must take ClaimQueueTurn and the exclusive selection fence"
+            item_claim.contains("drive_candidate_mutation"),
+            "ordinary item Claim must join the packed Update generation"
         );
         assert!(
-            !class_s.contains("class_s_claim_for_queue"),
+            !item_claim.contains("acquire_exclusive"),
+            "ordinary item Claim must not take the exclusive selection fence"
+        );
+        assert!(
+            !item_claim.contains("class_s_claim_for_queue"),
             "S5 cuts item Claim off the SQL-first writer lease-before-append lane"
         );
         assert!(
-            !class_s.contains("render_claimed(") && !class_s.contains("render_prepared_claim"),
+            !item_claim.contains("render_claimed(")
+                && !item_claim.contains("render_prepared_claim"),
             "item Claim continuation must retain pre-materialized rows"
         );
         let retained = between(
@@ -3755,7 +3878,7 @@ mod committed_pool_helper_tests {
         let grouped = between(
             compose,
             "async fn dispatch_grouped_cohort_claim(",
-            "async fn dispatch_class_s_claim(",
+            "async fn append_class_s_claim(",
         );
         assert!(
             !grouped.contains("render_prepared_claim") && !grouped.contains("render_claimed("),

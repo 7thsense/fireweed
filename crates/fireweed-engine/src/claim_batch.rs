@@ -69,11 +69,11 @@ pub const MUTATION_SEQUENCER_WAIT_RESOURCE: &str = "mutation sequencer wait";
 pub const SELECTION_FENCE_WAITERS_RESOURCE: &str = "selection fence waiters";
 pub const SELECTION_FENCE_ACQUIRE_RESOURCE: &str = "selection fence acquire";
 
-/// Compatible microbatch overlays currently have exactly the two reviewed FIFO shapes.
+/// Packed generation shapes: add (`Push`) and update (field update, claim, complete).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationGenerationKind {
     Push,
-    BatchUpdate,
+    Update,
 }
 
 /// Whether one command joins a compatible mutation generation, owns a singleton generation, or does
@@ -88,7 +88,7 @@ pub enum MutationGenerationDisposition {
 fn finalize_kind_generation(kind: FinalizeKind) -> MutationGenerationDisposition {
     match kind {
         FinalizeKind::Complete | FinalizeKind::Fail => {
-            MutationGenerationDisposition::NotCandidateMutating
+            MutationGenerationDisposition::Compatible(MutationGenerationKind::Update)
         }
         FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm => {
             MutationGenerationDisposition::Singleton
@@ -120,7 +120,7 @@ pub fn mutation_generation_disposition(command: &QueueCommand) -> MutationGenera
     match command {
         QueueCommand::CreateQueue(_) => Singleton,
         QueueCommand::Push(_) => Compatible(MutationGenerationKind::Push),
-        QueueCommand::Claim(_) => NotCandidateMutating,
+        QueueCommand::Claim(_) => Compatible(MutationGenerationKind::Update),
         QueueCommand::CohortClaim(_) => NotCandidateMutating,
         QueueCommand::RenewLease(_) => NotCandidateMutating,
         QueueCommand::CohortRenewLease(_) => NotCandidateMutating,
@@ -141,7 +141,7 @@ pub fn mutation_generation_disposition(command: &QueueCommand) -> MutationGenera
             for update in &command.updates {
                 classify_update_fields(update);
             }
-            Compatible(MutationGenerationKind::BatchUpdate)
+            Compatible(MutationGenerationKind::Update)
         }
         QueueCommand::MutateItems(command) => {
             classify_mutate_items(command);
@@ -1179,6 +1179,7 @@ struct MutationGeneration<C, R> {
     active: bool,
     items: usize,
     response_bytes: usize,
+    first_queued_at: Instant,
     requests: VecDeque<MutationEntry<R>>,
 }
 
@@ -1335,6 +1336,7 @@ where
                         active: false,
                         items: 0,
                         response_bytes: 0,
+                        first_queued_at: Instant::now(),
                         requests: VecDeque::new(),
                     });
                 generation_id
@@ -1374,6 +1376,14 @@ where
     /// Elect the front generation as owned work. Caller ticket cancellation no longer removes a
     /// generation once this method succeeds; the returned turn owns it through publication.
     pub fn start_generation(&self, queue: &K) -> Option<MutationGenerationBatch<K, C, R>> {
+        self.start_generation_after(queue, Duration::ZERO)
+    }
+
+    pub fn start_generation_after(
+        &self,
+        queue: &K,
+        linger: Duration,
+    ) -> Option<MutationGenerationBatch<K, C, R>> {
         let (generation_id, requests, items, response_bytes) = {
             let mut state = self
                 .inner
@@ -1382,6 +1392,12 @@ where
                 .expect("mutation sequencer poisoned");
             let generation = state.queues.get_mut(queue)?.generations.front_mut()?;
             if generation.active {
+                return None;
+            }
+            let full = generation.requests.len() >= CLAIM_GENERATION_MAX_REQUESTS
+                || generation.items >= GENERATION_MAX_ITEMS
+                || generation.response_bytes >= GENERATION_MAX_RESPONSE_BYTES;
+            if !full && generation.first_queued_at.elapsed() < linger {
                 return None;
             }
             generation.active = true;
@@ -1405,6 +1421,21 @@ where
             response_bytes,
             completed: false,
         })
+    }
+
+    pub fn generation_queued_or_active(&self, queue: &K, generation_id: u64) -> bool {
+        self.inner
+            .state
+            .lock()
+            .expect("mutation sequencer poisoned")
+            .queues
+            .get(queue)
+            .is_some_and(|entry| {
+                entry
+                    .generations
+                    .iter()
+                    .any(|generation| generation.id == generation_id)
+            })
     }
 
     pub fn close(&self) {
@@ -1521,6 +1552,10 @@ where
     C: Clone + Eq + Send + 'static,
     R: Send + Sync + 'static,
 {
+    pub fn generation_id(&self) -> u64 {
+        self.generation_id
+    }
+
     pub fn requests(&self) -> &[Arc<R>] {
         &self.requests
     }
@@ -2384,7 +2419,7 @@ mod tests {
                 Shared,
                 Compatible(MutationGenerationKind::Push),
             ),
-            (claim(), Exclusive, NotCandidateMutating),
+            (claim(), Shared, Compatible(MutationGenerationKind::Update)),
             (
                 QueueCommand::CohortClaim(CohortClaimCommand {
                     cohort_id: CohortId::new("cohort").unwrap(),
@@ -2422,10 +2457,14 @@ mod tests {
             ),
             (
                 finalize(FinalizeKind::Complete),
-                Bypass,
-                NotCandidateMutating,
+                Shared,
+                Compatible(MutationGenerationKind::Update),
             ),
-            (finalize(FinalizeKind::Fail), Bypass, NotCandidateMutating),
+            (
+                finalize(FinalizeKind::Fail),
+                Shared,
+                Compatible(MutationGenerationKind::Update),
+            ),
             (finalize(FinalizeKind::Retry), Shared, Singleton),
             (finalize(FinalizeKind::Release), Shared, Singleton),
             (finalize(FinalizeKind::Rearm), Shared, Singleton),
@@ -2477,7 +2516,7 @@ mod tests {
                     updates: vec![update_fields(PayloadUpdate::Keep, ScheduleUpdate::Keep)],
                 }),
                 Shared,
-                Compatible(MutationGenerationKind::BatchUpdate),
+                Compatible(MutationGenerationKind::Update),
             ),
             (
                 QueueCommand::LeaseExpired(LeaseExpiredCommand {
@@ -2535,19 +2574,14 @@ mod tests {
             FinalizeKind::Release,
             FinalizeKind::Rearm,
         ] {
-            let generation = finalize_kind_generation(kind);
-            let fence = match generation {
-                MutationGenerationDisposition::Singleton => SelectionFenceDisposition::Shared,
-                _ => SelectionFenceDisposition::Bypass,
-            };
             catalog.push((
                 QueueCommand::CohortFinalize(CohortFinalizeCommand {
                     cohort_id: CohortId::new("cohort").unwrap(),
                     kind,
                     not_before: None,
                 }),
-                fence,
-                generation,
+                SelectionFenceDisposition::Shared,
+                finalize_kind_generation(kind),
             ));
         }
 
@@ -2642,7 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_mutations_join_generations_and_pending_consumers_do_not() {
+    fn candidate_mutations_join_generations_and_singletons_stay_out() {
         let compatible = [
             (
                 QueueCommand::Push(PushCommand { items: Vec::new() }),
@@ -2652,8 +2686,14 @@ mod tests {
                 QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
                     updates: Vec::new(),
                 }),
-                MutationGenerationKind::BatchUpdate,
+                MutationGenerationKind::Update,
             ),
+            (claim(), MutationGenerationKind::Update),
+            (
+                finalize(FinalizeKind::Complete),
+                MutationGenerationKind::Update,
+            ),
+            (finalize(FinalizeKind::Fail), MutationGenerationKind::Update),
         ];
         for (command, kind) in compatible {
             assert_eq!(
@@ -2681,16 +2721,6 @@ mod tests {
                 MutationGenerationDisposition::Singleton
             );
         }
-
-        let pending_consumer = claim();
-        assert_eq!(
-            selection_fence_disposition(&pending_consumer),
-            SelectionFenceDisposition::Exclusive
-        );
-        assert_eq!(
-            mutation_generation_disposition(&pending_consumer),
-            MutationGenerationDisposition::NotCandidateMutating
-        );
     }
 
     #[test]
@@ -2700,7 +2730,6 @@ mod tests {
                 item_ids: vec![ItemId::from_u64(1)],
                 lease_expires_at: UtcTimestamp::new(3, 0).unwrap(),
             }),
-            finalize(FinalizeKind::Complete),
             QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
         ];
         for command in commands {
@@ -2759,7 +2788,7 @@ mod tests {
         );
         assert_eq!(
             mutation_generation_disposition_for_commands([&batch, &batch]),
-            MutationGenerationDisposition::Compatible(MutationGenerationKind::BatchUpdate)
+            MutationGenerationDisposition::Compatible(MutationGenerationKind::Update)
         );
         assert_eq!(
             mutation_generation_disposition_for_commands([&push, &batch]),
@@ -2791,7 +2820,7 @@ mod tests {
         let singleton = sequencer
             .admit(
                 "q",
-                MutationGenerationKind::BatchUpdate,
+                MutationGenerationKind::Update,
                 MutationIngress::Direct,
                 Arc::new(9),
                 1,
