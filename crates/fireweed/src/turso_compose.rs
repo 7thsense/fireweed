@@ -226,9 +226,7 @@ fn finish_inert_mutation_generation_append(
 /// becomes eight serial apply rounds.
 const MICROBATCH_LINGER: Duration = Duration::from_millis(20);
 
-/// Documented overlay exclude bound (two unpublished generations). Paging SELECT
-/// filters larger sets in memory instead of SQL `NOT IN`.
-#[cfg(test)]
+/// Claim SELECT `NOT IN` binds at most two unpublished generations (TD-016).
 const CLAIM_SELECT_EXCLUDE_CAP: usize =
     GENERATION_MAX_ITEMS.saturating_mul(MUTATION_MAX_GENERATIONS_PER_QUEUE);
 
