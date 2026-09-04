@@ -30,13 +30,14 @@ use fireweed_engine::{
     CommandPosition, ControlPlane, ControlPlaneStore, CoordinationError, CreateQueueOutcome,
     DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
     ExpiredLeaseCursor, ExpiredLeasePage, FinalizeKind, FinalizeOutcome, FinalizePort,
-    FinalizeTarget, HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IdempotencyDecision,
-    InProcessControlPlane, InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher,
-    ItemMutationPort, ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView,
-    LogStore, MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationDriverSnapshot,
-    MutationGenerationMemberOutcome, MutationGenerationWork, MutationIngress, MutationSequencer,
-    MutationSequencerKey, OutcomeReadAdmission, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory,
-    PendingPage, PendingSummary, PreparedClaim, PreparedClaimedResult, PreparedFinalize,
+    FinalizeTarget, GENERATION_MAX_ITEMS, HistoricalProjectionRead, HotProjectionQueryPort, IdGen,
+    IdempotencyDecision, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
+    InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
+    ItemView, LeaseView, LiveItemView, LogStore, MUTATION_MAX_GENERATIONS_PER_QUEUE,
+    MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationDriverSnapshot, MutationGenerationMemberOutcome,
+    MutationGenerationWork, MutationIngress, MutationSequencer, MutationSequencerKey,
+    OutcomeReadAdmission, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, PendingPage,
+    PendingSummary, PreparedClaim, PreparedClaimedResult, PreparedFinalize,
     PreparedMutationGeneration, PreparedPush, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
     ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort,
     PushCommand, PushFingerprint, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError,
@@ -224,6 +225,22 @@ fn finish_inert_mutation_generation_append(
 /// `start_driver` fire on the first waiter and compatible inflight=8 work
 /// becomes eight serial apply rounds.
 const MICROBATCH_LINGER: Duration = Duration::from_millis(20);
+
+/// Claim SELECT `NOT IN` binds at most two unpublished generations (TD-016).
+const CLAIM_SELECT_EXCLUDE_CAP: usize =
+    GENERATION_MAX_ITEMS.saturating_mul(MUTATION_MAX_GENERATIONS_PER_QUEUE);
+
+fn overlay_claim_exclude(snapshot: &MutationDriverSnapshot) -> Vec<ItemId> {
+    let mut ids: Vec<ItemId> = snapshot
+        .leased_ids
+        .iter()
+        .chain(snapshot.terminal_ids.iter())
+        .copied()
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
 
 fn merge_unpublished_into_snapshot(
     snapshot: &mut MutationDriverSnapshot,
@@ -963,6 +980,61 @@ mod contention_mapping_tests {
     }
 
     #[test]
+    fn overlay_claim_exclude_unions_leased_and_terminal_without_history() {
+        use std::collections::HashSet;
+
+        use fireweed_core::{ItemId, QueueId, TenantId};
+        use fireweed_engine::MutationDriverSnapshot;
+
+        let mut snapshot = MutationDriverSnapshot {
+            definition: fireweed_core::QueueDefinition {
+                tenant_id: TenantId::new("t").unwrap(),
+                queue_id: QueueId::new("q").unwrap(),
+                priority_model: fireweed_core::PriorityModel::timestamp_ascending(),
+                ordering_mode: fireweed_core::OrderingMode::Strict,
+                max_rank_error: 0,
+                progress_bound_ms: 60_000,
+                eligibility_policy: fireweed_core::EligibilityPolicy::default(),
+                cohort_policy: None,
+                recurrence: fireweed_core::RecurrencePolicy::default(),
+                request_id_retention_ms: 60_000,
+                client_item_key_retention_ms: 60_000,
+                terminal_retention_ms: 60_000,
+                max_lease_duration_ms: 60_000,
+                retry_policy: fireweed_core::RetryPolicy { max_attempts: 3 },
+                max_push_batch_size: 100,
+                max_claim_batch_size: 100,
+                max_eligible_group_size: None,
+                secondary_indexes: Vec::new(),
+                entity_schema: None,
+                typed_indexes: Vec::new(),
+                emit_change_records: false,
+            },
+            paused_drain_intake: false,
+            client_keys: HashSet::new(),
+            request_fingerprints: std::collections::HashMap::new(),
+            unique_index_values: HashSet::new(),
+            group_counts: std::collections::HashMap::new(),
+            batch_items: Vec::new(),
+            leased_ids: HashSet::from([ItemId::from_u64(1), ItemId::from_u64(2)]),
+            terminal_ids: HashSet::from([ItemId::from_u64(2), ItemId::from_u64(3)]),
+        };
+        let exclude = overlay_claim_exclude(&snapshot);
+        assert_eq!(
+            exclude,
+            vec![
+                ItemId::from_u64(1),
+                ItemId::from_u64(2),
+                ItemId::from_u64(3)
+            ]
+        );
+        assert_eq!(CLAIM_SELECT_EXCLUDE_CAP, 1_600);
+        snapshot.leased_ids = (0..2_000).map(ItemId::from_u64).collect();
+        snapshot.terminal_ids.clear();
+        assert!(overlay_claim_exclude(&snapshot).len() > CLAIM_SELECT_EXCLUDE_CAP);
+    }
+
+    #[test]
     fn public_reads_wait_then_take_outcome_admission_before_pool() {
         let compose_file = include_str!("turso_compose.rs");
         let (_, production) = compose_file
@@ -1010,8 +1082,16 @@ mod contention_mapping_tests {
             "async fn dispatch_claim(",
         );
         assert!(
-            realized.contains("remembered_lease_ids"),
-            "next Claim must exclude in-process leases instead of waiting last_claim apply"
+            realized.contains("overlay_claim_exclude"),
+            "next Claim must exclude unpublished overlay ids, not remembered history"
+        );
+        assert!(
+            realized.contains("CLAIM_SELECT_EXCLUDE_CAP"),
+            "Claim SELECT exclude must cap at two unpublished generations"
+        );
+        assert!(
+            !realized.contains("remembered_lease_ids"),
+            "Claim SELECT must not bind the cumulative remembered lease set"
         );
         assert!(
             !realized.contains("borrow_committed_driver_connection"),
@@ -3900,11 +3980,14 @@ impl DerivedObjectLogTursoBackend {
         if claim_members.is_empty() {
             return Ok(());
         }
-        let mut exclude: Vec<ItemId> = folded.leased_ids.iter().copied().collect();
-        exclude.extend(folded.terminal_ids.iter().copied());
-        exclude.extend(self.projection.remembered_lease_ids(queue).await);
-        exclude.sort_unstable();
-        exclude.dedup();
+        let mut exclude = overlay_claim_exclude(folded);
+        if exclude.len() > CLAIM_SELECT_EXCLUDE_CAP {
+            self.wait_selected_frontiers(queue, true, true).await?;
+            folded.leased_ids.clear();
+            folded.terminal_ids.clear();
+            self.unpublished_mutations.lock().await.remove(queue);
+            exclude.clear();
+        }
         let selected = self
             .projection
             .item_claim_microbatch_on_serving_reader(queue, &claim_members, &exclude)
