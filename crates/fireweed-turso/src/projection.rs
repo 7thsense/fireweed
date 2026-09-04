@@ -1573,6 +1573,22 @@ async fn apply_owned(
         }
     }
     let cursor_definition_us = duration_us(cursor_definition_started.elapsed());
+    let trace_items: usize = commands.iter().map(|command| command.item_ids.len()).sum();
+    let mut trace_push = 0u32;
+    let mut trace_update = 0u32;
+    let mut trace_claim = 0u32;
+    let mut trace_finalize = 0u32;
+    let mut trace_other = 0u32;
+    for command in &commands {
+        match &command.command {
+            QueueCommand::Push(_) => trace_push += 1,
+            QueueCommand::UpdateFields(_) | QueueCommand::UpdateFieldsBatch(_) => trace_update += 1,
+            QueueCommand::Claim(_) => trace_claim += 1,
+            QueueCommand::Finalize(_) => trace_finalize += 1,
+            _ => trace_other += 1,
+        }
+    }
+    let trace_cmds = commands.len();
     let hop_txn = transaction.clone();
     let rel_phases = Arc::new(std::sync::Mutex::new(RelApplyPhaseTotals::default()));
     let rel_phases_for_hop = Arc::clone(&rel_phases);
@@ -1658,6 +1674,13 @@ async fn apply_owned(
         commit_us,
         total_us: duration_us(total_started.elapsed()),
     };
+    if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
+        eprintln!(
+            "apply cmds={trace_cmds} items={trace_items} push={trace_push} upd={trace_update} claim={trace_claim} fin={trace_finalize} other={trace_other} \
+             wait_us={writer_wait_us} begin_us={begin_us} cur_us={cursor_definition_us} read_us={row_read_us} xform_us={transform_bridge_us} upd_us={update_side_us} commit_us={commit_us} total_us={}",
+            phase_observation.total_us
+        );
+    }
     *last_apply_phase
         .lock()
         .expect("Turso apply-phase mutex poisoned") = Some(phase_observation);
