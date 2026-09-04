@@ -641,23 +641,46 @@ impl TursoRelational {
             .await
             .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
         let result = async {
-            let mut assigned = exclude.to_vec();
             let mut out = Vec::with_capacity(members.len());
-            for (now, max, token, expires) in members {
-                let ids = crate::projection::select_item_claim_ids_on(
-                    &snapshot, shard, *now, *max, &assigned,
+            let same_clock = members.windows(2).all(|pair| pair[0].0 == pair[1].0);
+            if same_clock && !members.is_empty() {
+                let now = members[0].0;
+                let total: usize = members.iter().map(|member| member.1).sum();
+                let mut remaining = crate::projection::select_item_claim_ids_on(
+                    &snapshot, shard, now, total, exclude,
                 )
                 .await?;
-                let items = if ids.is_empty() {
-                    Vec::new()
-                } else {
-                    crate::projection::materialize_grouped_cohort_claimed_on(
-                        &snapshot, shard, &ids, token, *expires,
+                for (_now, max, token, expires) in members {
+                    let take = remaining.len().min(*max);
+                    let ids: Vec<_> = remaining.drain(..take).collect();
+                    let items = if ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        crate::projection::materialize_grouped_cohort_claimed_on(
+                            &snapshot, shard, &ids, token, *expires,
+                        )
+                        .await?
+                    };
+                    out.push((ids, items));
+                }
+            } else {
+                let mut assigned = exclude.to_vec();
+                for (now, max, token, expires) in members {
+                    let ids = crate::projection::select_item_claim_ids_on(
+                        &snapshot, shard, *now, *max, &assigned,
                     )
-                    .await?
-                };
-                assigned.extend_from_slice(&ids);
-                out.push((ids, items));
+                    .await?;
+                    let items = if ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        crate::projection::materialize_grouped_cohort_claimed_on(
+                            &snapshot, shard, &ids, token, *expires,
+                        )
+                        .await?
+                    };
+                    assigned.extend_from_slice(&ids);
+                    out.push((ids, items));
+                }
             }
             Ok(out)
         }
