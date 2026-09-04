@@ -2005,38 +2005,44 @@ pub async fn select_item_claim_ids_on(
     if queue_paused(connection, tenant, queue).await? {
         return Ok(Vec::new());
     }
-    let mut params = vec![
-        Value::Text(tenant.to_string()),
-        Value::Text(queue.to_string()),
-        Value::Integer(ts_nanos(now)),
-        Value::Integer(i64::try_from(max).map_err(storage)?),
-    ];
-    let exclude_clause = if exclude.is_empty() {
-        String::new()
-    } else {
-        let start = params.len() + 1;
-        let placeholders = (0..exclude.len())
-            .map(|index| format!("?{}", start + index))
-            .collect::<Vec<_>>()
-            .join(",");
-        params.extend(exclude.iter().map(|id| Value::Text(id.to_string())));
-        format!(" AND item_id NOT IN ({placeholders})")
-    };
-    let query = format!(
-        "SELECT item_id FROM fireweed_items \
+    let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
+    let mut chosen = Vec::with_capacity(max);
+    let mut offset: i64 = 0;
+    let query = "SELECT item_id FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
          AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
          AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
          JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
          AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
-         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id)\
-         {exclude_clause} \
-         ORDER BY priority_sort,created_seq LIMIT ?4"
-    );
-    let rows = query_driver_value_rows(connection, query, params).await?;
-    rows.into_iter()
-        .map(|values| ItemId::new(text(&values[0])?).map_err(storage))
-        .collect()
+         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
+         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5";
+    while chosen.len() < max {
+        let skip = exclude_set.len().saturating_sub(offset as usize).min(800);
+        let fetch = max.saturating_sub(chosen.len()).saturating_add(skip).max(1);
+        let params = vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+            Value::Integer(ts_nanos(now)),
+            Value::Integer(i64::try_from(fetch).map_err(storage)?),
+            Value::Integer(offset),
+        ];
+        let rows = query_driver_value_rows(connection, query, params).await?;
+        if rows.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(i64::try_from(rows.len()).map_err(storage)?);
+        for values in rows {
+            let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+            if exclude_set.contains(&id) {
+                continue;
+            }
+            chosen.push(id);
+            if chosen.len() == max {
+                break;
+            }
+        }
+    }
+    Ok(chosen)
 }
 
 /// Full-row grouped/cohort Claim materialization over a borrowed driver snapshot.

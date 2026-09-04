@@ -1086,12 +1086,12 @@ mod contention_mapping_tests {
             "next Claim must exclude unpublished overlay ids, not remembered history"
         );
         assert!(
-            realized.contains("CLAIM_SELECT_EXCLUDE_CAP"),
-            "Claim SELECT exclude must cap at two unpublished generations"
-        );
-        assert!(
             !realized.contains("remembered_lease_ids"),
             "Claim SELECT must not bind the cumulative remembered lease set"
+        );
+        assert!(
+            !realized.contains("item_id NOT IN"),
+            "Claim SELECT must filter overlay ids in memory, not SQL NOT IN"
         );
         assert!(
             !realized.contains("borrow_committed_driver_connection"),
@@ -3980,14 +3980,7 @@ impl DerivedObjectLogTursoBackend {
         if claim_members.is_empty() {
             return Ok(());
         }
-        let mut exclude = overlay_claim_exclude(folded);
-        if exclude.len() > CLAIM_SELECT_EXCLUDE_CAP {
-            self.wait_selected_frontiers(queue, true, true).await?;
-            folded.leased_ids.clear();
-            folded.terminal_ids.clear();
-            self.unpublished_mutations.lock().await.remove(queue);
-            exclude.clear();
-        }
+        let exclude = overlay_claim_exclude(folded);
         let selected = self
             .projection
             .item_claim_microbatch_on_serving_reader(queue, &claim_members, &exclude)
