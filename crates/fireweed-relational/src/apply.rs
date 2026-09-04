@@ -24,6 +24,12 @@ pub use crate::RELATIONAL_BATCH as SQLITE_BATCH;
 
 const TYPED_INDEX_CHECK_CHUNK: usize = 1_000;
 const TYPED_INDEX_INSERT_CHUNK: usize = 1_500;
+/// Turso/SQLite default variable limit. VALUES and IN-list chunks must stay at or under this.
+pub const SQLITE_BIND_CAP: usize = 900;
+
+fn bind_chunk_size(per_row: usize, extra: usize) -> usize {
+    (SQLITE_BIND_CAP.saturating_sub(extra) / per_row.max(1)).max(1)
+}
 const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
 const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
 const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
@@ -768,7 +774,7 @@ fn apply_complete_run_sql(
         &bearer_ids,
     )?;
     const COMPLETE_ROW_BINDS: usize = 4;
-    for chunk in rows.chunks(UPDATE_FIELDS_BATCH) {
+    for chunk in rows.chunks(bind_chunk_size(COMPLETE_ROW_BINDS, 2)) {
         let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
         let sql = format!(
             "WITH incoming(item_id, last_command_sequence, terminal_command_epoch, terminal_at) \
@@ -1844,10 +1850,10 @@ pub fn upsert_cohorts(
     Ok(())
 }
 
-/// Run `{prefix} (chunk)` (e.g. an `UPDATE … item_id IN` or `DELETE … item_id IN`) once per ≤256-id chunk.
+/// Run `{prefix} (chunk)` (e.g. an `UPDATE … item_id IN` or `DELETE … item_id IN`).
 /// `lead` are the bound values for the prefix's leading placeholders (the SET clause, if any); the prefix's
 /// trailing `tenant_id=? AND queue_id=?` then bind `t`,`q`, followed by the chunk ids. Chunking keeps the
-/// bound-variable count under sqlite's limit.
+/// bound-variable count under the 900-variable cap.
 pub fn exec_items_in(
     tx: &impl RelTx,
     prefix: &str,
@@ -1859,7 +1865,8 @@ pub fn exec_items_in(
     if ids.is_empty() {
         return Ok(());
     }
-    for chunk in ids.chunks(SQLITE_BATCH) {
+    let chunk_size = bind_chunk_size(1, lead.len() + 2);
+    for chunk in ids.chunks(chunk_size) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!("{prefix} ({ph})");
         let mut p: Vec<RelValue> = lead.to_vec();
@@ -1883,22 +1890,25 @@ fn persist_lease_bearers(
         return Ok(());
     }
     let (t, q) = parts(shard);
-    let placeholders = vec!["(?,?,?,?)"; ids.len()].join(",");
-    let sql = format!(
-        "INSERT INTO fireweed_lease_bearers(tenant_id,queue_id,item_id,lease_token) \
-         VALUES {placeholders} \
-         ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET lease_token=excluded.lease_token"
-    );
-    let mut params = Vec::with_capacity(ids.len() * 4);
-    for id in ids {
-        params.extend([
-            RelValue::Text(t.clone()),
-            RelValue::Text(q.clone()),
-            RelValue::Text(id.to_string()),
-            RelValue::Text(token.as_str().to_string()),
-        ]);
+    let chunk_size = bind_chunk_size(4, 0);
+    for chunk in ids.chunks(chunk_size) {
+        let placeholders = vec!["(?,?,?,?)"; chunk.len()].join(",");
+        let sql = format!(
+            "INSERT INTO fireweed_lease_bearers(tenant_id,queue_id,item_id,lease_token) \
+             VALUES {placeholders} \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET lease_token=excluded.lease_token"
+        );
+        let mut params = Vec::with_capacity(chunk.len() * 4);
+        for id in chunk {
+            params.extend([
+                RelValue::Text(t.clone()),
+                RelValue::Text(q.clone()),
+                RelValue::Text(id.to_string()),
+                RelValue::Text(token.as_str().to_string()),
+            ]);
+        }
+        crate::rel_exec(tx, &sql, params)?;
     }
-    crate::rel_exec(tx, &sql, params)?;
     Ok(())
 }
 
@@ -2921,30 +2931,9 @@ fn apply_one_claim_sql(
             *slot = next;
         }
     } else {
-        for chunk in ids.chunks(UPDATE_FIELDS_BATCH) {
-            let values = vec!["(?)"; chunk.len()].join(",");
-            let sql = format!(
-                "WITH incoming(item_id) AS (VALUES {values}) \
-                 UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?,\
-                 lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
-                 item_version=item_version+1, updated_at=?, last_command_sequence=? \
-                 FROM incoming WHERE tenant_id=? AND queue_id=? \
-                 AND fireweed_items.item_id=incoming.item_id \
-                 AND lifecycle_state='Pending' AND superseded=0"
-            );
-            let mut params = Vec::with_capacity(chunk.len() + 7);
-            params.extend(chunk.iter().cloned().map(RelValue::Text));
-            params.extend([
-                RelValue::Blob(hash.clone()),
-                RelValue::Integer(exp),
-                worker_id.map_or(RelValue::Null, |worker| RelValue::Text(worker.to_string())),
-                RelValue::Integer(now_n),
-                RelValue::Integer(seq as i64),
-                RelValue::Text(t.to_string()),
-                RelValue::Text(q.to_string()),
-            ]);
-            pending_moved += crate::rel_exec(tx, &sql, params)?;
-        }
+        let worker = worker_id.map_or(RelValue::Null, |worker| RelValue::Text(worker.to_string()));
+        pending_moved +=
+            lease_pending_ids_sql(tx, &t, &q, &ids, &hash, exp, &worker, now_n, seq as i64)?;
         advance_claim_scan_hint_for_ids(
             tx,
             claim_scan_hints,
@@ -2992,8 +2981,11 @@ fn apply_packed_claims_sql(
     if mutating.is_empty() {
         return Ok(());
     }
-    let mut rows: Vec<(String, Vec<u8>, i64, RelValue, i64, i64)> = Vec::new();
+    let mut all_ids = Vec::new();
+    let mut moved_any = false;
+    let mut last_now = mutating[0].2;
     for (claim, seq, now) in &mutating {
+        last_now = *now;
         let hash = lease_hash(&claim.lease_token);
         let exp = ts_nanos(claim.lease_expires_at);
         let worker = claim
@@ -3001,66 +2993,32 @@ fn apply_packed_claims_sql(
             .as_ref()
             .map(|worker| RelValue::Text(worker.as_str().to_string()))
             .unwrap_or(RelValue::Null);
-        let now_n = ts_nanos(*now);
-        for id in &claim.item_ids {
-            rows.push((
-                id.to_string(),
-                hash.clone(),
-                exp,
-                worker.clone(),
-                *seq as i64,
-                now_n,
-            ));
-        }
-    }
-    let mut moved: HashSet<String> = HashSet::new();
-    const CLAIM_ROW_BINDS: usize = 6;
-    for chunk in rows.chunks(UPDATE_FIELDS_BATCH) {
-        let values = vec!["(?,?,?,?,?,?)"; chunk.len()].join(",");
-        let sql = format!(
-            "WITH incoming(item_id, lease_token_hash, lease_expires_at, worker_id, \
-             last_command_sequence, updated_at) AS (VALUES {values}) \
-             UPDATE fireweed_items SET lifecycle_state='Leased', \
-             lease_token_hash=incoming.lease_token_hash, \
-             lease_expires_at=incoming.lease_expires_at, \
-             worker_id=incoming.worker_id, retry_count=retry_count+1, \
-             item_version=item_version+1, updated_at=incoming.updated_at, \
-             last_command_sequence=incoming.last_command_sequence \
-             FROM incoming WHERE tenant_id=? AND queue_id=? \
-             AND fireweed_items.item_id=incoming.item_id \
-             AND lifecycle_state='Pending' AND superseded=0 \
-             RETURNING fireweed_items.item_id"
-        );
-        let mut params = Vec::with_capacity(chunk.len() * CLAIM_ROW_BINDS + 2);
-        for (item_id, hash, exp, worker, seq, now_n) in chunk {
-            params.extend([
-                RelValue::Text(item_id.clone()),
-                RelValue::Blob(hash.clone()),
-                RelValue::Integer(*exp),
-                worker.clone(),
-                RelValue::Integer(*seq),
-                RelValue::Integer(*now_n),
-            ]);
-        }
-        params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
-        for row in crate::rel_query(tx, &sql, params)? {
-            moved.insert(row.get(0)?);
-        }
-    }
-    let mut all_ids = Vec::new();
-    for (claim, _, _) in &mutating {
-        all_ids.extend_from_slice(&claim.item_ids);
-        let pending_moved = claim
-            .item_ids
-            .iter()
-            .filter(|id| moved.contains(&id.to_string()))
-            .count();
+        let ids: Vec<String> = claim.item_ids.iter().map(|id| id.to_string()).collect();
+        let pending_moved = lease_pending_ids_sql(
+            tx,
+            &t,
+            &q,
+            &ids,
+            &hash,
+            exp,
+            &worker,
+            ts_nanos(*now),
+            *seq as i64,
+        )?;
         if claim.authority_first && pending_moved != claim.item_ids.len() {
             return Err(authority_first_short_move(
                 pending_moved,
                 claim.item_ids.len(),
             ));
         }
+        for id in &claim.item_ids {
+            token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
+        }
+        if pending_moved > 0 {
+            moved_any = true;
+            persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
+        }
+        all_ids.extend_from_slice(&claim.item_ids);
     }
     advance_claim_scan_hint_for_ids(
         tx,
@@ -3069,21 +3027,48 @@ fn apply_packed_claims_sql(
         shard,
         &all_ids,
     )?;
-    for (claim, _, now) in mutating {
-        let pending_moved = claim
-            .item_ids
-            .iter()
-            .filter(|id| moved.contains(&id.to_string()))
-            .count();
-        for id in &claim.item_ids {
-            token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
-        }
-        if pending_moved > 0 {
-            persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
-            maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
-        }
+    if moved_any {
+        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &all_ids, last_now)?;
     }
     Ok(())
+}
+
+fn lease_pending_ids_sql(
+    tx: &impl RelTx,
+    tenant: &str,
+    queue: &str,
+    ids: &[String],
+    hash: &[u8],
+    exp: i64,
+    worker: &RelValue,
+    now_n: i64,
+    seq: i64,
+) -> EngineResult<usize> {
+    let mut pending_moved = 0usize;
+    let extra = 7;
+    for chunk in ids.chunks(bind_chunk_size(1, extra)) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?,\
+             lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
+             item_version=item_version+1, updated_at=?, last_command_sequence=? \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph}) \
+             AND lifecycle_state='Pending' AND superseded=0"
+        );
+        let mut params = Vec::with_capacity(chunk.len() + extra);
+        params.extend([
+            RelValue::Blob(hash.to_vec()),
+            RelValue::Integer(exp),
+            worker.clone(),
+            RelValue::Integer(now_n),
+            RelValue::Integer(seq),
+            RelValue::Text(tenant.to_string()),
+            RelValue::Text(queue.to_string()),
+        ]);
+        params.extend(chunk.iter().cloned().map(RelValue::Text));
+        pending_moved += crate::rel_exec(tx, &sql, params)?;
+    }
+    Ok(pending_moved)
 }
 
 fn apply_claim_run_sql(
@@ -3508,8 +3493,9 @@ fn try_apply_operation_shaped_api001_batch(
     if let Some(values) = uniform_values {
         let range_bind_count = usize::from(shape.address == Api001UpdateAddress::ClientItemKey) * 2;
         let eligibility_bind_count = usize::from(grouped_schedule);
-        let chunk_size = 900 - values.len() - 4 - range_bind_count - eligibility_bind_count;
-        for chunk in updates.chunks(chunk_size) {
+        let chunk_size =
+            SQLITE_BIND_CAP - values.len() - 4 - range_bind_count - eligibility_bind_count;
+        for chunk in updates.chunks(chunk_size.max(1)) {
             let mut assignments = replacement_columns
                 .iter()
                 .map(|column| format!("{column}=?"))
@@ -3618,49 +3604,52 @@ fn try_apply_operation_shaped_api001_batch(
         return Ok(true);
     }
 
-    let supplied_column_count = replacement_columns.len();
-    // Each CASE arm binds the target and replacement, and the indexed IN predicate binds each
-    // target once more. Fixed binds carry time, sequence, tenant, queue, and (for grouped
-    // schedules) the pre-update eligibility partition.
-    let fixed_binds = 4 + usize::from(grouped_schedule);
-    let chunk_size = (900 - fixed_binds) / (supplied_column_count * 2 + 1);
+    let incoming_names = std::iter::once(address_column)
+        .chain(replacement_columns.iter().copied())
+        .collect::<Vec<_>>();
+    let row_binds = incoming_names.len();
+    let extra_binds = 4 + usize::from(grouped_schedule);
+    let chunk_size = bind_chunk_size(row_binds, extra_binds);
+    let incoming_row = format!("({})", vec!["?"; row_binds].join(","));
+    let assignments = replacement_columns
+        .iter()
+        .map(|column| format!("{column}=incoming.{column}"))
+        .chain([
+            "item_version=item_version+1".to_string(),
+            "updated_at=?".to_string(),
+            "last_command_sequence=?".to_string(),
+        ])
+        .collect::<Vec<_>>();
+    let assignment_sql = assignments.join(",");
+    let incoming_header = incoming_names.join(",");
     for (chunk, value_chunk) in updates
         .chunks(chunk_size)
         .zip(replacement_values.chunks(chunk_size))
     {
         if !grouped_schedule {
-            let mut assignments = Vec::with_capacity(supplied_column_count + 3);
-            let mut params = Vec::with_capacity(chunk.len() * (supplied_column_count * 2 + 1) + 4);
-            for (column_index, column) in replacement_columns.iter().enumerate() {
-                assignments.push(format!(
-                    "{column}=CASE {address_column} {} ELSE {column} END",
-                    vec!["WHEN ? THEN ?"; chunk.len()].join(" ")
-                ));
-                for (update, values) in chunk.iter().zip(value_chunk) {
-                    params.push(RelValue::Text(target(update)));
-                    params.push(values[column_index].clone());
-                }
+            let values_sql = vec![incoming_row.as_str(); chunk.len()].join(",");
+            let mut params = Vec::with_capacity(chunk.len() * row_binds + 4);
+            for (update, values) in chunk.iter().zip(value_chunk) {
+                params.push(RelValue::Text(target(update)));
+                params.extend(values.iter().cloned());
             }
-            assignments.extend([
-                "item_version=item_version+1".to_string(),
-                "updated_at=?".to_string(),
-                "last_command_sequence=?".to_string(),
-            ]);
             params.extend([
                 RelValue::Integer(now_n),
                 RelValue::Integer(seq as i64),
                 RelValue::Text(tenant.to_string()),
                 RelValue::Text(queue.to_string()),
             ]);
-            params.extend(chunk.iter().map(|update| RelValue::Text(target(update))));
-            let sql = format!(
-                "UPDATE fireweed_items SET {} \
-                 WHERE tenant_id=? AND queue_id=? AND {address_column} IN ({}) \
-                   AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
-                assignments.join(","),
-                vec!["?"; chunk.len()].join(",")
-            );
-            crate::rel_exec(tx, &sql, params)?;
+            crate::rel_exec(
+                tx,
+                &format!(
+                    "WITH incoming({incoming_header}) AS (VALUES {values_sql}) \
+                     UPDATE fireweed_items SET {assignment_sql} \
+                     FROM incoming WHERE tenant_id=? AND queue_id=? \
+                       AND fireweed_items.{address_column}=incoming.{address_column} \
+                       AND lifecycle_state='Pending' AND superseded=0 AND fenced=0"
+                ),
+                params,
+            )?;
             continue;
         }
 
@@ -3669,24 +3658,12 @@ fn try_apply_operation_shaped_api001_batch(
             if remaining.is_empty() {
                 break;
             }
-            let mut assignments = Vec::with_capacity(supplied_column_count + 3);
-            let mut params =
-                Vec::with_capacity(remaining.len() * (supplied_column_count * 2 + 1) + fixed_binds);
-            for (column_index, column) in replacement_columns.iter().enumerate() {
-                assignments.push(format!(
-                    "{column}=CASE {address_column} {} ELSE {column} END",
-                    vec!["WHEN ? THEN ?"; remaining.len()].join(" ")
-                ));
-                for (update, values) in &remaining {
-                    params.push(RelValue::Text(target(update)));
-                    params.push(values[column_index].clone());
-                }
+            let values_sql = vec![incoming_row.as_str(); remaining.len()].join(",");
+            let mut params = Vec::with_capacity(remaining.len() * row_binds + extra_binds);
+            for (update, values) in &remaining {
+                params.push(RelValue::Text(target(update)));
+                params.extend(values.iter().cloned());
             }
-            assignments.extend([
-                "item_version=item_version+1".to_string(),
-                "updated_at=?".to_string(),
-                "last_command_sequence=?".to_string(),
-            ]);
             params.extend([
                 RelValue::Integer(now_n),
                 RelValue::Integer(seq as i64),
@@ -3694,24 +3671,18 @@ fn try_apply_operation_shaped_api001_batch(
                 RelValue::Text(queue.to_string()),
                 RelValue::Integer(now_n),
             ]);
-            params.extend(
-                remaining
-                    .iter()
-                    .map(|(update, _)| RelValue::Text(target(update))),
-            );
             let eligibility_predicate = if was_eligible {
-                "(not_before IS NULL OR not_before<=?)"
+                "(fireweed_items.not_before IS NULL OR fireweed_items.not_before<=?)"
             } else {
-                "not_before IS NOT NULL AND not_before>?"
+                "fireweed_items.not_before IS NOT NULL AND fireweed_items.not_before>?"
             };
             let sql = format!(
-                "UPDATE fireweed_items SET {} \
-                 WHERE tenant_id=? AND queue_id=? AND {eligibility_predicate} \
-                   AND {address_column} IN ({}) AND lifecycle_state='Pending' \
-                   AND superseded=0 AND fenced=0 \
-                 RETURNING {address_column},group_key,item_id,eligible_since,priority_sort,not_before,created_at,created_seq",
-                assignments.join(","),
-                vec!["?"; remaining.len()].join(",")
+                "WITH incoming({incoming_header}) AS (VALUES {values_sql}) \
+                 UPDATE fireweed_items SET {assignment_sql} \
+                 FROM incoming WHERE tenant_id=? AND queue_id=? AND {eligibility_predicate} \
+                   AND fireweed_items.{address_column}=incoming.{address_column} \
+                   AND lifecycle_state='Pending' AND superseded=0 AND fenced=0 \
+                 RETURNING fireweed_items.{address_column},group_key,item_id,eligible_since,priority_sort,not_before,created_at,created_seq"
             );
             let matched = collect_grouped_schedule_rows(
                 crate::rel_query(tx, &sql, params)?,

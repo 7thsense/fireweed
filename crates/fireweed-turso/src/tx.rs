@@ -203,12 +203,14 @@ impl RelTx for TursoRel<'_> {
 
 #[cfg(test)]
 mod packed_authority_first_tests {
+    use bytes::Bytes;
     use fireweed_conformance::{envelope, item, qdef, ts};
     use fireweed_core::{GroupKey, ItemId, ItemState, LeaseToken, WorkerId};
     use fireweed_engine::{
         AsyncProjectionStore, ClaimCommand, CommandEnvelope, CommandPosition, EngineError,
-        FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PushCommand,
-        QueueCommand, QueueKey,
+        FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate,
+        PushCommand, QueueCommand, QueueKey, ScheduleUpdate, UpdateFieldsBatchCommand,
+        UpdateFieldsCommand,
     };
     use fireweed_relational::AUTHORITY_FIRST_CLAIM_SHORT_MOVE;
     use turso::Value;
@@ -934,6 +936,115 @@ mod packed_authority_first_tests {
         assert_eq!(
             group_summary(&packed, &shard, &group).await,
             (1, Some(g3.item_id.to_string()))
+        );
+    }
+
+    fn update_fields_envelope(ids: Vec<ItemId>, payload: Bytes) -> CommandEnvelope {
+        envelope(
+            QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                updates: ids
+                    .iter()
+                    .map(|item_id| UpdateFieldsCommand {
+                        item_id: *item_id,
+                        field_ops: Default::default(),
+                        payload: PayloadUpdate::Set(Some(payload.clone())),
+                        set_priority: ScheduleUpdate::Keep,
+                        set_not_before: ScheduleUpdate::Keep,
+                        set_entity_document: None,
+                        set_fields: None,
+                        set_metadata: Some(fireweed_core::Metadata::default()),
+                        set_gate_keys: None,
+                        api001_batch: true,
+                        client_item_key: None,
+                        expected_item_version: None,
+                    })
+                    .collect(),
+            }),
+            ids,
+        )
+    }
+
+    #[tokio::test]
+    async fn packed_update_fields_matches_solo_model_in_one_transaction() {
+        let items: Vec<_> = (1..=6)
+            .map(|index| item(&index.to_string(), &format!("uk{index}"), index))
+            .collect();
+        let ids: Vec<ItemId> = items.iter().map(|item| item.item_id).collect();
+        let (packed, shard) = open_store().await;
+        let (solo, solo_shard) = open_store().await;
+        let push = envelope(
+            QueueCommand::Push(PushCommand {
+                items: items.clone(),
+            }),
+            ids.clone(),
+        );
+        apply(&packed, &shard, 0, vec![push.clone()]).await.unwrap();
+        apply(&solo, &solo_shard, 0, vec![push]).await.unwrap();
+
+        let first = update_fields_envelope(ids[0..3].to_vec(), Bytes::from("p-a"));
+        let second = update_fields_envelope(ids[3..6].to_vec(), Bytes::from("p-b"));
+        apply(&packed, &shard, 1, vec![first.clone(), second.clone()])
+            .await
+            .expect("packed update fields");
+        let packed_phase = packed
+            .last_apply_phase_observation()
+            .expect("one Immediate");
+        assert!(packed_phase.begin_us > 0 || packed_phase.commit_us > 0);
+        apply(&solo, &solo_shard, 1, vec![first]).await.unwrap();
+        apply(&solo, &solo_shard, 2, vec![second]).await.unwrap();
+
+        for id in &ids {
+            let packed_rows = packed
+                .query(
+                    "SELECT item_version,payload,metadata,lifecycle_state FROM fireweed_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                    vec![
+                        Value::Text(shard.tenant_id.as_str().to_string()),
+                        Value::Text(shard.queue_id.as_str().to_string()),
+                        Value::Text(id.to_string()),
+                    ],
+                )
+                .await
+                .unwrap();
+            let solo_rows = solo
+                .query(
+                    "SELECT item_version,payload,metadata,lifecycle_state FROM fireweed_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                    vec![
+                        Value::Text(solo_shard.tenant_id.as_str().to_string()),
+                        Value::Text(solo_shard.queue_id.as_str().to_string()),
+                        Value::Text(id.to_string()),
+                    ],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                packed_rows[0].values, solo_rows[0].values,
+                "update model {id}"
+            );
+            assert_eq!(
+                row_model(&packed, &shard, *id).await,
+                row_model(&solo, &solo_shard, *id).await,
+                "lease model {id}"
+            );
+        }
+
+        let claim = claim_envelope(vec![ids[0]], "tok-u0", 50, "wu", true);
+        let complete = complete_envelope(vec![ids[0]]);
+        apply(&packed, &shard, 3, vec![claim.clone(), complete.clone()])
+            .await
+            .expect("mixed claim then complete");
+        apply(&solo, &solo_shard, 3, vec![claim]).await.unwrap();
+        apply(&solo, &solo_shard, 4, vec![complete]).await.unwrap();
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), ids[0])
+                .await
+                .unwrap(),
+            Some(ItemState::Complete)
+        );
+        assert_eq!(
+            row_model(&packed, &shard, ids[0]).await,
+            row_model(&solo, &solo_shard, ids[0]).await,
         );
     }
 }

@@ -21,8 +21,8 @@ use fireweed_engine::{
     TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
-    ClassSClaimedItem, RelRow, RelTx, RelValue, TokenOp, async_projection as sql, elig_sort,
-    entity_from_json, fields_from_json, fields_to_json, lease_hash, metadata_from_json,
+    ClassSClaimedItem, RelRow, RelTx, RelValue, SQLITE_BIND_CAP, TokenOp, async_projection as sql,
+    elig_sort, entity_from_json, fields_from_json, fields_to_json, lease_hash, metadata_from_json,
     metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos, ts_nanos_opt,
 };
 use tokio::sync::Mutex;
@@ -1234,7 +1234,7 @@ async fn execute_for_items<F>(
 where
     F: Fn(usize) -> String,
 {
-    let chunk_size = 900_usize
+    let chunk_size = SQLITE_BIND_CAP
         .checked_sub(params.len())
         .filter(|size| *size > 0)
         .ok_or_else(|| storage("item statement has no bind capacity"))?;
