@@ -9,14 +9,22 @@
 
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueryCapabilityFlags,
-    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
+    QueryCapabilityFlags, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+};
+use fireweed_engine::{
+    AdvanceInstanceFenceCommand, AsyncCommitStrategy, CommitEntryOutcome, CommitEntryStatus,
+    CommitTransition, CommitTransitionEntry, EntryRecovery, FinalizeCommand, IdempotencyDecision,
+    PushCommand, QueueIdempotencyCache, RequestOutcome, WriteSideRecordsCommand, build_push_items,
+    commit_body_hash, compile_entity_schema, outcome_entry_from_recovery, outcomes_from_recovery,
+    request_expires_at, stage_unique_push_keys, validate_distinct_commit_claims, validate_entity,
+    validate_instance_fence,
 };
 use fireweed_engine::{
     AppendAdmissionClass, AsyncClaimError, AsyncCommitSubmitError, AsyncComposedBackend,
@@ -408,6 +416,7 @@ pub struct AtomicTursoBackend<L: AsyncLogStore + 'static> {
     counters: Arc<QueueCounters>,
     #[allow(dead_code)]
     node_id: u8,
+    commit_idempotency: TursoCommitIdempotency,
 }
 
 impl<L> AtomicTursoBackend<L>
@@ -529,6 +538,7 @@ where
             ids,
             counters,
             node_id,
+            commit_idempotency: TursoCommitIdempotency::default(),
         };
         backend.recover_async().await?;
         Ok(backend)
@@ -734,6 +744,381 @@ where
 
 // Port impls for AtomicTursoBackend — shared via macro-like duplication with object-log product.
 
+// ---------------------------------------------------------------------------
+// Full Strict commit_transition surface for the Turso product families
+// (bead fireweed-82211ac4; mirrors fireweed-objectlog's commit_surface)
+// ---------------------------------------------------------------------------
+
+/// In-process commit request-id cache shared by both Turso product families (parity with the
+/// objectlog products' `commit_surface::CommitIdempotency`). The durable authority is the
+/// `fireweed_request_idempotency` row the apply arm persists; this cache covers the window
+/// before the derived composition's asynchronous apply lands and fast-paths replay.
+type TursoCommitIdempotency =
+    Arc<std::sync::Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>>>;
+
+/// Result of planning a Turso `commit_transition` (before log append).
+enum PreparedTursoCommitTransition {
+    /// Replay prior outcomes (request_id hit, equal body).
+    Replay(Vec<CommitEntryOutcome>),
+    /// Fresh batch ready to append+apply; record idempotency after successful submit.
+    Proceed {
+        envelopes: Vec<CommandEnvelope>,
+        recovery: Vec<EntryRecovery>,
+        request_id: Option<RequestId>,
+        fingerprint: BodyHash,
+        retention_ms: u64,
+    },
+}
+
+fn record_turso_commit_idempotency(
+    commit_idempotency: &TursoCommitIdempotency,
+    shard: &QueueKey,
+    request_id: RequestId,
+    fingerprint: BodyHash,
+    recovery: Vec<EntryRecovery>,
+    now: UtcTimestamp,
+    retention_ms: u64,
+) {
+    commit_idempotency
+        .lock()
+        .expect("commit idempotency poisoned")
+        .entry(shard.clone())
+        .or_default()
+        .record(
+            request_id,
+            fingerprint,
+            recovery,
+            request_expires_at(now, retention_ms),
+        );
+}
+
+/// Plan a Turso `commit_transition`: per-entry lease/fence/index validation against the durable
+/// projection, request-id replay/conflict resolution (in-process cache first, then the durable
+/// retained row), and lowering of every accepted entry into one atomic command batch
+/// (`WriteSideRecords` + `AdvanceInstanceFence` + lifecycle `Push` + `Finalize`, plus one
+/// idempotency-marker envelope carrying `RequestOutcome::CommitTransition`). Direct port of
+/// `fireweed-objectlog`'s `commit_surface::prepare_commit_transition` onto the Turso composition.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_turso_commit_transition(
+    projection: &TursoRelational,
+    control: &InProcessControlPlane,
+    ids: &SeqIdGen,
+    counters: &QueueCounters,
+    node_id: u8,
+    commit_idempotency: &TursoCommitIdempotency,
+    epoch: u64,
+    shard: &QueueKey,
+    transition: CommitTransition,
+    now: UtcTimestamp,
+) -> EngineResult<PreparedTursoCommitTransition> {
+    let CommitTransition {
+        request_id,
+        entries,
+    } = transition;
+    let fingerprint = commit_body_hash(&entries)?;
+    let definition = AsyncControlPlane::queue_definition(control, shard.clone()).await?;
+    let max_attempts = definition.retry_policy.max_attempts;
+    let retention_ms = definition.request_id_retention_ms;
+    let schema = definition
+        .entity_schema
+        .as_ref()
+        .and_then(|esd| esd.entity_schema.as_ref())
+        .map(compile_entity_schema)
+        .transpose()?;
+
+    if let Some(rid) = &request_id {
+        let cached = {
+            let cache = commit_idempotency
+                .lock()
+                .expect("commit idempotency poisoned");
+            cache.get(shard).map(|c| c.check(rid, fingerprint, now))
+        };
+        if let Some(decision) = cached {
+            match decision {
+                IdempotencyDecision::Replay(recovery) if recovery.len() == entries.len() => {
+                    return Ok(PreparedTursoCommitTransition::Replay(
+                        outcomes_from_recovery(&recovery),
+                    ));
+                }
+                IdempotencyDecision::Conflict => {
+                    return Err(EngineError::RequestIdConflict);
+                }
+                IdempotencyDecision::Replay(_)
+                | IdempotencyDecision::Proceed
+                | IdempotencyDecision::Expired => {}
+            }
+        }
+        if let Some(entries) = AsyncProjectionStore::replay_durable_commit(
+            projection,
+            shard.clone(),
+            rid.clone(),
+            fingerprint.0,
+            now,
+        )
+        .await?
+        {
+            let recovery = entries
+                .into_iter()
+                .map(fireweed_engine::recovery_from_outcome_entry)
+                .collect::<Vec<_>>();
+            record_turso_commit_idempotency(
+                commit_idempotency,
+                shard,
+                rid.clone(),
+                fingerprint,
+                recovery.clone(),
+                now,
+                retention_ms,
+            );
+            return Ok(PreparedTursoCommitTransition::Replay(
+                outcomes_from_recovery(&recovery),
+            ));
+        }
+    }
+
+    let commit_fingerprint = fingerprint.0;
+    let requires_cross_entry_push_validation = definition.requires_cross_entry_push_validation();
+    let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+    let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
+    let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
+    let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+    let mut staged_unique_keys: HashMap<(String, Vec<u8>), ItemId> = HashMap::new();
+
+    for entry in entries {
+        let CommitTransitionEntry {
+            claim_ref,
+            additional_claim_refs,
+            finalize,
+            side_records,
+            lifecycle_items,
+            instance_fence,
+        } = entry;
+        let consumed_input_id = claim_ref.item_id;
+        let additional_consumed_input_ids = additional_claim_refs
+            .iter()
+            .map(|c| c.item_id)
+            .collect::<Vec<_>>();
+        let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
+        claim_refs.push(claim_ref);
+        claim_refs.extend(additional_claim_refs);
+        let reject = |e: EngineError| EntryRecovery {
+            consumed_input_id,
+            additional_consumed_input_ids: additional_consumed_input_ids.clone(),
+            instance: None,
+            side_record_keys: Vec::new(),
+            lifecycle_item_ids: Vec::new(),
+            status: CommitEntryStatus::Rejected(e),
+        };
+
+        if let Err(error) = validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..]) {
+            recovery.push(reject(error));
+            continue;
+        }
+        if claim_refs
+            .iter()
+            .any(|c| finalized_in_commit.contains(&c.item_id))
+        {
+            recovery.push(reject(EngineError::Terminal));
+            continue;
+        }
+        if let Err(e) = AsyncProjectionStore::commit_validate(
+            projection,
+            shard.clone(),
+            claim_refs.clone(),
+            now,
+        )
+        .await
+        {
+            recovery.push(reject(e));
+            continue;
+        }
+        if let Some(fence) = &instance_fence {
+            let stored = match staged_fences.get(&fence.instance_key) {
+                Some(v) => *v,
+                None => AsyncProjectionStore::instance_fence(
+                    projection,
+                    shard.clone(),
+                    fence.instance_key.clone(),
+                )
+                .await?
+                .unwrap_or(0),
+            };
+            if let Err(e) = validate_instance_fence(stored, fence) {
+                recovery.push(reject(e));
+                continue;
+            }
+        }
+
+        // fireweed-bf03cbf5: not retained; a pure function of the caller's own request.
+        let side_record_keys: Vec<Vec<u8>> = Vec::new();
+        let instance = instance_fence
+            .as_ref()
+            .map(|f| (f.instance_key.clone(), f.next));
+        let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+        let mk_env = |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
+            command_id: ids.next_command_id(),
+            request_id: request_id.clone(),
+            request_fingerprint: Some(commit_fingerprint),
+            request_outcome: None,
+            item_ids,
+            command,
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+
+        if !side_records.is_empty() {
+            envelopes.push(mk_env(
+                QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: side_records,
+                }),
+                Vec::new(),
+            ));
+        }
+        if let Some(fence) = instance_fence {
+            envelopes.push(mk_env(
+                QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                    instance_key: fence.instance_key,
+                    expected: fence.expected,
+                    next: fence.next,
+                }),
+                Vec::new(),
+            ));
+        }
+
+        let mut lifecycle_item_ids = Vec::new();
+        if !lifecycle_items.is_empty() {
+            if let Some(e) = lifecycle_items
+                .iter()
+                .find_map(|item| validate_entity(schema.as_ref(), item.entity.as_ref()).err())
+            {
+                recovery.push(reject(e));
+                continue;
+            }
+            let counter_base = counters.reserve(shard, epoch, lifecycle_items.len() as u32);
+            let (push_items, push_ids) =
+                build_push_items(lifecycle_items, epoch, node_id, counter_base, max_attempts);
+            if let Err(e) = AsyncProjectionStore::index_validate_push(
+                projection,
+                shard.clone(),
+                push_items.clone(),
+            )
+            .await
+            {
+                recovery.push(reject(e));
+                continue;
+            }
+            if requires_cross_entry_push_validation
+                && let Err(e) =
+                    stage_unique_push_keys(&definition, &push_items, &mut staged_unique_keys)
+            {
+                recovery.push(reject(e));
+                continue;
+            }
+            lifecycle_item_ids = push_ids.clone();
+            envelopes.push(mk_env(
+                QueueCommand::Push(PushCommand { items: push_items }),
+                push_ids,
+            ));
+        }
+
+        envelopes.push(mk_env(
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: claim_refs
+                    .iter()
+                    .map(|c| FinalizeOutcome::new(c.item_id, finalize))
+                    .collect(),
+            }),
+            claim_refs.iter().map(|c| c.item_id).collect(),
+        ));
+
+        finalized_in_commit.extend(claim_refs.iter().map(|c| c.item_id));
+        if let Some((key, next)) = &instance {
+            staged_fences.insert(key.clone(), *next);
+        }
+        committed_envelopes.append(&mut envelopes);
+        recovery.push(EntryRecovery {
+            consumed_input_id,
+            additional_consumed_input_ids,
+            instance,
+            side_record_keys,
+            lifecycle_item_ids,
+            status: CommitEntryStatus::Committed,
+        });
+    }
+
+    let mut envelopes = committed_envelopes;
+    if let Some(rid) = &request_id {
+        let outcome_entries: Vec<_> = recovery.iter().map(outcome_entry_from_recovery).collect();
+        envelopes.push(CommandEnvelope {
+            command_id: ids.next_command_id(),
+            request_id: Some(rid.clone()),
+            request_fingerprint: Some(commit_fingerprint),
+            request_outcome: Some(RequestOutcome::CommitTransition {
+                entries: outcome_entries,
+            }),
+            item_ids: Vec::new(),
+            command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: Vec::new(),
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        });
+    }
+
+    Ok(PreparedTursoCommitTransition::Proceed {
+        envelopes,
+        recovery,
+        request_id,
+        fingerprint,
+        retention_ms,
+    })
+}
+
+/// Finish a prepared Turso commit: append+apply the batch via `commit` (which must already hold
+/// the queue-local admission permit — `strategy.commit`, not `engine.submit_commit`), then record
+/// request-id idempotency (parity with `commit_surface::finish_prepared_commit_transition`,
+/// including the fireweed-5497780d prepare+append TOCTOU closure).
+async fn finish_prepared_turso_commit_transition<Commit, CommitFut>(
+    shard: &QueueKey,
+    epoch: u64,
+    prepared: PreparedTursoCommitTransition,
+    commit_idempotency: &TursoCommitIdempotency,
+    now: UtcTimestamp,
+    commit: Commit,
+) -> EngineResult<Vec<CommitEntryOutcome>>
+where
+    Commit: FnOnce(RawCommitRequest) -> CommitFut,
+    CommitFut: std::future::Future<Output = EngineResult<RawCommitOutcome>>,
+{
+    match prepared {
+        PreparedTursoCommitTransition::Replay(outcomes) => Ok(outcomes),
+        PreparedTursoCommitTransition::Proceed {
+            envelopes,
+            recovery,
+            request_id,
+            fingerprint,
+            retention_ms,
+        } => {
+            if !envelopes.is_empty() {
+                commit(RawCommitRequest::new(shard.clone(), envelopes, epoch)).await?;
+            }
+            let outcomes = outcomes_from_recovery(&recovery);
+            if let Some(rid) = request_id {
+                record_turso_commit_idempotency(
+                    commit_idempotency,
+                    shard,
+                    rid,
+                    fingerprint,
+                    recovery,
+                    now,
+                    retention_ms,
+                );
+            }
+            Ok(outcomes)
+        }
+    }
+}
+
 macro_rules! impl_turso_product_ports {
     ($ty:ty, $durability:expr, $consistency:expr) => {
         impl Backend for $ty {
@@ -879,6 +1264,12 @@ macro_rules! impl_turso_product_ports {
         }
 
         impl fireweed_engine::CommitTransitionPort for $ty {
+            /// Full Strict commit surface (bead fireweed-82211ac4): per-entry lease/fence/index
+            /// validation, side-record + instance-fence + lifecycle-push + finalize lowering into
+            /// ONE atomic command batch, retained request-id idempotency, and per-entry
+            /// Committed/Rejected outcomes — parity with the objectlog products'
+            /// `commit_surface` path. Prepare and append+apply share the queue-local admission
+            /// permit (fireweed-5497780d) so fence validation cannot race a concurrent commit.
             fn commit_transition(
                 &self,
                 shard: &QueueKey,
@@ -890,64 +1281,57 @@ macro_rules! impl_turso_product_ports {
             > + Send {
                 let shard = shard.clone();
                 async move {
-                    // Per-entry lease validation so fabricated tokens become Rejected(StaleLease)
-                    // (TP-005 preflight). Accepted plain finalizes reuse FinalizePort; richer
-                    // side-record / fence / lifecycle entries stay Unavailable until the full
-                    // Strict commit surface is wired for Turso products.
-                    let mut outcomes = Vec::with_capacity(transition.entries.len());
-                    for entry in transition.entries {
-                        let mut refs = vec![entry.claim_ref.clone()];
-                        refs.extend(entry.additional_claim_refs.iter().cloned());
-                        match AsyncProjectionStore::commit_validate(
-                            self.projection.as_ref(),
-                            shard.clone(),
-                            refs,
-                            now,
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                if !entry.side_records.is_empty()
-                                    || entry.instance_fence.is_some()
-                                    || !entry.lifecycle_items.is_empty()
-                                {
-                                    outcomes.push(fireweed_engine::CommitEntryOutcome::Rejected(
-                                        EngineError::Unavailable,
-                                    ));
-                                    continue;
-                                }
-                                match FinalizePort::finalize(
-                                    self,
-                                    &shard,
-                                    vec![FinalizeOutcome {
-                                        item_id: entry.claim_ref.item_id,
-                                        kind: entry.finalize,
-                                        applied_state: None,
-                                        not_before: None,
-                                    }],
+                    let epoch = match expected_epoch {
+                        Some(epoch) => {
+                            let current =
+                                AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone())
+                                    .await?;
+                            if current != epoch {
+                                return Err(EngineError::EpochFenced);
+                            }
+                            epoch
+                        }
+                        None => {
+                            AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?
+                        }
+                    };
+                    let strategy = self.engine.commit_strategy();
+                    let projection = Arc::clone(&self.projection);
+                    let control = Arc::clone(&self.control);
+                    let ids = Arc::clone(&self.ids);
+                    let counters = Arc::clone(&self.counters);
+                    let commit_idempotency = Arc::clone(&self.commit_idempotency);
+                    let node_id = self.node_id;
+                    let op_shard = shard.clone();
+                    self.engine
+                        .submit_operation(shard, move || {
+                            Box::pin(async move {
+                                let prepared = prepare_turso_commit_transition(
+                                    projection.as_ref(),
+                                    control.as_ref(),
+                                    ids.as_ref(),
+                                    counters.as_ref(),
+                                    node_id,
+                                    &commit_idempotency,
+                                    epoch,
+                                    &op_shard,
+                                    transition,
                                     now,
-                                    expected_epoch,
+                                )
+                                .await?;
+                                finish_prepared_turso_commit_transition(
+                                    &op_shard,
+                                    epoch,
+                                    prepared,
+                                    &commit_idempotency,
+                                    now,
+                                    |request| async move { strategy.commit(request).await },
                                 )
                                 .await
-                                {
-                                    Ok(()) => outcomes.push(
-                                        fireweed_engine::CommitEntryOutcome::Committed {
-                                            lifecycle_item_ids: Vec::new(),
-                                        },
-                                    ),
-                                    Err(error) => outcomes.push(
-                                        fireweed_engine::CommitEntryOutcome::Rejected(error),
-                                    ),
-                                }
-                            }
-                            Err(error) => {
-                                outcomes.push(fireweed_engine::CommitEntryOutcome::Rejected(
-                                    error,
-                                ));
-                            }
-                        }
-                    }
-                    Ok(outcomes)
+                            })
+                        })
+                        .await
+                        .map_err(|error| map_submit("commit_transition", error))?
                 }
             }
         }
@@ -1813,6 +2197,7 @@ pub struct DerivedObjectLogTursoBackend {
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
+    commit_idempotency: TursoCommitIdempotency,
 }
 
 #[cfg(feature = "objectlog")]
@@ -1901,6 +2286,7 @@ impl DerivedObjectLogTursoBackend {
             async_apply,
             last_produce,
             produce_caught_up,
+            commit_idempotency: TursoCommitIdempotency::default(),
         };
         backend.recover_async().await?;
         Ok(backend)

@@ -3029,6 +3029,112 @@ impl AsyncProjectionStore for TursoRelational {
         }
     }
 
+    fn instance_fence(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send {
+        async move {
+            let rows = self
+                .query(
+                    sql::SELECT_INSTANCE_FENCE,
+                    vec![
+                        shard.tenant_id.as_str().to_string().into(),
+                        shard.queue_id.as_str().to_string().into(),
+                        Value::Blob(key),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+            rows.first()
+                .map(|row| {
+                    integer(&row.values[0])
+                        .and_then(|value| nonnegative_u64(value, "instance_fence"))
+                })
+                .transpose()
+        }
+    }
+
+    fn index_validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let reader = self.reader.clone();
+        async move {
+            let connection = reader.lock().await;
+            let definition = definition_in_transaction(&connection, &shard).await?;
+            if definition.typed_indexes.is_empty() {
+                return Ok(());
+            }
+            // Validation-only pass (persist = false): within-batch duplicates plus the same
+            // DB-level unique lookups the apply arm runs at insert time.
+            maintain_typed_indexes_on_insert(
+                &connection,
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                &definition.typed_indexes,
+                &items,
+                false,
+            )
+            .await
+        }
+    }
+
+    fn replay_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<
+        Output = EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>>,
+    > + Send {
+        async move {
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let rows = self
+                .query(
+                    sql::SELECT_COMMIT_REPLAY,
+                    vec![
+                        tenant.clone().into(),
+                        queue.clone().into(),
+                        request_id.as_str().to_string().into(),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+            let Some(row) = rows.first() else {
+                return Ok(None);
+            };
+            let stored_fingerprint = blob(&row.values[0])?;
+            let response_payload = text(&row.values[1])?;
+            let expires_at = integer(&row.values[2])?;
+            if expires_at <= ts_nanos(now) {
+                // Mirror fireweed-sqlite: an elapsed retained row replays as None and is removed
+                // (the SQL keeps the `expires_at` guard so a concurrent fresh re-record survives).
+                self.execute(
+                    sql::DELETE_EXPIRED_COMMIT_REPLAY,
+                    vec![
+                        tenant.into(),
+                        queue.into(),
+                        request_id.as_str().to_string().into(),
+                        ts_nanos(now).into(),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+                return Ok(None);
+            }
+            if stored_fingerprint != fingerprint.to_be_bytes() {
+                return Err(EngineError::RequestIdConflict);
+            }
+            serde_json::from_str(&response_payload)
+                .map(Some)
+                .map_err(storage)
+        }
+    }
+
     fn read_durable_commit(
         &self,
         shard: QueueKey,

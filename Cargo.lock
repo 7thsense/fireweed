@@ -1439,6 +1439,7 @@ version = "0.31.22"
 dependencies = [
  "axon-esf",
  "bytes",
+ "fireweed-conformance",
  "fireweed-core",
  "fireweed-engine",
  "fireweed-memory",

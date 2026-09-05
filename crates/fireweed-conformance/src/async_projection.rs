@@ -135,16 +135,17 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
     // implemented by relational authorities (Turso, bead fireweed-82211ac4), where an unwritten
     // key/request-id reads as `Ok(None)` — both outcomes are accepted below.
     let request_id = RequestId::new("async-projection-conformance-request").unwrap();
-    assert_eq!(
-        AsyncProjectionStore::replay_durable_commit(
-            store,
-            shard.clone(),
-            request_id.clone(),
-            1,
-            ts(0),
-        )
-        .await,
-        Err(EngineError::Unavailable)
+    let durable_replay = AsyncProjectionStore::replay_durable_commit(
+        store,
+        shard.clone(),
+        request_id.clone(),
+        1,
+        ts(0),
+    )
+    .await;
+    assert!(
+        matches!(durable_replay, Ok(None) | Err(EngineError::Unavailable)),
+        "replay_durable_commit of an unknown request id: expected Ok(None) or Unavailable, got {durable_replay:?}"
     );
     let durable_commit =
         AsyncProjectionStore::read_durable_commit(store, shard.clone(), request_id).await;
@@ -152,9 +153,10 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
         matches!(durable_commit, Ok(None) | Err(EngineError::Unavailable)),
         "read_durable_commit of an unknown request id: expected Ok(None) or Unavailable, got {durable_commit:?}"
     );
-    assert_eq!(
-        AsyncProjectionStore::instance_fence(store, shard.clone(), b"fence".to_vec()).await,
-        Err(EngineError::Unavailable)
+    let fence = AsyncProjectionStore::instance_fence(store, shard.clone(), b"fence".to_vec()).await;
+    assert!(
+        matches!(fence, Ok(None) | Err(EngineError::Unavailable)),
+        "instance_fence of an unwritten key: expected Ok(None) or Unavailable, got {fence:?}"
     );
     let side_record = AsyncProjectionStore::side_record(store, shard, b"side".to_vec()).await;
     assert!(

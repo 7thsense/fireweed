@@ -111,6 +111,19 @@ pub mod async_projection {
     /// (mirrors `fireweed-sqlite`'s `side_records_by_prefix_sql`).
     pub const SELECT_SIDE_RECORDS_BY_PREFIX: &str = "SELECT key,payload FROM fireweed_side_records \
         WHERE tenant_id=?1 AND queue_id=?2 AND key>=?3 ORDER BY key ASC LIMIT ?4";
+    /// Durable instance/state fence for one key (absent reads as the unset value 0).
+    pub const SELECT_INSTANCE_FENCE: &str = "SELECT fence FROM fireweed_instance_fences \
+        WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3";
+    /// Retained commit row for request-id replay: fingerprint + whole-body outcome + retention
+    /// horizon (mirrors `fireweed-sqlite`'s `replay_durable_commit` read).
+    pub const SELECT_COMMIT_REPLAY: &str = "SELECT request_fingerprint,response_payload,expires_at \
+        FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+        AND operation='commit' AND request_id=?3";
+    /// Remove one retained commit row whose retention has elapsed (the replay path's cleanup;
+    /// the `expires_at` guard keeps a concurrent fresh re-record safe).
+    pub const DELETE_EXPIRED_COMMIT_REPLAY: &str = "DELETE FROM fireweed_request_idempotency \
+        WHERE tenant_id=?1 AND queue_id=?2 AND operation='commit' AND request_id=?3 \
+        AND expires_at<=?4";
     /// Retained whole-body commit outcome for one `request_id` (recovery/explain read). Ignores the
     /// body fingerprint — the reader has only the id — mirroring `fireweed-sqlite`'s
     /// `read_commit_recovery`.

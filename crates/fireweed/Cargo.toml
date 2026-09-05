@@ -64,6 +64,8 @@ turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:firewee
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }
+# Shared Snorri commit-transition scenarios run against the Turso compositions (fireweed-82211ac4).
+fireweed-conformance = { path = "../fireweed-conformance" }
 # product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.
 fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"

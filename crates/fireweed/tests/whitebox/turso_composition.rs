@@ -19,11 +19,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fireweed::{Bytes, SegmentSettings};
+use fireweed::{
+    Bytes, ClaimRef, EntryOutcome, FinalizeKind, Fireweed, InstanceFence, LogConfig,
+    MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem, ObjectLogAuthority, PriorityValue,
+    ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier, SegmentConfig, SegmentSettings,
+    StorageConfig, SystemClock, open,
+};
 use fireweed_core::{
-    EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RequestId, RetryPolicy,
-    TenantId, UtcTimestamp,
+    EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RequestId,
+    RetryPolicy, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
     Backend, CommandChecksum, CommandEnvelope, CommandId, CommitEntryStatus, CommitOutcomeEntry,
@@ -283,5 +288,295 @@ async fn turso_filesystem_log_serves_recovery_reads_after_commit_and_reopen() {
         .expect("reopen filesystem-log × turso");
     reread_after_reopen(&reopened, def, &request_id).await;
     drop(reopened);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Full commit_transition surface through the public facade (the path Snorri uses)
+// ---------------------------------------------------------------------------
+
+fn facade_config(log: LogConfig, projection_path: std::path::PathBuf) -> StorageConfig {
+    let mut cfg = StorageConfig {
+        log,
+        projection: ProjectionStoreConfig::Turso {
+            path: projection_path,
+        },
+        control_plane: None,
+        authority: None,
+        response_barrier: ResponseBarrier::Strict,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
+        segments: SegmentConfig {
+            target_bytes: 1024 * 1024,
+            max_latency_ms: 5,
+        },
+        namespace: "turso-commit-surface".to_owned(),
+        recovery: RecoveryPolicy::default(),
+    };
+    if matches!(
+        &cfg.log,
+        LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+    ) {
+        cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+    }
+    cfg
+}
+
+fn side_new(key: &str, payload: &str) -> fireweed::SideRecord {
+    fireweed::SideRecord {
+        key: key.as_bytes().to_vec(),
+        payload: Bytes::copy_from_slice(payload.as_bytes()),
+    }
+}
+
+fn lifecycle_item() -> NewItem {
+    NewItem {
+        priority: Some(PriorityValue::Int64(20)),
+        ..NewItem::default()
+    }
+}
+
+async fn claim_one(fw: &Fireweed, q: &fireweed_engine::QueueKey) -> ClaimRef {
+    fw.push(
+        q,
+        NewItem {
+            priority: Some(PriorityValue::Int64(1)),
+            ..NewItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let claimed = fw.claim(q, 1, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let c = &claimed[0];
+    ClaimRef {
+        item_id: c.item_id,
+        lease_token: c.lease_token.clone().expect("claimed item carries token"),
+        lease_expires_at: c.lease_expires_at,
+        item_version: c.item_version,
+    }
+}
+
+fn full_commit_request(claim_ref: ClaimRef, request_id: &RequestId) -> MultiClaimCommitRequest {
+    MultiClaimCommitRequest {
+        request_id: Some(request_id.clone()),
+        entries: vec![MultiClaimCommitEntry {
+            claim_ref,
+            additional_claim_refs: vec![],
+            finalize: FinalizeKind::Complete,
+            side_records: vec![
+                side_new("audit:i-1:001", "a1"),
+                side_new("audit:i-1:003", "a3"),
+                side_new("audit:i-1:002", "a2"),
+                side_new("audit:i-2:001", "other"),
+            ],
+            lifecycle_items: vec![lifecycle_item()],
+            instance_fence: Some(InstanceFence {
+                instance_key: b"wf-1".to_vec(),
+                expected: 0,
+                next: 1,
+            }),
+        }],
+    }
+}
+
+/// Side records, the advanced fence, and the retained per-entry outcome must all read back
+/// through the facade's recovery ports.
+async fn assert_full_commit_reads(
+    fw: &Fireweed,
+    q: &QueueKey,
+    input_id: ItemId,
+    lifecycle_id: ItemId,
+    request_id: &RequestId,
+) {
+    assert_eq!(
+        fw.side_record(q, b"audit:i-1:002").await.unwrap(),
+        Some(Bytes::from_static(b"a2"))
+    );
+    assert_eq!(fw.side_record(q, b"audit:missing").await.unwrap(), None);
+    let first_page = fw
+        .side_records_by_prefix(q, b"audit:i-1:", 2, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page.entries,
+        vec![
+            (b"audit:i-1:001".to_vec(), Bytes::from_static(b"a1")),
+            (b"audit:i-1:002".to_vec(), Bytes::from_static(b"a2")),
+        ]
+    );
+    let cursor = first_page.next_cursor.clone().expect("third entry remains");
+    let second_page = fw
+        .side_records_by_prefix(q, b"audit:i-1:", 2, Some(cursor))
+        .await
+        .unwrap();
+    assert_eq!(
+        second_page.entries,
+        vec![(b"audit:i-1:003".to_vec(), Bytes::from_static(b"a3"))]
+    );
+    assert_eq!(second_page.next_cursor, None);
+
+    let recovery = fw
+        .explain_commit(q, request_id.clone())
+        .await
+        .unwrap()
+        .expect("retained commit recovery");
+    assert_eq!(recovery.request_id, *request_id);
+    assert_eq!(recovery.entries.len(), 1);
+    assert_eq!(recovery.entries[0].consumed_input_id, input_id);
+    assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
+    assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    assert!(matches!(
+        recovery.entries[0].status,
+        fireweed::CommitEntryStatus::Committed
+    ));
+}
+
+/// Full commit_transition (side records + instance fence + lifecycle item) through the public
+/// facade, with per-entry outcomes, replay idempotency, a fabricated-lease rejection, and reopen
+/// durability. This is the surface the previous fallback rejected with `Unavailable`.
+async fn full_commit_transition_cell(tag: &str, make_log: impl Fn(&std::path::Path) -> LogConfig) {
+    let root = unique_root(tag);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let projection_path = root.join("projection.turso");
+    let clock = Arc::new(SystemClock);
+    let def = definition("commit-surface");
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    let request_id = RequestId::new(format!("turso-full-commit-{tag}")).unwrap();
+
+    let fw = open(
+        facade_config(make_log(&root), projection_path.clone()),
+        Arc::clone(&clock) as _,
+    )
+    .expect("open turso composition");
+    fw.create_queue(def.clone()).await.unwrap();
+    let claim_ref = claim_one(&fw, &q).await;
+    let input_id = claim_ref.item_id;
+    let request = full_commit_request(claim_ref, &request_id);
+
+    let outcomes = fw.commit_multi_claim(&q, request.clone()).await.unwrap();
+    let lifecycle_id = match outcomes.as_slice() {
+        [EntryOutcome::Committed { lifecycle_item_ids }] if lifecycle_item_ids.len() == 1 => {
+            lifecycle_item_ids[0]
+        }
+        other => panic!("expected one Committed entry with one lifecycle id, got {other:?}"),
+    };
+    assert_ne!(lifecycle_id, input_id);
+    assert_full_commit_reads(&fw, &q, input_id, lifecycle_id, &request_id).await;
+
+    // Replay: the same request_id + identical body returns the retained outcome verbatim.
+    let replay = fw.commit_multi_claim(&q, request.clone()).await.unwrap();
+    assert_eq!(replay, outcomes);
+
+    // The lifecycle item is genuinely claimable work.
+    let metrics = fw.metrics(&q).await.unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.leased, metrics.complete),
+        (1, 0, 1),
+        "input completed; only the lifecycle item remains pending"
+    );
+
+    // A fabricated lease token rejects per-entry with StaleLease and writes nothing.
+    let mut forged = claim_one(&fw, &q).await;
+    forged.lease_token = LeaseToken::new("not-the-real-token").unwrap();
+    let rejected = fw
+        .commit_multi_claim(
+            &q,
+            MultiClaimCommitRequest {
+                request_id: None,
+                entries: vec![MultiClaimCommitEntry {
+                    claim_ref: forged,
+                    additional_claim_refs: vec![],
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side_new("audit:rejected", "must-not-exist")],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            rejected.as_slice(),
+            [EntryOutcome::Rejected(fireweed::EngineError::StaleLease)]
+        ),
+        "expected Rejected(StaleLease), got {rejected:?}"
+    );
+    assert_eq!(fw.side_record(&q, b"audit:rejected").await.unwrap(), None);
+    drop(fw);
+
+    // Reopen: reads and replay serve from durable state (retained commit row + side records).
+    let reopened = open(facade_config(make_log(&root), projection_path), clock)
+        .expect("reopen turso composition");
+    assert_full_commit_reads(&reopened, &q, input_id, lifecycle_id, &request_id).await;
+    let replay = reopened
+        .commit_multi_claim(&q, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(replay, outcomes, "durable replay after reopen");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn turso_sqlite_log_full_commit_transition_replay_and_reopen() {
+    full_commit_transition_cell("full-sqlite-log", |root| LogConfig::Sqlite {
+        path: root.join("log.db"),
+    })
+    .await;
+}
+
+#[cfg(feature = "objectlog")]
+#[tokio::test]
+async fn turso_filesystem_log_full_commit_transition_replay_and_reopen() {
+    full_commit_transition_cell("full-fs-log", |root| LogConfig::Filesystem {
+        root: root.join("fs-log"),
+    })
+    .await;
+}
+
+/// The shared Snorri commit-transition qualification (the same scenarios the memory, sqlite, and
+/// postgres products run) against the atomic sqlite-log × turso composition.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn turso_commit_transition_shared_conformance_scenarios() {
+    use fireweed_conformance::scenarios::{
+        commit_transition_rejects_bad_token_without_writing,
+        commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen,
+    };
+
+    let root = unique_root("shared-conformance");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    {
+        let log_path = root.join("positive-log.db");
+        let projection_path = root.join("positive-projection.turso");
+        let make = move || {
+            crate::turso_compose::assemble_sqlite_log_turso(
+                log_path.to_str().expect("utf-8 path"),
+                projection_path.clone(),
+            )
+            .expect("assemble sqlite-log × turso")
+        };
+        commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(
+            make,
+        )
+        .await;
+    }
+    {
+        let log_path = root.join("reject-log.db");
+        let projection_path = root.join("reject-projection.turso");
+        let make = move || {
+            crate::turso_compose::assemble_sqlite_log_turso(
+                log_path.to_str().expect("utf-8 path"),
+                projection_path.clone(),
+            )
+            .expect("assemble sqlite-log × turso")
+        };
+        commit_transition_rejects_bad_token_without_writing(make).await;
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
