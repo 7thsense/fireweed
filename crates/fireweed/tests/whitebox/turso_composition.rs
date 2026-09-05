@@ -31,9 +31,11 @@ use fireweed_core::{
     RetryPolicy, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    Backend, CommandChecksum, CommandEnvelope, CommandId, CommitEntryStatus, CommitOutcomeEntry,
-    ControlPlaneStore, QueueCommand, QueueKey, RawCommitRequest, RecoveryReadPort, RequestOutcome,
-    SideRecord, WriteSideRecordsCommand,
+    AddressedMutation, Backend, CommandChecksum, CommandEnvelope, CommandId, CommitEntryStatus,
+    CommitOutcomeEntry, ControlPlaneStore, EngineError, ItemMutationOperation, ItemMutationOutcome,
+    ItemMutationRequest, ItemPatch, PayloadUpdate, PushPort, PushSpec, QueueCommand, QueueKey,
+    RawCommitRequest, RecoveryReadPort, RequestOutcome, SideRecord, UpdateFieldsPort,
+    WriteSideRecordsCommand,
 };
 
 fn definition(tenant: &str) -> QueueDefinition {
@@ -577,6 +579,376 @@ async fn turso_commit_transition_shared_conformance_scenarios() {
             .expect("assemble sqlite-log × turso")
         };
         commit_transition_rejects_bad_token_without_writing(make).await;
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Probe for the snorri `object_log_turso` default functional cell: with the
+/// ASYNC-PROJECTION barrier (a live apply coordinator — what an embedder
+/// composes), a plain push must become claimable once the projection has
+/// caught up; a recovery read forces that catch-up (fireweed-82211ac4).
+#[cfg(feature = "objectlog")]
+#[tokio::test]
+async fn derived_turso_async_barrier_push_is_claimable_after_catch_up() {
+    let root = unique_root("async-claim");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let projection_path = root.join("projection.turso");
+    let def = definition("async-claim");
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+
+    let mut cfg = facade_config(
+        LogConfig::Filesystem {
+            root: root.join("fs-log"),
+        },
+        projection_path,
+    );
+    cfg.response_barrier = ResponseBarrier::AsyncProjection;
+    cfg.async_projection = Some(fireweed_engine::AsyncProjectionSpec {
+        apply_lag_max_commands: 500,
+        apply_debt_max_bytes: 8 * 1024 * 1024,
+        apply_queue_depth_max: 64,
+        oldest_unapplied_max_ms: 5_000,
+        apply_poison_retry_threshold: 5,
+        apply_start_delay_ms: 0,
+    });
+    let fw = open(cfg, Arc::new(SystemClock) as _).expect("open async-barrier turso composition");
+    fw.create_queue(def).await.unwrap();
+    let pushed = fw
+        .push(
+            &q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(1)),
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // A recovery read forces projection catch-up before answering.
+    let _ = fw.side_record(&q, b"probe").await.unwrap();
+
+    let claimed = fw.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(
+        claimed.len(),
+        1,
+        "an applied push must be claimable on the async-barrier turso cell"
+    );
+    assert_eq!(claimed[0].item_id, pushed);
+    drop(fw);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Upsert / update_fields / mutate_items ports (bead fireweed-82211ac4, round 3)
+// ---------------------------------------------------------------------------
+
+fn field(bytes: &str) -> Option<Bytes> {
+    Some(Bytes::copy_from_slice(bytes.as_bytes()))
+}
+
+/// `replace_if_pending` (Snorri's enroll path) and `mutate_items` (scenario-step live mutations)
+/// through the public facade: fresh key inserts, still-pending key replaces with a new id, the
+/// replacement's fields/entity/priority are intact on claim, and an addressed mutation has
+/// sqlite-parity outcome, replay, and version-precondition semantics.
+async fn upsert_and_mutation_cell(tag: &str, make_log: impl Fn(&std::path::Path) -> LogConfig) {
+    let root = unique_root(tag);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let projection_path = root.join("projection.turso");
+    let clock = Arc::new(SystemClock);
+    let def = definition("ports");
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+
+    let fw = open(
+        facade_config(make_log(&root), projection_path.clone()),
+        Arc::clone(&clock) as _,
+    )
+    .expect("open turso composition");
+    fw.create_queue(def.clone()).await.unwrap();
+
+    // (a) Fresh key inserts.
+    let key = fireweed_core::ClientItemKey::new("workflow-1").unwrap();
+    let inserted = fw
+        .upsert(
+            &q,
+            key.clone(),
+            NewItem {
+                priority: Some(PriorityValue::Int64(5)),
+                fields: [("stage".to_string(), Bytes::from_static(b"one"))]
+                    .into_iter()
+                    .collect(),
+                entity: Some(serde_json::json!({"kind": "alpha"})),
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap();
+    let fireweed::UpsertOutcome::Inserted { item_id: first_id } = inserted else {
+        panic!("expected Inserted, got {inserted:?}");
+    };
+
+    // Still-pending key replaces atomically with a NEW monotonic id.
+    let replaced = fw
+        .upsert(
+            &q,
+            key.clone(),
+            NewItem {
+                priority: Some(PriorityValue::Int64(7)),
+                fields: [("stage".to_string(), Bytes::from_static(b"two"))]
+                    .into_iter()
+                    .collect(),
+                entity: Some(serde_json::json!({"kind": "beta"})),
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap();
+    let fireweed::UpsertOutcome::Replaced {
+        new_item_id,
+        superseded_item_id,
+    } = replaced
+    else {
+        panic!("expected Replaced, got {replaced:?}");
+    };
+    assert_eq!(superseded_item_id, first_id);
+    assert_ne!(new_item_id, first_id);
+
+    // (b) Addressed mutation on the pending replacement: Updated outcome + field edit.
+    let mutation = |rid: &str, expected_item_version: Option<u64>| ItemMutationRequest {
+        request_id: RequestId::new(rid).unwrap(),
+        evaluated_at: UtcTimestamp::new(5, 0).unwrap(),
+        dry_run: false,
+        returning: Default::default(),
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed {
+            entries: vec![AddressedMutation {
+                item_id: new_item_id,
+                expected_item_version,
+                predicates: vec![],
+                lease_guard: Default::default(),
+                patch: ItemPatch {
+                    field_edits: [("note".to_string(), field("m1"))].into_iter().collect(),
+                    ..ItemPatch::default()
+                },
+            }],
+        },
+    };
+    let first_response = fw
+        .mutate_items(&q, mutation("ports-m1", None))
+        .await
+        .unwrap();
+    assert_eq!(first_response.results.len(), 1);
+    assert_eq!(first_response.results[0].item_id, new_item_id);
+    let mutated_version = match &first_response.results[0].outcome {
+        ItemMutationOutcome::Updated {
+            item_version,
+            state,
+        } => {
+            assert_eq!(*state, fireweed_core::ItemState::Pending);
+            *item_version
+        }
+        other => panic!("expected Updated, got {other:?}"),
+    };
+
+    // Replay: the same request_id + identical body returns the retained response verbatim.
+    let replay = fw
+        .mutate_items(&q, mutation("ports-m1", None))
+        .await
+        .unwrap();
+    assert_eq!(replay, first_response);
+
+    // Precondition: a version fence mismatch is a per-item Conflict outcome, nothing mutated.
+    let conflicted = fw
+        .mutate_items(&q, mutation("ports-m2", Some(999)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            conflicted.results[0].outcome,
+            ItemMutationOutcome::Conflict { actual_version } if actual_version == mutated_version
+        ),
+        "expected Conflict at v{mutated_version}, got {:?}",
+        conflicted.results[0].outcome
+    );
+
+    // The replacement (not the superseded insert) is the claimable item, with the replacement's
+    // priority/fields/entity plus the mutation's field edit intact.
+    let claimed = fw.claim(&q, 10, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 1, "only the replacement is claimable");
+    let c = &claimed[0];
+    assert_eq!(c.item_id, new_item_id);
+    assert_eq!(c.priority, Some(PriorityValue::Int64(7)));
+    assert_eq!(
+        c.fields.get("stage").map(|b| b.as_ref()),
+        Some(b"two".as_ref())
+    );
+    assert_eq!(
+        c.fields.get("note").map(|b| b.as_ref()),
+        Some(b"m1".as_ref())
+    );
+    assert_eq!(c.entity, Some(serde_json::json!({"kind": "beta"})));
+    drop(fw);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn turso_sqlite_log_upsert_and_mutate_items() {
+    upsert_and_mutation_cell("ports-sqlite-log", |root| LogConfig::Sqlite {
+        path: root.join("log.db"),
+    })
+    .await;
+}
+
+#[cfg(feature = "objectlog")]
+#[tokio::test]
+async fn turso_filesystem_log_upsert_and_mutate_items() {
+    upsert_and_mutation_cell("ports-fs-log", |root| LogConfig::Filesystem {
+        root: root.join("fs-log"),
+    })
+    .await;
+}
+
+/// (c) `update_fields` on the composed backends directly: bumps the version, honors the version
+/// fence (Conflict) and absent-id (NotFound) guards — sqlite-relational parity.
+async fn update_fields_asserts<B>(backend: &B, def: QueueDefinition)
+where
+    B: ControlPlaneStore + PushPort + UpdateFieldsPort,
+{
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    ControlPlaneStore::create_queue(backend, def).await.unwrap();
+    let ids = PushPort::push(
+        backend,
+        &q,
+        vec![PushSpec {
+            priority: Some(PriorityValue::Int64(1)),
+            ..PushSpec::default()
+        }],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+    let id = ids[0];
+    let version = UpdateFieldsPort::update_fields(
+        backend,
+        &q,
+        id,
+        [("stage".to_string(), field("one"))].into_iter().collect(),
+        PayloadUpdate::Keep,
+        None,
+        Some(1),
+        ts(1),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(version, 2, "update bumps the item version");
+    let err = UpdateFieldsPort::update_fields(
+        backend,
+        &q,
+        id,
+        [("stage".to_string(), field("two"))].into_iter().collect(),
+        PayloadUpdate::Keep,
+        None,
+        Some(99),
+        ts(2),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, EngineError::Conflict, "version fence mismatch");
+    let err = UpdateFieldsPort::update_fields(
+        backend,
+        &q,
+        fireweed_core::ItemId::new("909090").unwrap(),
+        [("stage".to_string(), field("x"))].into_iter().collect(),
+        PayloadUpdate::Keep,
+        None,
+        None,
+        ts(3),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, EngineError::NotFound, "absent item fails closed");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn turso_sqlite_log_update_fields_guards_and_versions() {
+    let root = unique_root("uf-sqlite-log");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let backend = crate::turso_compose::assemble_sqlite_log_turso(
+        root.join("log.db").to_str().expect("utf-8 path"),
+        root.join("projection.turso"),
+    )
+    .expect("assemble sqlite-log × turso");
+    update_fields_asserts(&backend, definition("uf-sqlite")).await;
+    drop(backend);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(feature = "objectlog")]
+#[tokio::test]
+async fn turso_filesystem_log_update_fields_guards_and_versions() {
+    let root = unique_root("uf-fs-log");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let log = crate::open_composed_object_log_engine(
+        &root.join("fs-log"),
+        "turso-update-fields",
+        SegmentSettings {
+            target_bytes: 1024 * 1024,
+            max_latency_ms: 5,
+        },
+    )
+    .expect("open filesystem object log");
+    let backend =
+        crate::turso_compose::assemble_objectlog_turso(log, root.join("projection.turso"), None)
+            .expect("assemble filesystem-log × turso");
+    update_fields_asserts(&backend, definition("uf-fs")).await;
+    drop(backend);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The shared ADR-011 typed-index qualifications the sqlite/postgres products run, against the
+/// atomic sqlite-log × turso composition (update_fields re-key + upsert unique-conflict atomicity).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn turso_adr011_shared_conformance_scenarios() {
+    use fireweed_conformance::scenarios::{
+        adr011_typed_update_fields_and_replace_rekey,
+        adr011_typed_upsert_insert_unique_conflict_is_atomic,
+    };
+    let root = unique_root("adr011-conformance");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    {
+        let log_path = root.join("rekey-log.db");
+        let projection_path = root.join("rekey-projection.turso");
+        let make = move || {
+            crate::turso_compose::assemble_sqlite_log_turso(
+                log_path.to_str().expect("utf-8 path"),
+                projection_path.clone(),
+            )
+            .expect("assemble sqlite-log × turso")
+        };
+        adr011_typed_update_fields_and_replace_rekey(make).await;
+    }
+    {
+        let log_path = root.join("upsert-log.db");
+        let projection_path = root.join("upsert-projection.turso");
+        let make = move || {
+            crate::turso_compose::assemble_sqlite_log_turso(
+                log_path.to_str().expect("utf-8 path"),
+                projection_path.clone(),
+            )
+            .expect("assemble sqlite-log × turso")
+        };
+        adr011_typed_upsert_insert_unique_conflict_is_atomic(make).await;
     }
     let _ = std::fs::remove_dir_all(&root);
 }

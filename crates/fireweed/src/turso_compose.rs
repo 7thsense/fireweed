@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fireweed_core::{
-    BodyHash, ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
+    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
     QueryCapabilityFlags, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
@@ -46,6 +46,10 @@ use fireweed_engine::{
     SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
     UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
     UpsertOutcome, UpsertPort,
+};
+use fireweed_engine::{
+    PushItem, ReplacePendingCommand, UpdateFieldsCommand, item_mutation_fingerprint,
+    resolve_write_epoch_async, validate_api001_reserved_write_fields,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -1643,37 +1647,221 @@ macro_rules! impl_turso_product_ports {
         }
 
         impl UpsertPort for $ty {
+            /// Full pending-key upsert (bead fireweed-82211ac4): plan against the caught-up
+            /// projection (insert vs replace-if-pending vs collision), validate typed unique
+            /// index keys pre-append on the insert path, and lower to one atomic
+            /// `Push` / `ReplacePending` append (mirrors the objectlog products'
+            /// `port_surface::prepare_upsert`).
             fn replace_if_pending(
                 &self,
-                _shard: &QueueKey,
-                _client_item_key: &ClientItemKey,
-                _priority: Option<PriorityValue>,
-                _group_key: Option<GroupKey>,
-                _not_before: Option<UtcTimestamp>,
-                _payload: Option<Bytes>,
-                _fields: BTreeMap<String, Bytes>,
-                _metadata: Metadata,
-                _entity: Option<serde_json::Value>,
-                _now: UtcTimestamp,
-                _expected_epoch: Option<u64>,
+                shard: &QueueKey,
+                client_item_key: &ClientItemKey,
+                priority: Option<PriorityValue>,
+                group_key: Option<GroupKey>,
+                not_before: Option<UtcTimestamp>,
+                payload: Option<Bytes>,
+                fields: BTreeMap<String, Bytes>,
+                metadata: Metadata,
+                entity: Option<serde_json::Value>,
+                now: UtcTimestamp,
+                expected_epoch: Option<u64>,
             ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
-                std::future::ready(Err(EngineError::Unavailable))
+                let shard = shard.clone();
+                let client_item_key = client_item_key.clone();
+                async move {
+                    let definition = AsyncControlPlane::queue_definition(
+                        self.control.as_ref(),
+                        shard.clone(),
+                    )
+                    .await?;
+                    let schema = definition
+                        .entity_schema
+                        .as_ref()
+                        .and_then(|esd| esd.entity_schema.as_ref())
+                        .map(compile_entity_schema)
+                        .transpose()?;
+                    validate_entity(schema.as_ref(), entity.as_ref())?;
+                    let epoch = match expected_epoch {
+                        Some(epoch) => epoch,
+                        None => {
+                            AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?
+                        }
+                    };
+                    let counter_base = self.counters.reserve(&shard, epoch, 1);
+                    let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
+                    let item = PushItem {
+                        client_item_key: client_item_key.clone(),
+                        item_id: new_item_id,
+                        priority,
+                        not_before,
+                        group_key,
+                        max_attempts: definition.retry_policy.max_attempts,
+                        payload,
+                        fields,
+                        metadata,
+                        cohort_size: None,
+                        gate_keys: Vec::new(),
+                        index_fields: Default::default(),
+                        entity_document: entity,
+                    };
+                    // The plan must observe applied state on the derived (EventualApply) family.
+                    self.catch_up_projection(&shard).await?;
+                    let existing = self
+                        .projection
+                        .lookup_active_by_key(&shard, &client_item_key)
+                        .await?;
+                    let (command, outcome) = match existing {
+                        None => {
+                            AsyncProjectionStore::index_validate_push(
+                                self.projection.as_ref(),
+                                shard.clone(),
+                                vec![item.clone()],
+                            )
+                            .await?;
+                            (
+                                QueueCommand::Push(PushCommand { items: vec![item] }),
+                                UpsertOutcome::Inserted {
+                                    item_id: new_item_id,
+                                },
+                            )
+                        }
+                        Some(existing_id) => {
+                            let state = AsyncProjectionStore::item_state(
+                                self.projection.as_ref(),
+                                shard.clone(),
+                                existing_id,
+                            )
+                            .await?
+                            .ok_or(EngineError::NotFound)?;
+                            match state {
+                                ItemState::Pending => (
+                                    QueueCommand::ReplacePending(ReplacePendingCommand {
+                                        client_item_key,
+                                        superseded_item_id: existing_id,
+                                        replacement: item,
+                                    }),
+                                    UpsertOutcome::Replaced {
+                                        new_item_id,
+                                        superseded_item_id: existing_id,
+                                    },
+                                ),
+                                ItemState::Leased => {
+                                    return Err(EngineError::Invalid(
+                                        "collision with claimed item",
+                                    ));
+                                }
+                                ItemState::Complete | ItemState::Failed => {
+                                    return Err(EngineError::Terminal);
+                                }
+                            }
+                        }
+                    };
+                    let envelope = CommandEnvelope {
+                        command_id: self.ids.next_command_id(),
+                        request_id: None,
+                        request_fingerprint: None,
+                        request_outcome: None,
+                        item_ids: vec![new_item_id],
+                        command,
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    };
+                    let strategy = self.engine.commit_strategy();
+                    let append_admission = match $durability {
+                        DurabilityClass::Atomic => AppendAdmissionClass::AtomicNative,
+                        DurabilityClass::EventualApply => AppendAdmissionClass::SelectionRequired,
+                    };
+                    strategy
+                        .commit(
+                            RawCommitRequest::new(shard, vec![envelope], epoch)
+                                .with_append_admission(append_admission),
+                        )
+                        .await?;
+                    Ok(outcome)
+                }
             }
         }
 
         impl UpdateFieldsPort for $ty {
+            /// FAC-1 live-item field/payload merge (bead fireweed-82211ac4): reserved-field and
+            /// entity-schema validation, the projection's update guard (StaleLease / Terminal /
+            /// Superseded / version Conflict / NotFound), then one atomic `UpdateFields` append;
+            /// returns the bumped item_version (parity with `port_surface::prepare_update_fields`).
             fn update_fields(
                 &self,
-                _shard: &QueueKey,
-                _item_id: ItemId,
-                _field_ops: BTreeMap<String, Option<Bytes>>,
-                _payload: fireweed_engine::PayloadUpdate,
-                _entity: Option<serde_json::Value>,
-                _expected_item_version: Option<u64>,
-                _now: UtcTimestamp,
-                _expected_epoch: Option<u64>,
+                shard: &QueueKey,
+                item_id: ItemId,
+                field_ops: BTreeMap<String, Option<Bytes>>,
+                payload: fireweed_engine::PayloadUpdate,
+                entity: Option<serde_json::Value>,
+                expected_item_version: Option<u64>,
+                now: UtcTimestamp,
+                expected_epoch: Option<u64>,
             ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-                std::future::ready(Err(EngineError::Unavailable))
+                let shard = shard.clone();
+                async move {
+                    validate_api001_reserved_write_fields(&field_ops)?;
+                    let definition = AsyncControlPlane::queue_definition(
+                        self.control.as_ref(),
+                        shard.clone(),
+                    )
+                    .await?;
+                    let schema = definition
+                        .entity_schema
+                        .as_ref()
+                        .and_then(|esd| esd.entity_schema.as_ref())
+                        .map(compile_entity_schema)
+                        .transpose()?;
+                    validate_entity(schema.as_ref(), entity.as_ref())?;
+                    self.catch_up_projection(&shard).await?;
+                    self.projection
+                        .update_fields_validate(&shard, item_id, expected_item_version)
+                        .await?;
+                    let epoch = match expected_epoch {
+                        Some(epoch) => epoch,
+                        None => {
+                            AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?
+                        }
+                    };
+                    let envelope = CommandEnvelope {
+                        command_id: self.ids.next_command_id(),
+                        request_id: None,
+                        request_fingerprint: None,
+                        request_outcome: None,
+                        item_ids: vec![item_id],
+                        command: QueueCommand::UpdateFields(UpdateFieldsCommand {
+                            item_id,
+                            field_ops,
+                            payload,
+                            set_priority: Default::default(),
+                            set_not_before: Default::default(),
+                            set_entity_document: entity,
+                            set_fields: None,
+                            set_metadata: None,
+                            set_gate_keys: None,
+                            api001_batch: false,
+                            client_item_key: None,
+                            expected_item_version: None,
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    };
+                    let strategy = self.engine.commit_strategy();
+                    let append_admission = match $durability {
+                        DurabilityClass::Atomic => AppendAdmissionClass::AtomicNative,
+                        DurabilityClass::EventualApply => AppendAdmissionClass::SelectionRequired,
+                    };
+                    strategy
+                        .commit(
+                            RawCommitRequest::new(shard.clone(), vec![envelope], epoch)
+                                .with_append_admission(append_admission),
+                        )
+                        .await?;
+                    self.catch_up_projection(&shard).await?;
+                    AsyncProjectionStore::item_version(self.projection.as_ref(), shard, item_id)
+                        .await?
+                        .ok_or(EngineError::NotFound)
+                }
             }
         }
 
@@ -1721,34 +1909,129 @@ macro_rules! impl_turso_product_ports {
         }
 
         impl IndexQueryPort for $ty {
+            /// ADR-010 §6 typed-index reads over the durable `fireweed_item_index` rows the apply
+            /// arm maintains (bead fireweed-82211ac4; mirrors the postgres relational lookups).
             fn index_get_unique(
                 &self,
-                _shard: &QueueKey,
-                _index: &str,
-                _key: &[Vec<u8>],
+                shard: &QueueKey,
+                index: &str,
+                key: &[Vec<u8>],
             ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::IndexHit>>> + Send
             {
-                std::future::ready(Err(EngineError::Unavailable))
+                let shard = shard.clone();
+                let index = index.to_string();
+                let key = key.to_vec();
+                async move {
+                    self.catch_up_projection(&shard).await?;
+                    self.projection.index_get_unique(&shard, &index, &key).await
+                }
             }
             fn index_lookup(
                 &self,
-                _shard: &QueueKey,
-                _index: &str,
-                _key: &[Vec<u8>],
+                shard: &QueueKey,
+                index: &str,
+                key: &[Vec<u8>],
             ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::IndexHit>>> + Send
             {
-                std::future::ready(Err(EngineError::Unavailable))
+                let shard = shard.clone();
+                let index = index.to_string();
+                let key = key.to_vec();
+                async move {
+                    self.catch_up_projection(&shard).await?;
+                    self.projection.index_lookup(&shard, &index, &key).await
+                }
             }
         }
 
         impl ItemMutationPort for $ty {
+            /// Backend-erased item mutation (bead fireweed-82211ac4): durable request-id replay
+            /// from the retained `fireweed_request_idempotency` row, planning via the shared
+            /// in-memory planner over the materialized image, then one atomic `MutateItems`
+            /// append carrying the retained response — replay check, plan, and append all under
+            /// the queue-local admission permit (parity with the objectlog products).
             fn mutate_items(
                 &self,
-                _shard: &QueueKey,
-                _request: ItemMutationRequest,
-                _expected_epoch: Option<u64>,
+                shard: &QueueKey,
+                request: ItemMutationRequest,
+                expected_epoch: Option<u64>,
             ) -> impl std::future::Future<Output = EngineResult<ItemMutationResponse>> + Send {
-                std::future::ready(Err(EngineError::Unavailable))
+                let shard = shard.clone();
+                async move {
+                    let fingerprint = item_mutation_fingerprint(&request)?;
+                    let request_id = request.request_id.clone();
+                    let evaluated_at = request.evaluated_at;
+                    self.catch_up_projection(&shard).await?;
+                    let strategy = self.engine.commit_strategy();
+                    let append_admission = match $durability {
+                        DurabilityClass::Atomic => AppendAdmissionClass::AtomicNative,
+                        DurabilityClass::EventualApply => AppendAdmissionClass::SelectionRequired,
+                    };
+                    let projection = Arc::clone(&self.projection);
+                    let log = Arc::clone(&self.log);
+                    let ids = Arc::clone(&self.ids);
+                    let op_shard = shard.clone();
+                    self.engine
+                        .submit_operation(shard, move || {
+                            Box::pin(async move {
+                                if let Some(response) = projection
+                                    .replay_durable_item_mutation(
+                                        &op_shard,
+                                        &request_id,
+                                        fingerprint,
+                                        evaluated_at,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(response);
+                                }
+                                let mut plan =
+                                    projection.plan_item_mutation(&op_shard, &request).await?;
+                                if request.dry_run {
+                                    return Ok(plan.response);
+                                }
+                                let epoch = resolve_write_epoch_async(expected_epoch, || {
+                                    AsyncLogStore::current_epoch(log.as_ref(), op_shard.clone())
+                                })
+                                .await?;
+                                let response_payload = serde_json::to_string(&plan.response)
+                                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                                let item_ids = plan
+                                    .command
+                                    .items
+                                    .iter()
+                                    .map(|item| item.item_id)
+                                    .collect::<Vec<_>>();
+                                let envelope = CommandEnvelope {
+                                    command_id: ids.next_command_id(),
+                                    request_id: Some(request_id),
+                                    request_fingerprint: Some(fingerprint),
+                                    request_outcome: Some(RequestOutcome::ItemMutation {
+                                        response_payload,
+                                    }),
+                                    item_ids,
+                                    command: QueueCommand::MutateItems(plan.command),
+                                    checksum: CommandChecksum(0),
+                                    created_at: evaluated_at,
+                                };
+                                strategy
+                                    .commit(
+                                        RawCommitRequest::new(
+                                            op_shard.clone(),
+                                            vec![envelope],
+                                            epoch,
+                                        )
+                                        .with_append_admission(append_admission),
+                                    )
+                                    .await?;
+                                plan.response.position =
+                                    AsyncLogStore::high_water(log.as_ref(), op_shard.clone())
+                                        .await?;
+                                Ok(plan.response)
+                            })
+                        })
+                        .await
+                        .map_err(|error| map_submit("mutate_items", error))?
+                }
             }
         }
 

@@ -2,24 +2,26 @@
 // implementation's public return type to `async fn`.
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
-    QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
+    QueueDefinition, QueueIndex, RequestId, UtcTimestamp, WorkerId, is_retry_exhausted,
 };
 use fireweed_engine::{
     AsyncProjectionStore, BatchUpdateResponse, BatchUpdateSnapshotItem, ClaimCompatibility,
     ClaimRef, ClaimUnit, ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition,
     CreateQueueOutcome, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
-    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
-    PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget,
-    RequestOutcome, ResolvedItemMutationAction, RichClaimSelection, ScheduleUpdate,
-    TerminalEmissionMetrics, UpdateFieldsCommand,
+    IdempotencyDecision, IndexHit, ItemMutationPlan, ItemMutationRequest, ItemMutationResponse,
+    ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary, PushFingerprint,
+    PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget, RequestOutcome,
+    ResolvedItemMutationAction, RichClaimSelection, ScheduleUpdate, TerminalEmissionMetrics,
+    UpdateFieldsCommand,
 };
+use fireweed_projection::{ProjectionData, ProjectionImage, ProjectionImageItem};
 use fireweed_relational::{
     RelRow, RelTx, RelValue, TokenOp, async_projection as sql, elig_sort, entity_from_json,
     fields_from_json, fields_to_json, lease_hash, metadata_from_json, metadata_to_json, nanos_ts,
@@ -3241,6 +3243,389 @@ impl AsyncProjectionStore for TursoRelational {
                 .map(|row| serde_json::from_str(&text(&row.values[0])?).map_err(storage))
                 .collect()
         }
+    }
+}
+
+/// Port-planning reads for the composed Turso products (bead fireweed-82211ac4): upsert key
+/// lookup, update-fields guards, retained item-mutation replay, typed-index probes, and the
+/// full-image loader behind `plan_item_mutation`.
+impl TursoRelational {
+    /// Live (non-superseded) item id for `client_item_key`, if any (upsert planning read; mirrors
+    /// `fireweed-sqlite`'s `lookup_active_by_key`).
+    pub async fn lookup_active_by_key(
+        &self,
+        shard: &QueueKey,
+        client_item_key: &ClientItemKey,
+    ) -> EngineResult<Option<ItemId>> {
+        let rows = self
+            .query(
+                sql::SELECT_ACTIVE_BY_KEY,
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    client_item_key.as_str().to_string().into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        rows.first()
+            .map(|row| ItemId::new(text(&row.values[0])?).map_err(storage))
+            .transpose()
+    }
+
+    /// Pre-append guard for `update_fields` (mirrors `fireweed-sqlite`'s
+    /// `update_fields_validate_sql`): fenced → StaleLease, terminal → Terminal, superseded →
+    /// Superseded, version mismatch → Conflict, absent → NotFound.
+    pub async fn update_fields_validate(
+        &self,
+        shard: &QueueKey,
+        id: ItemId,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<()> {
+        let rows = self
+            .query(
+                sql::SELECT_UPDATE_FIELDS_GUARD,
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    id.to_string().into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        let row = rows.first().ok_or(EngineError::NotFound)?;
+        let state = parse_state(&text(&row.values[0])?).map_err(storage)?;
+        if integer(&row.values[2])? != 0 {
+            return Err(EngineError::StaleLease);
+        }
+        if state.is_terminal() {
+            return Err(EngineError::Terminal);
+        }
+        if integer(&row.values[1])? != 0 {
+            return Err(EngineError::Superseded);
+        }
+        let version = nonnegative_u64(integer(&row.values[3])?, "item_version")?;
+        if expected_item_version.is_some_and(|expected| expected != version) {
+            return Err(EngineError::Conflict);
+        }
+        Ok(())
+    }
+
+    /// Retained item-mutation response for request-id replay (mirrors `fireweed-sqlite`'s
+    /// `replay_durable_item_mutation`: an elapsed row reads as `None` and is removed; a reused id
+    /// with a different body is `RequestIdConflict`).
+    pub async fn replay_durable_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<ItemMutationResponse>> {
+        let tenant = shard.tenant_id.as_str().to_string();
+        let queue = shard.queue_id.as_str().to_string();
+        let rows = self
+            .query(
+                sql::SELECT_ITEM_MUTATION_REPLAY,
+                vec![
+                    tenant.clone().into(),
+                    queue.clone().into(),
+                    request_id.as_str().to_string().into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let stored_fingerprint = blob(&row.values[0])?;
+        let response_payload = text(&row.values[1])?;
+        let positions_json = text(&row.values[2])?;
+        let expires_at = integer(&row.values[3])?;
+        if expires_at <= ts_nanos(now) {
+            self.execute(
+                sql::DELETE_EXPIRED_ITEM_MUTATION_REPLAY,
+                vec![
+                    tenant.into(),
+                    queue.into(),
+                    request_id.as_str().to_string().into(),
+                    ts_nanos(now).into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+            return Ok(None);
+        }
+        if stored_fingerprint != fingerprint.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        let mut response: ItemMutationResponse =
+            serde_json::from_str(&response_payload).map_err(storage)?;
+        let decoded: Vec<(u64, u64)> = serde_json::from_str(&positions_json).map_err(storage)?;
+        response.position = decoded
+            .last()
+            .map(|(epoch, sequence)| CommandPosition::new(shard.clone(), *epoch, *sequence));
+        Ok(Some(response))
+    }
+
+    /// Materialize the queue's complete in-memory image and lift it into the shared
+    /// [`ProjectionData`] planner state (async analogue of `fireweed-sqlite`'s
+    /// `projection_data_sql`). Cost is O(resident queue), matching the sqlite relational planner.
+    pub async fn projection_data(&self, shard: &QueueKey) -> EngineResult<ProjectionData> {
+        let definition = {
+            let connection = self.reader.lock().await;
+            definition_in_transaction(&connection, shard).await?
+        };
+        let tenant = Value::Text(shard.tenant_id.as_str().to_string());
+        let queue = Value::Text(shard.queue_id.as_str().to_string());
+        let cursor = self
+            .query(
+                sql::SELECT_CURSOR_STATE,
+                vec![tenant.clone(), queue.clone()],
+            )
+            .await
+            .map_err(storage)?;
+        let cursor = &cursor.first().ok_or(EngineError::NotFound)?.values;
+        let next_seq = nonnegative_u64(integer(&cursor[0])?, "next_seq")?;
+        let next_item_seq = nonnegative_u64(integer(&cursor[1])?, "next_item_seq")?;
+        let assignment_epoch = nonnegative_u64(integer(&cursor[2])?, "assignment_epoch")?;
+        let queue_row = self
+            .query(
+                "SELECT paused,pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
+                vec![tenant.clone(), queue.clone()],
+            )
+            .await
+            .map_err(storage)?;
+        let queue_row = &queue_row.first().ok_or(EngineError::NotFound)?.values;
+        let paused = integer(&queue_row[0])? != 0;
+        let pause_drain_intake = integer(&queue_row[1])? != 0;
+
+        let mut gates: HashMap<String, Vec<String>> = HashMap::new();
+        for row in self
+            .query(
+                "SELECT item_id,gate_key FROM fireweed_item_gates \
+                 WHERE tenant_id=?1 AND queue_id=?2 ORDER BY item_id,gate_key",
+                vec![tenant.clone(), queue.clone()],
+            )
+            .await
+            .map_err(storage)?
+        {
+            gates
+                .entry(text(&row.values[0])?)
+                .or_default()
+                .push(text(&row.values[1])?);
+        }
+        let mut blocked_gates = BTreeSet::new();
+        for row in self
+            .query(
+                "SELECT gate_key FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2",
+                vec![tenant.clone(), queue.clone()],
+            )
+            .await
+            .map_err(storage)?
+        {
+            blocked_gates.insert(text(&row.values[0])?);
+        }
+
+        let rows = self
+            .query(
+                "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,\
+                 group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
+                 item_version,lease_expires_at,worker_id,fenced,superseded,max_attempts,\
+                 created_seq,last_command_sequence,terminal_at,terminal_command_epoch \
+                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+                 ORDER BY created_seq,item_id",
+                vec![tenant.clone(), queue.clone()],
+            )
+            .await
+            .map_err(storage)?;
+        let live_tokens = self.live_tokens.lock().await;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let values = row.values;
+            let item_id_text = text(&values[0])?;
+            let item_id = ItemId::new(&item_id_text).map_err(storage)?;
+            items.push(ProjectionImageItem {
+                item_id,
+                client_item_key: ClientItemKey::new(text(&values[1])?).map_err(storage)?,
+                state: parse_state(&text(&values[2])?).map_err(storage)?,
+                priority: parse_priority(optional_text(&values[3])?)?,
+                not_before: optional_integer(&values[4])?.map(nanos_ts),
+                eligible_since: optional_integer(&values[5])?.map(nanos_ts),
+                group_key: optional_text(&values[6])?
+                    .map(|value| GroupKey::new(value).map_err(storage))
+                    .transpose()?,
+                cohort_size: optional_integer(&values[7])?
+                    .map(|value| nonnegative_u64(value, "cohort_size"))
+                    .transpose()?,
+                payload: optional_blob(&values[8])?.map(Bytes::from),
+                fields: fields_from_json(text(&values[9])?)?,
+                metadata: metadata_from_json(text(&values[10])?)?,
+                gate_keys: gates.remove(&item_id_text).unwrap_or_default(),
+                index_fields: Default::default(),
+                entity_document: optional_text(&values[11])?
+                    .map(|value| serde_json::from_str(&value).map_err(storage))
+                    .transpose()?,
+                attempt_count: nonnegative_u32(integer(&values[12])?, "retry_count")?,
+                item_version: nonnegative_u64(integer(&values[13])?, "item_version")?,
+                lease_token: live_tokens.get(&(shard.clone(), item_id)).cloned(),
+                lease_expires_at: optional_integer(&values[14])?.map(nanos_ts),
+                lease_is_cohort: optional_integer(&values[7])?.is_some(),
+                worker_id: optional_text(&values[15])?
+                    .map(|value| WorkerId::new(value).map_err(storage))
+                    .transpose()?,
+                fenced: integer(&values[16])? != 0,
+                superseded: integer(&values[17])? != 0,
+                max_attempts: nonnegative_u32(integer(&values[18])?, "max_attempts")?,
+                created_seq: nonnegative_u64(integer(&values[19])?, "created_seq")?,
+                terminal_at: optional_integer(&values[21])?.map(nanos_ts),
+                terminal_position: optional_integer(&values[22])?
+                    .map(|epoch| -> EngineResult<CommandPosition> {
+                        Ok(CommandPosition::new(
+                            shard.clone(),
+                            nonnegative_u64(epoch, "terminal_command_epoch")?,
+                            nonnegative_u64(integer(&values[20])?, "last_command_sequence")?,
+                        ))
+                    })
+                    .transpose()?,
+            });
+        }
+        drop(live_tokens);
+
+        let mut side_records = BTreeMap::new();
+        for row in self
+            .query(
+                "SELECT key,payload FROM fireweed_side_records \
+                 WHERE tenant_id=?1 AND queue_id=?2 ORDER BY key",
+                vec![tenant.clone(), queue.clone()],
+            )
+            .await
+            .map_err(storage)?
+        {
+            side_records.insert(blob(&row.values[0])?, Bytes::from(blob(&row.values[1])?));
+        }
+        let mut instance_fences = BTreeMap::new();
+        for row in self
+            .query(
+                "SELECT instance_key,fence FROM fireweed_instance_fences \
+                 WHERE tenant_id=?1 AND queue_id=?2 ORDER BY instance_key",
+                vec![tenant, queue],
+            )
+            .await
+            .map_err(storage)?
+        {
+            instance_fences.insert(
+                blob(&row.values[0])?,
+                nonnegative_u64(integer(&row.values[1])?, "instance_fence")?,
+            );
+        }
+        let image = ProjectionImage {
+            high_water: (next_seq > 0).then(|| {
+                CommandPosition::new(shard.clone(), assignment_epoch, next_seq.saturating_sub(1))
+            }),
+            paused,
+            pause_drain_intake,
+            blocked_gates,
+            next_seq: next_item_seq,
+            items,
+            side_records,
+            instance_fences,
+            metrics: self.server_metrics(shard).await?,
+        };
+        ProjectionData::from_image(&definition, image)
+    }
+
+    /// Resolve and validate one backend-erased mutation against a single immutable queue image
+    /// via the shared in-memory planner (the same planner the sqlite relational backend uses).
+    pub async fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
+        self.projection_data(shard)
+            .await?
+            .plan_item_mutation(request)
+    }
+
+    /// ADR-010 §6 unique typed-index point read (mirrors the postgres relational implementation).
+    pub async fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> EngineResult<Option<IndexHit>> {
+        let qi = self.typed_index_declaration(shard, index).await?;
+        if !index_is_unique(&qi) {
+            return Err(EngineError::Invalid("secondary index is not unique"));
+        }
+        let hits = self.typed_index_hits(shard, &qi, index, key, 1).await?;
+        Ok(hits.into_iter().next())
+    }
+
+    /// ADR-010 §6 typed-index multi-hit lookup (mirrors the postgres relational implementation).
+    pub async fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> EngineResult<Vec<IndexHit>> {
+        let qi = self.typed_index_declaration(shard, index).await?;
+        self.typed_index_hits(shard, &qi, index, key, -1).await
+    }
+
+    async fn typed_index_declaration(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+    ) -> EngineResult<QueueIndex> {
+        let definition = {
+            let connection = self.reader.lock().await;
+            definition_in_transaction(&connection, shard).await?
+        };
+        definition
+            .typed_indexes
+            .iter()
+            .find(|qi| qi.name == index)
+            .cloned()
+            .ok_or(EngineError::Invalid("unknown secondary index"))
+    }
+
+    async fn typed_index_hits(
+        &self,
+        shard: &QueueKey,
+        qi: &QueueIndex,
+        index: &str,
+        key: &[Vec<u8>],
+        limit: i64,
+    ) -> EngineResult<Vec<IndexHit>> {
+        let expected_arity = match &qi.declaration {
+            IndexDeclaration::Single(_) => 1,
+            IndexDeclaration::Compound(definition) => definition.fields.len(),
+        };
+        if key.len() != expected_arity {
+            return Err(EngineError::Invalid("secondary index key arity mismatch"));
+        }
+        let canonical = fireweed_relational::typed_lookup_canonical_key(qi, key)?;
+        self.query(
+            sql::SELECT_INDEX_HITS,
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                index.to_string().into(),
+                Value::Blob(canonical),
+                limit.into(),
+            ],
+        )
+        .await
+        .map_err(storage)?
+        .into_iter()
+        .map(|row| {
+            Ok(IndexHit {
+                item_id: ItemId::new(text(&row.values[0])?).map_err(storage)?,
+                client_item_key: ClientItemKey::new(text(&row.values[1])?).map_err(storage)?,
+                item_version: nonnegative_u64(integer(&row.values[2])?, "item_version")?,
+            })
+        })
+        .collect()
     }
 }
 

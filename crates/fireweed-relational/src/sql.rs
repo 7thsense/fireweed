@@ -111,6 +111,31 @@ pub mod async_projection {
     /// (mirrors `fireweed-sqlite`'s `side_records_by_prefix_sql`).
     pub const SELECT_SIDE_RECORDS_BY_PREFIX: &str = "SELECT key,payload FROM fireweed_side_records \
         WHERE tenant_id=?1 AND queue_id=?2 AND key>=?3 ORDER BY key ASC LIMIT ?4";
+    /// Live (non-superseded) item id for one client_item_key (upsert planning read; mirrors
+    /// `fireweed-sqlite`'s `lookup_active_by_key`).
+    pub const SELECT_ACTIVE_BY_KEY: &str = "SELECT item_id FROM fireweed_items \
+        WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND superseded=0";
+    /// Pre-append `update_fields` guard row (mirrors `fireweed-sqlite`'s
+    /// `update_fields_validate_sql` column order).
+    pub const SELECT_UPDATE_FIELDS_GUARD: &str = "SELECT lifecycle_state,superseded,fenced,item_version \
+        FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
+    /// Retained item-mutation row for request-id replay (fingerprint + response + committed
+    /// positions + retention horizon).
+    pub const SELECT_ITEM_MUTATION_REPLAY: &str = "SELECT request_fingerprint,response_payload,\
+        command_positions,expires_at FROM fireweed_request_idempotency \
+        WHERE tenant_id=?1 AND queue_id=?2 AND operation='item_mutation' AND request_id=?3";
+    /// Remove one retained item-mutation row whose retention has elapsed (guarded like
+    /// `DELETE_EXPIRED_COMMIT_REPLAY`).
+    pub const DELETE_EXPIRED_ITEM_MUTATION_REPLAY: &str = "DELETE FROM fireweed_request_idempotency \
+        WHERE tenant_id=?1 AND queue_id=?2 AND operation='item_mutation' AND request_id=?3 \
+        AND expires_at<=?4";
+    /// ADR-010 §6 typed-index probe (mirrors the postgres relational lookup join). `?5` bounds the
+    /// page: 1 for the unique point read, -1 (no limit) for the multi-hit lookup.
+    pub const SELECT_INDEX_HITS: &str = "SELECT i.item_id,i.client_item_key,i.item_version \
+        FROM fireweed_item_index idx JOIN fireweed_items i \
+        ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id AND i.item_id=idx.item_id \
+        WHERE idx.tenant_id=?1 AND idx.queue_id=?2 AND idx.index_name=?3 AND idx.index_key=?4 \
+        ORDER BY i.item_id LIMIT ?5";
     /// Durable instance/state fence for one key (absent reads as the unset value 0).
     pub const SELECT_INSTANCE_FENCE: &str = "SELECT fence FROM fireweed_instance_fences \
         WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3";
