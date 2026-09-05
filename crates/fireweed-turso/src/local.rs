@@ -629,7 +629,7 @@ impl TursoRelational {
         Self::item_claim_microbatch_on_connection(&mut connection, shard, members, exclude).await
     }
 
-    /// FIFO item-Claim selects on one Deferred snapshot against an already-borrowed driver.
+    /// FIFO item-Claim select and materialize on one Deferred snapshot against an already-borrowed driver.
     pub async fn item_claim_microbatch_on_connection(
         connection: &mut Connection,
         shard: &QueueKey,
@@ -641,23 +641,32 @@ impl TursoRelational {
             .await
             .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
         let result = async {
-            let mut assigned = exclude.to_vec();
+            // Latest `now` is the most inclusive eligibility instant across the generation.
+            let Some(now) = members.iter().map(|member| member.0).max() else {
+                return Ok(Vec::new());
+            };
+            let total_max = members.iter().map(|member| member.1).sum();
+            let (mut ids, mut items) = crate::projection::select_and_materialize_item_claims_on(
+                &snapshot,
+                shard,
+                now,
+                total_max,
+                exclude,
+                &members[0].2,
+                members[0].3,
+            )
+            .await?;
             let mut out = Vec::with_capacity(members.len());
-            for (now, max, token, expires) in members {
-                let ids = crate::projection::select_item_claim_ids_on(
-                    &snapshot, shard, *now, *max, &assigned,
-                )
-                .await?;
-                let items = if ids.is_empty() {
-                    Vec::new()
-                } else {
-                    crate::projection::materialize_grouped_cohort_claimed_on(
-                        &snapshot, shard, &ids, token, *expires,
-                    )
-                    .await?
-                };
-                assigned.extend_from_slice(&ids);
-                out.push((ids, items));
+            for (_, max, token, expires) in members {
+                let take_ids = ids.len().min(*max);
+                let member_ids = ids.drain(..take_ids).collect::<Vec<_>>();
+                let take_items = items.len().min(*max);
+                let mut member_items = items.drain(..take_items).collect::<Vec<_>>();
+                for item in &mut member_items {
+                    item.lease_token = Some(token.clone());
+                    item.lease_expires_at = *expires;
+                }
+                out.push((member_ids, member_items));
             }
             Ok(out)
         }
@@ -1410,6 +1419,91 @@ mod class_s_tests {
             timed.is_ok(),
             "reader waited {waited:?} on a held IMMEDIATE writer; produce will serialize on apply"
         );
+    }
+
+    #[tokio::test]
+    async fn item_claim_microbatch_on_connection_splits_fifo_and_overwrites_tokens() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        store
+            .execute(
+                "INSERT INTO queues(tenant,queue,definition,paused,pause_drain_intake) \
+                 VALUES('t','q','{}',0,0)",
+                vec![],
+            )
+            .await
+            .expect("queue");
+        let ids: Vec<ItemId> = (1..=5).map(|seq| ItemId::mint(1, 0, seq as u32)).collect();
+        for (seq, item_id) in ids.iter().enumerate() {
+            store
+                .execute(
+                    insert_pending(&item_id.to_string(), (seq as i64) + 1),
+                    vec![],
+                )
+                .await
+                .expect("insert");
+        }
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let token_a = LeaseToken::new("token-a").expect("token");
+        let token_b = LeaseToken::new("token-b").expect("token");
+        let token_c = LeaseToken::new("token-c").expect("token");
+        let token_d = LeaseToken::new("token-d").expect("token");
+        let now_early = UtcTimestamp::new(10, 0).unwrap();
+        let now_late = UtcTimestamp::new(20, 0).unwrap();
+        let expires_a = UtcTimestamp::new(100, 0).unwrap();
+        let expires_b = UtcTimestamp::new(200, 0).unwrap();
+        let expires_c = UtcTimestamp::new(300, 0).unwrap();
+        let expires_d = UtcTimestamp::new(400, 0).unwrap();
+        let members = [
+            (now_early, 2, token_a.clone(), expires_a),
+            (now_late, 2, token_b.clone(), expires_b),
+            (now_early, 2, token_c.clone(), expires_c),
+            (now_late, 1, token_d.clone(), expires_d),
+        ];
+        let mut reader = store.reader.lock().await;
+        let empty =
+            TursoRelational::item_claim_microbatch_on_connection(&mut reader, &shard, &[], &[])
+                .await
+                .expect("empty members");
+        assert!(empty.is_empty());
+        let assigned = TursoRelational::item_claim_microbatch_on_connection(
+            &mut reader,
+            &shard,
+            &members,
+            &[],
+        )
+        .await
+        .expect("microbatch");
+        assert_eq!(assigned.len(), 4);
+        assert_eq!(assigned[0].0, ids[..2]);
+        assert_eq!(assigned[1].0, ids[2..4]);
+        assert_eq!(assigned[2].0, ids[4..]);
+        assert!(assigned[3].0.is_empty());
+        assert_eq!(assigned[0].1.len(), 2);
+        assert_eq!(assigned[1].1.len(), 2);
+        assert_eq!(assigned[2].1.len(), 1);
+        assert!(assigned[3].1.is_empty());
+        assert!(assigned[0].1.iter().all(|item| {
+            item.lease_token.as_ref() == Some(&token_a) && item.lease_expires_at == expires_a
+        }));
+        assert!(assigned[1].1.iter().all(|item| {
+            item.lease_token.as_ref() == Some(&token_b) && item.lease_expires_at == expires_b
+        }));
+        assert!(assigned[2].1.iter().all(|item| {
+            item.lease_token.as_ref() == Some(&token_c) && item.lease_expires_at == expires_c
+        }));
+        assert_eq!(assigned[0].1[0].item_id, ids[0]);
+        assert_eq!(assigned[1].1[0].item_id, ids[2]);
+        assert_eq!(assigned[2].1[0].item_id, ids[4]);
+        let excluded = TursoRelational::item_claim_microbatch_on_connection(
+            &mut reader,
+            &shard,
+            &[(now_late, 2, token_a.clone(), expires_a)],
+            &ids[..2],
+        )
+        .await
+        .expect("exclude");
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].0, ids[2..4]);
     }
 }
 

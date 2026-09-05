@@ -22,7 +22,8 @@ use crate::{
     OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
     QueueCommand, QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
     RequestOutcome, TaskOutcomeError, UpdateFieldsBatchCommand, compile_entity_schema,
-    plan_batch_update, validate_claim_compatibility, validate_entity, validate_gate_push,
+    plan_batch_update, plan_batch_update_pipelined, validate_claim_compatibility, validate_entity,
+    validate_gate_push,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,12 +679,29 @@ impl MutationGenerationOverlay {
             }
             return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);
         }
-        let plan = plan_batch_update(
-            &snapshot.definition,
-            true,
-            request.updates.clone(),
-            self.batch_items.clone(),
-        );
+        let plan_by_client_key = request.updates.iter().all(|update| {
+            update.expected_item_version.is_none()
+                && matches!(
+                    update.item_ref,
+                    crate::BatchUpdateItemRef::ClientItemKey(_)
+                        | crate::BatchUpdateItemRef::Both { .. }
+                )
+        });
+        let plan = if plan_by_client_key {
+            plan_batch_update_pipelined(
+                &snapshot.definition,
+                true,
+                request.updates.clone(),
+                Vec::new(),
+            )
+        } else {
+            plan_batch_update(
+                &snapshot.definition,
+                true,
+                request.updates.clone(),
+                self.batch_items.clone(),
+            )
+        };
         let accepted = plan
             .outcomes
             .iter()

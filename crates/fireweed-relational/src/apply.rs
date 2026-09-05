@@ -877,32 +877,27 @@ fn apply_complete_run_sql(
         &q,
         &bearer_ids,
     )?;
-    const COMPLETE_ROW_BINDS: usize = 4;
-    for chunk in rows.chunks(bind_chunk_size(COMPLETE_ROW_BINDS, 2)) {
-        let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
-        let sql = format!(
-            "WITH incoming(item_id, last_command_sequence, terminal_command_epoch, terminal_at) \
-             AS (VALUES {values}) \
-             UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+    let mut by_seq: BTreeMap<(i64, i64, i64), Vec<String>> = BTreeMap::new();
+    for (item_id, seq, epoch, now_n) in rows {
+        by_seq.entry((seq, epoch, now_n)).or_default().push(item_id);
+    }
+    for ((seq, epoch, now_n), ids) in by_seq {
+        exec_items_in(
+            tx,
+            "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
              lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
-             terminal_at=incoming.terminal_at, \
-             terminal_command_epoch=incoming.terminal_command_epoch, \
-             updated_at=incoming.terminal_at, \
-             last_command_sequence=incoming.last_command_sequence \
-             FROM incoming WHERE tenant_id=? AND queue_id=? \
-             AND fireweed_items.item_id=incoming.item_id"
-        );
-        let mut params = Vec::with_capacity(chunk.len() * COMPLETE_ROW_BINDS + 2);
-        for (item_id, seq, epoch, now_n) in chunk {
-            params.extend([
-                RelValue::Text(item_id.clone()),
-                RelValue::Integer(*seq),
-                RelValue::Integer(*epoch),
-                RelValue::Integer(*now_n),
-            ]);
-        }
-        params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
-        crate::rel_exec(tx, &sql, params)?;
+             terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            &[
+                RelValue::Integer(now_n),
+                RelValue::Integer(epoch),
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq),
+            ],
+            &t,
+            &q,
+            &ids,
+        )?;
     }
     Ok(())
 }
@@ -1990,12 +1985,22 @@ fn persist_lease_bearers(
     ids: &[ItemId],
     token: &LeaseToken,
 ) -> EngineResult<()> {
-    if ids.is_empty() {
+    let rows: Vec<(ItemId, LeaseToken)> =
+        ids.iter().copied().map(|id| (id, token.clone())).collect();
+    persist_lease_bearer_pairs(tx, shard, &rows)
+}
+
+fn persist_lease_bearer_pairs(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    rows: &[(ItemId, LeaseToken)],
+) -> EngineResult<()> {
+    if rows.is_empty() {
         return Ok(());
     }
     let (t, q) = parts(shard);
     let chunk_size = bind_chunk_size(4, 0);
-    for chunk in ids.chunks(chunk_size) {
+    for chunk in rows.chunks(chunk_size) {
         let placeholders = vec!["(?,?,?,?)"; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_lease_bearers(tenant_id,queue_id,item_id,lease_token) \
@@ -2003,7 +2008,7 @@ fn persist_lease_bearers(
              ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET lease_token=excluded.lease_token"
         );
         let mut params = Vec::with_capacity(chunk.len() * 4);
-        for id in chunk {
+        for (id, token) in chunk {
             params.extend([
                 RelValue::Text(t.clone()),
                 RelValue::Text(q.clone()),
@@ -2361,6 +2366,24 @@ struct GroupItemRef {
     created_seq: i64,
 }
 
+fn group_item_refs_from_returning(rows: Vec<RelRow>) -> EngineResult<Vec<GroupItemRef>> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(group) = row.get::<Option<String>>(0)? else {
+            continue;
+        };
+        out.push(GroupItemRef {
+            group_key: GroupKey::new(group).map_err(|e| EngineError::Storage(e.to_string()))?,
+            item_id: row.get(1)?,
+            eligible_since: row.get(2)?,
+            priority_sort: row.get(3)?,
+            created_at: row.get(4)?,
+            created_seq: row.get(5)?,
+        });
+    }
+    Ok(out)
+}
+
 struct LoadedSummary {
     oldest: Option<i64>,
     rep_priority_sort: Option<Vec<u8>>,
@@ -2689,31 +2712,37 @@ fn apply_group_summary_remove(
     let removed = items_by_group(removed);
     let mut writes = Vec::new();
     let mut fallback = Vec::new();
+    let mut lost_reps = Vec::new();
     for group in &groups {
         let leaving = removed.get(group).map(Vec::as_slice).unwrap_or(&[]);
         let Some(current) = existing.get(group) else {
             fallback.push(group.clone());
             continue;
         };
-        let leaving_ids: HashSet<&str> = leaving.iter().map(|item| item.item_id.as_str()).collect();
-        if current
-            .rep_item_id
-            .as_deref()
-            .is_some_and(|id| leaving_ids.contains(id))
-        {
-            fallback.push(group.clone());
-            continue;
-        }
-        if current
-            .oldest
-            .is_some_and(|oldest| leaving.iter().any(|item| item.eligible_since == oldest))
-        {
-            fallback.push(group.clone());
-            continue;
-        }
         let count = current.count - leaving.len() as i64;
         if count < 0 {
             fallback.push(group.clone());
+            continue;
+        }
+        let leaving_ids: HashSet<&str> = leaving.iter().map(|item| item.item_id.as_str()).collect();
+        let lost_rep = current
+            .rep_item_id
+            .as_deref()
+            .is_some_and(|id| leaving_ids.contains(id));
+        if count == 0 {
+            writes.push(SummaryWrite {
+                group_key: group.clone(),
+                oldest: None,
+                rep_priority_sort: None,
+                rep_created_at: None,
+                rep_created_seq: None,
+                rep_item_id: None,
+                count: 0,
+            });
+            continue;
+        }
+        if lost_rep {
+            lost_reps.push((group.clone(), count));
             continue;
         }
         writes.push(SummaryWrite {
@@ -2727,7 +2756,75 @@ fn apply_group_summary_remove(
         });
     }
     upsert_group_summaries(tx, shard, &writes, now)?;
+    refresh_lost_group_reps_sql(tx, shard, &lost_reps, now)?;
     relect_group_summaries(tx, shard, &fallback, now)
+}
+
+fn refresh_lost_group_reps_sql(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    lost: &[(GroupKey, i64)],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if lost.is_empty() {
+        return Ok(());
+    }
+    let (tenant, queue) = parts(shard);
+    let now_n = ts_nanos(now);
+    const ROW_BINDS: usize = 2;
+    let extra = 6;
+    for chunk in lost.chunks(bind_chunk_size(ROW_BINDS, extra)) {
+        let values = vec!["(?,?)"; chunk.len()].join(",");
+        let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + extra);
+        for (group, count) in chunk {
+            params.extend([
+                RelValue::Text(group.as_str().to_string()),
+                RelValue::Integer(*count),
+            ]);
+        }
+        params.extend([
+            RelValue::Text(tenant.clone()),
+            RelValue::Text(queue.clone()),
+            RelValue::Integer(now_n),
+            RelValue::Integer(now_n),
+            RelValue::Text(tenant.clone()),
+            RelValue::Text(queue.clone()),
+        ]);
+        crate::rel_exec(
+            tx,
+            &format!(
+                "WITH incoming(group_key,new_count) AS (VALUES {values}), \
+                 head AS ( \
+                   SELECT incoming.group_key AS group_key, i.item_id, i.priority_sort, \
+                          i.created_at, i.created_seq, i.eligible_since \
+                   FROM incoming \
+                   LEFT JOIN fireweed_items i ON i.rowid = ( \
+                     SELECT i2.rowid FROM fireweed_items i2 \
+                     WHERE i2.tenant_id=? AND i2.queue_id=? \
+                       AND i2.group_key=incoming.group_key \
+                       AND i2.lifecycle_state='Pending' AND i2.superseded=0 \
+                       AND (i2.not_before IS NULL OR i2.not_before<=?) \
+                     ORDER BY i2.priority_sort, i2.created_seq, i2.item_id \
+                     LIMIT 1 \
+                   ) \
+                 ) \
+                 UPDATE fireweed_group_summary SET \
+                   eligible_item_count=incoming.new_count, \
+                   oldest_eligible_at=head.eligible_since, \
+                   rep_item_id=head.item_id, \
+                   rep_priority_sort=head.priority_sort, \
+                   rep_created_at=head.created_at, \
+                   rep_created_seq=head.created_seq, \
+                   updated_at=? \
+                 FROM incoming \
+                 LEFT JOIN head ON head.group_key=incoming.group_key \
+                 WHERE fireweed_group_summary.tenant_id=? AND fireweed_group_summary.queue_id=? \
+                   AND fireweed_group_summary.group_key=incoming.group_key"
+            ),
+            params,
+        )?;
+    }
+    Ok(())
 }
 
 /// Priority / schedule change for items that stay eligible. Recompute a group only when its current
@@ -3036,8 +3133,9 @@ fn apply_one_claim_sql(
         }
     } else {
         let worker = worker_id.map_or(RelValue::Null, |worker| RelValue::Text(worker.to_string()));
-        pending_moved +=
+        let (moved, grouped_refs) =
             lease_pending_ids_sql(tx, &t, &q, &ids, &hash, exp, &worker, now_n, seq as i64)?;
+        pending_moved += moved;
         advance_claim_scan_hint_for_ids(
             tx,
             claim_scan_hints,
@@ -3045,6 +3143,22 @@ fn apply_one_claim_sql(
             shard,
             &claim.item_ids,
         )?;
+        if claim.authority_first && pending_moved != claim.item_ids.len() {
+            return Err(authority_first_short_move(
+                pending_moved,
+                claim.item_ids.len(),
+            ));
+        }
+        for id in &claim.item_ids {
+            token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
+        }
+        if pending_moved > 0 {
+            persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
+            if grouped_shards.contains(shard) {
+                apply_group_summary_remove(tx, shard, &grouped_refs, now)?;
+            }
+        }
+        return Ok(());
     }
     if claim.authority_first && pending_moved != claim.item_ids.len() {
         return Err(authority_first_short_move(
@@ -3086,7 +3200,8 @@ fn apply_packed_claims_sql(
         return Ok(());
     }
     let mut all_ids = Vec::new();
-    let mut moved_any = false;
+    let mut grouped_refs = Vec::new();
+    let mut bearer_rows = Vec::new();
     let mut last_now = mutating[0].2;
     for (claim, seq, now) in &mutating {
         last_now = *now;
@@ -3098,7 +3213,7 @@ fn apply_packed_claims_sql(
             .map(|worker| RelValue::Text(worker.as_str().to_string()))
             .unwrap_or(RelValue::Null);
         let ids: Vec<String> = claim.item_ids.iter().map(|id| id.to_string()).collect();
-        let pending_moved = lease_pending_ids_sql(
+        let (pending_moved, moved_refs) = lease_pending_ids_sql(
             tx,
             &t,
             &q,
@@ -3119,11 +3234,18 @@ fn apply_packed_claims_sql(
             token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
         }
         if pending_moved > 0 {
-            moved_any = true;
-            persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
+            bearer_rows.extend(
+                claim
+                    .item_ids
+                    .iter()
+                    .copied()
+                    .map(|id| (id, claim.lease_token.clone())),
+            );
+            grouped_refs.extend(moved_refs);
         }
         all_ids.extend_from_slice(&claim.item_ids);
     }
+    persist_lease_bearer_pairs(tx, shard, &bearer_rows)?;
     advance_claim_scan_hint_for_ids(
         tx,
         claim_scan_hints,
@@ -3131,8 +3253,8 @@ fn apply_packed_claims_sql(
         shard,
         &all_ids,
     )?;
-    if moved_any {
-        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &all_ids, last_now)?;
+    if grouped_shards.contains(shard) && !grouped_refs.is_empty() {
+        apply_group_summary_remove(tx, shard, &grouped_refs, last_now)?;
     }
     Ok(())
 }
@@ -3147,8 +3269,9 @@ fn lease_pending_ids_sql(
     worker: &RelValue,
     now_n: i64,
     seq: i64,
-) -> EngineResult<usize> {
+) -> EngineResult<(usize, Vec<GroupItemRef>)> {
     let mut pending_moved = 0usize;
+    let mut grouped_refs = Vec::new();
     let extra = 7;
     for chunk in ids.chunks(bind_chunk_size(1, extra)) {
         let ph = vec!["?"; chunk.len()].join(",");
@@ -3157,7 +3280,8 @@ fn lease_pending_ids_sql(
              lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
              item_version=item_version+1, updated_at=?, last_command_sequence=? \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph}) \
-             AND lifecycle_state='Pending' AND superseded=0"
+             AND lifecycle_state='Pending' AND superseded=0 \
+             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
         );
         let mut params = Vec::with_capacity(chunk.len() + extra);
         params.extend([
@@ -3170,9 +3294,11 @@ fn lease_pending_ids_sql(
             RelValue::Text(queue.to_string()),
         ]);
         params.extend(chunk.iter().cloned().map(RelValue::Text));
-        pending_moved += crate::rel_exec(tx, &sql, params)?;
+        let rows = crate::rel_query(tx, &sql, params)?;
+        pending_moved += rows.len();
+        grouped_refs.extend(group_item_refs_from_returning(rows)?);
     }
-    Ok(pending_moved)
+    Ok((pending_moved, grouped_refs))
 }
 
 fn apply_claim_run_sql(
@@ -3295,7 +3421,8 @@ pub fn apply_fused_claim_complete_sql(
              terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
              WHERE tenant_id=? AND queue_id=? AND superseded=0 \
                AND {pending_pred} \
-               AND item_id IN ({ph})"
+               AND item_id IN ({ph}) \
+             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
         );
         let mut params = vec![
             RelValue::Integer(now_n),
@@ -3309,7 +3436,9 @@ pub fn apply_fused_claim_complete_sql(
             params.push(RelValue::Blob(hash));
         }
         params.extend(ids.iter().cloned().map(RelValue::Text));
-        pending_moved = crate::rel_exec(tx, &sql, params)?;
+        let returning = crate::rel_query(tx, &sql, params)?;
+        pending_moved = returning.len();
+        let grouped_refs = group_item_refs_from_returning(returning)?;
         advance_claim_scan_hint_for_ids(
             tx,
             claim_scan_hints,
@@ -3317,6 +3446,19 @@ pub fn apply_fused_claim_complete_sql(
             shard,
             &claim.item_ids,
         )?;
+        if claim.authority_first && pending_moved != claim.item_ids.len() {
+            return Err(authority_first_short_move(
+                pending_moved,
+                claim.item_ids.len(),
+            ));
+        }
+        for id in &claim.item_ids {
+            token_ops.push(TokenOp::Clear(shard.clone(), *id));
+        }
+        if pending_moved > 0 && grouped_shards.contains(shard) {
+            apply_group_summary_remove(tx, shard, &grouped_refs, now)?;
+        }
+        return Ok(());
     }
     if claim.authority_first && pending_moved != claim.item_ids.len() {
         return Err(authority_first_short_move(
@@ -3387,35 +3529,38 @@ fn apply_fused_claim_complete_run_sql(
             .map(|(id, _, _, _)| id.clone())
             .collect::<Vec<_>>(),
     )?;
-    const ROW_BINDS: usize = 4;
+    let mut by_seq: BTreeMap<(i64, i64, i64), Vec<String>> = BTreeMap::new();
+    for (item_id, seq, epoch, now_n) in rows {
+        by_seq.entry((seq, epoch, now_n)).or_default().push(item_id);
+    }
+    let extra = 6;
     let mut pending_moved = 0usize;
-    for chunk in rows.chunks(bind_chunk_size(ROW_BINDS, 2)) {
-        let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
-        let sql = format!(
-            "WITH incoming(item_id, last_command_sequence, terminal_command_epoch, terminal_at) \
-             AS (VALUES {values}) \
-             UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
-             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
-             retry_count=retry_count+1, item_version=item_version+2, \
-             terminal_at=incoming.terminal_at, \
-             terminal_command_epoch=incoming.terminal_command_epoch, \
-             updated_at=incoming.terminal_at, \
-             last_command_sequence=incoming.last_command_sequence \
-             FROM incoming WHERE tenant_id=? AND queue_id=? \
-             AND fireweed_items.item_id=incoming.item_id \
-             AND lifecycle_state='Pending' AND superseded=0"
-        );
-        let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + 2);
-        for (item_id, seq, epoch, now_n) in chunk {
-            params.extend([
-                RelValue::Text(item_id.clone()),
-                RelValue::Integer(*seq),
-                RelValue::Integer(*epoch),
-                RelValue::Integer(*now_n),
-            ]);
+    let mut grouped_refs = Vec::new();
+    for ((seq, epoch, now_n), ids) in by_seq {
+        for chunk in ids.chunks(bind_chunk_size(1, extra)) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+                 lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+                 retry_count=retry_count+1, item_version=item_version+2, \
+                 terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+                 WHERE tenant_id=? AND queue_id=? AND superseded=0 \
+                   AND lifecycle_state='Pending' AND item_id IN ({ph}) \
+                 RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
+            );
+            let mut params = vec![
+                RelValue::Integer(now_n),
+                RelValue::Integer(epoch),
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq),
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+            ];
+            params.extend(chunk.iter().cloned().map(RelValue::Text));
+            let returning = crate::rel_query(tx, &sql, params)?;
+            pending_moved += returning.len();
+            grouped_refs.extend(group_item_refs_from_returning(returning)?);
         }
-        params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
-        pending_moved += crate::rel_exec(tx, &sql, params)?;
     }
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
@@ -3427,8 +3572,8 @@ fn apply_fused_claim_complete_run_sql(
         shard,
         &all_ids,
     )?;
-    if pending_moved > 0 {
-        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &all_ids, last_now)?;
+    if pending_moved > 0 && grouped_shards.contains(shard) {
+        apply_group_summary_remove(tx, shard, &grouped_refs, last_now)?;
     }
     Ok(())
 }
@@ -3467,13 +3612,12 @@ fn api001_update_shape(update: &UpdateFieldsCommand) -> Option<Api001UpdateShape
     {
         return None;
     }
-    let address = if update.item_id.as_u64() == 0 {
-        update
-            .client_item_key
-            .as_ref()
-            .map(|_| Api001UpdateAddress::ClientItemKey)?
-    } else {
+    let address = if update.client_item_key.is_some() {
+        Api001UpdateAddress::ClientItemKey
+    } else if update.item_id.as_u64() != 0 {
         Api001UpdateAddress::ItemId
+    } else {
+        return None;
     };
     Some(Api001UpdateShape {
         address,

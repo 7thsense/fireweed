@@ -3,13 +3,14 @@
 //! The serving projection remains on the response path. This coordinator owns only the selected
 //! projection that may lag under `ResponseBarrier::AsyncProjection`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use fireweed_core::ItemId;
 use fireweed_engine::{
     AsyncProjectionSpec, AsyncProjectionStore, CLAIM_GENERATION_MAX_REQUESTS, CommandEnvelope,
     CommandPosition, EngineError, EngineResult, GENERATION_MAX_ITEMS,
@@ -816,7 +817,8 @@ fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration
         return None;
     };
     let mut envelopes = generation_envelope_count(&first);
-    let mut items = represented_item_mutations(&first);
+    let mut seen_items = HashSet::new();
+    insert_batch_item_ids(&mut seen_items, &first);
     let mut debt = first.debt_bytes;
     let mut generation = ApplyGeneration {
         shard: first.shard.clone(),
@@ -854,15 +856,22 @@ fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration
             break;
         }
         let add_envelopes = generation_envelope_count(batch);
-        let add_items = represented_item_mutations(batch);
-        if envelopes.saturating_add(add_envelopes) > CLAIM_GENERATION_MAX_REQUESTS
-            || items.saturating_add(add_items) > GENERATION_MAX_ITEMS
+        let add_unique_items = unique_item_growth(&seen_items, batch);
+        let compose_same_items =
+            batch_has_identities(batch) && add_unique_items == 0 && !seen_items.is_empty();
+        let envelope_cap = if compose_same_items {
+            CLAIM_GENERATION_MAX_REQUESTS.saturating_mul(2)
+        } else {
+            CLAIM_GENERATION_MAX_REQUESTS
+        };
+        if envelopes.saturating_add(add_envelopes) > envelope_cap
+            || seen_items.len().saturating_add(add_unique_items) > GENERATION_MAX_ITEMS
             || debt.saturating_add(batch.debt_bytes) > GENERATION_MAX_RESPONSE_BYTES as u64
         {
             break;
         }
         envelopes = envelopes.saturating_add(add_envelopes);
-        items = items.saturating_add(add_items);
+        insert_batch_item_ids(&mut seen_items, batch);
         debt = debt.saturating_add(batch.debt_bytes);
         generation.entry_ids.push(batch.id);
         generation.positions.extend(batch.positions.iter().cloned());
@@ -882,12 +891,29 @@ fn generation_envelope_count(batch: &ApplyBatch) -> usize {
     }
 }
 
-fn represented_item_mutations(batch: &ApplyBatch) -> usize {
-    batch
-        .commands
-        .iter()
-        .map(|envelope| envelope.item_ids.len())
-        .sum()
+fn batch_item_ids(batch: &ApplyBatch) -> impl Iterator<Item = ItemId> + '_ {
+    batch.commands.iter().flat_map(|envelope| {
+        envelope
+            .item_ids
+            .iter()
+            .copied()
+            .filter(|id| id.as_u64() != 0)
+    })
+}
+
+fn batch_has_identities(batch: &ApplyBatch) -> bool {
+    batch_item_ids(batch).next().is_some()
+}
+
+fn unique_item_growth(seen: &HashSet<ItemId>, batch: &ApplyBatch) -> usize {
+    batch_item_ids(batch)
+        .filter(|id| !seen.contains(id))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn insert_batch_item_ids(seen: &mut HashSet<ItemId>, batch: &ApplyBatch) {
+    seen.extend(batch_item_ids(batch));
 }
 
 fn reserved_between(state: &CoordinatorState, shard: &QueueKey, left: u64, right: u64) -> bool {
@@ -1140,18 +1166,34 @@ mod tests {
     }
 
     fn items_env(id: &str, items: usize) -> CommandEnvelope {
+        items_env_from(id, 0, items)
+    }
+
+    fn items_env_from(id: &str, start: usize, items: usize) -> CommandEnvelope {
         CommandEnvelope {
             command_id: CommandId::new(id),
             request_id: None,
             request_fingerprint: None,
             request_outcome: None,
-            item_ids: (0..items)
+            item_ids: (start..start + items)
                 .map(|index| ItemId::mint(1, 0, u32::try_from(index).expect("item index")))
                 .collect(),
             command: QueueCommand::PauseQueue(Default::default()),
             checksum: CommandChecksum(0),
             created_at: UtcTimestamp::new(1, 0).unwrap(),
         }
+    }
+
+    fn ready_item_range(id: u64, sequence: u64, start: usize, items: usize) -> ApplyEntry {
+        ApplyEntry::Ready(ApplyBatch {
+            id,
+            shard: shard(),
+            positions: vec![pos(sequence)],
+            commands: vec![items_env_from(&id.to_string(), start, items)],
+            command_count: 1,
+            debt_bytes: 0,
+            enqueued_at: Instant::now(),
+        })
     }
 
     fn ready(id: u64, sequence: u64) -> ApplyEntry {
@@ -1314,12 +1356,68 @@ mod tests {
     }
 
     #[test]
+    fn does_not_join_nine_and_seven_empty_envelopes() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready_sized(1, 1, 9, 0, 0));
+        state.entries.push_back(ready_sized(2, 2, 7, 0, 0));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn does_not_join_two_sequencer_generations_of_empty_envelopes() {
+        let mut state = CoordinatorState::default();
+        state.entries.push_back(ready_sized(
+            1,
+            1,
+            CLAIM_GENERATION_MAX_REQUESTS as u64,
+            0,
+            0,
+        ));
+        state.entries.push_back(ready_sized(
+            2,
+            2,
+            CLAIM_GENERATION_MAX_REQUESTS as u64,
+            0,
+            0,
+        ));
+        assert_eq!(generation_ids(&state), vec![1]);
+        state.entries.push_back(ready(3, 3));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
     fn stops_at_eight_hundred_item_bound() {
         let mut state = CoordinatorState::default();
         state
             .entries
             .push_back(ready_sized(1, 1, 1, GENERATION_MAX_ITEMS - 1, 0));
-        state.entries.push_back(ready_sized(2, 2, 1, 2, 0));
+        state
+            .entries
+            .push_back(ready_item_range(2, 2, GENERATION_MAX_ITEMS - 1, 2));
+        assert_eq!(generation_ids(&state), vec![1]);
+    }
+
+    #[test]
+    fn coalesces_underfilled_claim_and_complete_of_the_same_items() {
+        let mut state = CoordinatorState::default();
+        state
+            .entries
+            .push_back(ready_sized(1, 1, 1, GENERATION_MAX_ITEMS, 0));
+        state
+            .entries
+            .push_back(ready_sized(2, 2, 1, GENERATION_MAX_ITEMS, 0));
+        assert_eq!(generation_ids(&state), vec![1, 2]);
+    }
+
+    #[test]
+    fn does_not_coalesce_when_follower_introduces_an_801st_distinct_item() {
+        let mut state = CoordinatorState::default();
+        state
+            .entries
+            .push_back(ready_sized(1, 1, 1, GENERATION_MAX_ITEMS, 0));
+        state
+            .entries
+            .push_back(ready_item_range(2, 2, GENERATION_MAX_ITEMS, 1));
         assert_eq!(generation_ids(&state), vec![1]);
     }
 

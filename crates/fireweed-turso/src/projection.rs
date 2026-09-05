@@ -26,7 +26,7 @@ use fireweed_relational::{
     metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos, ts_nanos_opt,
 };
 use tokio::sync::Mutex;
-use turso::{Connection, Value, transaction::TransactionBehavior};
+use turso::{Connection, Row, Value, transaction::TransactionBehavior};
 
 use crate::{
     COMMITTED_DRIVER_POOL_RESOURCE, COMMITTED_OUTCOME_POOL_RESOURCE, TursoApplyPhaseObservation,
@@ -98,6 +98,70 @@ fn optional_blob(value: &Value) -> EngineResult<Option<Vec<u8>>> {
         Value::Blob(value) => Ok(Some(value.clone())),
         other => Err(storage(format!("expected optional blob, got {other:?}"))),
     }
+}
+
+fn take_text(value: Value) -> EngineResult<String> {
+    match value {
+        Value::Text(value) => Ok(value),
+        other => Err(storage(format!("expected text, got {other:?}"))),
+    }
+}
+
+fn take_integer(value: Value) -> EngineResult<i64> {
+    match value {
+        Value::Integer(value) => Ok(value),
+        other => Err(storage(format!("expected integer, got {other:?}"))),
+    }
+}
+
+fn take_optional_text(value: Value) -> EngineResult<Option<String>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(Some(value)),
+        other => Err(storage(format!("expected optional text, got {other:?}"))),
+    }
+}
+
+fn take_optional_integer(value: Value) -> EngineResult<Option<i64>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Integer(value) => Ok(Some(value)),
+        other => Err(storage(format!("expected optional integer, got {other:?}"))),
+    }
+}
+
+fn take_optional_blob(value: Value) -> EngineResult<Option<Vec<u8>>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Blob(value) => Ok(Some(value)),
+        other => Err(storage(format!("expected optional blob, got {other:?}"))),
+    }
+}
+
+fn class_s_item_from_turso_row(
+    row: &Row,
+    lease_expires_at: i64,
+) -> EngineResult<ClassSClaimedItem> {
+    Ok(ClassSClaimedItem {
+        item_id: take_text(row.get_value(0).map_err(driver_read_error)?)?,
+        client_item_key: take_text(row.get_value(1).map_err(driver_read_error)?)?,
+        payload: take_optional_blob(row.get_value(2).map_err(driver_read_error)?)?,
+        item_version: take_integer(row.get_value(3).map_err(driver_read_error)?)? + 1,
+        retry_count: take_integer(row.get_value(4).map_err(driver_read_error)?)? + 1,
+        lease_expires_at,
+        priority: take_optional_text(row.get_value(5).map_err(driver_read_error)?)?,
+        group_key: take_optional_text(row.get_value(6).map_err(driver_read_error)?)?,
+        not_before: take_optional_integer(row.get_value(7).map_err(driver_read_error)?)?,
+        fields_json: take_optional_text(row.get_value(8).map_err(driver_read_error)?)?
+            .unwrap_or_else(|| "{}".into()),
+        metadata_json: take_optional_text(row.get_value(9).map_err(driver_read_error)?)?
+            .unwrap_or_else(|| "{}".into()),
+        max_attempts: take_optional_integer(row.get_value(10).map_err(driver_read_error)?)?
+            .unwrap_or(0),
+        entity_document: take_optional_text(row.get_value(11).map_err(driver_read_error)?)?,
+        index_fields: take_optional_blob(row.get_value(12).map_err(driver_read_error)?)?,
+        gate_keys: Vec::new(),
+    })
 }
 
 async fn one_row(
@@ -2028,19 +2092,37 @@ pub async fn select_item_claim_ids_on(
     if queue_paused(connection, tenant, queue).await? {
         return Ok(Vec::new());
     }
+    let gated = !query_driver_value_rows(
+        connection,
+        "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+        vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ],
+    )
+    .await?
+    .is_empty();
     let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
     let mut chosen = Vec::with_capacity(max);
     let mut offset: i64 = 0;
-    let query = "SELECT item_id FROM fireweed_items \
+    let query = if gated {
+        "SELECT item_id FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
          AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
          AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
          JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
          AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
          AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
-         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5";
+         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
+    } else {
+        "SELECT item_id FROM fireweed_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+         AND eligible_since IS NOT NULL \
+         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
+    };
     while chosen.len() < max {
-        let skip = exclude_set.len().saturating_sub(offset as usize).min(800);
+        let skip = exclude_set.len().saturating_sub(offset as usize);
         let fetch = max.saturating_sub(chosen.len()).saturating_add(skip).max(1);
         let params = vec![
             Value::Text(tenant.to_string()),
@@ -2068,6 +2150,155 @@ pub async fn select_item_claim_ids_on(
     Ok(chosen)
 }
 
+/// Next due item-Claim rows with bodies, in schedule order, on a borrowed snapshot.
+///
+/// One ordered SELECT (take-next-batch). Overlay ids are skipped in-process. This is the
+/// ordinary item-Claim realize path; grouped/cohort still materializes by id after exclusive
+/// selection.
+pub async fn select_and_materialize_item_claims_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max: usize,
+    exclude: &[ItemId],
+    lease_token: &LeaseToken,
+    lease_expires_at: UtcTimestamp,
+) -> EngineResult<(Vec<ItemId>, Vec<ClaimedItem>)> {
+    if max == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let tenant = shard.tenant_id.as_str();
+    let queue = shard.queue_id.as_str();
+    if queue_paused(connection, tenant, queue).await? {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let gated = !query_driver_value_rows(
+        connection,
+        "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+        vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ],
+    )
+    .await?
+    .is_empty();
+    let has_item_gates = !query_driver_value_rows(
+        connection,
+        "SELECT 1 FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+        vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ],
+    )
+    .await?
+    .is_empty();
+    let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
+    let expires = ts_nanos(lease_expires_at);
+    let query = if gated {
+        "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
+         not_before,fields,metadata,max_attempts,entity_document,index_fields \
+         FROM fireweed_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+         AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+         JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
+         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
+         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
+    } else {
+        "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
+         not_before,fields,metadata,max_attempts,entity_document,index_fields \
+         FROM fireweed_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+         AND eligible_since IS NOT NULL \
+         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
+    };
+    let mut ids = Vec::with_capacity(max);
+    let mut carriers = Vec::with_capacity(max);
+    let mut offset: i64 = 0;
+    let mut first_page = true;
+    let started = Instant::now();
+    while ids.len() < max {
+        let extra = if first_page {
+            exclude_set.len()
+        } else {
+            0
+        };
+        first_page = false;
+        let fetch = max
+            .saturating_sub(ids.len())
+            .saturating_add(extra)
+            .max(1);
+        let params = vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+            Value::Integer(ts_nanos(now)),
+            Value::Integer(i64::try_from(fetch).map_err(storage)?),
+            Value::Integer(offset),
+        ];
+        let mut rows = connection
+            .query(query, params)
+            .await
+            .map_err(driver_read_error)?;
+        let mut page = 0usize;
+        while let Some(row) = rows.next().await.map_err(driver_read_error)? {
+            page += 1;
+            let item = class_s_item_from_turso_row(&row, expires)?;
+            let id = ItemId::new(&item.item_id).map_err(storage)?;
+            if exclude_set.contains(&id) {
+                continue;
+            }
+            ids.push(id);
+            carriers.push(item);
+            if ids.len() == max {
+                break;
+            }
+        }
+        if page == 0 {
+            break;
+        }
+        offset = offset.saturating_add(i64::try_from(page).map_err(storage)?);
+    }
+    if has_item_gates && !ids.is_empty() {
+        let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
+        for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(2).max(1)) {
+            let placeholders = (0..chunk.len())
+                .map(|index| format!("?{}", index + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut params = vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+            ];
+            params.extend(chunk.iter().map(|id| id.to_string().into()));
+            let gate_sql = format!(
+                "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
+                 AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+            );
+            for values in query_driver_value_rows(connection, gate_sql, params).await? {
+                let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+                gate_keys.entry(id).or_default().push(text(&values[1])?);
+            }
+        }
+        for (id, item) in ids.iter().zip(carriers.iter_mut()) {
+            if let Some(keys) = gate_keys.remove(id) {
+                item.gate_keys = keys;
+            }
+        }
+    }
+    if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
+        eprintln!(
+            "claim_realize n={} exclude={} us={}",
+            ids.len(),
+            exclude.len(),
+            started.elapsed().as_micros()
+        );
+    }
+    let items = render_class_s_claimed_items(lease_token, carriers)?;
+    Ok((ids, items))
+}
+
 /// Full-row grouped/cohort Claim materialization over a borrowed driver snapshot.
 ///
 /// Items may still be Pending. Lease token/expiry come from the request. S5 item/group/cohort
@@ -2085,7 +2316,17 @@ pub async fn materialize_grouped_cohort_claimed_on(
     let expires = ts_nanos(lease_expires_at);
     let mut item_rows = HashMap::<ItemId, ClassSClaimedItem>::with_capacity(ids.len());
     let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
-    for chunk in ids.chunks(500) {
+    let gated = !query_driver_value_rows(
+        connection,
+        "SELECT 1 FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ],
+    )
+    .await?
+    .is_empty();
+    for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(2).max(1)) {
         let placeholders = (0..chunk.len())
             .map(|index| format!("?{}", index + 3))
             .collect::<Vec<_>>()
@@ -2105,6 +2346,9 @@ pub async fn materialize_grouped_cohort_claimed_on(
             let item = class_s_item_from_driver_row(&values, expires)?;
             let id = ItemId::new(&item.item_id).map_err(storage)?;
             item_rows.insert(id, item);
+        }
+        if !gated {
+            continue;
         }
         let gate_sql = format!(
             "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \

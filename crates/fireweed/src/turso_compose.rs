@@ -9,7 +9,7 @@
 
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2571,13 +2571,25 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                 Some(coordinator) => Some(coordinator.reserve(shard.clone(), &commands).await?),
                 None => None,
             };
+            let force_seal = commands.len() >= CLAIM_GENERATION_MAX_REQUESTS
+                || commands
+                    .iter()
+                    .map(|envelope| {
+                        envelope
+                            .item_ids
+                            .iter()
+                            .filter(|id| id.as_u64() != 0)
+                            .count()
+                    })
+                    .sum::<usize>()
+                    >= GENERATION_MAX_ITEMS;
             let outcome = match log
                 .packed_append_owned(
                     shard.clone(),
                     commands.clone(),
                     expected_epoch,
                     reservation.as_ref().map(|reserved| reserved.id()),
-                    false,
+                    force_seal,
                 )
                 .await
             {
@@ -3765,9 +3777,18 @@ impl DerivedObjectLogTursoBackend {
             .iter()
             .map(|work| work.as_ref().clone())
             .collect();
-        let wait_push_apply = works
+        let wait_push_apply = if works
             .iter()
-            .any(|work| matches!(work, MutationGenerationWork::Claim { .. }));
+            .any(|work| matches!(work, MutationGenerationWork::Claim { .. }))
+        {
+            self.unpublished_mutations
+                .lock()
+                .await
+                .get(&queue)
+                .is_some_and(|unpublished| !unpublished.client_keys.is_empty())
+        } else {
+            false
+        };
         self.wait_selected_frontiers(&queue, false, wait_push_apply)
             .await?;
         let _slot = self.shared_slots.acquire().await.map_err(map_coord)?;
@@ -3825,16 +3846,55 @@ impl DerivedObjectLogTursoBackend {
                 .map(|envelope| envelope.created_at)
                 .unwrap_or_else(|| UtcTimestamp::new(1, 0).expect("epoch")),
         };
-        let mut snapshot = self
-            .projection
-            .mutation_driver_snapshot_on_serving_reader(
-                &queue,
-                definition.clone(),
-                &keys,
-                &batch_keys,
-                now,
+        let snapshot_batch_keys = if works.iter().any(|work| match work {
+            MutationGenerationWork::BatchUpdate { request, .. } => {
+                request.updates.iter().any(|update| {
+                    update.expected_item_version.is_some()
+                        || !matches!(
+                            update.item_ref,
+                            fireweed_engine::BatchUpdateItemRef::ClientItemKey(_)
+                                | fireweed_engine::BatchUpdateItemRef::Both { .. }
+                        )
+                })
+            }
+            _ => false,
+        }) {
+            batch_keys
+        } else {
+            Vec::new()
+        };
+        let needs_identity_snapshot = works.iter().any(|work| {
+            matches!(
+                work,
+                MutationGenerationWork::Push { .. } | MutationGenerationWork::BatchUpdate { .. }
             )
-            .await?;
+        });
+        let mut snapshot = if needs_identity_snapshot {
+            self.projection
+                .mutation_driver_snapshot_on_serving_reader(
+                    &queue,
+                    definition.clone(),
+                    &keys,
+                    &snapshot_batch_keys,
+                    now,
+                )
+                .await?
+        } else {
+            // Claim/Complete overlay is process-local. Opening a Deferred reader
+            // snapshot here waits behind the Turso IMMEDIATE apply of the previous
+            // packed Update and serializes ack of the next generation.
+            MutationDriverSnapshot {
+                definition: definition.clone(),
+                paused_drain_intake: false,
+                client_keys: HashSet::new(),
+                request_fingerprints: HashMap::new(),
+                unique_index_values: HashSet::new(),
+                group_counts: HashMap::new(),
+                batch_items: Vec::new(),
+                leased_ids: HashSet::new(),
+                terminal_ids: HashSet::new(),
+            }
+        };
         if let Some(unpublished) = self.unpublished_mutations.lock().await.get(&queue) {
             merge_unpublished_into_snapshot(&mut snapshot, unpublished);
         }
@@ -3999,7 +4059,6 @@ impl DerivedObjectLogTursoBackend {
             let MutationGenerationWork::Claim { id, request } = &works[index] else {
                 continue;
             };
-            folded.leased_ids.extend(ids.iter().copied());
             if ids.is_empty() {
                 members[index].outcome = MutationGenerationMemberOutcome::Claim {
                     id: *id,
@@ -4010,14 +4069,17 @@ impl DerivedObjectLogTursoBackend {
             }
             let claimed =
                 PreparedClaimedResult::from_rendered(request, &ids, items, None)?.into_claimed();
+            folded
+                .leased_ids
+                .extend(claimed.items.iter().map(|item| item.item_id));
             let envelope = CommandEnvelope {
                 command_id: self.ids.next_command_id(),
                 request_id: None,
                 request_fingerprint: None,
                 request_outcome: None,
-                item_ids: ids.clone(),
+                item_ids: claimed.items.iter().map(|item| item.item_id).collect(),
                 command: QueueCommand::Claim(ClaimCommand {
-                    item_ids: ids,
+                    item_ids: claimed.items.iter().map(|item| item.item_id).collect(),
                     lease_token: request.lease_token.clone(),
                     lease_expires_at: request.lease_expires_at,
                     worker_id: Some(request.worker_id.clone()),
