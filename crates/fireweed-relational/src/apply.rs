@@ -1124,6 +1124,56 @@ pub fn fifo_rowid_range_for_id_strings(
     }
 }
 
+/// Packed insert/claim waves occupy consecutive rowids. A BETWEEN update walks
+/// that slice instead of scanning every remaining Pending row for an IN-list.
+fn contiguous_rowid_range(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[ItemId],
+) -> EngineResult<Option<(i64, i64)>> {
+    let n = ids.len() as u64;
+    if n == 0 {
+        return Ok(None);
+    }
+    let min_id = ids.iter().copied().min().expect("nonempty");
+    let max_id = ids.iter().copied().max().expect("nonempty");
+    if max_id.as_u64().saturating_sub(min_id.as_u64()).saturating_add(1) != n {
+        return Ok(None);
+    }
+    let (t, q) = parts(shard);
+    let rows = crate::rel_query(
+        tx,
+        "SELECT item_id, rowid FROM fireweed_items \
+         WHERE tenant_id=? AND queue_id=? AND item_id IN (?,?)",
+        [
+            RelValue::Text(t.to_string()),
+            RelValue::Text(q.to_string()),
+            RelValue::Text(min_id.to_string()),
+            RelValue::Text(max_id.to_string()),
+        ],
+    )?;
+    let mut min_rowid: Option<i64> = None;
+    let mut max_rowid: Option<i64> = None;
+    for row in rows {
+        let id = ItemId::new(row.get::<String>(0)?).map_err(|e| EngineError::Storage(e.to_string()))?;
+        let rowid: i64 = row.get(1)?;
+        if id == min_id {
+            min_rowid = Some(rowid);
+        }
+        if id == max_id {
+            max_rowid = Some(rowid);
+        }
+    }
+    let (Some(min_rowid), Some(max_rowid)) = (min_rowid, max_rowid) else {
+        return Ok(None);
+    };
+    if max_rowid.saturating_sub(min_rowid).saturating_add(1) == n as i64 {
+        Ok(Some((min_rowid, max_rowid)))
+    } else {
+        Ok(None)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ADR-011 typed secondary index helpers
 // ---------------------------------------------------------------------------
@@ -3658,32 +3708,57 @@ fn apply_fused_claim_complete_run_sql(
     let seq = last_position.sequence as i64;
     let epoch = last_position.backend_epoch as i64;
     let now_n = ts_nanos(last_now);
-    let extra = 6;
     let mut pending_moved = 0usize;
     let mut grouped_refs = Vec::new();
-    for chunk in ids.chunks(bind_chunk_size(1, extra)) {
-        let ph = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
+    if let Some((min_rowid, max_rowid)) = contiguous_rowid_range(tx, shard, &all_ids)? {
+        let returning = crate::rel_query(
+            tx,
             "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
              lease_expires_at=NULL, worker_id=NULL, fenced=0, \
              retry_count=retry_count+1, item_version=item_version+2, \
              terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
              WHERE tenant_id=? AND queue_id=? AND superseded=0 \
-               AND lifecycle_state='Pending' AND item_id IN ({ph}) \
-             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
-        );
-        let mut params = vec![
-            RelValue::Integer(now_n),
-            RelValue::Integer(epoch),
-            RelValue::Integer(now_n),
-            RelValue::Integer(seq),
-            RelValue::Text(t.to_string()),
-            RelValue::Text(q.to_string()),
-        ];
-        params.extend(chunk.iter().cloned().map(RelValue::Text));
-        let returning = crate::rel_query(tx, &sql, params)?;
-        pending_moved += returning.len();
-        grouped_refs.extend(group_item_refs_from_returning(returning)?);
+               AND lifecycle_state='Pending' AND rowid BETWEEN ? AND ? \
+             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq",
+            [
+                RelValue::Integer(now_n),
+                RelValue::Integer(epoch),
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq),
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+                RelValue::Integer(min_rowid),
+                RelValue::Integer(max_rowid),
+            ],
+        )?;
+        pending_moved = returning.len();
+        grouped_refs = group_item_refs_from_returning(returning)?;
+    } else {
+        let extra = 6;
+        for chunk in ids.chunks(bind_chunk_size(1, extra)) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+                 lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+                 retry_count=retry_count+1, item_version=item_version+2, \
+                 terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+                 WHERE tenant_id=? AND queue_id=? AND superseded=0 \
+                   AND lifecycle_state='Pending' AND item_id IN ({ph}) \
+                 RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
+            );
+            let mut params = vec![
+                RelValue::Integer(now_n),
+                RelValue::Integer(epoch),
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq),
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+            ];
+            params.extend(chunk.iter().cloned().map(RelValue::Text));
+            let returning = crate::rel_query(tx, &sql, params)?;
+            pending_moved += returning.len();
+            grouped_refs.extend(group_item_refs_from_returning(returning)?);
+        }
     }
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
