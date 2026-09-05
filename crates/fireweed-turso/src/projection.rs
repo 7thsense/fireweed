@@ -3029,6 +3029,101 @@ impl AsyncProjectionStore for TursoRelational {
         }
     }
 
+    fn read_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<
+        Output = EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>>,
+    > + Send {
+        async move {
+            let rows = self
+                .query(
+                    sql::SELECT_COMMIT_RECOVERY,
+                    vec![
+                        shard.tenant_id.as_str().to_string().into(),
+                        shard.queue_id.as_str().to_string().into(),
+                        request_id.as_str().to_string().into(),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+            rows.first()
+                .map(|row| serde_json::from_str(&text(&row.values[0])?).map_err(storage))
+                .transpose()
+        }
+    }
+
+    fn side_record(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        async move {
+            let rows = self
+                .query(
+                    sql::SELECT_SIDE_RECORD,
+                    vec![
+                        shard.tenant_id.as_str().to_string().into(),
+                        shard.queue_id.as_str().to_string().into(),
+                        Value::Blob(key),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+            rows.first()
+                .map(|row| blob(&row.values[0]).map(Bytes::from))
+                .transpose()
+        }
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: QueueKey,
+        prefix: Vec<u8>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        async move {
+            // Server-side page bound, mirroring `fireweed-sqlite`'s `SIDE_RECORD_MAX_PAGE_SIZE`.
+            const SIDE_RECORD_MAX_PAGE_SIZE: usize = 1_000;
+            let page_size = page_size.min(SIDE_RECORD_MAX_PAGE_SIZE);
+            let start = cursor.unwrap_or_else(|| prefix.clone());
+            let limit = (page_size as i64).saturating_add(1);
+            let rows = self
+                .query(
+                    sql::SELECT_SIDE_RECORDS_BY_PREFIX,
+                    vec![
+                        shard.tenant_id.as_str().to_string().into(),
+                        shard.queue_id.as_str().to_string().into(),
+                        Value::Blob(start),
+                        limit.into(),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+            let mut entries = Vec::new();
+            let mut next_cursor = None;
+            for row in rows {
+                let key = blob(&row.values[0])?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if entries.len() == page_size {
+                    next_cursor = Some(key);
+                    break;
+                }
+                let payload = blob(&row.values[1])?;
+                entries.push((key, Bytes::from(payload)));
+            }
+            Ok(fireweed_engine::SideRecordPage {
+                entries,
+                next_cursor,
+            })
+        }
+    }
+
     fn recover_definitions(
         &self,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {

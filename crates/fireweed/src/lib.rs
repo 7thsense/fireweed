@@ -161,6 +161,9 @@ mod test_schema_validation;
 #[path = "../tests/whitebox/secondary_indexes.rs"]
 mod test_secondary_indexes;
 #[cfg(test)]
+#[path = "../tests/whitebox/turso_composition.rs"]
+mod test_turso_composition;
+#[cfg(test)]
 #[path = "../tests/whitebox/vectorized_commit.rs"]
 mod test_vectorized_commit;
 

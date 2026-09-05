@@ -129,9 +129,11 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
         vec![definition]
     );
 
-    // Durable-commit replay/read and side-record/fence seams stay Unavailable on pure projection
+    // Durable-commit replay and the instance-fence seam stay Unavailable on pure projection
     // adapters (no unified relational authority). Qualification requires the exact typed decline
-    // instead of a silent default/no-op.
+    // instead of a silent default/no-op. The retained-commit and side-record READS may instead be
+    // implemented by relational authorities (Turso, bead fireweed-82211ac4), where an unwritten
+    // key/request-id reads as `Ok(None)` — both outcomes are accepted below.
     let request_id = RequestId::new("async-projection-conformance-request").unwrap();
     assert_eq!(
         AsyncProjectionStore::replay_durable_commit(
@@ -144,17 +146,20 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
         .await,
         Err(EngineError::Unavailable)
     );
-    assert_eq!(
-        AsyncProjectionStore::read_durable_commit(store, shard.clone(), request_id).await,
-        Err(EngineError::Unavailable)
+    let durable_commit =
+        AsyncProjectionStore::read_durable_commit(store, shard.clone(), request_id).await;
+    assert!(
+        matches!(durable_commit, Ok(None) | Err(EngineError::Unavailable)),
+        "read_durable_commit of an unknown request id: expected Ok(None) or Unavailable, got {durable_commit:?}"
     );
     assert_eq!(
         AsyncProjectionStore::instance_fence(store, shard.clone(), b"fence".to_vec()).await,
         Err(EngineError::Unavailable)
     );
-    assert_eq!(
-        AsyncProjectionStore::side_record(store, shard, b"side".to_vec()).await,
-        Err(EngineError::Unavailable)
+    let side_record = AsyncProjectionStore::side_record(store, shard, b"side".to_vec()).await;
+    assert!(
+        matches!(side_record, Ok(None) | Err(EngineError::Unavailable)),
+        "side_record of an unwritten key: expected Ok(None) or Unavailable, got {side_record:?}"
     );
     // index_validate_push / commit_validate may be Unavailable (async SQLite reference) or
     // implemented with a vacuous Ok(()) on empty batches (Turso / relational projections).

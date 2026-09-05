@@ -951,7 +951,74 @@ macro_rules! impl_turso_product_ports {
                 }
             }
         }
-        impl fireweed_engine::RecoveryReadPort for $ty {}
+        impl fireweed_engine::RecoveryReadPort for $ty {
+            /// Reconstruct the committed transition addressed by `request_id` from the retained
+            /// `fireweed_request_idempotency` row the Turso apply arm persists. The derived
+            /// object-log composition applies asynchronously (`DurabilityClass::EventualApply`),
+            /// so the projection is caught up to the log high-water first; the atomic
+            /// compositions' `catch_up_projection` is a no-op.
+            fn explain_commit(
+                &self,
+                shard: &QueueKey,
+                request_id: RequestId,
+            ) -> impl std::future::Future<
+                Output = EngineResult<Option<fireweed_engine::CommitRecovery>>,
+            > + Send {
+                let shard = shard.clone();
+                async move {
+                    self.catch_up_projection(&shard).await?;
+                    let durable = AsyncProjectionStore::read_durable_commit(
+                        self.projection.as_ref(),
+                        shard,
+                        request_id.clone(),
+                    )
+                    .await?;
+                    Ok(durable.map(|entries| fireweed_engine::CommitRecovery {
+                        request_id,
+                        entries: entries
+                            .into_iter()
+                            .map(fireweed_engine::recovery_from_outcome_entry)
+                            .collect(),
+                    }))
+                }
+            }
+
+            fn side_record(
+                &self,
+                shard: &QueueKey,
+                key: &[u8],
+            ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+                let shard = shard.clone();
+                let key = key.to_vec();
+                async move {
+                    self.catch_up_projection(&shard).await?;
+                    AsyncProjectionStore::side_record(self.projection.as_ref(), shard, key).await
+                }
+            }
+
+            fn side_records_by_prefix(
+                &self,
+                shard: &QueueKey,
+                prefix: &[u8],
+                page_size: usize,
+                cursor: Option<Vec<u8>>,
+            ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+            {
+                let shard = shard.clone();
+                let prefix = prefix.to_vec();
+                async move {
+                    self.catch_up_projection(&shard).await?;
+                    AsyncProjectionStore::side_records_by_prefix(
+                        self.projection.as_ref(),
+                        shard,
+                        prefix,
+                        page_size,
+                        cursor,
+                    )
+                    .await
+                }
+            }
+        }
         impl BatchUpdatePort for $ty {
             fn batch_update(
                 &self,

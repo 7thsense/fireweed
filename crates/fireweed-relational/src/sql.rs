@@ -103,6 +103,20 @@ pub mod async_projection {
     pub const SELECT_ITEM_GATES: &str = "SELECT gate_key FROM fireweed_item_gates \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 ORDER BY gate_key";
     pub const SELECT_DEFINITIONS: &str = "SELECT definition FROM queues ORDER BY tenant,queue";
+    /// Point-get one opaque non-work side record by key (recovery/audit read, bead fireweed-82211ac4).
+    pub const SELECT_SIDE_RECORD: &str = "SELECT payload FROM fireweed_side_records \
+        WHERE tenant_id=?1 AND queue_id=?2 AND key=?3";
+    /// Key-ascending prefix seek over side records: `?3` is the start key (a resume cursor or the
+    /// prefix itself) and `?4` is `page_size + 1`, so the overflow row becomes the next cursor
+    /// (mirrors `fireweed-sqlite`'s `side_records_by_prefix_sql`).
+    pub const SELECT_SIDE_RECORDS_BY_PREFIX: &str = "SELECT key,payload FROM fireweed_side_records \
+        WHERE tenant_id=?1 AND queue_id=?2 AND key>=?3 ORDER BY key ASC LIMIT ?4";
+    /// Retained whole-body commit outcome for one `request_id` (recovery/explain read). Ignores the
+    /// body fingerprint — the reader has only the id — mirroring `fireweed-sqlite`'s
+    /// `read_commit_recovery`.
+    pub const SELECT_COMMIT_RECOVERY: &str = "SELECT response_payload \
+        FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+        AND operation='commit' AND request_id=?3";
     pub const SELECT_CLAIM_BY_QUERY_REPLAYS: &str = "SELECT request_id,response_payload \
         FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
         AND operation='claim_by_query'";
