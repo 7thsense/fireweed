@@ -781,7 +781,7 @@ mod peek_page_tests {
 /// `fireweed_items` source with the claim eligibility predicate (pending, not superseded, due at `now`, and
 /// not blocked by a current gate). This makes a time-only `not_before` crossing visible without a write and
 /// represents all ungrouped items as one `group_key=None` scope. The partial
-/// `fireweed_items_active_scope_idx` bounds the source scan to one queue's pending, non-superseded rows;
+/// `fireweed_items_pending_order_idx` bounds the source scan to one queue's pending, non-superseded rows;
 /// gate anti-joins use the membership/state primary keys. The cost is O(live pending rows in the addressed
 /// queue), rather than the old O(stored keyed summaries), in exchange for exact read-time eligibility.
 ///

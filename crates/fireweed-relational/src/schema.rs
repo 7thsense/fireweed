@@ -54,16 +54,10 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
     ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
-CREATE INDEX IF NOT EXISTS fireweed_items_group_due_idx
-    ON fireweed_items (tenant_id, queue_id, lifecycle_state, group_key, not_before, priority_sort, created_seq)
-    WHERE group_key IS NOT NULL AND superseded = 0;
--- B-011 exact read-only active-scope discovery. Unlike the group-summary indexes, this deliberately
--- includes NULL group keys and covers the live eligibility-age aggregate without a resident-table scan.
-CREATE INDEX IF NOT EXISTS fireweed_items_active_scope_idx
-    ON fireweed_items (tenant_id, queue_id, group_key, eligible_since, not_before, item_id)
-    WHERE lifecycle_state = 'Pending' AND superseded = 0;
--- Pending recovery/peek readers keyset-page in this exact strict order. Keeping the filter in the
--- partial-index predicate lets SQLite both seek to the queue/cursor and satisfy ORDER BY in index order.
+-- One pending FIFO index for Claim and peek. group_due and active_scope
+-- duplicated that order and made every Complete rewrite three Pending B-trees.
+DROP INDEX IF EXISTS fireweed_items_group_due_idx;
+DROP INDEX IF EXISTS fireweed_items_active_scope_idx;
 CREATE INDEX IF NOT EXISTS fireweed_items_pending_order_idx
     ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq, item_id)
     WHERE lifecycle_state = 'Pending' AND superseded = 0;
