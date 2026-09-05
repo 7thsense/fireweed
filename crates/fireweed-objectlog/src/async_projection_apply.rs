@@ -679,7 +679,7 @@ where
             let state = inner.state.lock().await;
             next_coalesced_generation(&state)
         };
-        let Some(generation) = next else {
+        let Some(mut generation) = next else {
             inner.worker_running.store(false, Ordering::Release);
             let has_work = {
                 let state = inner.state.lock().await;
@@ -696,6 +696,33 @@ where
             }
             return;
         };
+
+        if generation_is_claim_without_complete(&generation) {
+            let deadline = Instant::now() + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
+            while generation_is_claim_without_complete(&generation) {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::select! {
+                    _ = inner.changed.notified() => {}
+                    _ = tokio::time::sleep(remaining) => {}
+                }
+                let state = inner.state.lock().await;
+                let Some(again) = next_coalesced_generation(&state) else {
+                    continue;
+                };
+                if again
+                    .entry_ids
+                    .iter()
+                    .any(|id| generation.entry_ids.contains(id))
+                {
+                    generation = again;
+                }
+            }
+        }
 
         #[cfg(test)]
         {
@@ -809,6 +836,30 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
                 | QueueCommand::UpdateFieldsBatch(_)
         )
     })
+}
+
+/// Wait for Complete envelopes of the same ids before applying a Claim-only
+/// generation. Completes are packed after Claim responses return (~30ms);
+/// applying Claim first writes Leased rows that Complete immediately discards.
+const CLAIM_COMPLETE_JOIN_MS: u64 = 80;
+
+fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
+    let mut claim = false;
+    let mut complete = false;
+    for envelope in &generation.commands {
+        match &envelope.command {
+            QueueCommand::Claim(_) => claim = true,
+            QueueCommand::Finalize(finalize)
+                if finalize.outcomes.iter().all(|outcome| {
+                    matches!(outcome.kind, fireweed_engine::FinalizeKind::Complete)
+                }) =>
+            {
+                complete = true;
+            }
+            _ => {}
+        }
+    }
+    claim && !complete
 }
 
 fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration> {
