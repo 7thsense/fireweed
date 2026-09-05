@@ -1569,3 +1569,109 @@ async fn derived_turso_async_barrier_snorri_shaped_request_id_push_is_claimable(
     drop(fw);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Two workers racing `claim_by_query` on the ASYNC-barrier derived cell must never lease the
+/// same item twice: the permit-held selection has to observe every prior committed claim, even
+/// though the derived family applies asynchronously (worker-pool probe, bead fireweed-82211ac4).
+#[cfg(feature = "objectlog")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn derived_turso_async_barrier_concurrent_query_claims_are_disjoint() {
+    use fireweed_core::TypedValue;
+    let root = unique_root("async-claim-race");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let projection_path = root.join("projection.turso");
+    let def = snorri_like_definition("claim-race");
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+
+    let mut cfg = facade_config(
+        LogConfig::Filesystem {
+            root: root.join("fs-log"),
+        },
+        projection_path,
+    );
+    cfg.response_barrier = ResponseBarrier::AsyncProjection;
+    cfg.async_projection = Some(fireweed_engine::AsyncProjectionSpec {
+        apply_lag_max_commands: 500,
+        apply_debt_max_bytes: 8 * 1024 * 1024,
+        apply_queue_depth_max: 64,
+        oldest_unapplied_max_ms: 5_000,
+        apply_poison_retry_threshold: 5,
+        apply_start_delay_ms: 0,
+    });
+    let fw = std::sync::Arc::new(
+        open(cfg, Arc::new(SystemClock) as _).expect("open async-barrier turso composition"),
+    );
+    fw.create_queue(def).await.unwrap();
+    let lifecycle_like = |key: &str| {
+        let mut index_fields = std::collections::BTreeMap::new();
+        index_fields.insert(
+            "record_kind".to_string(),
+            TypedValue::String("transition".to_string()),
+        );
+        index_fields.insert(
+            "idempotency_key".to_string(),
+            TypedValue::String(key.to_string()),
+        );
+        NewItem {
+            client_item_key: Some(fireweed_core::ClientItemKey::new(key).unwrap()),
+            priority: Some(PriorityValue::Timestamp(
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+            )),
+            index_fields,
+            entity: Some(serde_json::json!({
+                "record_kind": "transition",
+                "idempotency_key": key,
+            })),
+            ..NewItem::default()
+        }
+    };
+    for key in ["race-a", "race-b"] {
+        fw.push(&q, lifecycle_like(key)).await.unwrap();
+    }
+    let query = |rid: &str| fireweed_core::ClaimByQueryRequest {
+        index: Some("by_record_kind_key".to_string()),
+        filters: vec![fireweed_core::QueryFilter {
+            field: "record_kind".to_string(),
+            op: fireweed_core::FilterOp::Eq,
+            value: fireweed_core::TypedValue::String("transition".to_string()),
+        }],
+        order_by: fireweed_core::OrderField {
+            field: "idempotency_key".to_string(),
+            direction: fireweed_core::SortDirection::Ascending,
+        },
+        max_items: 1,
+        lease_duration_ms: 60_000,
+        worker_id: fireweed_core::WorkerId::new("race-worker").unwrap(),
+        request_id: Some(RequestId::new(rid).unwrap()),
+    };
+    let a = {
+        let fw = Arc::clone(&fw);
+        let q = q.clone();
+        let request = query("race-claim-a");
+        tokio::spawn(async move { fw.claim_by_query(&q, request).await.unwrap() })
+    };
+    let b = {
+        let fw = Arc::clone(&fw);
+        let q = q.clone();
+        let request = query("race-claim-b");
+        tokio::spawn(async move { fw.claim_by_query(&q, request).await.unwrap() })
+    };
+    let (a, b) = (a.await.unwrap(), b.await.unwrap());
+    let follow_up = fw
+        .claim_by_query(&q, query("race-claim-followup"))
+        .await
+        .unwrap();
+    assert!(
+        follow_up.items.is_empty(),
+        "both items are leased; a third query claim finds nothing"
+    );
+    assert_eq!(a.items.len(), 1, "worker A claims one item");
+    assert_eq!(b.items.len(), 1, "worker B claims one item");
+    assert_ne!(
+        a.items[0].item_id, b.items[0].item_id,
+        "concurrent query claims must lease DISJOINT items"
+    );
+    drop(fw);
+    let _ = std::fs::remove_dir_all(&root);
+}

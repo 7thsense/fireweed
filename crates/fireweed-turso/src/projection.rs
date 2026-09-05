@@ -3529,7 +3529,8 @@ impl TursoRelational {
                 "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,\
                  group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
                  item_version,lease_expires_at,worker_id,fenced,superseded,max_attempts,\
-                 created_seq,last_command_sequence,terminal_at,terminal_command_epoch \
+                 created_seq,last_command_sequence,terminal_at,terminal_command_epoch,\
+                 index_fields \
                  FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                  ORDER BY created_seq,item_id",
                 vec![tenant.clone(), queue.clone()],
@@ -3559,7 +3560,12 @@ impl TursoRelational {
                 fields: fields_from_json(text(&values[9])?)?,
                 metadata: metadata_from_json(text(&values[10])?)?,
                 gate_keys: gates.remove(&item_id_text).unwrap_or_default(),
-                index_fields: Default::default(),
+                // Admission drops a fully-indexed entity document and keeps only the native
+                // index_fields blob; the image planner (claim_by_query selection, mutation
+                // predicates) reads keys/entity-echo from these, so they MUST be materialized.
+                index_fields: fireweed_engine::index_fields::decode_index_fields_blob(
+                    optional_blob(&values[23])?.as_deref(),
+                )?,
                 entity_document: optional_text(&values[11])?
                     .map(|value| serde_json::from_str(&value).map_err(storage))
                     .transpose()?,

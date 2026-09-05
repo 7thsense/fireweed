@@ -476,6 +476,10 @@ where
         Ok(())
     }
 
+    fn apply_wait(&self) -> TursoApplyWait {
+        TursoApplyWait::Inline
+    }
+
     async fn catch_up_produce(&self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
     }
@@ -762,6 +766,64 @@ where
 /// before the derived composition's asynchronous apply lands and fast-paths replay.
 type TursoCommitIdempotency =
     Arc<std::sync::Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>>>;
+
+/// How a Turso product's projection apply relates to its log append: the atomic family applies
+/// inline inside the commit strategy, while the derived object-log family may defer apply to the
+/// async coordinator. Permit-held planners must then wait for the projection to reach the log
+/// high-water BEFORE reading it — otherwise two racing workers can both select the same
+/// still-unapplied item (worker-pool double claim, bead fireweed-82211ac4).
+#[derive(Clone)]
+enum TursoApplyWait {
+    /// Apply is synchronous with append: a permit-held read always sees prior commits.
+    Inline,
+    /// Apply is deferred to the coordinator: wait until the projection covers the log high-water
+    /// (mirrors `DerivedObjectLogTursoBackend::wait_for_projection`).
+    #[cfg(feature = "objectlog")]
+    Deferred(AsyncProjectionApplyCoordinator<TursoRelational>),
+}
+
+impl TursoApplyWait {
+    async fn caught_up<L>(
+        &self,
+        log: &L,
+        projection: &TursoRelational,
+        shard: &QueueKey,
+    ) -> EngineResult<()>
+    where
+        L: AsyncLogStore,
+    {
+        match self {
+            TursoApplyWait::Inline => {
+                let _ = (log, projection, shard);
+                Ok(())
+            }
+            #[cfg(feature = "objectlog")]
+            TursoApplyWait::Deferred(coordinator) => {
+                coordinator.ensure_healthy(shard)?;
+                let Some(target) = AsyncLogStore::high_water(log, shard.clone()).await? else {
+                    return Ok(());
+                };
+                loop {
+                    coordinator.ensure_healthy(shard)?;
+                    let snap = coordinator.snapshot(shard).await;
+                    if position_covers(snap.applied_high_water.as_ref(), &target) {
+                        return Ok(());
+                    }
+                    let projected =
+                        AsyncProjectionStore::recovery_high_water(projection, shard.clone())
+                            .await?;
+                    if position_covers(projected.as_ref(), &target) {
+                        return Ok(());
+                    }
+                    if snap.apply_queue_depth == 0 || !coordinator.has_ready(shard).await {
+                        return Ok(());
+                    }
+                    coordinator.wait_for_progress(shard).await?;
+                }
+            }
+        }
+    }
+}
 
 /// In-process claim_by_query request-id cache (parity with the objectlog products'
 /// `port_surface::ClaimByQueryIdempotency`); the durable authority is the retained
@@ -1353,10 +1415,17 @@ macro_rules! impl_turso_product_ports {
                     let counters = Arc::clone(&self.counters);
                     let commit_idempotency = Arc::clone(&self.commit_idempotency);
                     let node_id = self.node_id;
+                    let apply_wait = self.apply_wait();
+                    let log = Arc::clone(&self.log);
                     let op_shard = shard.clone();
                     self.engine
                         .submit_operation(shard, move || {
                             Box::pin(async move {
+                                // Lease/fence validation must observe every prior committed
+                                // transition, even under deferred apply.
+                                apply_wait
+                                    .caught_up(log.as_ref(), projection.as_ref(), &op_shard)
+                                    .await?;
                                 let prepared = prepare_turso_commit_transition(
                                     projection.as_ref(),
                                     control.as_ref(),
@@ -1987,11 +2056,18 @@ macro_rules! impl_turso_product_ports {
                     let control = Arc::clone(&self.control);
                     let ids = Arc::clone(&self.ids);
                     let cache = Arc::clone(&self.claim_by_query_idempotency);
+                    let apply_wait = self.apply_wait();
+                    let log = Arc::clone(&self.log);
                     let op_shard = shard.clone();
                     let outcome = self
                         .engine
                         .submit_operation(shard.clone(), move || {
                             Box::pin(async move {
+                                // The permit-held selection must observe every prior committed
+                                // claim, even under deferred apply (double-claim guard).
+                                apply_wait
+                                    .caught_up(log.as_ref(), projection.as_ref(), &op_shard)
+                                    .await?;
                                 let definition = AsyncControlPlane::queue_definition(
                                     control.as_ref(),
                                     op_shard.clone(),
@@ -2261,10 +2337,14 @@ macro_rules! impl_turso_product_ports {
                     let projection = Arc::clone(&self.projection);
                     let log = Arc::clone(&self.log);
                     let ids = Arc::clone(&self.ids);
+                    let apply_wait = self.apply_wait();
                     let op_shard = shard.clone();
                     self.engine
                         .submit_operation(shard, move || {
                             Box::pin(async move {
+                                apply_wait
+                                    .caught_up(log.as_ref(), projection.as_ref(), &op_shard)
+                                    .await?;
                                 if let Some(response) = projection
                                     .replay_durable_item_mutation(
                                         &op_shard,
@@ -2867,6 +2947,13 @@ impl DerivedObjectLogTursoBackend {
         };
         backend.recover_async().await?;
         Ok(backend)
+    }
+
+    fn apply_wait(&self) -> TursoApplyWait {
+        match &self.async_apply {
+            Some(coordinator) => TursoApplyWait::Deferred(coordinator.clone()),
+            None => TursoApplyWait::Inline,
+        }
     }
 
     async fn catch_up_projection(&self, shard: &QueueKey) -> EngineResult<()> {
