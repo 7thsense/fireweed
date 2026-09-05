@@ -3367,6 +3367,104 @@ impl TursoRelational {
         Ok(Some(response))
     }
 
+    /// Durable request-id replay check for `claim_by_query` (mirrors `fireweed-sqlite`'s
+    /// `check_claim_by_query_idempotency`): `None` when nothing is retained; a reused id with a
+    /// different body is `RequestIdConflict`; an elapsed retention window or a replay whose leases
+    /// are no longer ALL active under the retained token is `RequestExpired`.
+    pub async fn replay_durable_claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: &[u8],
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<(Vec<ItemId>, LeaseToken)>> {
+        let rows = self
+            .query(
+                sql::SELECT_CLAIM_BY_QUERY_REPLAY,
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    request_id.as_str().to_string().into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        if blob(&row.values[0])? != fingerprint {
+            return Err(EngineError::RequestIdConflict);
+        }
+        if integer(&row.values[2])? <= ts_nanos(now) {
+            return Err(EngineError::RequestExpired);
+        }
+        let payload: serde_json::Value =
+            serde_json::from_str(&text(&row.values[1])?).map_err(storage)?;
+        let item_ids = payload
+            .get("item_ids")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| {
+                EngineError::Storage("claim_by_query replay payload missing item_ids".into())
+            })?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| {
+                        EngineError::Storage("claim_by_query replay item id is not a string".into())
+                    })
+                    .and_then(|id| ItemId::new(id).map_err(storage))
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        let lease_token = LeaseToken::new(
+            payload
+                .get("lease_token")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    EngineError::Storage("claim_by_query replay payload missing lease_token".into())
+                })?,
+        )
+        .map_err(storage)?;
+        if item_ids.is_empty() {
+            return Ok(Some((item_ids, lease_token)));
+        }
+        // Every replayed lease must still be active under the retained token (hash compare, so a
+        // reopen that lost lease cleartext still validates).
+        let token_hash = lease_hash(&lease_token);
+        let now_nanos = ts_nanos(now);
+        for chunk in item_ids.chunks(VALIDATION_ITEM_CHUNK) {
+            let placeholders = (0..chunk.len())
+                .map(|offset| format!("?{}", offset + 4))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut params: Vec<Value> = vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                Value::Blob(token_hash.clone()),
+            ];
+            params.extend(chunk.iter().map(|id| Value::from(id.to_string())));
+            let rows = self
+                .query(
+                    format!(
+                        "SELECT COUNT(*), MIN(lease_expires_at) FROM fireweed_items \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
+                         AND superseded=0 AND fenced=0 AND lease_token_hash=?3 \
+                         AND item_id IN ({placeholders})"
+                    ),
+                    params,
+                )
+                .await
+                .map_err(storage)?;
+            let row = rows.first().ok_or(EngineError::RequestExpired)?;
+            let active = integer(&row.values[0])?;
+            let earliest = optional_integer(&row.values[1])?;
+            if active != chunk.len() as i64 || earliest.is_none_or(|expiry| expiry <= now_nanos) {
+                return Err(EngineError::RequestExpired);
+            }
+        }
+        Ok(Some((item_ids, lease_token)))
+    }
+
     /// Materialize the queue's complete in-memory image and lift it into the shared
     /// [`ProjectionData`] planner state (async analogue of `fireweed-sqlite`'s
     /// `projection_data_sql`). Cost is O(resident queue), matching the sqlite relational planner.

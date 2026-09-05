@@ -136,6 +136,11 @@ pub mod async_projection {
         ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id AND i.item_id=idx.item_id \
         WHERE idx.tenant_id=?1 AND idx.queue_id=?2 AND idx.index_name=?3 AND idx.index_key=?4 \
         ORDER BY i.item_id LIMIT ?5";
+    /// Retained claim_by_query row for request-id replay (fingerprint + response + retention
+    /// horizon; mirrors `fireweed-sqlite`'s `check_claim_by_query_idempotency` read).
+    pub const SELECT_CLAIM_BY_QUERY_REPLAY: &str = "SELECT request_fingerprint,response_payload,\
+        expires_at FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+        AND operation='claim_by_query' AND request_id=?3";
     /// Durable instance/state fence for one key (absent reads as the unset value 0).
     pub const SELECT_INSTANCE_FENCE: &str = "SELECT fence FROM fireweed_instance_fences \
         WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3";

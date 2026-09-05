@@ -952,3 +952,620 @@ async fn turso_adr011_shared_conformance_scenarios() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Minimal repro for the snorri enroll gap: on the ASYNC-barrier derived
+/// cell, a `push_batch_with_request_id` (the idempotent request-id push the
+/// embedder's enroll uses) must produce a claimable item exactly like a
+/// plain push does.
+#[cfg(feature = "objectlog")]
+#[tokio::test]
+async fn derived_turso_async_barrier_request_id_push_is_claimable() {
+    let root = unique_root("async-reqid-push");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let projection_path = root.join("projection.turso");
+    let def = definition("async-reqid");
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+
+    let mut cfg = facade_config(
+        LogConfig::Filesystem {
+            root: root.join("fs-log"),
+        },
+        projection_path,
+    );
+    cfg.response_barrier = ResponseBarrier::AsyncProjection;
+    cfg.async_projection = Some(fireweed_engine::AsyncProjectionSpec {
+        apply_lag_max_commands: 500,
+        apply_debt_max_bytes: 8 * 1024 * 1024,
+        apply_queue_depth_max: 64,
+        oldest_unapplied_max_ms: 5_000,
+        apply_poison_retry_threshold: 5,
+        apply_start_delay_ms: 0,
+    });
+    let fw = open(cfg, Arc::new(SystemClock) as _).expect("open async-barrier turso composition");
+    fw.create_queue(def).await.unwrap();
+    let request_id = RequestId::new("reqid-push-1").unwrap();
+    let pushed = fw
+        .push_batch_with_request_id(
+            &q,
+            request_id.clone(),
+            vec![NewItem {
+                priority: Some(PriorityValue::Int64(1)),
+                ..NewItem::default()
+            }],
+        )
+        .await
+        .unwrap()
+        .into_item_ids();
+    assert_eq!(pushed.len(), 1);
+
+    // Recovery read forces projection catch-up.
+    let _ = fw.side_record(&q, b"probe").await.unwrap();
+
+    let claimed = fw.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(
+        claimed.len(),
+        1,
+        "a request-id push must be claimable on the async-barrier turso cell"
+    );
+    assert_eq!(claimed[0].item_id, pushed[0]);
+    drop(fw);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Snorri-shaped enroll repro (bead fireweed-82211ac4, round 4)
+// ---------------------------------------------------------------------------
+
+/// The 19 compound typed indexes snorri's scheduled-action queue declares
+/// (`scheduled_action_typed_indexes`), including the datetime-typed
+/// `scheduled_at` fields and the unique `by_run_target_key`.
+fn snorri_like_typed_indexes() -> Vec<fireweed_core::QueueIndex> {
+    use fireweed_core::{CompoundIndexDef, CompoundIndexField, IndexType};
+    let indexes: [(&str, bool, &[(&str, IndexType)]); 19] = [
+        (
+            "by_record_kind_key",
+            false,
+            &[
+                ("record_kind", IndexType::String),
+                ("idempotency_key", IndexType::String),
+            ],
+        ),
+        (
+            "by_record_kind_scheduled_at",
+            false,
+            &[
+                ("record_kind", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_tenant_status",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("status", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_tenant_action_type",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_tenant_action_type_status",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+                ("status", IndexType::String),
+            ],
+        ),
+        (
+            "by_tenant_action_type_recycling",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+                ("suppressed_by_recycling", IndexType::Boolean),
+            ],
+        ),
+        (
+            "by_tenant_engagement_probability",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("engagement_probability", IndexType::Float),
+            ],
+        ),
+        (
+            "by_workflow_status",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("workflow_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("status", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_workflow_action_type",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("workflow_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_workflow_action_type_status",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("workflow_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+                ("status", IndexType::String),
+            ],
+        ),
+        (
+            "by_workflow_action_type_recycling",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("workflow_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+                ("suppressed_by_recycling", IndexType::Boolean),
+            ],
+        ),
+        (
+            "by_workflow_engagement_probability",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("workflow_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("engagement_probability", IndexType::Float),
+            ],
+        ),
+        (
+            "by_run_status",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("status", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_run_action_type",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_run_action_type_status",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+                ("status", IndexType::String),
+            ],
+        ),
+        (
+            "by_run_action_type_recycling",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("action_type", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+                ("suppressed_by_recycling", IndexType::Boolean),
+            ],
+        ),
+        (
+            "by_run_recycling",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("suppressed_by_recycling", IndexType::Boolean),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+        ),
+        (
+            "by_run_engagement_probability",
+            false,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("engagement_probability", IndexType::Float),
+            ],
+        ),
+        (
+            "by_run_target_key",
+            true,
+            &[
+                ("tenant_id", IndexType::String),
+                ("run_id", IndexType::String),
+                ("projection_kind", IndexType::String),
+                ("projection_schema_version", IndexType::Integer),
+                ("target_key", IndexType::String),
+            ],
+        ),
+    ];
+    indexes
+        .into_iter()
+        .map(|(name, unique, fields)| fireweed_core::QueueIndex {
+            name: name.to_string(),
+            declaration: fireweed_core::IndexDeclaration::Compound(CompoundIndexDef {
+                fields: fields
+                    .iter()
+                    .map(|(field, index_type)| CompoundIndexField {
+                        field: field.to_string(),
+                        index_type: index_type.clone(),
+                    })
+                    .collect(),
+                unique,
+            }),
+        })
+        .collect()
+}
+
+/// Snorri's scheduled-action queue definition shape (`queue_definition`):
+/// timestamp-ascending priority model + the 19 typed indexes.
+fn snorri_like_definition(tenant: &str) -> QueueDefinition {
+    QueueDefinition {
+        tenant_id: TenantId::new(tenant).unwrap(),
+        queue_id: QueueId::new("lifecycle").unwrap(),
+        priority_model: PriorityModel::timestamp_ascending(),
+        ordering_mode: OrderingMode::Strict,
+        max_rank_error: 0,
+        progress_bound_ms: 60_000,
+        eligibility_policy: EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: RecurrencePolicy::default(),
+        request_id_retention_ms: 86_400_000,
+        client_item_key_retention_ms: 86_400_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 300_000,
+        retry_policy: RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 10_000,
+        max_claim_batch_size: 10_000,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: snorri_like_typed_indexes(),
+        emit_change_records: false,
+    }
+}
+
+/// A full snorri ENROLL work item (`workflow_item_from_facade` -> `workflow_item` with the probe's
+/// `NewWorkflowWorkItem`): Timestamp priority AND not_before, entity JSON with a null
+/// engagement_probability, the 11-key native `index_fields` map (engagement_probability absent, as
+/// the probe payload carries none) with a datetime `scheduled_at`, the execution-remainder fields
+/// blob, snorri's four metadata keys (including an Integer value), and a colon-joined
+/// client_item_key.
+fn snorri_like_item(key: &str, target: &str) -> NewItem {
+    use fireweed_core::TypedValue;
+    let scheduled = UtcTimestamp::new(1_700_000_000, 0).unwrap();
+    let mut index_fields = std::collections::BTreeMap::new();
+    index_fields.insert(
+        "record_kind".to_string(),
+        TypedValue::String("transition".to_string()),
+    );
+    index_fields.insert(
+        "tenant_id".to_string(),
+        TypedValue::String("t-e2e".to_string()),
+    );
+    index_fields.insert(
+        "projection_kind".to_string(),
+        TypedValue::String("scheduled_action".to_string()),
+    );
+    index_fields.insert(
+        "projection_schema_version".to_string(),
+        TypedValue::Integer(1),
+    );
+    index_fields.insert(
+        "workflow_id".to_string(),
+        TypedValue::String("wf-1".to_string()),
+    );
+    index_fields.insert(
+        "run_id".to_string(),
+        TypedValue::String("run-1".to_string()),
+    );
+    index_fields.insert(
+        "target_key".to_string(),
+        TypedValue::String(target.to_string()),
+    );
+    index_fields.insert("scheduled_at".to_string(), TypedValue::DateTime(scheduled));
+    index_fields.insert(
+        "status".to_string(),
+        TypedValue::String("scheduled".to_string()),
+    );
+    index_fields.insert(
+        "action_type".to_string(),
+        TypedValue::String("message.send".to_string()),
+    );
+    index_fields.insert(
+        "suppressed_by_recycling".to_string(),
+        TypedValue::Bool(false),
+    );
+    // engagement_probability deliberately ABSENT (the probe payload carries none; the legacy
+    // derive pass skipped null JSON values, so the native map must too).
+    let payload = serde_json::json!({ "subject_id": target });
+    let mut metadata = fireweed_core::Metadata::default();
+    metadata.insert(
+        "snorri.tenant_id",
+        fireweed_core::MetadataValue::String("t-e2e".to_string()),
+    );
+    metadata.insert(
+        "snorri.item_kind",
+        fireweed_core::MetadataValue::String("workflow.entry".to_string()),
+    );
+    metadata.insert(
+        "snorri.run_id",
+        fireweed_core::MetadataValue::String("run-1".to_string()),
+    );
+    metadata.insert("snorri.priority", fireweed_core::MetadataValue::Integer(0));
+    let remainder = serde_json::json!({
+        "input_event_type": "workflow.entry",
+        "input_provenance": "Queued",
+        "subject_context": { "subject_ref": { "provider_id": "crm.probe",
+            "subject_type": "contact", "subject_id": target },
+            "schema_version": null, "snapshot_ref": null, "payload": {} },
+    });
+    NewItem {
+        client_item_key: Some(fireweed_core::ClientItemKey::new(key).unwrap()),
+        priority: Some(PriorityValue::Timestamp(scheduled)),
+        not_before: Some(scheduled),
+        payload: Some(Bytes::from(serde_json::to_vec(&payload).unwrap())),
+        fields: [(
+            "snorri.execution_rem.v2".to_string(),
+            Bytes::from(serde_json::to_vec(&remainder).unwrap()),
+        )]
+        .into_iter()
+        .collect(),
+        metadata,
+        index_fields,
+        entity: Some(serde_json::json!({
+            "record_kind": "transition",
+            "tenant_id": "t-e2e",
+            "account_id": "acct_default",
+            "projection_kind": "scheduled_action",
+            "projection_schema_version": 1,
+            "workflow_id": "wf-1",
+            "run_id": "run-1",
+            "action_id": key,
+            "instance_id": "run-1",
+            "target_key": target,
+            "scheduled_at": "2023-11-14T22:13:20Z",
+            "status": "scheduled",
+            "action_type": "message.send",
+            "scheduler_algorithm": "personalized",
+            "engagement_probability": null,
+            "engagement_threshold": 0.10,
+            "suppressed_by_recycling": false,
+            "is_enrolled_using_open_rate_filter": false,
+            "input_event_id": key,
+            "workflow_instance_id": "run-1",
+            "artifact_digest": "digest-1",
+            "workflow_version": "v1",
+            "source_state_version": 1,
+            "transition": "entry",
+            "payload": payload,
+        })),
+        ..NewItem::default()
+    }
+}
+
+/// Snorri's `workflow_claim_work` fallback claim path: reclaim expired leases at the probe's
+/// lease_time, then a portable claim with explicit eligibility + lease times.
+async fn claim_like_snorri(
+    fw: &Fireweed,
+    q: &QueueKey,
+    when: UtcTimestamp,
+) -> Vec<fireweed_engine::ClaimedItem> {
+    fw.reclaim_expired_at(q, None, when).await.unwrap();
+    fw.claim_at(
+        q,
+        fireweed::ClaimAt::new(10, 60_000)
+            .eligibility_time(when)
+            .lease_time(when),
+    )
+    .await
+    .unwrap()
+}
+
+/// Repro for the snorri enroll gap: on the ASYNC-barrier derived cell, a request-id push of the
+/// FULL snorri work-item shape must mint ids that become claimable — exactly like a plain push of
+/// the same shape and like a request-id push of a plain item (both green in this file).
+#[cfg(feature = "objectlog")]
+#[tokio::test]
+async fn derived_turso_async_barrier_snorri_shaped_request_id_push_is_claimable() {
+    let root = unique_root("async-snorri-shape");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let projection_path = root.join("projection.turso");
+    let def = snorri_like_definition("snorri-shape");
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+
+    let mut cfg = facade_config(
+        LogConfig::Filesystem {
+            root: root.join("fs-log"),
+        },
+        projection_path,
+    );
+    cfg.response_barrier = ResponseBarrier::AsyncProjection;
+    cfg.async_projection = Some(fireweed_engine::AsyncProjectionSpec {
+        apply_lag_max_commands: 500,
+        apply_debt_max_bytes: 8 * 1024 * 1024,
+        apply_queue_depth_max: 64,
+        oldest_unapplied_max_ms: 5_000,
+        apply_poison_retry_threshold: 5,
+        apply_start_delay_ms: 0,
+    });
+    let fw = open(cfg, Arc::new(SystemClock) as _).expect("open async-barrier turso composition");
+    fw.create_queue(def).await.unwrap();
+
+    let when = UtcTimestamp::new(1_700_000_000, 0).unwrap();
+
+    // Probe A: plain push of the full snorri shape.
+    let plain_id = fw
+        .push(
+            &q,
+            snorri_like_item("enroll-1:run-1:workflow.entry", "target-a"),
+        )
+        .await
+        .unwrap();
+    let _ = fw.side_record(&q, b"probe").await.unwrap();
+    eprintln!("metrics after plain push: {:?}", fw.metrics(&q).await);
+    let claimed = claim_like_snorri(&fw, &q, when).await;
+    assert_eq!(
+        claimed.len(),
+        1,
+        "plain push of the snorri-shaped item must be claimable"
+    );
+    assert_eq!(claimed[0].item_id, plain_id);
+
+    // Probe B: request-id push (the enroll path) of the same full shape.
+    let request_id = RequestId::new("enroll-1.s0").unwrap();
+    let pushed = fw
+        .push_batch_with_request_id(
+            &q,
+            request_id.clone(),
+            vec![snorri_like_item(
+                "enroll-1:run-2:workflow.entry",
+                "target-b",
+            )],
+        )
+        .await
+        .unwrap()
+        .into_item_ids();
+    assert_eq!(pushed.len(), 1);
+    let _ = fw.side_record(&q, b"probe").await.unwrap();
+    eprintln!("metrics after reqid push: {:?}", fw.metrics(&q).await);
+    let claimed = claim_like_snorri(&fw, &q, when).await;
+    assert_eq!(
+        claimed.len(),
+        1,
+        "request-id push of the snorri-shaped item must be claimable"
+    );
+    assert_eq!(claimed[0].item_id, pushed[0]);
+
+    // Probe C: snorri's PRIMARY claim path — API-004 claim_by_query on the declared
+    // record_kind × scheduled_at index (previously Unavailable on every Turso cell, which forced
+    // snorri onto its facade-gated fallback and dropped enroll items).
+    let request_id_c = RequestId::new("enroll-2.s0").unwrap();
+    let pushed_c = fw
+        .push_batch_with_request_id(
+            &q,
+            request_id_c,
+            vec![snorri_like_item(
+                "enroll-2:run-3:workflow.entry",
+                "target-c",
+            )],
+        )
+        .await
+        .unwrap()
+        .into_item_ids();
+    let query_request = || fireweed_core::ClaimByQueryRequest {
+        index: Some("by_record_kind_scheduled_at".to_string()),
+        filters: vec![fireweed_core::QueryFilter {
+            field: "record_kind".to_string(),
+            op: fireweed_core::FilterOp::Eq,
+            value: fireweed_core::TypedValue::String("transition".to_string()),
+        }],
+        order_by: fireweed_core::OrderField {
+            field: "scheduled_at".to_string(),
+            direction: fireweed_core::SortDirection::Ascending,
+        },
+        max_items: 10,
+        lease_duration_ms: 60_000,
+        worker_id: fireweed_core::WorkerId::new("snorri-workflow").unwrap(),
+        request_id: Some(RequestId::new("claim-query-1").unwrap()),
+    };
+    let by_query = fw
+        .claim_by_query_at(
+            &q,
+            query_request(),
+            fireweed::ClaimByQueryAt::new()
+                .eligibility_time(when)
+                .lease_time(when),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        by_query.items.len(),
+        1,
+        "claim_by_query must serve the snorri transition index on the turso cell"
+    );
+    assert_eq!(by_query.items[0].item_id, pushed_c[0]);
+    assert!(by_query.items[0].lease_token.is_some());
+    // Same request id + identical body replays the same lease.
+    let replayed = fw
+        .claim_by_query_at(
+            &q,
+            query_request(),
+            fireweed::ClaimByQueryAt::new()
+                .eligibility_time(when)
+                .lease_time(when),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.items.len(), 1);
+    assert_eq!(replayed.items[0].item_id, pushed_c[0]);
+    assert_eq!(
+        replayed.items[0].lease_token, by_query.items[0].lease_token,
+        "claim_by_query replay returns the retained lease"
+    );
+    drop(fw);
+    let _ = std::fs::remove_dir_all(&root);
+}

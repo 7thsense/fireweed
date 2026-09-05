@@ -48,8 +48,9 @@ use fireweed_engine::{
     UpsertOutcome, UpsertPort,
 };
 use fireweed_engine::{
-    PushItem, ReplacePendingCommand, UpdateFieldsCommand, item_mutation_fingerprint,
-    resolve_write_epoch_async, validate_api001_reserved_write_fields,
+    PushItem, ReplacePendingCommand, UpdateFieldsCommand, claim_by_query_body_hash,
+    generate_query_lease_token, item_mutation_fingerprint, resolve_write_epoch_async,
+    validate_api001_reserved_write_fields,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -421,6 +422,7 @@ pub struct AtomicTursoBackend<L: AsyncLogStore + 'static> {
     #[allow(dead_code)]
     node_id: u8,
     commit_idempotency: TursoCommitIdempotency,
+    claim_by_query_idempotency: TursoClaimByQueryIdempotency,
 }
 
 impl<L> AtomicTursoBackend<L>
@@ -543,6 +545,7 @@ where
             counters,
             node_id,
             commit_idempotency: TursoCommitIdempotency::default(),
+            claim_by_query_idempotency: TursoClaimByQueryIdempotency::default(),
         };
         backend.recover_async().await?;
         Ok(backend)
@@ -759,6 +762,50 @@ where
 /// before the derived composition's asynchronous apply lands and fast-paths replay.
 type TursoCommitIdempotency =
     Arc<std::sync::Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>>>;
+
+/// In-process claim_by_query request-id cache (parity with the objectlog products'
+/// `port_surface::ClaimByQueryIdempotency`); the durable authority is the retained
+/// `operation='claim_by_query'` idempotency row the apply arm persists.
+type TursoClaimByQueryIdempotency =
+    Arc<std::sync::Mutex<HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>>>;
+
+/// What a permit-held claim_by_query submission resolved to (rendering happens post-permit,
+/// after the projection has caught up to the committed claim).
+enum TursoClaimByQueryOutcome {
+    Replay {
+        item_ids: Vec<ItemId>,
+        lease_token: LeaseToken,
+    },
+    Committed {
+        item_ids: Vec<ItemId>,
+        lease_token: LeaseToken,
+        request_id: RequestId,
+        fingerprint: BodyHash,
+        replay_expires_at: UtcTimestamp,
+    },
+}
+
+fn record_turso_claim_by_query_idempotency(
+    cache: &TursoClaimByQueryIdempotency,
+    shard: &QueueKey,
+    request_id: RequestId,
+    fingerprint: BodyHash,
+    item_ids: Vec<ItemId>,
+    lease_token: LeaseToken,
+    replay_expires_at: UtcTimestamp,
+) {
+    cache
+        .lock()
+        .expect("claim_by_query idempotency poisoned")
+        .entry(shard.clone())
+        .or_default()
+        .record(
+            request_id,
+            fingerprint,
+            (item_ids, lease_token),
+            replay_expires_at,
+        );
+}
 
 /// Result of planning a Turso `commit_transition` (before log append).
 enum PreparedTursoCommitTransition {
@@ -1904,7 +1951,252 @@ macro_rules! impl_turso_product_ports {
                 &self,
                 _shard: &QueueKey,
             ) -> QueryCapabilityFlags {
-                QueryCapabilityFlags::default()
+                QueryCapabilityFlags {
+                    claim_by_query: true,
+                    ..QueryCapabilityFlags::default()
+                }
+            }
+
+            /// API-004 claim-by-query (bead fireweed-82211ac4): request-id replay (in-process
+            /// cache, then the durable retained row), declared-index selection via the shared
+            /// in-memory planner over the materialized image, one atomic `Claim` append carrying
+            /// the retained `RequestOutcome::ClaimByQuery` — selection and append under the
+            /// queue-local admission permit; rendering after the projection catches up to the
+            /// committed claim (the derived family applies asynchronously).
+            fn claim_by_query(
+                &self,
+                shard: &QueueKey,
+                request: fireweed_core::ClaimByQueryRequest,
+                context: fireweed_engine::ClaimByQueryContext,
+            ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+                let shard = shard.clone();
+                async move {
+                    let epoch = match context.expected_epoch {
+                        Some(epoch) => epoch,
+                        None => {
+                            AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?
+                        }
+                    };
+                    self.catch_up_projection(&shard).await?;
+                    let strategy = self.engine.commit_strategy();
+                    let append_admission = match $durability {
+                        DurabilityClass::Atomic => AppendAdmissionClass::AtomicNative,
+                        DurabilityClass::EventualApply => AppendAdmissionClass::SelectionRequired,
+                    };
+                    let projection = Arc::clone(&self.projection);
+                    let control = Arc::clone(&self.control);
+                    let ids = Arc::clone(&self.ids);
+                    let cache = Arc::clone(&self.claim_by_query_idempotency);
+                    let op_shard = shard.clone();
+                    let outcome = self
+                        .engine
+                        .submit_operation(shard.clone(), move || {
+                            Box::pin(async move {
+                                let definition = AsyncControlPlane::queue_definition(
+                                    control.as_ref(),
+                                    op_shard.clone(),
+                                )
+                                .await?;
+                                if request.max_items == 0
+                                    || u64::from(request.max_items)
+                                        > definition.max_claim_batch_size
+                                {
+                                    return Err(EngineError::Invalid(
+                                        "invalid claim_by_query max_items",
+                                    ));
+                                }
+                                if request.lease_duration_ms == 0
+                                    || request.lease_duration_ms
+                                        > definition.max_lease_duration_ms
+                                {
+                                    return Err(EngineError::Invalid(
+                                        "invalid claim_by_query lease_duration_ms",
+                                    ));
+                                }
+                                let request_id = request.request_id.clone().ok_or(
+                                    EngineError::Invalid("claim_by_query request_id required"),
+                                )?;
+                                let fingerprint = claim_by_query_body_hash(&request)?;
+                                let expires_at = request_expires_at(
+                                    context.now,
+                                    definition.request_id_retention_ms,
+                                );
+                                match cache
+                                    .lock()
+                                    .expect("claim_by_query idempotency poisoned")
+                                    .entry(op_shard.clone())
+                                    .or_default()
+                                    .check_conflict_first(&request_id, fingerprint, context.now)
+                                {
+                                    IdempotencyDecision::Replay((item_ids, lease_token)) => {
+                                        return Ok(TursoClaimByQueryOutcome::Replay {
+                                            item_ids,
+                                            lease_token,
+                                        });
+                                    }
+                                    IdempotencyDecision::Conflict => {
+                                        return Err(EngineError::RequestIdConflict);
+                                    }
+                                    IdempotencyDecision::Expired => {
+                                        return Err(EngineError::RequestExpired);
+                                    }
+                                    IdempotencyDecision::Proceed => {}
+                                }
+                                if let Some((item_ids, lease_token)) = projection
+                                    .replay_durable_claim_by_query(
+                                        &op_shard,
+                                        &request_id,
+                                        &fingerprint.0.to_be_bytes(),
+                                        context.now,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(TursoClaimByQueryOutcome::Replay {
+                                        item_ids,
+                                        lease_token,
+                                    });
+                                }
+                                let item_ids = projection
+                                    .projection_data(&op_shard)
+                                    .await?
+                                    .select_claim_by_query(
+                                        request.index.as_deref(),
+                                        &request.filters,
+                                        &request.order_by,
+                                        request.max_items as usize,
+                                        context.eligibility_at(),
+                                    )?;
+                                let lease_expires_at =
+                                    context.lease_expires_at(request.lease_duration_ms);
+                                let (lease_token, claim_item_ids) = if item_ids.is_empty() {
+                                    (
+                                        LeaseToken::new("empty-claim").expect("valid token"),
+                                        Vec::new(),
+                                    )
+                                } else {
+                                    (generate_query_lease_token()?, item_ids)
+                                };
+                                let envelope = CommandEnvelope {
+                                    command_id: ids.next_command_id(),
+                                    request_id: Some(request_id.clone()),
+                                    request_fingerprint: Some(fingerprint.0),
+                                    request_outcome: Some(RequestOutcome::ClaimByQuery {
+                                        item_ids: claim_item_ids.clone(),
+                                        lease_token: lease_token.clone(),
+                                        worker_id: Some(request.worker_id.clone()),
+                                    }),
+                                    item_ids: claim_item_ids.clone(),
+                                    command: QueueCommand::Claim(ClaimCommand {
+                                        item_ids: claim_item_ids.clone(),
+                                        lease_token: lease_token.clone(),
+                                        lease_expires_at,
+                                        worker_id: Some(request.worker_id.clone()),
+                                    }),
+                                    checksum: CommandChecksum(0),
+                                    created_at: context.now,
+                                };
+                                strategy
+                                    .commit(
+                                        RawCommitRequest::new(
+                                            op_shard.clone(),
+                                            vec![envelope],
+                                            epoch,
+                                        )
+                                        .with_append_admission(append_admission),
+                                    )
+                                    .await?;
+                                let replay_expires_at = if claim_item_ids.is_empty() {
+                                    expires_at
+                                } else {
+                                    expires_at.max(lease_expires_at)
+                                };
+                                Ok(TursoClaimByQueryOutcome::Committed {
+                                    item_ids: claim_item_ids,
+                                    lease_token,
+                                    request_id,
+                                    fingerprint,
+                                    replay_expires_at,
+                                })
+                            })
+                        })
+                        .await
+                        .map_err(|error| map_submit("claim_by_query", error))??;
+                    self.catch_up_projection(&shard).await?;
+                    match outcome {
+                        TursoClaimByQueryOutcome::Replay {
+                            item_ids,
+                            lease_token,
+                        } => {
+                            if item_ids.is_empty() {
+                                return Ok(Claimed::default());
+                            }
+                            let mut items = AsyncProjectionStore::render_claimed(
+                                self.projection.as_ref(),
+                                shard,
+                                item_ids.clone(),
+                            )
+                            .await?;
+                            if items.len() != item_ids.len()
+                                || items.iter().any(|item| {
+                                    item.lease_expires_at <= context.now
+                                        || item
+                                            .lease_token
+                                            .as_ref()
+                                            .is_some_and(|token| token != &lease_token)
+                                })
+                            {
+                                return Err(EngineError::RequestExpired);
+                            }
+                            for item in &mut items {
+                                item.lease_token = Some(lease_token.clone());
+                            }
+                            Ok(Claimed {
+                                items,
+                                ..Default::default()
+                            })
+                        }
+                        TursoClaimByQueryOutcome::Committed {
+                            item_ids,
+                            lease_token,
+                            request_id,
+                            fingerprint,
+                            replay_expires_at,
+                        } => {
+                            let items = if item_ids.is_empty() {
+                                Vec::new()
+                            } else {
+                                let mut items = AsyncProjectionStore::render_claimed(
+                                    self.projection.as_ref(),
+                                    shard.clone(),
+                                    item_ids.clone(),
+                                )
+                                .await?;
+                                if items.len() != item_ids.len() {
+                                    return Err(EngineError::Storage(
+                                        "claim_by_query render lost committed leases".into(),
+                                    ));
+                                }
+                                for item in &mut items {
+                                    item.lease_token = Some(lease_token.clone());
+                                }
+                                items
+                            };
+                            record_turso_claim_by_query_idempotency(
+                                &self.claim_by_query_idempotency,
+                                &shard,
+                                request_id,
+                                fingerprint,
+                                item_ids,
+                                lease_token,
+                                replay_expires_at,
+                            );
+                            Ok(Claimed {
+                                items,
+                                ..Default::default()
+                            })
+                        }
+                    }
+                }
             }
         }
 
@@ -2481,6 +2773,7 @@ pub struct DerivedObjectLogTursoBackend {
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     commit_idempotency: TursoCommitIdempotency,
+    claim_by_query_idempotency: TursoClaimByQueryIdempotency,
 }
 
 #[cfg(feature = "objectlog")]
@@ -2570,6 +2863,7 @@ impl DerivedObjectLogTursoBackend {
             last_produce,
             produce_caught_up,
             commit_idempotency: TursoCommitIdempotency::default(),
+            claim_by_query_idempotency: TursoClaimByQueryIdempotency::default(),
         };
         backend.recover_async().await?;
         Ok(backend)
