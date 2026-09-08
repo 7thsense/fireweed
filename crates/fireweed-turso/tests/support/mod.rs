@@ -13,12 +13,11 @@ use fireweed_engine::{
 };
 use fireweed_projection::{ProjectionImage, ProjectionImageItem};
 use fireweed_relational::{fields_from_json, metadata_from_json, parse_priority, parse_state};
-use fireweed_sqlite::AsyncSqliteProjectionStore;
 use fireweed_turso::TursoRelational;
 use turso::Value;
 
 pub struct Pair {
-    pub sqlite: AsyncSqliteProjectionStore,
+    pub reference: TursoRelational,
     pub turso: TursoRelational,
     pub shard: QueueKey,
 }
@@ -27,16 +26,16 @@ impl Pair {
     pub async fn memory() -> Self {
         let definition = qdef();
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-        let sqlite = AsyncSqliteProjectionStore::open(":memory:").await.unwrap();
+        let reference = TursoRelational::in_memory().await.unwrap();
         let turso = TursoRelational::in_memory().await.unwrap();
-        AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
+        AsyncProjectionStore::ensure_shard(&reference, definition.clone())
             .await
             .unwrap();
         AsyncProjectionStore::ensure_shard(&turso, definition)
             .await
             .unwrap();
         Self {
-            sqlite,
+            reference,
             turso,
             shard,
         }
@@ -45,7 +44,7 @@ impl Pair {
     pub async fn apply(&self, sequence: u64, command: CommandEnvelope) {
         let position = CommandPosition::new(self.shard.clone(), 0, sequence);
         AsyncProjectionStore::apply_live(
-            &self.sqlite,
+            &self.reference,
             vec![position.clone()],
             vec![command.clone()],
         )
@@ -62,7 +61,7 @@ impl Pair {
                 AsyncProjectionStore::item_state(&self.turso, self.shard.clone(), *id)
                     .await
                     .unwrap(),
-                AsyncProjectionStore::item_state(&self.sqlite, self.shard.clone(), *id)
+                AsyncProjectionStore::item_state(&self.reference, self.shard.clone(), *id)
                     .await
                     .unwrap(),
                 "state mismatch for {id}"
@@ -71,7 +70,7 @@ impl Pair {
                 AsyncProjectionStore::item_version(&self.turso, self.shard.clone(), *id)
                     .await
                     .unwrap(),
-                AsyncProjectionStore::item_version(&self.sqlite, self.shard.clone(), *id)
+                AsyncProjectionStore::item_version(&self.reference, self.shard.clone(), *id)
                     .await
                     .unwrap(),
                 "version mismatch for {id}"
@@ -81,7 +80,7 @@ impl Pair {
             AsyncProjectionStore::recovery_high_water(&self.turso, self.shard.clone())
                 .await
                 .unwrap(),
-            AsyncProjectionStore::recovery_high_water(&self.sqlite, self.shard.clone())
+            AsyncProjectionStore::recovery_high_water(&self.reference, self.shard.clone())
                 .await
                 .unwrap()
         );
@@ -89,7 +88,7 @@ impl Pair {
             AsyncProjectionStore::recover_definitions(&self.turso)
                 .await
                 .unwrap(),
-            AsyncProjectionStore::recover_definitions(&self.sqlite)
+            AsyncProjectionStore::recover_definitions(&self.reference)
                 .await
                 .unwrap()
         );
@@ -104,7 +103,7 @@ impl Pair {
                 .await
                 .unwrap(),
                 AsyncProjectionStore::eligible_candidates(
-                    &self.sqlite,
+                    &self.reference,
                     self.shard.clone(),
                     now,
                     100,
@@ -117,7 +116,7 @@ impl Pair {
                 AsyncProjectionStore::expired_leases(&self.turso, self.shard.clone(), now, 100,)
                     .await
                     .unwrap(),
-                AsyncProjectionStore::expired_leases(&self.sqlite, self.shard.clone(), now, 100,)
+                AsyncProjectionStore::expired_leases(&self.reference, self.shard.clone(), now, 100,)
                     .await
                     .unwrap(),
                 "expired-lease mismatch at {now:?}"
@@ -128,7 +127,7 @@ impl Pair {
                 .await
                 .unwrap();
         let sqlite_claimed =
-            AsyncProjectionStore::render_claimed(&self.sqlite, self.shard.clone(), ids.to_vec())
+            AsyncProjectionStore::render_claimed(&self.reference, self.shard.clone(), ids.to_vec())
                 .await
                 .unwrap();
         assert_eq!(turso_claimed.len(), sqlite_claimed.len());
@@ -151,13 +150,9 @@ impl Pair {
 
     pub async fn assert_projection_image_and_reads_equal(&self, ids: &[ItemId]) {
         self.assert_items_equal(ids).await;
-        let sqlite = self
-            .sqlite
-            .export_projection_image(self.shard.clone())
-            .await
-            .unwrap();
+        let reference = turso_projection_image(&self.reference, &self.shard).await;
         let turso = turso_projection_image(&self.turso, &self.shard).await;
-        assert_eq!(turso, sqlite, "complete ProjectionImage mismatch");
+        assert_eq!(turso, reference, "complete ProjectionImage mismatch");
     }
 }
 

@@ -35,7 +35,7 @@ on this path.
 | U1 | Two-kind dispatch + overlay | TD-016 pipeline | None | Classifier + overlay unit tests; compose audits: item Claim and Complete call `drive_candidate_mutation`; no `ClaimCoordinator` on the item path |
 | U2 | In-flight Claim exclude | TD-016 overlay bound | U1 | SELECT bind cap ≤ 1600; N=10k P4 does not poison `moved 0 of N` |
 | U3 | Set-based packed apply | TD-016 apply | U1 | Packed Claim/Complete/UpdateFields apply matches solo model in one IMMEDIATE |
-| U4 | Qualify 10k/s | TD-016 performance | U2, U3 | `ss_phased_capacity_smoke` N=10k filesystem--turso: each phase `settled_items_per_s` ≥ 10000 and T3 exact |
+| U4 | Qualify 10k/s | TD-016 performance | U2, U3 | `ss_phased_capacity_smoke` N=10k filesystem--turso asserts T3 exact; rate floor is the evidence summary (`1788659385`: each phase settled ≥ 10000). The smoke test does not currently fail CI below 10k/s. |
 
 U2 and U3 may proceed in parallel after U1.
 

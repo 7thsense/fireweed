@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-fireweed = { path = "../../../../crates/fireweed", default-features = false, features = ["memory", "sqlite", "objectlog", "postgres"] }
+fireweed = { path = "../../../../crates/fireweed", default-features = false, features = ["memory", "objectlog", "postgres", "turso"] }
 
 [[bin]]
 name = "supported"

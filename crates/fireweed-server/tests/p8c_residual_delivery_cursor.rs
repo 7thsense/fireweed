@@ -33,7 +33,6 @@ use fireweed_server::{
     ObjectLogSpec, ProjectionSpec, ResponseBarrierSpec, SegmentConfig, emit_change_record_tick,
     spawn_change_record_emitter, start,
 };
-use fireweed_sqlite::{SqliteLog, composed_sqlite_backend};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
@@ -606,6 +605,7 @@ impl ChangeRecordSink for CountingSink {
 }
 
 /// SQLite-log cursor: monotonic advance, concurrent emit-driven advance, cancel/join, crash/reopen.
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8c_residual_sqlite_log_cursor_lifecycle() {
     let path = tmp_file("cursor-sqlite", "sqlite");
@@ -873,6 +873,7 @@ async fn p8c_residual_postgres_log_cursor_lifecycle() {
 }
 
 /// Tick-level opt-out + disabled endpoint tuple (complements server.rs residual seeds).
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8c_residual_opt_out_and_disabled_endpoint_tuple_on_class_a() {
     let log_path = tmp_file("opt-out", "sqlite");

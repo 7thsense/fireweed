@@ -43,21 +43,24 @@ explicit final state.
 
 ### Storage product law
 
-The public storage product is exactly five log backends (`memory`, `sqlite`,
-`postgres`, `filesystem`, `s3`) crossed with three projections (`memory`,
-`sqlite`, `postgres`): 15 supported cells assembled through one typed
-composition model. The control plane is a separate optional topology choice,
+The public storage product is exactly four log backends (`memory`, `postgres`,
+`filesystem`, `s3`) crossed with three projections (`memory`, `turso`,
+`postgres`): 12 supported cells assembled through one typed composition model.
+Turso is the default serving projection. The rusqlite `sqlite` log and
+`sqlite` projection are retired; local durable serving is object-log × Turso
+(or postgres). The control plane is a separate optional topology choice,
 not a mandatory PostgreSQL tier or a bundled storage product. Public product paths
 use native-async composition; a blocking store may be isolated behind a bounded
 adapter actor without changing that public execution model.
 
-Logs define the cross-process durability class. `sqlite`, `postgres`,
+Logs define the cross-process durability class. `postgres`,
 `filesystem`, and `s3` logs are Class A: the durable log is authoritative and a
 projection can be rebuilt by high-water plus tail replay. The `memory` log is
 Class B: after process death only a durable projection can remain, so the
 product makes no log-rebuild, branch, read-as-of, or log-derived change-record
 claim for those three cells. Filesystem and S3 are peer implementations of the
-same object-log protocol; Postgres is first-class on both public axes.
+same object-log protocol; Postgres remains first-class as a log and as a
+projection.
 
 ## User Experience
 

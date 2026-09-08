@@ -23,6 +23,6 @@ tokio-util = { version = "0.7" }
 
 [dev-dependencies]
 fireweed-memory = { path = "../fireweed-memory" }
-fireweed-sqlite = { path = "../fireweed-sqlite" }
+fireweed-objectlog = { path = "../fireweed-objectlog" }
 redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

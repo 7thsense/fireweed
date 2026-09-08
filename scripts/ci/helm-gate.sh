@@ -42,19 +42,17 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
-# Public axes only: logs memory|sqlite|postgres|filesystem|s3; projections memory|sqlite|turso|postgres.
-# Full 20-cell matrix fixtures (plus shared multi-replica S3/control-plane and lakebase variants).
-# MATRIX_COMBINATIONS is the injective map onto the 20 canonical cell IDs (log--projection).
+# Public axes only: logs memory|postgres|filesystem|s3; projections memory|turso|postgres.
+# Full 12-cell matrix fixtures (plus shared multi-replica S3/control-plane and lakebase variants).
+# MATRIX_COMBINATIONS is the injective map onto the 12 canonical cell IDs (log--projection).
 MATRIX_COMBINATIONS=(
-    memory-memory memory-sqlite memory-turso memory-postgres
-    sqlite-memory sqlite-sqlite sqlite-turso sqlite-postgres
-    postgres-memory postgres-sqlite postgres-turso postgres-postgres
-    filesystem-memory filesystem-sqlite filesystem-turso filesystem-postgres
-    s3-memory s3-sqlite s3-turso s3-postgres
+    memory-memory memory-turso memory-postgres
+    postgres-memory postgres-turso postgres-postgres
+    filesystem-memory filesystem-turso filesystem-postgres
+    s3-memory s3-turso s3-postgres
 )
 VARIANT_COMBINATIONS=(
     shared-s3-postgres-control-plane
-    s3-sqlite-postgres-control-plane
     lakebase-postgres
 )
 COMBINATIONS=("${MATRIX_COMBINATIONS[@]}" "${VARIANT_COMBINATIONS[@]}")

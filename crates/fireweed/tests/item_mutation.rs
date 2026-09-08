@@ -561,7 +561,7 @@ async fn objectlog_inmemory_reopen_replays_without_selector_evaluation() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 #[tokio::test]
 async fn objectlog_sqlite_reopen_replays_without_selector_evaluation() {
     let root = std::env::temp_dir().join(format!(

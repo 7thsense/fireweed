@@ -25,7 +25,6 @@ use fireweed_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::AsyncProjectionSpec;
-use fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK;
 
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
@@ -428,17 +427,17 @@ fn parse_backend(
     let log = env_or(env, "FIREWEED_LOG_BACKEND", "filesystem");
     let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "turso");
 
-    // Public product log names: memory|sqlite|postgres|filesystem|s3.
+    // Public product log names: memory|postgres|filesystem|s3.
     // Legacy `objectlog` (+ store local/s3) is hard-rejected — use filesystem or s3.
     let log_spec = match log.as_str() {
         "memory" => LogSpec::Memory,
-        "sqlite" => LogSpec::Sqlite {
-            path: PathBuf::from(env_or(
-                env,
-                "FIREWEED_SQLITE_LOG_PATH",
-                "/var/lib/fireweed/fireweed-log.db",
-            )),
-        },
+        "sqlite" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "sqlite storage is retired; use filesystem log and turso projection",
+            ));
+        }
         // First-class filesystem object log (local directory / NAS).
         "filesystem" => {
             if let Some((key, _)) = env
@@ -491,23 +490,23 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|sqlite|postgres|filesystem|s3"
+                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|postgres|filesystem|s3"
                 ),
             ));
         }
     };
 
-    // Public product projection names: memory|sqlite|turso|postgres (default turso).
+    // Public product projection names: memory|turso|postgres (default turso).
     // Legacy `inmemory` and demoted hybrid* are hard-rejected (construct Config directly for Hybrid tests).
     let projection_spec = match projection.as_str() {
         "memory" => ProjectionSpec::InMemory,
-        "sqlite" => ProjectionSpec::Sqlite {
-            path: PathBuf::from(env_or(
-                env,
-                "FIREWEED_SQLITE_PROJECTION_PATH",
-                "/var/lib/fireweed/fireweed-projection.db",
-            )),
-        },
+        "sqlite" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "sqlite storage is retired; use filesystem log and turso projection",
+            ));
+        }
         "turso" => {
             #[cfg(feature = "turso-projection")]
             {
@@ -571,7 +570,7 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|turso|postgres"
+                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|turso|postgres"
                 ),
             ));
         }
@@ -632,23 +631,7 @@ fn parse_backend(
         ResponseBarrierSpec::AsyncProjection => Some(thresholds),
         ResponseBarrierSpec::Strict => None,
     };
-    let deferred_default = parse_usize(
-        env,
-        "FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK",
-        DEFAULT_DEFERRED_FLUSH_CHUNK,
-    );
-    let sqlite_projection_deferred_flush_chunk = if matches!(log_spec, LogSpec::ObjectLog(_))
-        && matches!(
-            projection_spec,
-            ProjectionSpec::Sqlite { .. }
-                | ProjectionSpec::Hybrid { .. }
-                | ProjectionSpec::HybridStrict { .. }
-                | ProjectionSpec::HybridAsync { .. }
-        ) {
-        Some(deferred_default)
-    } else {
-        None
-    };
+    let sqlite_projection_deferred_flush_chunk = None;
     Ok(BackendSpec {
         log: log_spec,
         projection: projection_spec,

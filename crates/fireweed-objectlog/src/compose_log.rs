@@ -98,8 +98,8 @@ impl OwnedTaskDispatcher for ObjectLogTaskDispatcher {
 /// used directly from the calling thread.
 ///
 /// All sync objectlog open paths (`composed_objectlog_backend`,
-/// `open_object_log_engine_*_sync`, and facade `open_objectlog` /
-/// `open_objectlog_sqlite` via this helper) inherit this behavior. Library I/O workers
+/// `open_object_log_engine_*_sync`, and facade `open_objectlog` via this helper)
+/// inherit this behavior. Library I/O workers
 /// should also drive LogEngine futures through [`block_on_objectlog_future`].
 pub fn block_on_objectlog<F, T>(fut: F) -> EngineResult<T>
 where

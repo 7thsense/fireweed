@@ -3,11 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, ClientItemKey,
-    EligibilityPolicy, Fireweed, NewItem, ObjectLogAuthority, ObjectLogRuntimeConfig,
+    EligibilityPolicy, Fireweed, LogConfig, NewItem, ObjectLogAuthority, ObjectLogRuntimeConfig,
     ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition, QueueId, QueueKey,
-    RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SegmentConfig,
-    SystemClock, TenantId, WorkerId, open_memory, open_sqlite, open_sqlite_sqlite_projection,
+    PriorityTieBreaker, PriorityValue, ProjectionConfig, ProjectionStoreConfig, QueueDefinition,
+    QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
+    SegmentConfig, StorageConfig, SystemClock, TenantId, WorkerId, open, open_memory,
 };
 
 fn queue_definition() -> QueueDefinition {
@@ -115,7 +115,11 @@ fn role_named_object_log_configuration_validates() {
         namespace: "downstream".to_string(),
         recovery: RecoveryPolicy::default(),
     };
-    config.validate().unwrap();
+    let err = config.validate().expect_err("sqlite projection is retired");
+    assert!(
+        format!("{err:?}").contains("sqlite storage is retired"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -136,62 +140,44 @@ async fn root_crate_is_sufficient_for_a_concrete_memory_handle() {
     exercise_operation_families(&fireweed, "operation-families-memory").await;
 }
 
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
-async fn sqlite_uses_the_same_concrete_handle_and_operation_families() {
+async fn filesystem_turso_uses_the_same_concrete_handle_and_operation_families() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "fireweed-concrete-facade-{}-{nonce}.sqlite",
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-concrete-fs-turso-{}-{nonce}",
         std::process::id()
     ));
-    let fireweed = open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).unwrap();
-    accepts_concrete_handle(&fireweed);
-    exercise_operation_families(&fireweed, "operation-families-sqlite").await;
-    drop(fireweed);
-    let _ = std::fs::remove_file(path);
-}
-
-/// Class A matrix cell: durable sqlite log × durable sqlite projection (distinct paths).
-#[tokio::test]
-async fn sqlite_sqlite_projection_uses_the_same_concrete_handle() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let log = std::env::temp_dir().join(format!(
-        "fireweed-concrete-sqlite-log-{}-{nonce}.db",
-        std::process::id()
-    ));
-    let proj = std::env::temp_dir().join(format!(
-        "fireweed-concrete-sqlite-proj-{}-{nonce}.db",
-        std::process::id()
-    ));
-    let fireweed = open_sqlite_sqlite_projection(
-        log.to_str().unwrap(),
-        proj.to_str().unwrap(),
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("log")).unwrap();
+    let fireweed = open(
+        StorageConfig {
+            log: LogConfig::Filesystem {
+                root: root.join("log"),
+            },
+            projection: ProjectionStoreConfig::Turso {
+                path: root.join("projection.db"),
+            },
+            control_plane: None,
+            authority: None,
+            response_barrier: ResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+            segments: SegmentConfig {
+                target_bytes: 256 * 1024,
+                max_latency_ms: 50,
+            },
+            namespace: "concrete-fs-turso".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        },
         Arc::new(SystemClock),
     )
-    .expect("open sqlite×sqlite facade cell");
+    .expect("open filesystem--turso");
     accepts_concrete_handle(&fireweed);
-    exercise_operation_families(&fireweed, "operation-families-sqlite-sqlite").await;
+    exercise_operation_families(&fireweed, "operation-families-filesystem-turso").await;
     drop(fireweed);
-    let _ = std::fs::remove_file(log);
-    let _ = std::fs::remove_file(proj);
-}
-
-#[test]
-fn open_sqlite_sqlite_projection_rejects_identical_paths() {
-    let err = open_sqlite_sqlite_projection(
-        "/tmp/fireweed-same-path.db",
-        "/tmp/fireweed-same-path.db",
-        Arc::new(SystemClock),
-    )
-    .expect_err("identical paths must fail");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("distinct"),
-        "error should mention distinct paths: {msg}"
-    );
+    let _ = std::fs::remove_dir_all(root);
 }

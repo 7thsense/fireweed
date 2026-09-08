@@ -19,7 +19,6 @@ use fireweed_core::{
 };
 use fireweed_engine::{EngineError, HotProjectionQueryPort};
 use fireweed_memory::{ManualClock, composed_memory_backend};
-use fireweed_sqlite::SqliteRelationalBackend;
 use serde_json::{Value, json};
 
 fn qkey() -> fireweed::QueueKey {
@@ -169,21 +168,6 @@ async fn safe_recycling_rule_update_marks_only_act_001() {
         Arc::new(ManualClock::at(0)),
     );
     assert_safe_recycling_rule_update_on_backend(&memory_fireweed).await;
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-bounded-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_fireweed = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_safe_recycling_rule_update_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
@@ -194,22 +178,6 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
     );
     assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_fireweed)
         .await;
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-bounded-claim-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_fireweed = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_fireweed)
-        .await;
 }
 
 #[tokio::test]
@@ -219,21 +187,6 @@ async fn claim_due_scheduled_actions_by_query() {
         Arc::new(ManualClock::at(0)),
     );
     assert_claim_due_scheduled_actions_by_query_on_backend(&memory_fireweed).await;
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-claim-by-query-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_fireweed = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_claim_due_scheduled_actions_by_query_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
@@ -243,21 +196,6 @@ async fn hourly_distribution_by_status() {
         Arc::new(ManualClock::at(0)),
     );
     assert_hourly_distribution_by_status_on_backend(&memory_fireweed).await;
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-hourly-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_fireweed = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_hourly_distribution_by_status_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
@@ -267,21 +205,6 @@ async fn recycling_preview_by_hour() {
         Arc::new(ManualClock::at(0)),
     );
     assert_recycling_preview_by_hour_on_backend(&memory_fireweed).await;
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-recycling-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_fireweed = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_recycling_preview_by_hour_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
@@ -291,21 +214,6 @@ async fn engagement_probability_segments() {
         Arc::new(ManualClock::at(0)),
     );
     assert_engagement_probability_segments_on_backend(&memory_fireweed).await;
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-engagement-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_fireweed = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_engagement_probability_segments_on_backend(&sqlite_fireweed).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -910,12 +818,6 @@ async fn backend_capability_advertising_is_explicit() {
         // Memory/compose product implements API-001 BatchClaimByItemIds.
         claim_by_item_ids: true,
     };
-    // Relational sqlite still advertises the five paired hot-query flags; claim_by_item_ids lands
-    // with the relational implement path (compose memory is the product path for this epic).
-    let sqlite_expected = fireweed::QueryCapabilityFlags {
-        claim_by_item_ids: false,
-        ..memory_expected
-    };
 
     let memory = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
@@ -928,27 +830,6 @@ async fn backend_capability_advertising_is_explicit() {
             .paired_capabilities_consistent()
     );
     assert!(!memory.hot_projection_capabilities(&q).side_record_query);
-
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-capabilities-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
-        Arc::new(ManualClock::at(0)),
-    );
-    assert_eq!(sqlite.hot_projection_capabilities(&q), sqlite_expected);
-    assert!(
-        sqlite
-            .hot_projection_capabilities(&q)
-            .paired_capabilities_consistent()
-    );
-    assert!(!sqlite.hot_projection_capabilities(&q).side_record_query);
 
     let unsupported = UnsupportedHotProjectionBackend;
     let unsupported_flags = unsupported.hot_projection_capabilities(&q);
@@ -1307,17 +1188,10 @@ async fn ordered_cursor_pagination_is_stable() {
 #[tokio::test]
 async fn detail_range_filter_by_run_status_and_schedule() {
     let q = qkey();
-    let sqlite_path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-hot-projection-queries-range-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&sqlite_path);
-    let backend = Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap());
-    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     fireweed
         .create_queue(scheduled_action_queue_definition())
         .await

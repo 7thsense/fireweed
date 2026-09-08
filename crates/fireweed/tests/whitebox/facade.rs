@@ -20,7 +20,6 @@ use fireweed_core::{
 };
 use fireweed_engine::QueueKey;
 use fireweed_memory::{ManualClock, composed_memory_backend};
-use fireweed_sqlite::SqliteRelationalBackend;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -290,16 +289,7 @@ async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
 #[tokio::test]
 async fn discover_alias_preserves_exact_scope_order() {
     let clock = Arc::new(ManualClock::at(0));
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "fireweed-facade-discover-alias-{}-{nonce}.db",
-        std::process::id()
-    ));
-    let backend = Arc::new(SqliteRelationalBackend::open(path.to_str().unwrap()).unwrap());
-    let fireweed = RuntimeCore::new(backend, clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
 
@@ -328,43 +318,6 @@ async fn discover_alias_preserves_exact_scope_order() {
             .collect::<Vec<_>>(),
         vec![Some("old".to_string()), Some("new".to_string())]
     );
-
-    drop(fireweed);
-    std::fs::remove_file(path).unwrap();
-}
-#[tokio::test]
-async fn request_id_push_replays_over_sqlite_relational_facade() {
-    let clock = Arc::new(ManualClock::at(0));
-    let path = std::env::temp_dir()
-        .join(format!(
-            "fireweed-facade-request-id-{}.db",
-            std::process::id()
-        ))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(&path);
-    let backend = Arc::new(SqliteRelationalBackend::open(&path).unwrap());
-    let fireweed = RuntimeCore::new(backend, clock);
-    let q = qkey();
-    fireweed.create_queue(qdef()).await.unwrap();
-    let request_id = RequestId::new("push-req-1").unwrap();
-
-    let first = fireweed
-        .push_batch_with_request_id(&q, request_id.clone(), vec![at(10), at(20)])
-        .await
-        .unwrap();
-    let replay = fireweed
-        .push_batch_with_request_id(&q, request_id, vec![at(10), at(20)])
-        .await
-        .unwrap();
-
-    assert!(first.is_fresh());
-    assert!(replay.is_replayed());
-    assert_eq!(replay.item_ids, first.item_ids);
-    assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
-    drop(fireweed);
-    let _ = std::fs::remove_file(&path);
 }
 #[tokio::test]
 async fn request_id_push_is_idempotent_on_memory_backend() {

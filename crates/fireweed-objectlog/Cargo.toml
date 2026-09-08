@@ -14,7 +14,6 @@ path = "src/lib.rs"
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }
-fireweed-sqlite = { path = "../fireweed-sqlite" }
 # crates.io object-log (program A substrate). Native async LogEngine.
 object-log = { version = "0.3.1", git = "https://github.com/7thsense/object-log.git", tag = "v0.3.1", features = ["s3"] }
 # Create-only PutObject (If-None-Match: *) for queue-definition authority; object-log
@@ -30,7 +29,6 @@ tokio = { version = "1", features = ["rt", "macros"] }
 fireweed-conformance = { path = "../fireweed-conformance" }
 fireweed-release = { path = "../fireweed-release" }
 fireweed-engine = { path = "../fireweed-engine" }
-fireweed-sqlite = { path = "../fireweed-sqlite" }
 fireweed-sim-support = { path = "../fireweed-sim-support" }
 
 [[test]]

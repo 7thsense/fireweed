@@ -1,8 +1,11 @@
 # Cleanup: one log, one projection
 
-**Status**: in progress (2026-08-19). SQLite-family apply is the shared RelTx hop
-(`apply_committed_batch_sql`). Postgres apply remains dialect-forked (`$n` /
-`UNNEST` / no `json_each`).
+**Status**: superseded for object-log × Turso item Claim by TD-016 (2026-09-05).
+SQLite-family apply is the shared RelTx hop (`apply_committed_batch_sql`).
+Postgres apply remains dialect-forked (`$n` / `UNNEST` / no `json_each`) and
+still creates `group_due_idx` / `active_scope_idx` that sqlite/turso drop.
+Class S (SQL-first lease in the claim txn) remains sqlite-log Item claim and
+grouped/cohort exclusive Claim, not the Turso item default.
 
 This document **supersedes** the “planner map as produce-path authority”
 section in `ss-objectlog-turso-memory-goal.md`. That map was a locking

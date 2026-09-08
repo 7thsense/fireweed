@@ -39,7 +39,6 @@ sha2 = "0.11"
 # that builds the chosen backend internally (ADR-009 §4a / B3) so a client never names a concrete backend
 # — the `open_*` functions are the construction path. This is the deliberate composition-root dependency inversion.
 fireweed-memory = { path = "../fireweed-memory", optional = true }
-fireweed-sqlite = { path = "../fireweed-sqlite", optional = true }
 fireweed-objectlog = { path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { path = "../fireweed-postgres", optional = true }
 fireweed-turso = { path = "../fireweed-turso", optional = true }
@@ -50,12 +49,12 @@ tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync
 
 [features]
 # Default pulls the embeddable adapters so `cargo build`/`cargo test` behave as before; a consumer who
-# wants only one backend uses e.g. `--no-default-features --features sqlite`. `postgres` is OPT-IN (it pulls
+# wants only one backend uses e.g. `--no-default-features --features turso`. `postgres` is OPT-IN (it pulls
 # the postgres client) and is the multi-instance backend (`open_postgres` / `open_postgres_coordinated`).
 # `turso` is default-on: Turso is the public default projection (ADR-016 / TD-010).
-default = ["memory", "sqlite", "objectlog", "turso"]
+# rusqlite `sqlite` log/projection is retired; use filesystem log and turso projection.
+default = ["memory", "objectlog", "turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
-sqlite = ["dep:fireweed-sqlite"]
 # objectlog pulls tokio so BlockingLibBackend workers host a reactor for LogEngine I/O.
 objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
@@ -69,7 +68,6 @@ fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"
 # The postgres-constructor smoke test drives the sync postgres client via a non-tokio executor.
 postgres = "0.19"
-rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[test]]
 name = "ss_phased_capacity"
@@ -107,6 +105,11 @@ name = "item_mutation"
 path = "tests/item_mutation.rs"
 
 [[test]]
+name = "eligibility_index_recovery"
+path = "tests/eligibility_index_recovery.rs"
+required-features = ["objectlog", "turso"]
+
+[[test]]
 name = "multi_queue_claim"
 path = "tests/multi_queue_claim.rs"
 
@@ -114,50 +117,6 @@ path = "tests/multi_queue_claim.rs"
 name = "objectlog_postgres_composition"
 path = "tests/objectlog_postgres_composition.rs"
 required-features = ["objectlog", "postgres"]
-
-[[test]]
-name = "sqlite_create_or_read"
-path = "tests/sqlite_create_or_read.rs"
-
-[[test]]
-name = "sqlite_commit_batch_linearity"
-path = "tests/sqlite_commit_batch_linearity.rs"
-required-features = ["sqlite", "memory", "objectlog"]
-
-[[test]]
-name = "sqlite_commit_section_contention_probe"
-path = "tests/sqlite_commit_section_contention_probe.rs"
-required-features = ["sqlite"]
-
-[[test]]
-name = "sqlite_mixed_op_funnel_probe"
-path = "tests/sqlite_mixed_op_funnel_probe.rs"
-required-features = ["sqlite"]
-
-[[test]]
-name = "sqlite_multi_worker_tps_probe"
-path = "tests/sqlite_multi_worker_tps_probe.rs"
-required-features = ["sqlite"]
-
-[[test]]
-name = "sqlite_sqlite_projection_tps_probe"
-path = "tests/sqlite_sqlite_projection_tps_probe.rs"
-required-features = ["sqlite"]
-
-[[test]]
-name = "sqlite_log_group_commit_stress"
-path = "tests/sqlite_log_group_commit_stress.rs"
-required-features = ["sqlite"]
-
-[[test]]
-name = "sqlite_product_claim_commit_group_commit_probe"
-path = "tests/sqlite_product_claim_commit_group_commit_probe.rs"
-required-features = ["sqlite"]
-
-[[test]]
-name = "durable_tps_proof"
-path = "tests/durable_tps_proof.rs"
-required-features = ["sqlite"]
 
 [[test]]
 name = "public_interface_conformance"
@@ -171,37 +130,37 @@ required-features = ["memory", "objectlog"]
 [[test]]
 name = "p7n_non_s3_lifecycle_parity"
 path = "tests/p7n_non_s3_lifecycle_parity.rs"
-required-features = ["memory", "sqlite", "objectlog"]
+required-features = ["memory", "objectlog", "turso"]
 
 [[test]]
 name = "p6n_non_s3_query_parity"
 path = "tests/p6n_non_s3_query_parity.rs"
-required-features = ["memory", "sqlite", "objectlog"]
+required-features = ["memory", "objectlog", "turso"]
 
 [[test]]
 name = "p8n_non_s3_mutation_parity"
 path = "tests/p8n_non_s3_mutation_parity.rs"
-required-features = ["memory", "sqlite", "objectlog"]
+required-features = ["memory", "objectlog", "turso"]
 
 [[test]]
 name = "p9n_non_s3_transaction_parity"
 path = "tests/p9n_non_s3_transaction_parity.rs"
-required-features = ["memory", "sqlite", "objectlog"]
+required-features = ["memory", "objectlog", "turso"]
 
 [[test]]
 name = "p5_class_b_reopen"
 path = "tests/p5_class_b_reopen.rs"
-required-features = ["memory", "sqlite", "turso"]
+required-features = ["memory", "turso"]
 
 [[test]]
 name = "p5an_non_s3_class_a_reopen_parity"
 path = "tests/p5an_non_s3_class_a_reopen_parity.rs"
-required-features = ["memory", "sqlite", "objectlog"]
+required-features = ["memory", "objectlog", "turso"]
 
 [[test]]
 name = "public_interface_external_conformance"
 path = "tests/public_interface_external_conformance.rs"
-required-features = ["postgres", "objectlog", "sqlite"]
+required-features = ["postgres", "objectlog", "turso"]
 
 [[test]]
 name = "public_durability_matrix"
@@ -235,49 +194,49 @@ path = "tests/p3b_async_config_validation.rs"
 [[test]]
 name = "p3b_filesystem_barriers"
 path = "tests/p3b_filesystem_barriers.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p3s_s3_barriers"
 path = "tests/p3s_s3_barriers.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p7s_s3_lifecycle"
 path = "tests/p7s_s3_lifecycle.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p5as3_s3_reopen_parity"
 path = "tests/p5as3_s3_reopen_parity.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p6s_s3_durability_acceptance"
 path = "tests/p6s_s3_durability_acceptance.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p6s3_s3_query_parity"
 path = "tests/p6s3_s3_query_parity.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p8s3_s3_mutation_parity"
 path = "tests/p8s3_s3_mutation_parity.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p9s3_s3_transaction_parity"
 path = "tests/p9s3_s3_transaction_parity.rs"
-required-features = ["objectlog", "sqlite", "postgres"]
+required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p3b_non_s3_barrier_conformance"
 path = "tests/p3b_non_s3_barrier_conformance.rs"
-required-features = ["memory", "objectlog", "sqlite", "postgres"]
+required-features = ["memory", "objectlog", "turso", "postgres"]
 
 [[test]]
 name = "functional_matrix_route_sources"
 path = "tests/functional_matrix_route_sources.rs"
-required-features = ["memory", "sqlite", "objectlog", "postgres", "turso"]
+required-features = ["memory", "objectlog", "postgres", "turso"]

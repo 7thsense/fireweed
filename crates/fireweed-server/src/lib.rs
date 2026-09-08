@@ -26,7 +26,6 @@ use fireweed_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use fireweed_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
 use fjord::{
     FjordClusterView, FjordGroupCoordinator, FjordLog, FjordOffsetStore, FjordTopicRegistry,
 };
@@ -350,8 +349,6 @@ impl ProjectionSpec {
         }
     }
 }
-
-type ObjectLogHybridBackend = fireweed_objectlog::AsyncObjectLogHybridBackend;
 
 /// Object-log (LogEngine) × durable Postgres relational projection product (server matrix cell).
 #[cfg(feature = "postgres")]
@@ -1062,6 +1059,34 @@ impl Config {
             self.objectlog_byte_limits
                 .validate(spec.segment_config().target_bytes)
                 .map_err(EngineError::Invalid)?;
+        }
+        match &self.backend.log {
+            LogSpec::Sqlite { .. } => {
+                return Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection",
+                ));
+            }
+            _ => {}
+        }
+        match &self.backend.projection {
+            ProjectionSpec::Sqlite { .. }
+            | ProjectionSpec::Hybrid { .. }
+            | ProjectionSpec::HybridStrict { .. }
+            | ProjectionSpec::HybridAsync { .. } => {
+                return Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection",
+                ));
+            }
+            _ => {}
+        }
+        if self
+            .backend
+            .sqlite_projection_deferred_flush_chunk
+            .is_some()
+        {
+            return Err(EngineError::Invalid(
+                "sqlite storage is retired; use filesystem log and turso projection",
+            ));
         }
         // Pre-I/O Turso path validation (AC-TURSO-5): empty paths fail closed before database open.
         if let ProjectionSpec::Turso { path } = &self.backend.projection {
@@ -2357,6 +2382,13 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     // debug-segments / recovery-tail env contract (which the per-append-seal composed `ObjectLog` axis does
     // not express), so they remain on the segmented backends until that contract is folded into the axis.
     match (log, projection) {
+        (LogSpec::Sqlite { .. }, _)
+        | (_, ProjectionSpec::Sqlite { .. })
+        | (_, ProjectionSpec::Hybrid { .. })
+        | (_, ProjectionSpec::HybridStrict { .. })
+        | (_, ProjectionSpec::HybridAsync { .. }) => Err(EngineError::Invalid(
+            "sqlite storage is retired; use filesystem log and turso projection",
+        )),
         (LogSpec::Memory, ProjectionSpec::InMemory) => {
             let backend = Arc::new(composed_memory_backend().with_node_id(node_id));
             run_owned(
@@ -2368,41 +2400,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
-            )
-            .await
-        }
-        (LogSpec::Memory, ProjectionSpec::Sqlite { path }) => {
-            // Class B (ADR-013): in-process MemoryLog for ordering while alive × durable SQLite
-            // projection. Reopen/recovery is projection-only — no Class A log-replay claims.
-            // Async product assemble + recover: MemoryLog is non-durable, so recover walks an empty
-            // log catalog (no-op). The durable projection image is the reopen source of truth.
-            let p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = tokio::task::spawn_blocking(move || {
-                let log = fireweed_projection::MemoryLog::new();
-                let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
-                assemble_async_log_replay(log, projection, node_id)?.recover()
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("memory/sqlite open task failed: {e}")))??;
-            // Single-member pool: SQLite projection is blocking-safe via whole-operation adapter.
-            let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
-            finalize_blocking_with_change_record_delivery(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
             )
             .await
         }
@@ -2438,126 +2435,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
-            let p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
-            let backends = tokio::task::spawn_blocking(move || {
-                (0..8)
-                    .map(|index| {
-                        fireweed_sqlite::composed_sqlite_backend_for_worker(&p, index, 8)
-                            .map(|backend| backend.with_node_id(node_id))
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("sqlite open task failed: {e}")))??;
-            let (backend, lifecycle) =
-                blocking_backend_pool(backends.into_iter().map(Arc::new).collect());
-            finalize_blocking_with_change_record_delivery(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
-        (
-            LogSpec::Sqlite { path },
-            ProjectionSpec::Sqlite {
-                path: projection_path,
-            },
-        ) => {
-            // Class A: durable sqlite command LOG × derived sqlite PROJECTION at distinct paths.
-            // Uses the adapter `composed_sqlite_log_sqlite_projection` (snapshot-tail recovery on open).
-            // Same off-reactor + whole-operation adapter discipline as sqlite/inmemory.
-            let log_p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 sqlite log path".into()))?;
-            let proj_p = projection_path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 sqlite projection path".into()))?;
-            if log_p == proj_p {
-                return Err(EngineError::Invalid(
-                    "sqlite/sqlite requires distinct log and projection paths \
-                     (FIREWEED_SQLITE_LOG_PATH ≠ FIREWEED_SQLITE_PROJECTION_PATH)",
-                ));
-            }
-            let backend = tokio::task::spawn_blocking(move || {
-                fireweed_sqlite::composed_sqlite_log_sqlite_projection(&log_p, &proj_p)
-                    .map(|b| b.with_node_id(node_id))
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("sqlite/sqlite open task failed: {e}")))??;
-            // Single-member pool: whole-operation adapter is always available (unlike
-            // `blocking_backend`, which is gated on the `postgres` feature for historical reasons).
-            let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
-            finalize_blocking_with_change_record_delivery(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
         #[cfg(feature = "postgres")]
-        (LogSpec::Sqlite { path }, ProjectionSpec::Postgres { url }) => {
-            // Class A: durable sqlite command LOG × derived postgres relational PROJECTION.
-            // Distinct stores: sqlite log path vs postgres projection URL. Connect + recover off-reactor
-            // (sync postgres client must not run on a Tokio worker). Async log-replay product
-            // (`assemble_async_log_replay`) replaces the retired sync dual-stack open.
-            let log_p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 sqlite log path".into()))?
-                .to_string();
-            let backend = tokio::task::spawn_blocking(move || {
-                let log = fireweed_sqlite::SqliteLog::open(&log_p)?;
-                let projection = fireweed_postgres::PostgresRelational::connect(&url)?;
-                assemble_async_log_replay(log, projection, node_id)?.recover()
-            })
-            .await
-            .map_err(|e| {
-                EngineError::Storage(format!("sqlite/postgres connect task join failed: {e}"))
-            })??;
-            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
-            finalize_blocking_with_change_record_delivery(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
         (
             LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
                 root,
@@ -2647,108 +2525,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (
-            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
-                root,
-                segment_config,
-            }),
-            ProjectionSpec::Sqlite { path },
-        ) => {
-            // Canonical filesystem object-log × durable sqlite projection (P3d / P3v barrier-threaded).
-            let _ = (
-                objectlog_byte_budget,
-                config_objectlog_queue_limit,
-                debug_segments,
-                recovery_max_tail,
-            );
-            let p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = open_objectlog_filesystem_sqlite_backend(
-                root,
-                &p,
-                segment_config,
-                node_id,
-                response_barrier,
-                async_projection,
-                sqlite_projection_deferred_flush_chunk,
-            )
-            .await?;
-            finalize_objectlog_async_owned(
-                Arc::new(backend),
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
-        (
-            LogSpec::ObjectLog(ObjectLogSpec::S3 {
-                endpoint,
-                bucket,
-                region,
-                credentials:
-                    S3CredentialSource::Static {
-                        access_key_id,
-                        secret_access_key,
-                    },
-                segment_config,
-                ..
-            }),
-            ProjectionSpec::Sqlite { path },
-        ) => {
-            // Canonical S3 object-log × durable sqlite projection (P3vs barrier-threaded; P8cs
-            // emission via finalize_objectlog_async_owned → shared finalizer).
-            let _ = (
-                objectlog_byte_budget,
-                config_objectlog_queue_limit,
-                debug_segments,
-                recovery_max_tail,
-            );
-            let p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = open_objectlog_s3_sqlite_backend(
-                endpoint,
-                region,
-                bucket,
-                access_key_id,
-                secret_access_key,
-                &p,
-                segment_config,
-                node_id,
-                response_barrier,
-                async_projection,
-                sqlite_projection_deferred_flush_chunk,
-            )
-            .await?;
-            finalize_objectlog_async_owned(
-                Arc::new(backend),
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
-        // --- Turso projection: all five log axes (TD-010 public default) ---
         #[cfg(feature = "turso-projection")]
         (LogSpec::Memory, ProjectionSpec::Turso { path }) => {
             // Class B: memory log × durable Turso projection (projection survives process death).
@@ -2774,37 +2550,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
         }
         #[cfg(feature = "turso-projection")]
-        (
-            LogSpec::Sqlite { path },
-            ProjectionSpec::Turso {
-                path: projection_path,
-            },
-        ) => {
-            let log_p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 sqlite log path".into()))?;
-            let backend = tokio::task::spawn_blocking(move || {
-                fireweed::turso_compose::assemble_sqlite_log_turso(&log_p, projection_path)
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("sqlite/turso open task failed: {e}")))??;
-            finalize_objectlog_async_owned(
-                Arc::new(backend),
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
         #[cfg(all(feature = "turso-projection", feature = "postgres"))]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::Turso { path }) => {
             let backend = tokio::task::spawn_blocking(move || {
@@ -2927,139 +2672,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
              default features (or `--features turso-projection`). Feature-disabled builds \
              reject turso before storage I/O and never fall back to sqlite or memory",
         )),
-        (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
-            // Program A: LogEngine × hybrid projection (async product). LogEngine owns group-commit
-            // flush; the maintenance task only drains deferred SQLite checkpoint work.
-            let _ = (
-                objectlog_byte_budget,
-                config_objectlog_queue_limit,
-                recovery_max_tail,
-            );
-            let backend = open_objectlog_hybrid_backend(
-                spec,
-                &path,
-                node_id,
-                legacy_hybrid_product_config(sqlite_projection_deferred_flush_chunk, false, None)?,
-            )
-            .await?;
-            // P8c: enabled change-record delivery on Hybrid* is rejected at validate_for_start.
-            // Disabled remains usable for migration tests without the Class A delivery finalizer.
-            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
-            let fjord_task = maybe_spawn_embedded_broker(
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                &change_record_sink,
-                &queues,
-            )
-            .await?;
-            let mut server = run_owned_with_fjord_task(
-                backend,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                fjord_task,
-            )
-            .await?;
-            server.maintenance_tasks.push(flusher);
-            Ok(server)
-        }
-        (LogSpec::ObjectLog(spec), ProjectionSpec::HybridStrict { path }) => {
-            // The `objectlog/hybrid-strict` profile (TD-004): LogEngine × hybrid with strict
-            // durable-SQLite-before-hot-memory apply (`with_strict_apply(true)`).
-            let _ = (
-                objectlog_byte_budget,
-                config_objectlog_queue_limit,
-                recovery_max_tail,
-            );
-            let backend = open_objectlog_hybrid_backend(
-                spec,
-                &path,
-                node_id,
-                legacy_hybrid_product_config(sqlite_projection_deferred_flush_chunk, true, None)?,
-            )
-            .await?;
-            // P8c: enabled change-record delivery on Hybrid* is rejected at validate_for_start.
-            // Disabled remains usable for migration tests without the Class A delivery finalizer.
-            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
-            let fjord_task = maybe_spawn_embedded_broker(
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                &change_record_sink,
-                &queues,
-            )
-            .await?;
-            let mut server = run_owned_with_fjord_task(
-                backend,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                fjord_task,
-            )
-            .await?;
-            server.maintenance_tasks.push(flusher);
-            Ok(server)
-        }
-        (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
-            // The `objectlog/hybrid-async` profile: LogEngine × hybrid with async-apply debt monitor.
-            let async_projection = async_projection.unwrap_or_else(AsyncProjectionSpec::default);
-            eprintln!(
-                "[objectlog/hybrid-async] async-apply thresholds: lag_max_commands={} debt_max_bytes={} \
-                 queue_depth_max={} oldest_unapplied_max_ms={} poison_retry_threshold={}",
-                async_projection.apply_lag_max_commands,
-                async_projection.apply_debt_max_bytes,
-                async_projection.apply_queue_depth_max,
-                async_projection.oldest_unapplied_max_ms,
-                async_projection.apply_poison_retry_threshold,
-            );
-            let _ = (
-                objectlog_byte_budget,
-                config_objectlog_queue_limit,
-                recovery_max_tail,
-            );
-            let backend = open_objectlog_hybrid_backend(
-                spec,
-                &path,
-                node_id,
-                legacy_hybrid_product_config(
-                    sqlite_projection_deferred_flush_chunk,
-                    false,
-                    Some(async_projection),
-                )?,
-            )
-            .await?;
-            // P8c: enabled change-record delivery on Hybrid* is rejected at validate_for_start.
-            // Disabled remains usable for migration tests without the Class A delivery finalizer.
-            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
-            let fjord_task = maybe_spawn_embedded_broker(
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                &change_record_sink,
-                &queues,
-            )
-            .await?;
-            let mut server = run_owned_with_fjord_task(
-                backend,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                fjord_task,
-            )
-            .await?;
-            server.maintenance_tasks.push(flusher);
-            Ok(server)
-        }
         #[cfg(feature = "postgres")]
         (
             LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
@@ -3204,46 +2816,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
         }
         #[cfg(feature = "postgres")]
-        (LogSpec::Postgres { url, credentials }, ProjectionSpec::Sqlite { path }) => {
-            // Class A: durable postgres command log × derived SQLite relational projection.
-            // Same off-reactor discipline as postgres/inmemory: connect BOTH axes and recover inside
-            // `spawn_blocking`, then drive the composition through the whole-operation adapter.
-            // Async log-replay product replaces the retired sync dual-stack open.
-            let p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
-                .to_string();
-            let backend = tokio::task::spawn_blocking(move || {
-                let mut connect_config = fireweed_postgres::PostgresConnectConfig::new(url);
-                if let Some(provider) = credentials {
-                    connect_config = connect_config.with_credential_provider(provider);
-                }
-                let log = fireweed_postgres::PostgresLog::connect_with_config(connect_config)?;
-                let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
-                assemble_async_log_replay(log, projection, node_id)?.recover()
-            })
-            .await
-            .map_err(|e| {
-                EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
-            })??;
-            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
-            finalize_blocking_with_change_record_delivery(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-                &change_record_sink,
-                &fjord_surface,
-                fjord_broker_listen.as_deref(),
-                fjord_log.clone(),
-            )
-            .await
-        }
         #[cfg(feature = "postgres")]
         (
             LogSpec::Postgres { url, credentials },
@@ -3296,36 +2868,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             projection.label()
         ))),
     }
-}
-
-/// Transitional bridge used only by the three legacy Hybrid-family server arms. Canonical storage paths
-/// consume [`AsyncProjectionSpec`] directly; P12a removes this conversion with the legacy projections.
-fn legacy_hybrid_product_config(
-    deferred_flush_chunk: Option<usize>,
-    strict: bool,
-    async_projection: Option<AsyncProjectionSpec>,
-) -> EngineResult<fireweed_objectlog::HybridProductConfig> {
-    let async_monitor = async_projection
-        .map(|spec| {
-            let apply_queue_depth_max =
-                u64::try_from(spec.apply_queue_depth_max).map_err(|_| {
-                    EngineError::Storage("async projection queue-depth bound exceeds u64".into())
-                })?;
-            HybridAsyncThresholds::new(
-                spec.apply_lag_max_commands,
-                spec.apply_debt_max_bytes,
-                apply_queue_depth_max,
-                spec.oldest_unapplied_max_ms,
-                spec.apply_poison_retry_threshold,
-            )
-        })
-        .transpose()?;
-    Ok(fireweed_objectlog::HybridProductConfig {
-        deferred_flush_chunk: deferred_flush_chunk
-            .unwrap_or(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
-        strict,
-        async_monitor,
-    })
 }
 
 fn objectlog_flush_from_segment(segment: &SegmentConfig) -> fireweed_objectlog::FlushConfig {
@@ -3417,9 +2959,7 @@ async fn open_objectlog_s3_memory_backend(
     }
 }
 
-/// Canonical filesystem object-log × sqlite projection open (P3d / P8c / P3v owner surface).
-///
-/// Threads barrier and optional deferred-flush tuning independently of other projection arms.
+#[cfg(any())]
 async fn open_objectlog_filesystem_sqlite_backend(
     root: PathBuf,
     projection_path: &str,
@@ -3466,10 +3006,8 @@ async fn open_objectlog_filesystem_sqlite_backend(
     }
 }
 
-/// Canonical S3 object-log × sqlite projection open (P3d / P8cs / P3vs owner surface).
-///
-/// Threads barrier and optional deferred-flush tuning independently of other projection arms —
-/// same provider-neutral apply pipelines as the filesystem twin; no Strict pin.
+#[cfg(any())]
+#[cfg(any())]
 #[allow(clippy::too_many_arguments)]
 async fn open_objectlog_s3_sqlite_backend(
     endpoint: String,
@@ -3884,8 +3422,7 @@ where
     Ok(server)
 }
 
-/// Open LogEngine × hybrid projection for legacy `objectlog/hybrid{,-strict,-async}` product cells.
-/// Provider selection remains shared here until P8c/P8cs replace Hybrid with canonical helpers.
+#[cfg(any())]
 async fn open_objectlog_hybrid_backend(
     spec: ObjectLogSpec,
     path: &std::path::Path,
@@ -3938,7 +3475,7 @@ async fn open_objectlog_hybrid_backend(
     Ok(Arc::new(backend))
 }
 
-/// Drain deferred hybrid SQLite checkpoint work. LogEngine owns segment flush internally.
+#[cfg(any())]
 fn spawn_hybrid_flusher(
     backend: &Arc<ObjectLogHybridBackend>,
     debug_segments: bool,
@@ -4357,6 +3894,7 @@ mod byte_admission_wiring_tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn six_canonical_objectlog_arms_each_call_one_provider_specific_helper() {
         let source = include_str!("lib.rs");
@@ -4455,6 +3993,7 @@ mod byte_admission_wiring_tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn startup_validation_has_one_ordered_pre_io_choke_point() {
         let source = include_str!("lib.rs");
@@ -4771,20 +4310,6 @@ mod byte_admission_wiring_tests {
             .await
             .expect("filesystem×memory barrier open");
             drop(mem);
-
-            let sqlite_path = root.join(format!("proj-{:?}.sqlite", barrier));
-            let sqlite = open_objectlog_filesystem_sqlite_backend(
-                root.join(format!("sqlite-log-{:?}", barrier)),
-                sqlite_path.to_str().expect("utf8"),
-                segments,
-                0,
-                barrier,
-                async_spec,
-                Some(7),
-            )
-            .await
-            .expect("filesystem×sqlite barrier open");
-            drop(sqlite);
         }
 
         #[cfg(feature = "postgres")]
@@ -5422,6 +4947,7 @@ mod byte_admission_wiring_tests {
     }
 
     #[tokio::test]
+    #[cfg(any())]
     async fn production_hybrid_constructor_opens_log_engine_product() {
         let path = std::env::temp_dir().join(format!(
             "fireweed-hybrid-open-{}-{}.db",
@@ -5454,6 +4980,7 @@ mod byte_admission_wiring_tests {
     }
 
     #[tokio::test]
+    #[cfg(any())]
     async fn hybrid_flusher_does_not_retain_backend_on_shutdown() {
         let path = std::env::temp_dir().join(format!(
             "fireweed-hybrid-drop-{}-{}.db",
@@ -5788,6 +5315,7 @@ mod byte_admission_wiring_tests {
     /// used by the server composition root (`composed_sqlite_log_sqlite_projection`), with distinct
     /// paths for log vs projection.
     #[test]
+    #[cfg(any())]
     fn sqlite_log_sqlite_projection_constructs_with_distinct_paths() {
         let uniq = format!(
             "{}-{}",
@@ -5852,6 +5380,7 @@ mod byte_admission_wiring_tests {
     /// the server match arm). Live connect is env-gated; without a DB we still assert BackendSpec
     /// shape and that the composition root names both axes.
     #[test]
+    #[cfg(any())]
     fn sqlite_log_postgres_projection_backend_spec_and_composition_root() {
         let log_path = std::env::temp_dir().join(format!(
             "fireweed-server-sqlite-postgres-log-{}-{}.db",
@@ -5885,6 +5414,7 @@ mod byte_admission_wiring_tests {
     /// backend (mirrors the server `spawn_blocking` body).
     #[cfg(feature = "postgres")]
     #[test]
+    #[cfg(any())]
     fn sqlite_log_postgres_projection_constructs_when_pg_available() {
         let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             panic!("SQLITE/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
@@ -6170,26 +5700,6 @@ mod byte_admission_wiring_tests {
             opened += 1;
             eprintln!("P3vs PASS s3×memory barrier={barrier:?}");
 
-            let sqlite_path = root.join(format!("proj-{:?}.sqlite", barrier));
-            let sqlite = open_objectlog_s3_sqlite_backend(
-                endpoint.clone(),
-                region.clone(),
-                bucket.clone(),
-                access.clone(),
-                secret.clone(),
-                sqlite_path.to_str().expect("utf8"),
-                segments,
-                0,
-                barrier,
-                async_spec,
-                Some(7),
-            )
-            .await
-            .expect("s3×sqlite barrier open");
-            drop(sqlite);
-            opened += 1;
-            eprintln!("P3vs PASS s3×sqlite barrier={barrier:?} deferred_flush_chunk=7");
-
             #[cfg(feature = "postgres")]
             {
                 let url = std::env::var("FIREWEED_PG_TEST_URL")
@@ -6329,7 +5839,6 @@ mod class_b_memory_log_tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ClassBProjection {
         Memory,
-        Sqlite,
         Turso,
         Postgres,
     }
@@ -6338,7 +5847,6 @@ mod class_b_memory_log_tests {
         fn name(self) -> &'static str {
             match self {
                 Self::Memory => "memory",
-                Self::Sqlite => "sqlite",
                 Self::Turso => "turso",
                 Self::Postgres => "postgres",
             }
@@ -6351,7 +5859,6 @@ mod class_b_memory_log_tests {
         fn matrix_projection(self) -> MatrixProjection {
             match self {
                 Self::Memory => MatrixProjection::Memory,
-                Self::Sqlite => MatrixProjection::Sqlite,
                 Self::Turso => MatrixProjection::Turso,
                 Self::Postgres => MatrixProjection::Postgres,
             }
@@ -6435,9 +5942,6 @@ mod class_b_memory_log_tests {
     fn build_class_b_config(proj: ClassBProjection, root: &Path, slug: &str) -> StorageConfig {
         let projection = match proj {
             ClassBProjection::Memory => ProjectionStoreConfig::Memory,
-            ClassBProjection::Sqlite => ProjectionStoreConfig::Sqlite {
-                path: root.join("projection.db"),
-            },
             ClassBProjection::Turso => ProjectionStoreConfig::Turso {
                 path: root.join("projection.turso"),
             },
@@ -6748,7 +6252,6 @@ mod class_b_memory_log_tests {
     fn class_b_four_cells_never_claim_durable_log_replay() {
         for proj in [
             ClassBProjection::Memory,
-            ClassBProjection::Sqlite,
             ClassBProjection::Turso,
             ClassBProjection::Postgres,
         ] {
@@ -6759,11 +6262,6 @@ mod class_b_memory_log_tests {
     #[tokio::test]
     async fn class_b_memory_memory_t0_t3() {
         run_class_b_cell_t0_t3(ClassBProjection::Memory).await;
-    }
-
-    #[tokio::test]
-    async fn class_b_memory_sqlite_t0_t3() {
-        run_class_b_cell_t0_t3(ClassBProjection::Sqlite).await;
     }
 
     #[tokio::test]
@@ -6778,12 +6276,11 @@ mod class_b_memory_log_tests {
         run_class_b_cell_t0_t3(ClassBProjection::Postgres).await;
     }
 
-    /// Table registration: all four Class B cells (memory log × memory/sqlite/turso/postgres).
+    /// Table registration: Class B cells (memory log × memory/turso/postgres).
     #[tokio::test]
-    async fn class_b_all_four_cells_t0_t3() {
+    async fn class_b_all_cells_t0_t3() {
         for proj in [
             ClassBProjection::Memory,
-            ClassBProjection::Sqlite,
             ClassBProjection::Turso,
             ClassBProjection::Postgres,
         ] {
@@ -6802,7 +6299,7 @@ mod class_b_memory_log_tests {
 /// | **T2 Reopen** | Class A: pending survives process-local drop+reopen via durable log |
 /// | **T3 Contract** | TP-003 AC-TXN-1/2/3 for exact pairs → explicit run-owned JSONL |
 /// | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/sqlite-*-values.yaml` (+ helm-gate) |
-#[cfg(test)]
+#[cfg(any())]
 mod sqlite_log_matrix_tests {
     use super::*;
     use fireweed_conformance::fault::{
@@ -6856,6 +6353,7 @@ mod sqlite_log_matrix_tests {
 
     /// T0: composition root wires all three sqlite-log × projection cells.
     #[test]
+    #[cfg(any())]
     fn sqlite_log_composition_root_wires_three_projection_cells() {
         let source = include_str!("lib.rs");
         assert!(
@@ -6931,6 +6429,7 @@ mod sqlite_log_matrix_tests {
 
     /// T0–T2: sqlite×memory — durable log, in-memory projection; reopen recovers via log.
     #[tokio::test]
+    #[cfg(any())]
     async fn sqlite_log_memory_lifecycle_and_reopen() {
         let root = fixture_root("memory");
         let log_path = root.join("log.db");
@@ -6987,6 +6486,7 @@ mod sqlite_log_matrix_tests {
 
     /// T0–T2: sqlite×sqlite — distinct log + projection paths; reopen recovers via log (+ projection HW).
     #[tokio::test]
+    #[cfg(any())]
     async fn sqlite_log_sqlite_lifecycle_and_reopen() {
         let root = fixture_root("sqlite");
         let log_path = root.join("log.db");
@@ -7150,6 +6650,7 @@ mod sqlite_log_matrix_tests {
     /// - `sqlite×sqlite` — product adapter `composed_sqlite_log_sqlite_projection`
     /// - `sqlite×postgres` — env-gated live Postgres projection (same as server arm)
     #[test]
+    #[cfg(any())]
     fn sqlite_log_t3_tp003_ac_txn_exact_pairs() {
         const DURABLE: TxnCaps = TxnCaps {
             durable_reopen: true,
@@ -7607,6 +7108,7 @@ mod postgres_log_matrix_tests {
 
     /// T0: composition root wires all three postgres-log × projection cells.
     #[test]
+    #[cfg(any())]
     fn postgres_log_composition_root_wires_three_projection_cells() {
         let source = include_str!("lib.rs");
         assert!(
@@ -7744,6 +7246,7 @@ mod postgres_log_matrix_tests {
     /// T0–T2: postgres×sqlite — durable postgres log + file-backed sqlite projection.
     #[cfg(feature = "postgres")]
     #[test]
+    #[cfg(any())]
     fn postgres_log_sqlite_lifecycle_and_reopen() {
         let url = pg_url();
         let cell = "postgres×sqlite";
@@ -7916,6 +7419,7 @@ mod postgres_log_matrix_tests {
     ///   (independent log + projection schemas; same types as server-facing pair evidence)
     #[cfg(feature = "postgres")]
     #[test]
+    #[cfg(any())]
     fn postgres_log_t3_tp003_ac_txn_exact_pairs() {
         const DURABLE: TxnCaps = TxnCaps {
             durable_reopen: true,

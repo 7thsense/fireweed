@@ -27,7 +27,6 @@ turso = { version = "=0.7.2", default-features = false, optional = true }
 [dev-dependencies]
 fireweed-conformance = { path = "../fireweed-conformance" }
 fireweed-projection = { path = "../fireweed-projection" }
-fireweed-sqlite = { path = "../fireweed-sqlite" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 

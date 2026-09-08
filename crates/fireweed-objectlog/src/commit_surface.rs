@@ -36,8 +36,6 @@ use fireweed_engine::{
     validate_distinct_commit_claims, validate_entity, validate_instance_fence,
 };
 
-use crate::async_product::SeqIdGen;
-
 /// In-process commit request-id cache (parity with [`fireweed_engine::AsyncLogReplayBackend`]).
 pub type CommitIdempotency =
     Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>>>;
@@ -104,10 +102,10 @@ pub enum PreparedCommitTransition {
     clippy::too_many_arguments,
     reason = "commit planning keeps authority, identity, and idempotency inputs explicit"
 )]
-pub async fn prepare_commit_transition<P>(
+pub async fn prepare_commit_transition<P, I>(
     projection: &P,
     control: &InProcessControlPlane,
-    ids: &SeqIdGen,
+    ids: &I,
     counters: &QueueCounters,
     node_id: u8,
     commit_idempotency: &CommitIdempotency,
@@ -118,6 +116,7 @@ pub async fn prepare_commit_transition<P>(
 ) -> EngineResult<PreparedCommitTransition>
 where
     P: AsyncProjectionStore,
+    I: IdGen + ?Sized,
 {
     let CommitTransition {
         request_id,
@@ -156,15 +155,22 @@ where
                 | IdempotencyDecision::Expired => {}
             }
         }
-        if let Some(entries) = AsyncProjectionStore::replay_durable_commit(
+        let durable_replay = match AsyncProjectionStore::replay_durable_commit(
             projection,
             shard.clone(),
             rid.clone(),
             fingerprint.0,
             now,
         )
-        .await?
+        .await
         {
+            Ok(entries) => entries,
+            // Turso and other projection-only adapters fail closed at this seam;
+            // retained commit replay is the in-process product cache above.
+            Err(EngineError::Unavailable) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(entries) = durable_replay {
             let recovery = entries
                 .into_iter()
                 .map(recovery_from_outcome_entry)

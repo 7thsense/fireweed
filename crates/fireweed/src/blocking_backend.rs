@@ -62,13 +62,13 @@ struct WorkerSenders {
     data: Vec<mpsc::SyncSender<Job>>,
 }
 
-#[cfg(all(feature = "objectlog", any(feature = "postgres", feature = "sqlite")))]
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
 #[derive(Clone)]
 pub(crate) struct OwnedBlockingExecutor {
     pool: Arc<WorkerPool>,
 }
 
-#[cfg(all(feature = "objectlog", any(feature = "postgres", feature = "sqlite")))]
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
 impl OwnedBlockingExecutor {
     pub(crate) fn run<T, F>(
         &self,
@@ -196,10 +196,7 @@ fn shared_worker_pool() -> EngineResult<Arc<WorkerPool>> {
     }
 }
 
-#[cfg(any(
-    all(feature = "objectlog", feature = "postgres"),
-    all(feature = "objectlog", feature = "sqlite")
-))]
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
 pub(crate) fn shared_executor() -> EngineResult<OwnedBlockingExecutor> {
     Ok(OwnedBlockingExecutor {
         pool: shared_worker_pool()?,

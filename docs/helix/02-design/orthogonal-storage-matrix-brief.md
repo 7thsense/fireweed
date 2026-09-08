@@ -65,8 +65,8 @@ appear only in test IDs and historical evidence filenames.
 
 | Axis | Public values | Responsibility |
 |------|---------------|----------------|
-| **Log** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
-| **Projection** | `memory`, `sqlite`, `turso`, `postgres` | Serving, claim selection, validation, apply; `turso` is the default |
+| **Log** | `memory`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
+| **Projection** | `memory`, `turso`, `postgres` | Serving, claim selection, validation, apply; `turso` is the default |
 | **Control plane** | Optional (in-process / postgres, etc.) | Queue definitions, placement, ownership — composed independently and not redefined here |
 
 **Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`,
@@ -76,17 +76,18 @@ projection—not matrix rows. The public `turso` value is limited to the
 embedded/local Turso 0.7 adapter in ordinary WAL mode; remote, sync, and MVCC
 modes are outside this product boundary.
 
-### 2.2 Full matrix (20 cells)
+### 2.2 Full matrix (12 cells)
 
 Every cell is a valid selection. Semantics differ only by **durability class**.
+The rusqlite `sqlite` log and `sqlite` projection are retired; Turso is the
+sqlite-family serving store.
 
-| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
-|------------------|----------|----------|-------------------|------------|
-| `memory` | Class B | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `turso` (default) | `postgres` |
+|------------------|----------|-------------------|------------|
+| `memory` | Class B | Class B | Class B |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
 
 ### 2.3 Object-log peers
 
@@ -103,8 +104,8 @@ is not an automatic free multi-writer free-for-all.
 
 | Class | Logs | Authority after restart | Client contract |
 |-------|------|-------------------------|-----------------|
-| **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`sqlite`/`turso`/`postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
+| **A — Durable log** | `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
+| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`turso`/`postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
 
 **CQRS is preserved:** every cell remains `LogStore × ProjectionStore` with
 append → apply → acknowledge for that class. Class B is a weaker **persistence
@@ -137,13 +138,12 @@ not be framed as “Postgres unfinished.”
 StorageConfig
   log:
     Memory
-    | Sqlite { path }
     | Postgres { url, … }
     | Filesystem { root }
     | S3 { endpoint, bucket, region, credentials, … }
   projection:
     Memory
-    | Sqlite { path }
+    | Turso { path }
     | Postgres { url, … }
   control_plane: …
   # object-log: segments, authority, recovery where applicable
@@ -155,11 +155,11 @@ StorageConfig
 - **Public docs and preview** describe axes and structured fields / Helm keys.
 - **Env name tables** are a “container injection map” appendix, not the definition of storage.
 
-Retired public spellings (`objectlog`, `inmemory`, and Hybrid selectors) fail
-closed. Public examples and help use only the five log and four projection
-names. Turso is the default projection selector. Historical evidence may retain
-old strings as immutable provenance; that does not make retired aliases accepted
-configuration.
+Retired public spellings (`objectlog`, `inmemory`, Hybrid selectors, and the
+rusqlite `sqlite` log/projection) fail closed. Public examples and help use only
+the four log and three projection names. Turso is the default projection
+selector. Historical evidence may retain old strings as immutable provenance;
+that does not make retired aliases accepted configuration.
 
 ## 4. Public messaging
 

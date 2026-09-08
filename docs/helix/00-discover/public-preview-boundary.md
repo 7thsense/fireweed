@@ -74,41 +74,39 @@ non-governing provenance only
 
 | Class | Logs | Authority after restart | Client contract |
 |-------|------|-------------------------|-----------------|
-| **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`sqlite` / `turso` / `postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
+| **A — Durable log** | `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
+| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`turso` / `postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
 
 Class B is a weaker **persistence envelope**, not a second architecture. Every cell remains
 `LogStore × ProjectionStore` with append → apply → acknowledge for that class. Class B cells carry
 an explicit **semantic durability disclaimer**: durability is limited to the projection. That is the
 only Class B caveat—not incompleteness, not “development only,” and not a demoted product row.
 
-### Full matrix (20 cells) — all preview-supported
+### Full matrix (12 cells) — all preview-supported
 
 Every cell is a valid, preview-supported selection. Semantics differ only by durability class.
 Open via typed `StorageConfig` (`Fireweed::open` / `open_async`); server and Helm select the same pair.
-Default projection is `turso`.
+Default projection is `turso`. The rusqlite `sqlite` log and `sqlite` projection are retired.
 
-| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
-|------------------|----------|----------|-------------------|------------|
-| `memory` | Class B · **supported** | Class B · **supported** | Class B · **supported** | Class B · **supported** |
-| `sqlite` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `postgres` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `filesystem` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `s3` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| Log \ Projection | `memory` | `turso` (default) | `postgres` |
+|------------------|----------|-------------------|------------|
+| `memory` | Class B · **supported** | Class B · **supported** | Class B · **supported** |
+| `postgres` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| `filesystem` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| `s3` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
 
 ### Preview support posture
 
-All **20** public matrix cells are **preview-supported**. Maintainers accept correctness reports
+All **12** public matrix cells are **preview-supported**. Maintainers accept correctness reports
 against the documented contract for each cell and intend configuration compatibility within the
 0.x minor line (definition above).
 
 | Log backend | Projection | Durability | Preview posture |
 |-------------|------------|------------|-----------------|
 | `memory` | `memory` | Class B | **Supported** — process-local; after process death neither log nor projection remains |
-| `memory` | `sqlite` / `turso` / `postgres` | Class B | **Supported** — durability limited to the projection; **no** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
-| `sqlite` | `memory` / `sqlite` / `turso` / `postgres` | Class A | **Supported** — durable sqlite log; projection as selected |
-| `postgres` | `memory` / `sqlite` / `turso` / `postgres` | Class A | **Supported** — first-class durable postgres log; projection as selected (`postgres` cargo feature / image packaging may omit the adapter and must fail closed) |
-| `filesystem` / `s3` | `memory` / `sqlite` / `turso` / `postgres` | Class A | **Supported** — durable object log (filesystem and s3 are peers); projection as selected |
+| `memory` | `turso` / `postgres` | Class B | **Supported** — durability limited to the projection; **no** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
+| `postgres` | `memory` / `turso` / `postgres` | Class A | **Supported** — first-class durable postgres log; projection as selected (`postgres` cargo feature / image packaging may omit the adapter and must fail closed) |
+| `filesystem` / `s3` | `memory` / `turso` / `postgres` | Class A | **Supported** — durable object log (filesystem and s3 are peers); projection as selected |
 
 Response barriers on object-log cells are public `Strict` and `AsyncProjection` (not Hybrid product
 rows). S3 publication authority is NativeConditionalWrite only; provider brand names (including
@@ -152,7 +150,7 @@ classified below so the preview boundary remains explicit and auditable.
 | `fireweed-projection` | Runtime substrate | Supported through shipped log × projection compositions, not promised as a standalone API. |
 | `fireweed-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
 | `fireweed-objectlog` | Runtime adapter | Supported through `filesystem` / `s3` log backends above. |
-| `fireweed-sqlite` | Runtime adapter | Supported as log backend and as projection backend in the matrix. |
+| `fireweed-sqlite` | Retired | Rusqlite log/projection adapter; not a public matrix cell. Removal in progress. |
 | `fireweed-server` | Public runtime | Supported service binary within the storage-axes boundary above. |
 | `fireweed-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
 | `fireweed-memory` | Runtime adapter | Supported Class B memory log and memory projection paths in the matrix. |

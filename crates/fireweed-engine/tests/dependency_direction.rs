@@ -35,9 +35,9 @@ fn depends_on(manifest: &str, crate_name: &str) -> bool {
 
 const ADAPTERS: &[&str] = &[
     "fireweed-memory",
-    "fireweed-sqlite",
     "fireweed-postgres",
     "fireweed-objectlog",
+    "fireweed-turso",
     "fireweed-resp",
     "fireweed-server",
     "fireweed", // the library facade (a driving adapter)

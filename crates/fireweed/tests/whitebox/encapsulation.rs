@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use fireweed::{
     AsyncProjectionSpec, CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig,
-    ComposedStorageConfig, CreateQueue, EligibilityPolicy, ObjectLogAuthorityConfig,
+    ComposedStorageConfig, CreateQueue, EligibilityPolicy, EngineError, ObjectLogAuthorityConfig,
     ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction, ProjectionRecoveryPolicy,
     QueueCreationPolicy, QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RetryPolicy,
@@ -138,5 +138,11 @@ fn composed_storage_config_is_owned_and_secret_safe() {
             ..Default::default()
         },
     };
-    local.validate().unwrap();
+    assert!(
+        matches!(
+            local.validate(),
+            Err(EngineError::Invalid(msg)) if msg.contains("sqlite storage is retired")
+        ),
+        "composed sqlite projection must fail closed"
+    );
 }

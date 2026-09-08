@@ -1,5 +1,5 @@
 //! Product storage-matrix durability classes (Class A / Class B) and the
-//! conformance **capability claims** each public 5×4 cell may make.
+//! conformance **capability claims** each public 4×3 cell may make.
 //!
 //! Normative product law:
 //! - [orthogonal-storage-matrix-brief](../../../../docs/helix/02-design/orthogonal-storage-matrix-brief.md)
@@ -14,17 +14,15 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatrixLog {
     Memory,
-    Sqlite,
     Postgres,
     Filesystem,
     S3,
 }
 
 impl MatrixLog {
-    /// All five public log backends, in matrix-brief order.
-    pub const ALL: [MatrixLog; 5] = [
+    /// All four public log backends, in matrix-brief order.
+    pub const ALL: [MatrixLog; 4] = [
         MatrixLog::Memory,
-        MatrixLog::Sqlite,
         MatrixLog::Postgres,
         MatrixLog::Filesystem,
         MatrixLog::S3,
@@ -34,7 +32,6 @@ impl MatrixLog {
     pub const fn as_str(self) -> &'static str {
         match self {
             MatrixLog::Memory => "memory",
-            MatrixLog::Sqlite => "sqlite",
             MatrixLog::Postgres => "postgres",
             MatrixLog::Filesystem => "filesystem",
             MatrixLog::S3 => "s3",
@@ -51,16 +48,14 @@ impl MatrixLog {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatrixProjection {
     Memory,
-    Sqlite,
     Turso,
     Postgres,
 }
 
 impl MatrixProjection {
-    /// All four public projections, in matrix-brief order. Turso is the default.
-    pub const ALL: [MatrixProjection; 4] = [
+    /// All three public projections, in matrix-brief order. Turso is the default.
+    pub const ALL: [MatrixProjection; 3] = [
         MatrixProjection::Memory,
-        MatrixProjection::Sqlite,
         MatrixProjection::Turso,
         MatrixProjection::Postgres,
     ];
@@ -68,7 +63,6 @@ impl MatrixProjection {
     pub const fn as_str(self) -> &'static str {
         match self {
             MatrixProjection::Memory => "memory",
-            MatrixProjection::Sqlite => "sqlite",
             MatrixProjection::Turso => "turso",
             MatrixProjection::Postgres => "postgres",
         }
@@ -87,7 +81,7 @@ impl MatrixProjection {
 /// after process death.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProductDurabilityClass {
-    /// Class A — durable log (`sqlite`, `postgres`, `filesystem`, `s3`).
+    /// Class A — durable log (`postgres`, `filesystem`, `s3`).
     ClassA,
     /// Class B — memory log; after process death only the projection remains.
     ClassB,
@@ -167,7 +161,7 @@ impl CellConformanceClaims {
 /// Why a claimed suite set is illegal for a matrix cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IllegalConformanceClaim {
-    /// Cell id (`"memory×sqlite"`).
+    /// Cell id (`"memory×turso"`).
     pub cell_id: String,
     /// Product class of that cell.
     pub product_class: ProductDurabilityClass,
@@ -338,15 +332,15 @@ impl MatrixCell {
         }
     }
 
-    /// Human-readable cell id (`"memory×sqlite"`).
+    /// Human-readable cell id (`"memory×turso"`).
     pub fn id(self) -> String {
         format!("{}×{}", self.log.as_str(), self.projection.as_str())
     }
 }
 
-/// All 20 public matrix cells (row-major: log outer, projection inner).
-pub fn all_matrix_cells() -> [MatrixCell; 20] {
-    let mut cells = [MatrixCell::new(MatrixLog::Memory, MatrixProjection::Memory); 20];
+/// All 12 public matrix cells (row-major: log outer, projection inner).
+pub fn all_matrix_cells() -> [MatrixCell; 12] {
+    let mut cells = [MatrixCell::new(MatrixLog::Memory, MatrixProjection::Memory); 12];
     let mut i = 0;
     for log in MatrixLog::ALL {
         for projection in MatrixProjection::ALL {
@@ -354,7 +348,7 @@ pub fn all_matrix_cells() -> [MatrixCell; 20] {
             i += 1;
         }
     }
-    debug_assert_eq!(i, 20);
+    debug_assert_eq!(i, 12);
     cells
 }
 
@@ -362,7 +356,7 @@ pub fn all_matrix_cells() -> [MatrixCell; 20] {
 pub fn product_class_for_log_name(log: &str) -> Option<ProductDurabilityClass> {
     match log {
         "memory" => Some(ProductDurabilityClass::ClassB),
-        "sqlite" | "postgres" | "filesystem" | "s3" => Some(ProductDurabilityClass::ClassA),
+        "postgres" | "filesystem" | "s3" => Some(ProductDurabilityClass::ClassA),
         // Legacy env alias maps to Class A object-log (filesystem or s3).
         "objectlog" => Some(ProductDurabilityClass::ClassA),
         _ => None,
@@ -374,13 +368,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matrix_has_exactly_twenty_cells() {
-        assert_eq!(all_matrix_cells().len(), 20);
+    fn matrix_has_exactly_twelve_cells() {
+        assert_eq!(all_matrix_cells().len(), 12);
         let mut seen = std::collections::BTreeSet::new();
         for cell in all_matrix_cells() {
             assert!(seen.insert((cell.log.as_str(), cell.projection.as_str())));
         }
-        assert_eq!(seen.len(), 20);
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]
@@ -398,12 +392,7 @@ mod tests {
 
     #[test]
     fn durable_logs_are_class_a_for_every_projection() {
-        for log in [
-            MatrixLog::Sqlite,
-            MatrixLog::Postgres,
-            MatrixLog::Filesystem,
-            MatrixLog::S3,
-        ] {
+        for log in [MatrixLog::Postgres, MatrixLog::Filesystem, MatrixLog::S3] {
             for projection in MatrixProjection::ALL {
                 let cell = MatrixCell::new(log, projection);
                 assert_eq!(
@@ -446,11 +435,7 @@ mod tests {
 
     #[test]
     fn class_b_with_durable_projection_claims_projection_reopen_only() {
-        for projection in [
-            MatrixProjection::Sqlite,
-            MatrixProjection::Turso,
-            MatrixProjection::Postgres,
-        ] {
+        for projection in [MatrixProjection::Turso, MatrixProjection::Postgres] {
             let cell = MatrixCell::new(MatrixLog::Memory, projection);
             let claims = cell.claims();
             assert!(!claims.durable_log_replay);
@@ -495,13 +480,14 @@ mod tests {
             product_class_for_log_name("memory"),
             Some(ProductDurabilityClass::ClassB)
         );
-        for name in ["sqlite", "postgres", "filesystem", "s3", "objectlog"] {
+        for name in ["postgres", "filesystem", "s3", "objectlog"] {
             assert_eq!(
                 product_class_for_log_name(name),
                 Some(ProductDurabilityClass::ClassA),
                 "{name}"
             );
         }
+        assert_eq!(product_class_for_log_name("sqlite"), None);
         assert_eq!(product_class_for_log_name("hybrid"), None);
     }
 
@@ -540,14 +526,14 @@ mod tests {
     /// Even when other Class B flags are correctly set, durable_log_replay remains banned.
     #[test]
     fn register_suite_claims_rejects_class_b_mixed_with_projection_reopen() {
-        let cell = MatrixCell::new(MatrixLog::Memory, MatrixProjection::Sqlite);
+        let cell = MatrixCell::new(MatrixLog::Memory, MatrixProjection::Turso);
         let mut claims = cell.claims();
         assert!(!claims.durable_log_replay);
         claims.durable_log_replay = true; // flip the hard-rule bit
 
         let err = register_suite_claims(cell, claims).unwrap_err();
         assert_eq!(err.flag, "durable_log_replay");
-        assert_eq!(err.cell_id, "memory×sqlite");
+        assert_eq!(err.cell_id, "memory×turso");
     }
 
     #[test]
@@ -566,7 +552,7 @@ mod tests {
 
     #[test]
     fn register_suite_claims_allows_under_claiming() {
-        let cell = MatrixCell::new(MatrixLog::Sqlite, MatrixProjection::Sqlite);
+        let cell = MatrixCell::new(MatrixLog::Filesystem, MatrixProjection::Turso);
         let core_only = CellConformanceClaims {
             core: true,
             durable_log_replay: false,

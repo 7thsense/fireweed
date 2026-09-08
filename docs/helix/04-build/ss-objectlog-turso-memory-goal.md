@@ -1,8 +1,12 @@
 # Goal: object-log × Turso capacity with a cache-bound working set
 
-**Status**: active iteration (2026-08-28). Post-S8c N=10k qualification is
-recorded; T1/T2 remain unmet / not measured at N=100k. M1/M2/M3 are not
-scored at N=100k.
+**Status**: active iteration (2026-09-07). N=10k P1–P4 settled ≥10k with T3
+exact on `filesystem--turso` (see current table). T1 met at N=100k (P1 settled
+16,357/s). T2 unmet on settled P4 (1,398/s); P4 ack is 3,222/s. Claim SELECT
+orders by indexed `priority_sort,created_seq` or FIFO `rowid`, never payload.
+Residual eligibility is applied in-process. Turso remains the serving store;
+pending bodies are not duplicated in process memory. Apply still bounds N=100k
+P2/P3/P4 settlement.
 
 The 2026-08-17 planner-map artifacts (`1786977588` and `1786977711`) remain
 historical diagnostics. They are not the current design or release evidence:
@@ -21,10 +25,12 @@ the facade while preserving the public maximum of 100 items per request.
 1. A compatible generation contains at most eight FIFO requests, 800 requested
    rows, 4 MiB of rendered response data, and 20 ms of linger. Same-queue
    mutations retain at most two generations or sixteen requests.
-2. Item Claim is log-first Claim. One committed snapshot selects candidates and
-   pre-materializes the full bounded response before append. Each public request
-   retains its own response, outcome vector, and lease token until Turso applies
-   its authoritative position.
+2. Item Claim is log-first Claim. A statement-level autocommit SELECT on Turso
+   takes the next LIMIT rows by indexed `priority_sort,created_seq` or FIFO
+   `rowid`. Payload is projected from those rows only; it is never a sort or
+   filter key. No live Deferred snapshot pins WAL across that SELECT. Each
+   public request retains its own response, outcome vector, and lease token
+   until Turso applies its authoritative position.
 3. Response continuation after publication neither renders from Turso nor
    borrows a projection pool. Queued generations keep request structs; they do
    not clone payloads or pre-render bodies.
@@ -50,19 +56,35 @@ is recorded in `docs/perf/evidence/ss-phased/1787310542/summary.json` and
 
 Post-S8c measured row (2026-08-28) at source
 `a7b04a50deffd3c2fc5092f967e899539d5fd6a9` is recorded in
-`docs/perf/evidence/ss-phased/1787954751/summary.json`. This is the log-first
-Claim + packed Complete serving path after SQL-first removal. N=100k was not
-run.
+`docs/perf/evidence/ss-phased/1787954751/summary.json` (P1 142/s, P4 168/s).
+That row is historical. N=100k was not run.
 
-| date | utc | sha | N | P1 settled | P2 settled | P3 settled | P4 settled | RSS delta | HWM after |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| 2026-08-28 | 1787954751 | a7b04a50 | 10,000 | 142/s | 658/s | 555/s | 168/s | 131.4 MiB | 138.2 MiB |
+Current N=10k floor (produce-path identity in process; no Turso snapshot on
+Push/pipelined Update) is recorded in
+`docs/perf/evidence/ss-phased/1788813701/summary.json`. Occupancy + overlay
+prune is `1788659385`. v0.31.25 cut evidence is `1788626038`.
 
-Gate score on this SHA: T1 unmet / not measured at N=100k (N=10k P1 settled
-142/s vs ≥8,000 at N=100k). T2 unmet / not measured at N=100k (N=10k P4
-settled 168/s vs ≥4,000 at N=100k). T3 holds at N=10k (`pending=0`,
-`leased=0`, `complete=10000`); not measured at N=100k. M1/M2/M3 recorded from
-the N=10k summary only and are **not** claimed as passes.
+| date | utc | evidence | N | P1 settled | P2 settled | P3 settled | P4 settled |
+|---|---|---|---:|---:|---:|---:|---:|
+| 2026-08-28 | 1787954751 | historical S8c | 10,000 | 142/s | 658/s | 555/s | 168/s |
+| 2026-09-05 | 1788626038 | v0.31.25 | 10,000 | 13,667/s | 17,067/s | 12,575/s | 16,124/s |
+| 2026-09-05 | 1788659385 | occupancy + overlay prune | 10,000 | 14,493/s | 18,843/s | 13,367/s | 17,086/s |
+| 2026-09-07 | 1788813701 | no produce snapshot | 10,000 | 14,497/s | 18,511/s | 13,408/s | 17,245/s |
+| 2026-09-07 | 1788813970 | no produce snapshot | 100,000 | 9,590/s | 3,595/s | 1,688/s | 1,164/s |
+| 2026-09-07 | 1788814883 | in-process Claim (reverted) | 10,000 | 14,084/s | 17,990/s | 12,897/s | 17,152/s |
+| 2026-09-07 | 1788815083 | in-process Claim (reverted) | 100,000 | 9,691/s | 3,672/s | 1,721/s | 1,151/s |
+| 2026-09-07 | 1788816244 | WAL TRUNCATE | 10,000 | 14,305/s | 8,055/s | 13,076/s | 10,033/s |
+| 2026-09-07 | 1788816402 | WAL TRUNCATE | 100,000 | 14,520/s | 6,261/s | 2,296/s | 1,413/s |
+| 2026-09-07 | 1788817556 | Claim autocommit + TRUNCATE | 10,000 | 14,222/s | 14,685/s | 14,988/s | 14,914/s |
+| 2026-09-07 | 1788817726 | Claim autocommit + TRUNCATE | 100,000 | 14,566/s | 6,085/s | 2,195/s | 1,317/s |
+| 2026-09-07 | 1788835331 | index-shaped Claim SELECT | 10,000 | 15,374/s | 22,828/s | 16,328/s | 20,220/s |
+| 2026-09-07 | 1788835486 | index-shaped Claim SELECT | 100,000 | 16,357/s | 6,581/s | 2,306/s | 1,398/s |
+
+Gate score on the current working tree: N=10k P1–P4 settled ≥10,000 and T3 exact
+(`1788835331`). T1 met at N=100k (P1 settled 16,357/s ≥ 8,000). T2 unmet on
+**settled** P4 (1,398/s); P4 **ack** is 3,222/s (Claim p50 248 ms, was 558 ms).
+Claim does not ORDER BY or WHERE payload. Projection file is 22.2 MiB at 10k
+and 150.6 MiB at 100k. RSS/item at 100k is 4.6 kB. N=1M was not re-run.
 
 P2/P3 append acknowledgements were 29,163/s and 41,633/s, but settlement lag
 was 34.906 s and 31.335 s. The result isolates ordered background Turso apply,

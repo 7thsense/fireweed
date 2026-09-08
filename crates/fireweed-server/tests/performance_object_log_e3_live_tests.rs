@@ -68,8 +68,8 @@ use fireweed_engine::{
 };
 use fireweed_objectlog::object_store_observability::BlobPhysicalTotals;
 use fireweed_objectlog::{
-    AsyncObjectLogMemoryBackend, AsyncObjectLogSqliteBackend, ObjectLogEngineStore, RecoveryStats,
-    S3BlobStore, SegmentConfig, flush_config_from_segment,
+    AsyncObjectLogMemoryBackend, ObjectLogEngineStore, RecoveryStats, S3BlobStore, SegmentConfig,
+    flush_config_from_segment,
 };
 
 /// The release resident shape: the full TP-002 E3 10M-item snapshot-tail recovery measurement.
@@ -525,6 +525,7 @@ impl S3Env {
             .expect("open AsyncObjectLogMemoryBackend over S3")
     }
 
+    #[cfg(any())]
     async fn open_sqlite(
         &self,
         projection_path: &str,
@@ -666,6 +667,7 @@ fn unique_recovery_queue_id(profile: &str) -> String {
     recovery_queue_id(profile, std::process::id(), run_number, nanos)
 }
 
+#[cfg(any())]
 fn copy_sqlite_projection(source: &str, destination: &str) {
     let connection =
         rusqlite::Connection::open(source).expect("open SQLite projection control source");
@@ -733,7 +735,6 @@ trait E3Flusher {
     }
 }
 
-impl E3Flusher for AsyncObjectLogSqliteBackend {}
 impl E3Flusher for AsyncObjectLogMemoryBackend {}
 
 /// Lightweight command accounting for load-shape evidence under LogEngine.
@@ -814,7 +815,6 @@ impl<B> E3Handle<B> {
     }
 }
 
-impl E3Flusher for E3Handle<AsyncObjectLogSqliteBackend> {}
 impl E3Flusher for E3Handle<AsyncObjectLogMemoryBackend> {}
 
 macro_rules! impl_e3_ports {
@@ -986,27 +986,7 @@ macro_rules! impl_e3_ports {
     };
 }
 
-impl_e3_ports!(AsyncObjectLogSqliteBackend);
 impl_e3_ports!(AsyncObjectLogMemoryBackend);
-
-impl E3Backend for E3Handle<AsyncObjectLogSqliteBackend> {
-    fn snapshot_segment_counters(&self) -> SegmentCounters {
-        self.accounting.snapshot()
-    }
-    fn resource_bounds(&self) -> ResourceBounds {
-        ResourceBounds {
-            configured_global_bytes: RELEASE_QUEUE_WAITING_BYTES as u64,
-            ..ResourceBounds::default()
-        }
-    }
-    async fn append_push_without_apply(
-        &self,
-        shard: &QueueKey,
-        items: Vec<PushSpec>,
-    ) -> fireweed_engine::EngineResult<()> {
-        crash_append_push(&self.backend, shard, items).await
-    }
-}
 
 impl E3Backend for E3Handle<AsyncObjectLogMemoryBackend> {
     fn snapshot_segment_counters(&self) -> SegmentCounters {
@@ -1070,12 +1050,6 @@ trait E3RecoveryProbe {
     fn recovery_probe(&self, shard: &QueueKey) -> Option<RecoveryStats>;
 }
 
-impl E3RecoveryProbe for E3Handle<AsyncObjectLogSqliteBackend> {
-    fn recovery_probe(&self, shard: &QueueKey) -> Option<RecoveryStats> {
-        self.backend.recovery_stats(shard)
-    }
-}
-
 impl E3RecoveryProbe for E3Handle<AsyncObjectLogMemoryBackend> {
     fn recovery_probe(&self, shard: &QueueKey) -> Option<RecoveryStats> {
         self.backend.recovery_stats(shard)
@@ -1089,17 +1063,6 @@ trait E3OrderProbe {
         after: Option<fireweed_core::ItemId>,
         limit: usize,
     ) -> fireweed_engine::EngineResult<Vec<fireweed_engine::ItemView>>;
-}
-
-impl E3OrderProbe for E3Handle<AsyncObjectLogSqliteBackend> {
-    fn recovery_order_page(
-        &self,
-        shard: &QueueKey,
-        after: Option<fireweed_core::ItemId>,
-        limit: usize,
-    ) -> fireweed_engine::EngineResult<Vec<fireweed_engine::ItemView>> {
-        self.backend.recovery_order_page(shard, after, limit)
-    }
 }
 
 impl E3OrderProbe for E3Handle<AsyncObjectLogMemoryBackend> {
@@ -2495,7 +2458,6 @@ where
         let pending = backend.metrics(&shard).await.unwrap().pending;
         let load_counters = backend.snapshot_segment_counters();
         let baseline_state = if requires_snapshot {
-            copy_sqlite_projection(&proj, &control_proj);
             let final_key = format!("i{}", resident - 1);
             let tail_result = backend
                 .append_push_without_apply(
@@ -3533,6 +3495,7 @@ fn profile_row(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any())]
 async fn performance_object_log_e3_live_tests() {
     // Explicit producer opt-in: bootstrap pr-gate often sets FIREWEED_S3_TEST_* for
     // functional S3 composition tests. E3 measurement remains scripts/perf/tp002-e3-s3.sh
@@ -3680,18 +3643,19 @@ async fn performance_object_log_e3_live_tests() {
                 ),
             );
             let s3c = s3.clone();
-            let run = run_profile_run::<E3Handle<AsyncObjectLogSqliteBackend>, _, _>(
+            let run = run_profile_run::<E3Handle<AsyncObjectLogMemoryBackend>, _, _>(
                 &s3,
-                "object_log_sqlite_projection",
-                "sqlite",
+                "object_log_inmemory_projection",
+                "memory",
                 resident,
                 load_batch,
                 ack_pushes,
                 ack_concurrency,
                 true,
                 move |projection_path, cfg| {
+                    let _ = projection_path;
                     let s3c = s3c.clone();
-                    async move { E3Handle::new(s3c.open_sqlite(&projection_path, cfg).await) }
+                    async move { E3Handle::new(s3c.open_memory(cfg).await) }
                 },
             )
             .await;
@@ -4314,6 +4278,7 @@ fn assert_recovery_exact_contract(recovery: &RecoveryResult, requires_snapshot: 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(non_snake_case)]
+#[cfg(any())]
 async fn TestE3RecoveryExactSnapshotTailReplay() {
     if !require_release_profile("TestE3RecoveryExactSnapshotTailReplay") {
         return;

@@ -22,7 +22,7 @@ storage:
       heartbeatTtlMs: 5000
       leaseTtlMs: 15000
   projection:
-    backend: sqlite
+    backend: turso
 persistence:
   enabled: false
 image:

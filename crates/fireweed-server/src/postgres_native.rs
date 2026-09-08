@@ -1475,6 +1475,7 @@ mod tests {
         let tail_thread = operation.await.unwrap().unwrap();
         assert_ne!(tail_thread, runtime_thread);
     }
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn production_sqlite_pool_allows_queue_b_while_queue_a_apply_is_blocked() {
         let path = std::env::temp_dir().join(format!(

@@ -42,9 +42,6 @@ use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_engine::QueueKey;
 use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use fireweed_objectlog::composed_objectlog_backend;
-use fireweed_sqlite::{
-    SqliteRelationalBackend, composed_sqlite_backend, composed_sqlite_relational_in_memory,
-};
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -603,18 +600,6 @@ async fn scheduled_action_delivery_e2e() {
     let memory = scheduled_batch_delivery_profile(&fireweed, clock.clone(), "sched-mem").await;
     let memory_idempotent = assert_keyed_upsert_converges(&fireweed, "sched-mem-idempotent").await;
 
-    let sqlite_path = unique_temp_path("scheduled-sqlite");
-    let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_clock = Arc::new(ManualClock::at(0));
-    let sqlite = RuntimeCore::new(
-        Arc::new(composed_sqlite_backend(sqlite_path.to_str().unwrap()).expect("open sqlite")),
-        sqlite_clock.clone(),
-    );
-    let sqlite_evidence =
-        scheduled_batch_delivery_profile(&sqlite, sqlite_clock, "sched-sqlite").await;
-    let sqlite_idempotent = assert_keyed_upsert_converges(&sqlite, "sched-sqlite-idempotent").await;
-    let _ = std::fs::remove_file(&sqlite_path);
-
     let dir = unique_temp_path("scheduled-objectlog");
     let _ = std::fs::remove_dir_all(&dir);
     let object_clock = Arc::new(ManualClock::at(0));
@@ -961,9 +946,7 @@ async fn scheduled_action_delivery_e2e() {
             (
                 "delivered_in_schedule_order".into(),
                 serde_json::json!(
-                    memory.delivered_in_schedule_order
-                        && sqlite_evidence.delivered_in_schedule_order
-                        && object.delivered_in_schedule_order
+                    memory.delivered_in_schedule_order && object.delivered_in_schedule_order
                 ),
             ),
             (
@@ -977,35 +960,25 @@ async fn scheduled_action_delivery_e2e() {
             (
                 "max_items_pacing_observed".into(),
                 serde_json::json!(
-                    memory.max_items_pacing_observed
-                        && sqlite_evidence.max_items_pacing_observed
-                        && object.max_items_pacing_observed
+                    memory.max_items_pacing_observed && object.max_items_pacing_observed
                 ),
             ),
             (
                 "stable_client_keys_observed".into(),
                 serde_json::json!(
-                    memory.stable_client_keys_observed
-                        && sqlite_evidence.stable_client_keys_observed
-                        && object.stable_client_keys_observed
+                    memory.stable_client_keys_observed && object.stable_client_keys_observed
                 ),
             ),
             (
                 "idempotent_client_key_convergence_profiles".into(),
                 serde_json::json!({
                     "memory": memory_idempotent,
-                    "sqlite": sqlite_idempotent,
                     "object_log": objectlog_idempotent
                 }),
             ),
             (
                 "backend_profiles".into(),
-                serde_json::json!([
-                    "memory",
-                    "sqlite",
-                    "object_log_sqlite_projection",
-                    "relational_gates"
-                ]),
+                serde_json::json!(["memory", "object_log"]),
             ),
             (
                 "reschedule_not_before_makes_eligible".into(),
@@ -1700,7 +1673,7 @@ async fn marketo_group_batching_e2e() {
     // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
     // The relational family implements atomic whole-group claim. Same lib facade (RuntimeCore), relational backend.
     let rel = RuntimeCore::new(
-        Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
+        Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let rq = qk("marketo", "leads-rel");
@@ -1964,7 +1937,7 @@ async fn callback_cohort_e2e() {
 
     // --- ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c, all-or-nothing) ---
     let rel = RuntimeCore::new(
-        Arc::new(composed_sqlite_relational_in_memory().expect("relational backend")),
+        Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let crq = qk("cohort", "callbacks-rel");
@@ -2254,10 +2227,7 @@ async fn noisy_neighbor_scale_e2e() {
     // oldest-eligible age (most-starved first). The facade returns the UNFILTERED ranking (no principal —
     // unauthorized-scope exclusion is the auth layer's concern per ADR-002).
     let disc_clock = Arc::new(ManualClock::at(0));
-    let rel = RuntimeCore::new(
-        Arc::new(composed_sqlite_relational_in_memory().expect("relational backend")),
-        disc_clock.clone(),
-    );
+    let rel = RuntimeCore::new(Arc::new(composed_memory_backend()), disc_clock.clone());
     let dq = qk("nn", "discover");
     rel.create_queue(qdef(
         "nn",

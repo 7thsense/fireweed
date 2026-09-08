@@ -3,6 +3,7 @@
 #![allow(clippy::manual_async_fn)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,48 @@ use crate::{
 
 fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
+}
+
+/// Truncate only when the WAL is already large and no reader snapshot is live.
+/// `busy_timeout=0` makes TRUNCATE fail immediately if a Deferred reader holds
+/// the WAL; apply then continues and the next quiet apply retries. Autocheckpoint
+/// stays off so this never runs inside reader construction.
+const WAL_TRUNCATE_MIN_BYTES: u64 = 4 * 1024 * 1024;
+
+pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {
+    if database == Path::new(":memory:") {
+        return None;
+    }
+    let mut path = database.as_os_str().to_os_string();
+    path.push("-wal");
+    Some(PathBuf::from(path))
+}
+
+pub(crate) async fn truncate_wal_if_unpinned(
+    writer: &Mutex<Connection>,
+    wal_path: Option<&Path>,
+    busy_timeout: Duration,
+) {
+    let Some(wal_path) = wal_path else {
+        return;
+    };
+    let Ok(len) = std::fs::metadata(wal_path).map(|meta| meta.len()) else {
+        return;
+    };
+    if len < WAL_TRUNCATE_MIN_BYTES {
+        return;
+    }
+    let Ok(connection) = writer.try_lock() else {
+        return;
+    };
+    let _ = connection.busy_timeout(Duration::ZERO);
+    if let Ok(mut rows) = connection
+        .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+        .await
+    {
+        while rows.next().await.ok().flatten().is_some() {}
+    }
+    let _ = connection.busy_timeout(busy_timeout);
 }
 
 fn outcome_read_error(error: turso::Error) -> EngineError {
@@ -2074,15 +2117,18 @@ fn class_s_item_from_driver_row(
     })
 }
 
-/// Select pending item-Claim IDs on a borrowed committed snapshot.
+/// Select pending item-Claim IDs. Never reads payload, fields, or other blobs.
 ///
-/// The snapshot is already open. This helper issues no writer lease and no outbox row.
+/// FIFO queues walk `rowid` from a process-local floor (`NOT INDEXED`, `ORDER BY
+/// rowid`). Everyone else orders indexed columns only (`priority_sort`,
+/// `created_seq`). Bodies load later by primary key.
 pub async fn select_item_claim_ids_on(
     connection: &Connection,
     shard: &QueueKey,
     now: UtcTimestamp,
     max: usize,
     exclude: &[ItemId],
+    rowid_floor: Option<i64>,
 ) -> EngineResult<Vec<ItemId>> {
     if max == 0 {
         return Ok(Vec::new());
@@ -2104,30 +2150,77 @@ pub async fn select_item_claim_ids_on(
     .is_empty();
     let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
     let mut chosen = Vec::with_capacity(max);
+    if !gated && let Some(mut floor) = rowid_floor {
+        const FIFO_SQL: &str = "SELECT item_id,rowid FROM fireweed_items NOT INDEXED \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+             AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+             AND eligible_since IS NOT NULL AND rowid>=?5 ORDER BY rowid LIMIT ?4";
+        let mut first_page = true;
+        while chosen.len() < max {
+            let extra = if first_page {
+                exclude_set.len().min(1_600)
+            } else {
+                0
+            };
+            first_page = false;
+            let fetch = max
+                .saturating_sub(chosen.len())
+                .saturating_add(extra)
+                .max(1);
+            let params = vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Integer(ts_nanos(now)),
+                Value::Integer(i64::try_from(fetch).map_err(storage)?),
+                Value::Integer(floor.max(1)),
+            ];
+            let rows = query_driver_value_rows(connection, FIFO_SQL, params).await?;
+            if rows.is_empty() {
+                break;
+            }
+            let mut last_rowid = floor;
+            for values in rows {
+                last_rowid = integer(&values[1])?;
+                let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+                if exclude_set.contains(&id) {
+                    continue;
+                }
+                chosen.push(id);
+                if chosen.len() == max {
+                    break;
+                }
+            }
+            let next = last_rowid.saturating_add(1);
+            if next <= floor {
+                break;
+            }
+            floor = next;
+        }
+        return Ok(chosen);
+    }
     let mut offset: i64 = 0;
+    // Match `fireweed_items_pending_order_idx` exactly so ORDER BY can be
+    // index-only. Eligibility scalars that are not in the index are applied
+    // after primary-key body load, never by reading payload.
     let query = if gated {
         "SELECT item_id FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-         AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
          JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
          AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
          AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
-         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
+         ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4"
     } else {
         "SELECT item_id FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-         AND eligible_since IS NOT NULL \
-         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
+         ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4"
     };
     while chosen.len() < max {
-        let skip = exclude_set.len().saturating_sub(offset as usize);
+        let skip = exclude_set.len().min(1_600).saturating_sub(offset as usize);
         let fetch = max.saturating_sub(chosen.len()).saturating_add(skip).max(1);
         let params = vec![
             Value::Text(tenant.to_string()),
             Value::Text(queue.to_string()),
-            Value::Integer(ts_nanos(now)),
             Value::Integer(i64::try_from(fetch).map_err(storage)?),
             Value::Integer(offset),
         ];
@@ -2150,11 +2243,12 @@ pub async fn select_item_claim_ids_on(
     Ok(chosen)
 }
 
-/// Next due item-Claim rows with bodies, in schedule order, on a borrowed snapshot.
+/// Next due item-Claim rows with bodies, in schedule order.
 ///
-/// One ordered SELECT (take-next-batch). Overlay ids are skipped in-process. This is the
-/// ordinary item-Claim realize path; grouped/cohort still materializes by id after exclusive
-/// selection.
+/// One LIMIT query. ORDER BY is indexed `priority_sort,created_seq` or FIFO
+/// `rowid` — never payload. Payload is projected from the chosen rows only.
+/// Residual eligibility (not_before, eligible_since, cohort_size) is applied
+/// in-process so those predicates cannot force a table sort.
 pub async fn select_and_materialize_item_claims_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -2163,6 +2257,7 @@ pub async fn select_and_materialize_item_claims_on(
     exclude: &[ItemId],
     lease_token: &LeaseToken,
     lease_expires_at: UtcTimestamp,
+    rowid_floor: Option<i64>,
 ) -> EngineResult<(Vec<ItemId>, Vec<ClaimedItem>)> {
     if max == 0 {
         return Ok((Vec::new(), Vec::new()));
@@ -2172,119 +2267,112 @@ pub async fn select_and_materialize_item_claims_on(
     if queue_paused(connection, tenant, queue).await? {
         return Ok((Vec::new(), Vec::new()));
     }
-    let gated = !query_driver_value_rows(
-        connection,
-        "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
-        vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ],
-    )
-    .await?
-    .is_empty();
-    let has_item_gates = !query_driver_value_rows(
-        connection,
-        "SELECT 1 FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
-        vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ],
-    )
-    .await?
-    .is_empty();
     let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
     let expires = ts_nanos(lease_expires_at);
-    let query = if gated {
-        "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
-         not_before,fields,metadata,max_attempts,entity_document,index_fields \
-         FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-         AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
-         JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
-         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
-         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
-    } else {
-        "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
-         not_before,fields,metadata,max_attempts,entity_document,index_fields \
-         FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-         AND eligible_since IS NOT NULL \
-         ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5"
-    };
+    let now_n = ts_nanos(now);
+    let started = Instant::now();
     let mut ids = Vec::with_capacity(max);
     let mut carriers = Vec::with_capacity(max);
-    let mut offset: i64 = 0;
-    let mut first_page = true;
-    let started = Instant::now();
-    while ids.len() < max {
-        let extra = if first_page {
-            exclude_set.len()
-        } else {
-            0
-        };
-        first_page = false;
-        let fetch = max
-            .saturating_sub(ids.len())
-            .saturating_add(extra)
-            .max(1);
-        let params = vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-            Value::Integer(ts_nanos(now)),
-            Value::Integer(i64::try_from(fetch).map_err(storage)?),
-            Value::Integer(offset),
-        ];
-        let mut rows = connection
-            .query(query, params)
-            .await
-            .map_err(driver_read_error)?;
-        let mut page = 0usize;
-        while let Some(row) = rows.next().await.map_err(driver_read_error)? {
-            page += 1;
-            let item = class_s_item_from_turso_row(&row, expires)?;
-            let id = ItemId::new(&item.item_id).map_err(storage)?;
-            if exclude_set.contains(&id) {
-                continue;
-            }
-            ids.push(id);
-            carriers.push(item);
-            if ids.len() == max {
-                break;
-            }
-        }
-        if page == 0 {
-            break;
-        }
-        offset = offset.saturating_add(i64::try_from(page).map_err(storage)?);
-    }
-    if has_item_gates && !ids.is_empty() {
-        let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
-        for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(2).max(1)) {
-            let placeholders = (0..chunk.len())
-                .map(|index| format!("?{}", index + 3))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut params = vec![
+    if let Some(mut floor) = rowid_floor {
+        const FIFO_SQL: &str = "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
+             not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
+             FROM fireweed_items NOT INDEXED \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+             AND rowid>=?4 ORDER BY rowid LIMIT ?3";
+        let mut first_page = true;
+        while ids.len() < max {
+            let extra = if first_page {
+                exclude_set.len().min(1_600)
+            } else {
+                0
+            };
+            first_page = false;
+            let fetch = max.saturating_sub(ids.len()).saturating_add(extra).max(1);
+            let params = vec![
                 Value::Text(tenant.to_string()),
                 Value::Text(queue.to_string()),
+                Value::Integer(i64::try_from(fetch).map_err(storage)?),
+                Value::Integer(floor.max(1)),
             ];
-            params.extend(chunk.iter().map(|id| id.to_string().into()));
-            let gate_sql = format!(
-                "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-                 AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
-            );
-            for values in query_driver_value_rows(connection, gate_sql, params).await? {
-                let id = ItemId::new(text(&values[0])?).map_err(storage)?;
-                gate_keys.entry(id).or_default().push(text(&values[1])?);
+            let mut rows = connection
+                .query(FIFO_SQL, params)
+                .await
+                .map_err(driver_read_error)?;
+            let mut page = 0usize;
+            let mut last_rowid = floor;
+            while let Some(row) = rows.next().await.map_err(driver_read_error)? {
+                page += 1;
+                last_rowid = take_integer(row.get_value(15).map_err(driver_read_error)?)?;
+                if !claim_row_is_due(&row, now_n)? {
+                    continue;
+                }
+                let item = class_s_item_from_turso_row(&row, expires)?;
+                let id = ItemId::new(&item.item_id).map_err(storage)?;
+                if exclude_set.contains(&id) {
+                    continue;
+                }
+                ids.push(id);
+                carriers.push(item);
+                if ids.len() == max {
+                    break;
+                }
             }
+            if page == 0 {
+                break;
+            }
+            let next = last_rowid.saturating_add(1);
+            if next <= floor {
+                break;
+            }
+            floor = next;
         }
-        for (id, item) in ids.iter().zip(carriers.iter_mut()) {
-            if let Some(keys) = gate_keys.remove(id) {
-                item.gate_keys = keys;
+    } else {
+        const ORDER_SQL: &str = "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
+             not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size \
+             FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+             ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4";
+        let mut offset: i64 = 0;
+        let mut first_page = true;
+        while ids.len() < max {
+            let extra = if first_page {
+                exclude_set.len().min(1_600)
+            } else {
+                0
+            };
+            first_page = false;
+            let fetch = max.saturating_sub(ids.len()).saturating_add(extra).max(1);
+            let params = vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Integer(i64::try_from(fetch).map_err(storage)?),
+                Value::Integer(offset),
+            ];
+            let mut rows = connection
+                .query(ORDER_SQL, params)
+                .await
+                .map_err(driver_read_error)?;
+            let mut page = 0usize;
+            while let Some(row) = rows.next().await.map_err(driver_read_error)? {
+                page += 1;
+                if !claim_row_is_due(&row, now_n)? {
+                    continue;
+                }
+                let item = class_s_item_from_turso_row(&row, expires)?;
+                let id = ItemId::new(&item.item_id).map_err(storage)?;
+                if exclude_set.contains(&id) {
+                    continue;
+                }
+                ids.push(id);
+                carriers.push(item);
+                if ids.len() == max {
+                    break;
+                }
             }
+            if page == 0 {
+                break;
+            }
+            offset = offset.saturating_add(i64::try_from(page).map_err(storage)?);
         }
     }
     if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
@@ -2299,6 +2387,15 @@ pub async fn select_and_materialize_item_claims_on(
     Ok((ids, items))
 }
 
+fn claim_row_is_due(row: &Row, now_n: i64) -> EngineResult<bool> {
+    let not_before = take_optional_integer(row.get_value(7).map_err(driver_read_error)?)?;
+    let eligible_since = take_optional_integer(row.get_value(13).map_err(driver_read_error)?)?;
+    let cohort_size = take_optional_integer(row.get_value(14).map_err(driver_read_error)?)?;
+    Ok(eligible_since.is_some()
+        && cohort_size.is_none()
+        && not_before.map(|ts| ts <= now_n).unwrap_or(true))
+}
+
 /// Full-row grouped/cohort Claim materialization over a borrowed driver snapshot.
 ///
 /// Items may still be Pending. Lease token/expiry come from the request. S5 item/group/cohort
@@ -2309,6 +2406,17 @@ pub async fn materialize_grouped_cohort_claimed_on(
     ids: &[ItemId],
     lease_token: &LeaseToken,
     lease_expires_at: UtcTimestamp,
+) -> EngineResult<Vec<ClaimedItem>> {
+    materialize_claimed_on(connection, shard, ids, lease_token, lease_expires_at, None).await
+}
+
+async fn materialize_claimed_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    lease_token: &LeaseToken,
+    lease_expires_at: UtcTimestamp,
+    due_at: Option<i64>,
 ) -> EngineResult<Vec<ClaimedItem>> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -2326,21 +2434,31 @@ pub async fn materialize_grouped_cohort_claimed_on(
     )
     .await?
     .is_empty();
-    for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(2).max(1)) {
+    let id_bind = if due_at.is_some() { 4 } else { 3 };
+    let due_clause = if due_at.is_some() {
+        " AND cohort_size IS NULL AND eligible_since IS NOT NULL \
+         AND (not_before IS NULL OR not_before<=?3)"
+    } else {
+        ""
+    };
+    for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(id_bind).max(1)) {
         let placeholders = (0..chunk.len())
-            .map(|index| format!("?{}", index + 3))
+            .map(|index| format!("?{}", index + id_bind))
             .collect::<Vec<_>>()
             .join(",");
         let mut params = vec![
             shard.tenant_id.as_str().to_string().into(),
             shard.queue_id.as_str().to_string().into(),
         ];
+        if let Some(due_at) = due_at {
+            params.push(Value::Integer(due_at));
+        }
         params.extend(chunk.iter().map(|id| id.to_string().into()));
         let item_sql = format!(
             "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
              not_before,fields,metadata,max_attempts,entity_document,index_fields \
              FROM fireweed_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders}){due_clause}"
         );
         for values in query_driver_value_rows(connection, item_sql, params.clone()).await? {
             let item = class_s_item_from_driver_row(&values, expires)?;
@@ -2659,6 +2777,19 @@ impl AsyncProjectionStore for TursoRelational {
         _shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         std::future::ready(Ok(()))
+    }
+
+    fn index_validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        // Reuse push admission; a far-future `now` ignores expired key-retention rows.
+        self.validate_push(
+            shard,
+            items,
+            UtcTimestamp::new(4_102_444_800, 0).expect("far-future timestamp"),
+        )
     }
 
     fn validate_push(
@@ -3171,9 +3302,11 @@ impl AsyncProjectionStore for TursoRelational {
         let grouped_shards = self.grouped_shards.clone();
         let claim_scan_hints = self.claim_scan_hints.clone();
         let claim_scan_default_fifo = self.claim_scan_default_fifo.clone();
+        let wal_path = sqlite_wal_path(self.config().path());
+        let busy_timeout = self.config().busy_timeout();
         async move {
             apply_owned(
-                writer,
+                writer.clone(),
                 tokens,
                 by_consumer,
                 shape,
@@ -3186,7 +3319,9 @@ impl AsyncProjectionStore for TursoRelational {
                 commands,
                 true,
             )
-            .await
+            .await?;
+            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), busy_timeout).await;
+            Ok(())
         }
     }
 
@@ -3204,9 +3339,11 @@ impl AsyncProjectionStore for TursoRelational {
         let grouped_shards = self.grouped_shards.clone();
         let claim_scan_hints = self.claim_scan_hints.clone();
         let claim_scan_default_fifo = self.claim_scan_default_fifo.clone();
+        let wal_path = sqlite_wal_path(self.config().path());
+        let busy_timeout = self.config().busy_timeout();
         async move {
             apply_owned(
-                writer,
+                writer.clone(),
                 tokens,
                 by_consumer,
                 shape,
@@ -3219,7 +3356,9 @@ impl AsyncProjectionStore for TursoRelational {
                 commands,
                 false,
             )
-            .await
+            .await?;
+            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), busy_timeout).await;
+            Ok(())
         }
     }
 
@@ -4112,6 +4251,14 @@ mod committed_pool_helper_tests {
 
         let apply_live = between(projection, "fn apply_live(", "fn apply_recovery(");
         asserts_no_pool_borrow(apply_live, "apply_live");
+        assert!(
+            apply_live.contains("truncate_wal_if_unpinned"),
+            "apply must truncate WAL when no reader snapshot is live"
+        );
+        assert!(
+            projection.contains("PRAGMA wal_checkpoint(TRUNCATE)"),
+            "WAL bound is writer TRUNCATE, not PASSIVE"
+        );
 
         let (_, production) = compose
             .rsplit_once("// Atomic log-replay × Turso")
@@ -4164,6 +4311,25 @@ mod committed_pool_helper_tests {
         assert!(
             !production_local.contains("PRAGMA wal_checkpoint"),
             "committed-reader construction must not invoke wal_checkpoint"
+        );
+        let claim_micro = between(
+            local,
+            "pub async fn item_claim_microbatch_on_connection(",
+            "pub async fn mutation_driver_snapshot_on(",
+        );
+        assert!(
+            !claim_micro.contains("transaction_with_behavior"),
+            "item Claim SELECT must not open a Deferred snapshot that pins WAL"
+        );
+        let serving_claim = between(
+            local,
+            "pub async fn item_claim_microbatch_on_serving_reader(",
+            "pub async fn item_claim_microbatch_on_connection(",
+        );
+        assert!(
+            serving_claim.contains("claim_scan_default_fifo")
+                && serving_claim.contains("claim_scan_hints"),
+            "serving Claim must use the FIFO rowid floor when the queue is unpriced"
         );
 
         let items = finish_retained_claimed(Vec::<ClaimedItem>::new()).expect("retained");
@@ -4363,6 +4529,23 @@ mod committed_pool_helper_tests {
         assert!(
             !select_helper.contains("lifecycle_state='Leased'"),
             "log-first item select must not lease before append"
+        );
+        assert!(
+            !select_helper.contains("ORDER BY payload") && !select_helper.contains("WHERE payload"),
+            "candidate Claim SELECT must not sort or filter on payload"
+        );
+        assert!(
+            select_helper.contains("NOT INDEXED") && select_helper.contains("ORDER BY rowid"),
+            "FIFO Claim must walk rowid, not sort blobs"
+        );
+        assert!(
+            select_helper.contains("ORDER BY priority_sort,created_seq")
+                || select_helper.contains("ORDER BY rowid"),
+            "Claim order is indexed sort keys or rowid, never payload"
+        );
+        assert!(
+            !select_helper.contains("ORDER BY payload"),
+            "Claim must not sort on the payload blob"
         );
         asserts_no_pool_borrow(select_helper, "select_item_claim_ids_on");
         let _ = select_item_claim_ids_on;

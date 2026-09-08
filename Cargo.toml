@@ -16,7 +16,6 @@ members = [
     "crates/fireweed-turso",
     "crates/fireweed-conformance",
     "crates/fireweed-memory",
-    "crates/fireweed-sqlite",
     "crates/fireweed-postgres",
     "crates/fireweed-objectlog",
     "crates/fireweed-resp",

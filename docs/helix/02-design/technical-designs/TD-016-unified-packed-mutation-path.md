@@ -19,7 +19,7 @@ ddx:
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: td-batch-shape-and-critical-section-audit}
     - {kind: informed_by, to: ss-objectlog-turso-memory-goal}
-  status: proposed
+  status: accepted
 ---
 
 # Technical Design: TD-016 Unified packed add / update / delete
@@ -71,8 +71,8 @@ replay (API-001). Serving protocols do not.
 
 **Trade-offs**:
 
-- Gain: one code path to profile; P1 already ≥10k settled items/s on this path
-  (evidence `1788490208`).
+- Gain: one code path to profile; P1–P4 settled ≥10k items/s on this path
+  (evidence `1788659385`).
 - Lose: cannot overlap two Update generations' SELECTs without overlay; stale
   serving-reader rows must be excluded in-process, not by waiting coverage.
 - Rejected: per-phase protocols (ClaimCoordinator, Complete Bypass
@@ -200,9 +200,12 @@ writes on the live path.
 - **Response target**: each of P1/P2/P3/P4 settled items/s ≥ 10,000 at N=10k
   on filesystem--turso; T3 exact (`pending=0`, `leased=0`, `complete=10000`
   after P4). Ack-only rates are not the gate.
-- **Pinned evidence**: `docs/perf/evidence/ss-phased/1788490208/summary.json`
-  — P1 10351, P2 1704, P3 1641, P4 260. Goal-doc N=100k T1/T2 remain after
-  this N=10k floor.
+- **Pinned evidence**: `docs/perf/evidence/ss-phased/1788659385/summary.json`
+  — P1 14493, P2 18843, P3 13367, P4 settled 17086 (T3 exact). Fused Complete
+  keeps `rowid BETWEEN` only when the named ids occupy that slice; otherwise a
+  PK VALUES join. Overlay prune drops applied generations so Claim exclude
+  stays near in-flight (measured plateau 3200 at N=10k, not historical N).
+  Goal-doc N=100k T1/T2 remain after this N=10k floor.
 - **Optimizations**: pack compatible requests; set-based apply; O(in-flight)
   claim exclude; no apply-wait on the return path.
 

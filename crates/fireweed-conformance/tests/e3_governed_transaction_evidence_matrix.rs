@@ -15,10 +15,9 @@ use fireweed_conformance::fault::{
     ac_txn_3_unknown_outcome_replay, ac_txn_6_parity,
 };
 use fireweed_objectlog::{
-    AsyncObjectLogMemoryBackend, AsyncObjectLogSqliteBackend, FlushConfig, SegmentConfig,
+    AsyncObjectLogMemoryBackend, FlushConfig, SegmentConfig,
     composed_objectlog_backend_group_commit, flush_config_from_segment,
 };
-use fireweed_sqlite::composed_sqlite_backend;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -78,37 +77,13 @@ fn objectlog_group_commit_factory(bound_ms: u64) -> impl Fn(&str) -> AsyncObject
     }
 }
 
-fn objectlog_sqlite_factory(bound_ms: u64) -> impl Fn(&str) -> AsyncObjectLogSqliteBackend {
-    let root = unique_root("sqlite");
+fn filesystem_log_factory() -> impl Fn(&str) -> AsyncObjectLogMemoryBackend {
+    let root = unique_root("filesystem-log");
     move |tag: &str| {
         let run = root.join(tag);
         let _ = std::fs::create_dir_all(&run);
-        let proj = run.join("projection.sqlite");
-        let flush = flush_config_from_segment(1_048_576, bound_ms);
-        let open = AsyncObjectLogSqliteBackend::open(&run, proj.to_str().unwrap(), flush, 0);
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
-            Err(_) => {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("rt");
-                rt.block_on(open)
-            }
-        }
-        .expect("open objectlog sqlite")
+        open_memory_product(&run)
     }
-}
-
-fn sqlite_log_factory() -> impl Fn(
-    &str,
-) -> fireweed_engine::AsyncLogReplayBackend<
-    fireweed_sqlite::SqliteLog,
-    fireweed_sqlite::InMemoryProjection,
-> {
-    let path = unique_root("sqlite-log").join("log.db");
-    let path = path.to_str().unwrap().to_string();
-    move |_tag: &str| composed_sqlite_backend(&path).expect("open sqlite-log")
 }
 
 /// AC-TXN-4 exact-cell: AfterAppendBeforeApply withholds success without cancelling the
@@ -216,8 +191,7 @@ async fn e3_ac_txn_7_cell(profile: &str, bound_ms: u64) -> AcOutcome {
             fs.len()
         ));
     } else {
-        // SQLite projection: exercise AC-TXN-1 at this bound; force-seal control is the 1-byte target open.
-        let a = ac_txn_1_success_durable_visible(objectlog_sqlite_factory(bound_ms)).await?;
+        let a = ac_txn_1_success_durable_visible(objectlog_group_commit_factory(bound_ms)).await?;
         asserts.push(format!(
             "profile={profile} bound={bound_ms}ms AC-TXN-7: AC-TXN-1 held under group-commit bound ({} assertions); request_id force-sealed",
             a.len()
@@ -247,13 +221,10 @@ async fn produce_governed_transaction_evidence(output: String) {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
 
-    for profile in [
-        "object_log_inmemory_projection",
-        "object_log_sqlite_projection",
-    ] {
+    for profile in ["object_log_inmemory_projection"] {
         for bound_ms in E3_LATENCY_BOUNDS_MS {
             let mut outcomes: Vec<(&str, &str, AcOutcome)> = Vec::new();
-            if profile == "object_log_inmemory_projection" {
+            {
                 outcomes.push((
                     "AC-TXN-1",
                     "objectlog",
@@ -277,34 +248,12 @@ async fn produce_governed_transaction_evidence(output: String) {
                 ));
                 outcomes.push((
                     "AC-TXN-6",
-                    "sqlite_log|objectlog",
+                    "filesystem_log|objectlog",
                     ac_txn_6_parity(
-                        sqlite_log_factory(),
+                        filesystem_log_factory(),
                         objectlog_group_commit_factory(bound_ms),
                     )
                     .await,
-                ));
-            } else {
-                outcomes.push((
-                    "AC-TXN-1",
-                    "object_log_sqlite",
-                    ac_txn_1_success_durable_visible(objectlog_sqlite_factory(bound_ms)).await,
-                ));
-                outcomes.push((
-                    "AC-TXN-2",
-                    "object_log_sqlite",
-                    ac_txn_2_rejection_no_effect(objectlog_sqlite_factory(bound_ms), DURABLE).await,
-                ));
-                outcomes.push((
-                    "AC-TXN-3",
-                    "object_log_sqlite",
-                    ac_txn_3_unknown_outcome_replay(objectlog_sqlite_factory(bound_ms), DURABLE)
-                        .await,
-                ));
-                outcomes.push((
-                    "AC-TXN-6",
-                    "sqlite_log|object_log_sqlite",
-                    ac_txn_6_parity(sqlite_log_factory(), objectlog_sqlite_factory(bound_ms)).await,
                 ));
             }
             outcomes.push((
@@ -413,10 +362,7 @@ async fn e3_governed_transaction_evidence_matrix() {
 /// reservation, and reopen rebuilds authoritatively. Live poison reads are S3c.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_append_before_apply_poisons_then_recovers_authoritatively() {
-    for profile in [
-        "object_log_inmemory_projection",
-        "object_log_sqlite_projection",
-    ] {
+    for profile in ["object_log_inmemory_projection"] {
         let asserts = e3_ac_txn_4_cell(profile, 20)
             .await
             .unwrap_or_else(|error| panic!("{profile}: {error}"));

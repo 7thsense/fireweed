@@ -18,9 +18,16 @@ ddx:
 
 # Claim is take-next-batch
 
+**Status**: superseded for object-log × Turso item Claim by
+[TD-016](../02-design/technical-designs/TD-016-unified-packed-mutation-path.md)
+(log-first packed Update, take-next-batch realize, no SQL-first lease).
+Class-S SELECT+lease-in-claim remains on sqlite-log Item claim and on
+grouped/cohort exclusive Claim. Historical numbers below are not current.
+
 Deliver is `BatchClaim` + `complete`. Claim is not a second protocol. It is: next N due items, exclusive to this worker, bodies included. Then record that on the log.
 
-`one-projection-cleanup.md` already specified this (Class S). The live path does not follow it.
+`one-projection-cleanup.md` specified this as Class S. The live object-log ×
+Turso item path follows TD-016 instead.
 
 Latest `1787274546`, `filesystem--turso`, N=10k, inflight=8: ingest 31780/s, enrich 34898, schedule 49912, deliver **1290** (claim p50 211 ms). Lease waiters group-commit one IMMEDIATE; outbox delete is in Claim apply. Still ≪ ingest: one Turso writer still runs the lease SQL plus complete apply.
 

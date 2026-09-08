@@ -1124,20 +1124,40 @@ pub fn fifo_rowid_range_for_id_strings(
     }
 }
 
-/// Packed insert/claim waves occupy consecutive rowids. A BETWEEN update walks
-/// that slice instead of scanning every remaining Pending row for an IN-list.
-fn contiguous_rowid_range(
+/// Packed waves occupy a dense rowid slice of *exactly* the named ids. Two
+/// endpoint PK lookups stay cheap; the slice SELECT (integer rowid range, n
+/// rows) proves occupancy without an 800-id TEXT IN probe. COUNT==n alone is
+/// not identity: a same-queue neighbor can sit inside `[rowid(min), rowid(max)]`
+/// while a named id sits outside.
+fn named_ids_occupy_rowid_slice(
     tx: &impl RelTx,
     shard: &QueueKey,
     ids: &[ItemId],
 ) -> EngineResult<Option<(i64, i64)>> {
-    let n = ids.len() as u64;
+    let n = ids.len();
     if n == 0 {
         return Ok(None);
     }
-    let min_id = ids.iter().copied().min().expect("nonempty");
-    let max_id = ids.iter().copied().max().expect("nonempty");
-    if max_id.as_u64().saturating_sub(min_id.as_u64()).saturating_add(1) != n {
+    let mut named = HashSet::with_capacity(n);
+    let mut min_id = ids[0];
+    let mut max_id = ids[0];
+    for &id in ids {
+        if !named.insert(id) {
+            return Ok(None);
+        }
+        if id < min_id {
+            min_id = id;
+        }
+        if id > max_id {
+            max_id = id;
+        }
+    }
+    if max_id
+        .as_u64()
+        .saturating_sub(min_id.as_u64())
+        .saturating_add(1)
+        != n as u64
+    {
         return Ok(None);
     }
     let (t, q) = parts(shard);
@@ -1155,7 +1175,8 @@ fn contiguous_rowid_range(
     let mut min_rowid: Option<i64> = None;
     let mut max_rowid: Option<i64> = None;
     for row in rows {
-        let id = ItemId::new(row.get::<String>(0)?).map_err(|e| EngineError::Storage(e.to_string()))?;
+        let id =
+            ItemId::new(row.get::<String>(0)?).map_err(|e| EngineError::Storage(e.to_string()))?;
         let rowid: i64 = row.get(1)?;
         if id == min_id {
             min_rowid = Some(rowid);
@@ -1167,11 +1188,100 @@ fn contiguous_rowid_range(
     let (Some(min_rowid), Some(max_rowid)) = (min_rowid, max_rowid) else {
         return Ok(None);
     };
-    if max_rowid.saturating_sub(min_rowid).saturating_add(1) == n as i64 {
-        Ok(Some((min_rowid, max_rowid)))
-    } else {
-        Ok(None)
+    if max_rowid < min_rowid || max_rowid.saturating_sub(min_rowid).saturating_add(1) != n as i64 {
+        return Ok(None);
     }
+    let slice = crate::rel_query(
+        tx,
+        "SELECT item_id FROM fireweed_items \
+         WHERE tenant_id=? AND queue_id=? AND rowid BETWEEN ? AND ?",
+        [
+            RelValue::Text(t.to_string()),
+            RelValue::Text(q.to_string()),
+            RelValue::Integer(min_rowid),
+            RelValue::Integer(max_rowid),
+        ],
+    )?;
+    if slice.len() != n {
+        return Ok(None);
+    }
+    let mut seen = HashSet::with_capacity(n);
+    for row in slice {
+        let id =
+            ItemId::new(row.get::<String>(0)?).map_err(|e| EngineError::Storage(e.to_string()))?;
+        if !named.contains(&id) || !seen.insert(id) {
+            return Ok(None);
+        }
+    }
+    if seen.len() != n {
+        return Ok(None);
+    }
+    Ok(Some((min_rowid, max_rowid)))
+}
+
+fn fused_complete_moved_unnamed(
+    returning: &[RelRow],
+    named: &HashSet<ItemId>,
+) -> EngineResult<bool> {
+    for row in returning {
+        let id =
+            ItemId::new(row.get::<String>(1)?).map_err(|e| EngineError::Storage(e.to_string()))?;
+        if !named.contains(&id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn complete_named_ids_pk_sql(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[String],
+    now_n: i64,
+    epoch: i64,
+    seq: i64,
+    version_sql: &str,
+    pending_pred: &str,
+    lease_hash: Option<&[u8]>,
+) -> EngineResult<(usize, Vec<RelRow>)> {
+    if ids.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let (t, q) = parts(shard);
+    let extra = if lease_hash.is_some() { 7 } else { 6 };
+    let mut pending_moved = 0usize;
+    let mut returning_all = Vec::new();
+    for chunk in ids.chunks(bind_chunk_size(1, extra)) {
+        let values = vec!["(?)"; chunk.len()].join(",");
+        let sql = format!(
+            "WITH incoming(item_id) AS (VALUES {values}) \
+             UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+             {version_sql} \
+             terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+             FROM incoming \
+             WHERE tenant_id=? AND queue_id=? AND superseded=0 \
+               AND fireweed_items.item_id=incoming.item_id \
+               AND {pending_pred} \
+             RETURNING group_key,fireweed_items.item_id,eligible_since,priority_sort,created_at,created_seq"
+        );
+        let mut params: Vec<RelValue> = chunk.iter().cloned().map(RelValue::Text).collect();
+        params.extend([
+            RelValue::Integer(now_n),
+            RelValue::Integer(epoch),
+            RelValue::Integer(now_n),
+            RelValue::Integer(seq),
+            RelValue::Text(t.to_string()),
+            RelValue::Text(q.to_string()),
+        ]);
+        if let Some(hash) = lease_hash {
+            params.push(RelValue::Blob(hash.to_vec()));
+        }
+        let returning = crate::rel_query(tx, &sql, params)?;
+        pending_moved += returning.len();
+        returning_all.extend(returning);
+    }
+    Ok((pending_moved, returning_all))
 }
 
 // ---------------------------------------------------------------------------
@@ -3562,34 +3672,44 @@ pub fn apply_fused_claim_complete_sql(
     } else {
         "(lifecycle_state='Pending' OR (lifecycle_state='Leased' AND lease_token_hash=?))"
     };
+    const PAIR_VERSION_SQL: &str = "retry_count=CASE WHEN lifecycle_state='Pending' THEN retry_count+1 ELSE retry_count END, \
+             item_version=CASE WHEN lifecycle_state='Pending' THEN item_version+2 ELSE item_version+1 END,";
+    let named: HashSet<ItemId> = claim.item_ids.iter().copied().collect();
     let pending_moved;
-    if !pending_only
-        && claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
-        && let Some((min_rowid, max_rowid)) =
-            fifo_rowid_range_for_id_strings(tx, shard, &ids, None)?
+    if let Some((min_rowid, max_rowid)) = named_ids_occupy_rowid_slice(tx, shard, &claim.item_ids)?
     {
-        pending_moved = crate::rel_exec(
+        let mut between_params = vec![
+            RelValue::Integer(now_n),
+            RelValue::Integer(epoch),
+            RelValue::Integer(now_n),
+            RelValue::Integer(seq),
+            RelValue::Text(t.to_string()),
+            RelValue::Text(q.to_string()),
+            RelValue::Integer(min_rowid),
+            RelValue::Integer(max_rowid),
+        ];
+        if !pending_only {
+            between_params.push(RelValue::Blob(hash.clone()));
+        }
+        let returning = crate::rel_query(
             tx,
-            "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
-             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
-             retry_count=CASE WHEN lifecycle_state='Pending' THEN retry_count+1 ELSE retry_count END, \
-             item_version=CASE WHEN lifecycle_state='Pending' THEN item_version+2 ELSE item_version+1 END, \
-             terminal_at=?1, terminal_command_epoch=?2, updated_at=?3, last_command_sequence=?4 \
-             WHERE tenant_id=?5 AND queue_id=?6 AND rowid BETWEEN ?7 AND ?8 AND superseded=0 \
-               AND (lifecycle_state='Pending' \
-                    OR (lifecycle_state='Leased' AND lease_token_hash=?9))",
-            [
-                now_n.into(),
-                epoch.into(),
-                now_n.into(),
-                seq.into(),
-                RelValue::Text(t.to_string()),
-                RelValue::Text(q.to_string()),
-                min_rowid.into(),
-                max_rowid.into(),
-                RelValue::Blob(hash.clone()),
-            ],
+            &format!(
+                "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+                 lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+                 {PAIR_VERSION_SQL} \
+                 terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+                 WHERE tenant_id=? AND queue_id=? AND rowid BETWEEN ? AND ? AND superseded=0 \
+                   AND {pending_pred} \
+                 RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
+            ),
+            between_params,
         )?;
+        if fused_complete_moved_unnamed(&returning, &named)? {
+            return Err(EngineError::Storage(
+                "fused complete moved a row that was not in the named set".into(),
+            ));
+        }
+        pending_moved = returning.len();
         let next = max_rowid
             .checked_add(1)
             .ok_or_else(|| EngineError::Storage("claim scan hint overflow".into()))?;
@@ -3597,34 +3717,6 @@ pub fn apply_fused_claim_complete_sql(
         if next > *slot {
             *slot = next;
         }
-    } else {
-        let ph = vec!["?"; ids.len()].join(",");
-        let sql = format!(
-            "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
-             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
-             retry_count=CASE WHEN lifecycle_state='Pending' THEN retry_count+1 ELSE retry_count END, \
-             item_version=CASE WHEN lifecycle_state='Pending' THEN item_version+2 ELSE item_version+1 END, \
-             terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
-             WHERE tenant_id=? AND queue_id=? AND superseded=0 \
-               AND {pending_pred} \
-               AND item_id IN ({ph}) \
-             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
-        );
-        let mut params = vec![
-            RelValue::Integer(now_n),
-            RelValue::Integer(epoch),
-            RelValue::Integer(now_n),
-            RelValue::Integer(seq),
-            RelValue::Text(t.to_string()),
-            RelValue::Text(q.to_string()),
-        ];
-        if !pending_only {
-            params.push(RelValue::Blob(hash));
-        }
-        params.extend(ids.iter().cloned().map(RelValue::Text));
-        let returning = crate::rel_query(tx, &sql, params)?;
-        pending_moved = returning.len();
-        let grouped_refs = group_item_refs_from_returning(returning)?;
         maybe_advance_claim_scan_hint(
             tx,
             grouped_shards,
@@ -3642,11 +3734,32 @@ pub fn apply_fused_claim_complete_sql(
         for id in &claim.item_ids {
             token_ops.push(TokenOp::Clear(shard.clone(), *id));
         }
-        if pending_moved > 0 && grouped_shards.contains(shard) {
-            drop_claimed_group_heads(tx, shard, &grouped_refs, now)?;
+        if pending_moved > 0 {
+            maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
         }
         return Ok(());
     }
+    let (moved, returning) = complete_named_ids_pk_sql(
+        tx,
+        shard,
+        &ids,
+        now_n,
+        epoch,
+        seq,
+        PAIR_VERSION_SQL,
+        pending_pred,
+        (!pending_only).then_some(hash.as_slice()),
+    )?;
+    pending_moved = moved;
+    let grouped_refs = group_item_refs_from_returning(returning)?;
+    maybe_advance_claim_scan_hint(
+        tx,
+        grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        shard,
+        &claim.item_ids,
+    )?;
     if claim.authority_first && pending_moved != claim.item_ids.len() {
         return Err(authority_first_short_move(
             pending_moved,
@@ -3656,8 +3769,8 @@ pub fn apply_fused_claim_complete_sql(
     for id in &claim.item_ids {
         token_ops.push(TokenOp::Clear(shard.clone(), *id));
     }
-    if pending_moved > 0 {
-        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
+    if pending_moved > 0 && grouped_shards.contains(shard) {
+        drop_claimed_group_heads(tx, shard, &grouped_refs, now)?;
     }
     Ok(())
 }
@@ -3708,58 +3821,50 @@ fn apply_fused_claim_complete_run_sql(
     let seq = last_position.sequence as i64;
     let epoch = last_position.backend_epoch as i64;
     let now_n = ts_nanos(last_now);
-    let mut pending_moved = 0usize;
-    let mut grouped_refs = Vec::new();
-    if let Some((min_rowid, max_rowid)) = contiguous_rowid_range(tx, shard, &all_ids)? {
-        let returning = crate::rel_query(
-            tx,
-            "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
-             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
-             retry_count=retry_count+1, item_version=item_version+2, \
-             terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
-             WHERE tenant_id=? AND queue_id=? AND superseded=0 \
-               AND lifecycle_state='Pending' AND rowid BETWEEN ? AND ? \
-             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq",
-            [
-                RelValue::Integer(now_n),
-                RelValue::Integer(epoch),
-                RelValue::Integer(now_n),
-                RelValue::Integer(seq),
-                RelValue::Text(t.to_string()),
-                RelValue::Text(q.to_string()),
-                RelValue::Integer(min_rowid),
-                RelValue::Integer(max_rowid),
-            ],
-        )?;
-        pending_moved = returning.len();
-        grouped_refs = group_item_refs_from_returning(returning)?;
-    } else {
-        let extra = 6;
-        for chunk in ids.chunks(bind_chunk_size(1, extra)) {
-            let ph = vec!["?"; chunk.len()].join(",");
-            let sql = format!(
+    const RUN_VERSION_SQL: &str = "retry_count=retry_count+1, item_version=item_version+2,";
+    let named_set: HashSet<ItemId> = all_ids.iter().copied().collect();
+    let (pending_moved, grouped_refs) =
+        if let Some((min_rowid, max_rowid)) = named_ids_occupy_rowid_slice(tx, shard, &all_ids)? {
+            let returning = crate::rel_query(
+                tx,
                 "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, fenced=0, \
                  retry_count=retry_count+1, item_version=item_version+2, \
                  terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
                  WHERE tenant_id=? AND queue_id=? AND superseded=0 \
-                   AND lifecycle_state='Pending' AND item_id IN ({ph}) \
-                 RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
-            );
-            let mut params = vec![
-                RelValue::Integer(now_n),
-                RelValue::Integer(epoch),
-                RelValue::Integer(now_n),
-                RelValue::Integer(seq),
-                RelValue::Text(t.to_string()),
-                RelValue::Text(q.to_string()),
-            ];
-            params.extend(chunk.iter().cloned().map(RelValue::Text));
-            let returning = crate::rel_query(tx, &sql, params)?;
-            pending_moved += returning.len();
-            grouped_refs.extend(group_item_refs_from_returning(returning)?);
-        }
-    }
+                   AND lifecycle_state='Pending' AND rowid BETWEEN ? AND ? \
+                 RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq",
+                [
+                    RelValue::Integer(now_n),
+                    RelValue::Integer(epoch),
+                    RelValue::Integer(now_n),
+                    RelValue::Integer(seq),
+                    RelValue::Text(t.to_string()),
+                    RelValue::Text(q.to_string()),
+                    RelValue::Integer(min_rowid),
+                    RelValue::Integer(max_rowid),
+                ],
+            )?;
+            if fused_complete_moved_unnamed(&returning, &named_set)? {
+                return Err(EngineError::Storage(
+                    "fused complete moved a row that was not in the named set".into(),
+                ));
+            }
+            (returning.len(), group_item_refs_from_returning(returning)?)
+        } else {
+            let (moved, returning) = complete_named_ids_pk_sql(
+                tx,
+                shard,
+                &ids,
+                now_n,
+                epoch,
+                seq,
+                RUN_VERSION_SQL,
+                "lifecycle_state='Pending'",
+                None,
+            )?;
+            (moved, group_item_refs_from_returning(returning)?)
+        };
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
     }

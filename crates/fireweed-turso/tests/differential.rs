@@ -21,18 +21,16 @@ async fn gated_pair() -> Pair {
     definition.eligibility_policy.max_gates_per_request = Some(4);
     let shard =
         fireweed_engine::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let sqlite = fireweed_sqlite::AsyncSqliteProjectionStore::open(":memory:")
-        .await
-        .unwrap();
+    let reference = fireweed_turso::TursoRelational::in_memory().await.unwrap();
     let turso = fireweed_turso::TursoRelational::in_memory().await.unwrap();
-    AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
+    AsyncProjectionStore::ensure_shard(&reference, definition.clone())
         .await
         .unwrap();
     AsyncProjectionStore::ensure_shard(&turso, definition)
         .await
         .unwrap();
     Pair {
-        sqlite,
+        reference,
         turso,
         shard,
     }
@@ -58,7 +56,6 @@ async fn sqlite_and_turso_lifecycle_have_zero_observable_mismatch() {
             Some(state)
         );
     }
-    pair.sqlite.close_and_drain().await.unwrap();
 }
 
 #[tokio::test]
@@ -219,7 +216,6 @@ async fn generated_rich_history_has_exact_projection_image_and_read_parity() {
         .await;
     pair.assert_projection_image_and_reads_equal(&[original, leased, replacement])
         .await;
-    pair.sqlite.close_and_drain().await.unwrap();
 }
 
 #[tokio::test]
@@ -237,7 +233,7 @@ async fn sqlite_and_turso_rollback_the_same_conflicting_batch_without_cursor_dri
     );
     let position = CommandPosition::new(pair.shard.clone(), 0, 0);
     let sqlite = AsyncProjectionStore::apply_live(
-        &pair.sqlite,
+        &pair.reference,
         vec![position.clone()],
         vec![command.clone()],
     )
@@ -258,5 +254,4 @@ async fn sqlite_and_turso_rollback_the_same_conflicting_batch_without_cursor_dri
             .unwrap(),
         None
     );
-    pair.sqlite.close_and_drain().await.unwrap();
 }

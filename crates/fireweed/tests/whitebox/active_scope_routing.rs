@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use fireweed::{
-    ActiveScope, ActiveScopeDiscovery, DiscoveryGranularity, EngineError, GroupKey, NewItem,
-    OldestFirstScopePrefix, QueueDefinition, QueueId, QueueKey, RuntimeCore, TenantId,
-    UtcTimestamp, select_active_scope_from_prefix,
+    ActiveScope, ActiveScopeDiscovery, DiscoveryGranularity, EngineError, GroupKey, LogConfig,
+    NewItem, OldestFirstScopePrefix, ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey,
+    RuntimeCore, StorageConfig, TenantId, UtcTimestamp, open, select_active_scope_from_prefix,
 };
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
@@ -78,17 +78,23 @@ async fn queue_definition_accessor_reads_memory_and_durable_policy() {
         12_345
     );
 
-    let path = std::env::temp_dir().join(format!(
-        "fireweed-active-scope-policy-{}-{}.db",
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-active-scope-policy-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    let durable =
-        fireweed::open_sqlite_relational(path.to_str().unwrap(), Arc::new(ManualClock::at(0)))
-            .unwrap();
+    std::fs::create_dir_all(root.join("log")).unwrap();
+    let mut cfg = StorageConfig::memory();
+    cfg.log = LogConfig::Filesystem {
+        root: root.join("log"),
+    };
+    cfg.projection = ProjectionStoreConfig::Turso {
+        path: root.join("projection.turso"),
+    };
+    let durable = open(cfg, Arc::new(ManualClock::at(0))).unwrap();
     durable.create_queue(definition(&q, 54_321)).await.unwrap();
     assert_eq!(
         durable
@@ -99,7 +105,7 @@ async fn queue_definition_accessor_reads_memory_and_durable_policy() {
         54_321
     );
     drop(durable);
-    std::fs::remove_file(path).unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn ts(seconds: i64) -> UtcTimestamp {

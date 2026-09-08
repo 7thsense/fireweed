@@ -4,12 +4,10 @@
 //! Object-log product backends over crates.io [`object_log::LogEngine`] (program A).
 //!
 //! - [`ObjectLogEngineStore`] — native-async log axis
-//! - [`AsyncObjectLogMemoryBackend`] / [`AsyncObjectLogSqliteBackend`] — log × projection products
+//! - [`AsyncObjectLogMemoryBackend`] — log × in-memory projection product
 //! - [`composed_objectlog_backend`] — sync-open convenience for tests/embedders
 
 mod async_product;
-mod async_product_hybrid;
-mod async_product_sqlite;
 mod async_projection_apply;
 pub mod commit_surface;
 pub mod compose_log;
@@ -30,12 +28,6 @@ mod segment_config;
 pub mod storage_generation;
 
 pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlog_memory_async};
-pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig};
-pub use async_product_sqlite::AsyncObjectLogSqliteBackend;
-// Neutral compatibility names for conformance while the excluded legacy server selectors retain
-// their historical public spellings. New facade paths use `AsyncObjectLogSqliteBackend`.
-pub type LegacyObjectLogSqliteBackend = AsyncObjectLogHybridBackend;
-pub type LegacyObjectLogSqliteConfig = HybridProductConfig;
 #[doc(hidden)]
 pub use async_projection_apply::{
     AsyncProjectionApplyCoordinator, AsyncProjectionApplyReservation, AsyncProjectionApplySnapshot,

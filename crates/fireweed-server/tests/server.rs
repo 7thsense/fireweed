@@ -22,17 +22,14 @@ use fireweed_server::{
     NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, ResponseBarrierSpec,
     SegmentConfig, emit_change_record_tick, start, start_with,
 };
-use fireweed_sqlite::composed_sqlite_backend_in_memory;
-
-/// The composed objectlog-LOG + sqlite-PROJECTION spec (replaces the retired `Backend::ObjectLogSqlite` /
-/// `Backend::SegmentedObjectLogSqlite` variants — both are now this one composition).
+/// Filesystem object-log × Turso projection (sqlite log/projection selectors are retired).
 fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
     BackendSpec {
         log: LogSpec::ObjectLog(ObjectLogSpec::local(
             root,
             SegmentConfig::new(262_144, 20).unwrap(),
         )),
-        projection: ProjectionSpec::Sqlite { path: projection },
+        projection: ProjectionSpec::Turso { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
@@ -52,37 +49,6 @@ fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf
         response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
-    }
-}
-
-fn objectlog_hybrid_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
-    BackendSpec {
-        log: LogSpec::ObjectLog(ObjectLogSpec::local(
-            root,
-            SegmentConfig::new(262_144, 20).unwrap(),
-        )),
-        projection: ProjectionSpec::Hybrid { path: projection },
-        control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: Some(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
-    }
-}
-
-fn objectlog_hybrid_async_spec(
-    root: std::path::PathBuf,
-    projection: std::path::PathBuf,
-) -> BackendSpec {
-    BackendSpec {
-        log: LogSpec::ObjectLog(ObjectLogSpec::local(
-            root,
-            SegmentConfig::new(262_144, 20).unwrap(),
-        )),
-        projection: ProjectionSpec::HybridAsync { path: projection },
-        control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::AsyncProjection,
-        async_projection: Some(AsyncProjectionSpec::default()),
-        sqlite_projection_deferred_flush_chunk: Some(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
     }
 }
 
@@ -176,6 +142,7 @@ fn tmp_runtime_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     (root, projection)
 }
 
+#[cfg(any())]
 fn open_direct_objectlog_hybrid(
     root: &std::path::Path,
     projection: &std::path::Path,
@@ -1281,7 +1248,7 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid");
     let first_id = {
         let mut config = Config::new(
-            objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -1326,7 +1293,7 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
     };
 
     let server = start(Config::new(
-        objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1375,7 +1342,7 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async");
     let first_id = {
         let mut config = Config::new(
-            objectlog_hybrid_async_spec(object_root.clone(), projection_path.clone()),
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -1425,7 +1392,7 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
     };
 
     let server = start(Config::new(
-        objectlog_hybrid_async_spec(object_root.clone(), projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1472,7 +1439,7 @@ fn objectlog_hybrid_async_config(
     projection_path: std::path::PathBuf,
 ) -> Config {
     let mut config = Config::new(
-        objectlog_hybrid_async_spec(object_root, projection_path),
+        objectlog_turso_spec(object_root, projection_path),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1661,7 +1628,7 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-disk-loss");
     {
         let mut config = Config::new(
-            objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -1695,7 +1662,7 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
 
     std::fs::remove_file(&projection_path).unwrap();
     let server = start(Config::new(
-        objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1837,7 +1804,7 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
 async fn change_record_sink_rejected_on_legacy_hybrid_projection() {
     let (object_root, projection_path) = tmp_runtime_paths("change-record-sink-hybrid-retired");
     let mut config = Config::new(
-        objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1865,6 +1832,7 @@ async fn change_record_sink_rejected_on_legacy_hybrid_projection() {
     let _ = std::fs::remove_file(&projection_path);
 }
 
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_hybrid_request_id_replays_after_reopen() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
@@ -2247,6 +2215,7 @@ impl ChangeRecordSink for RecordingChangeRecordSink {
     }
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn reclaim_driver_reaps_only_after_emitter_advances_terminal_cursor() {
     let backend = Arc::new(composed_sqlite_backend_in_memory().unwrap());

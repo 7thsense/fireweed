@@ -726,12 +726,18 @@ async fn turso_indexed_schedule_rewrite_profile() {
         .unwrap();
     let active_pending = apply_schedule(&store, &shard, &ids, CHUNK, 2, "active+pending").await;
     store
-        .execute("DROP INDEX IF EXISTS fireweed_items_active_scope_idx", vec![])
+        .execute(
+            "DROP INDEX IF EXISTS fireweed_items_active_scope_idx",
+            vec![],
+        )
         .await
         .unwrap();
     let pending = apply_schedule(&store, &shard, &ids, CHUNK * 2, 3, "pending-only").await;
     store
-        .execute("DROP INDEX IF EXISTS fireweed_items_pending_order_idx", vec![])
+        .execute(
+            "DROP INDEX IF EXISTS fireweed_items_pending_order_idx",
+            vec![],
+        )
         .await
         .unwrap();
     let base = apply_schedule(&store, &shard, &ids, CHUNK * 3, 4, "base-row").await;

@@ -27,7 +27,7 @@ rustup run 1.97.1 cargo test --locked -p fireweed --lib
 # v0.25 headline proofs (integration targets, not covered by --lib alone)
 echo "--- claim_by_item_ids + eligibility recovery + RESP XCLAIM first-delivery ---"
 rustup run 1.97.1 cargo test --locked -p fireweed-engine --test claim_by_item_ids
-rustup run 1.97.1 cargo test --locked -p fireweed-sqlite --test eligibility_index_recovery
+rustup run 1.97.1 cargo test --locked -p fireweed --features objectlog,turso --test eligibility_index_recovery
 rustup run 1.97.1 cargo test --locked -p fireweed-resp --test e2e xclaim_first_delivery_pending_ids
 
 echo "fast functional gate passed"

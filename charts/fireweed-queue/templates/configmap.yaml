@@ -35,12 +35,6 @@ data:
   FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE: "static"
   FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: {{ .Values.storage.log.objectLog.s3.allowInsecureHttp | quote }}
   {{- end }}
-  {{- if eq .Values.storage.log.backend "sqlite" }}
-  FIREWEED_SQLITE_LOG_PATH: {{ .Values.storage.log.sqlite.path | quote }}
-  {{- end }}
-  {{- if eq .Values.storage.projection.backend "sqlite" }}
-  FIREWEED_SQLITE_PROJECTION_PATH: {{ .Values.storage.projection.sqlite.path | quote }}
-  {{- end }}
   {{- if eq .Values.storage.projection.backend "turso" }}
   FIREWEED_TURSO_PROJECTION_PATH: {{ .Values.storage.projection.turso.path | quote }}
   {{- end }}

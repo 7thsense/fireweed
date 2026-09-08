@@ -99,12 +99,18 @@ repair the discovery source before B-007 depends on it:
   before keyed (`Some`) groups; keyed values then use their stable key order. This tie-break refines
   deterministic representation only; oldest-first age remains the primary rank.
 
-The relational implementation uses a partial `fireweed_items_active_scope_idx` over pending,
-non-superseded rows keyed by `(tenant_id, queue_id, group_key, eligible_since, not_before, item_id)`, plus
-the existing item-gate and gate-state primary keys for the eligibility anti-join. Discovery now aggregates
-the addressed queue's live pending rows at read time: O(live pending rows in that queue), rather than the
-former O(stored keyed summary rows). This bounded queue-local cost is the deliberate price of exact
-ungrouped, gate-current, and time-crossing visibility; discovery performs no summary refresh or write.
+The SQLite-family relational implementation (SQLite and Turso) uses a partial
+`fireweed_items_pending_order_idx` over pending, non-superseded rows keyed by
+`(tenant_id, queue_id, priority_sort, created_seq, item_id)`, plus the existing
+item-gate and gate-state primary keys for the eligibility anti-join. Overlapping
+`fireweed_items_group_due_idx` and `fireweed_items_active_scope_idx` were dropped
+on migrate: they duplicated that FIFO order and made every Complete rewrite three
+Pending B-trees. Discovery still aggregates the addressed queue's live pending
+rows at read time: O(live pending rows in that queue), rather than the former
+O(stored keyed summary rows). This bounded queue-local cost is the deliberate
+price of exact ungrouped, gate-current, and time-crossing visibility; discovery
+performs no summary refresh or write. Postgres still creates `group_due_idx` and
+`active_scope_idx`; that is a divergent index set, not the sqlite-family plan.
 
 B-011 proves ungrouped-only, grouped/ungrouped mixed, time-only crossing, stale keyed summary mixed with
 live ungrouped work, no eligible work, and equal-age `None`-before-`Some` behavior in SQLite-relational and

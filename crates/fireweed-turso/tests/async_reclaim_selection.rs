@@ -7,7 +7,6 @@ use fireweed_engine::{
     CohortLeaseTarget, CohortRenewLeaseCommand, CommandPosition, EngineError, FenceLeaseCommand,
     FinalizeKind, LeaseExpiredCommand, PushCommand, QueueCommand, QueueKey,
 };
-use fireweed_sqlite::AsyncSqliteProjectionStore;
 use fireweed_turso::TursoRelational;
 
 #[tokio::test]
@@ -26,15 +25,8 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
         cohort_definition.tenant_id.clone(),
         cohort_definition.queue_id.clone(),
     );
-    let sqlite = AsyncSqliteProjectionStore::open(":memory:").await.unwrap();
     let turso = TursoRelational::in_memory().await.unwrap();
-    AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
-        .await
-        .unwrap();
     AsyncProjectionStore::ensure_shard(&turso, definition)
-        .await
-        .unwrap();
-    AsyncProjectionStore::ensure_shard(&sqlite, cohort_definition.clone())
         .await
         .unwrap();
     AsyncProjectionStore::ensure_shard(&turso, cohort_definition)
@@ -85,13 +77,6 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
         CommandPosition::new(shard.clone(), 0, 1),
         CommandPosition::new(shard.clone(), 0, 2),
     ];
-    AsyncProjectionStore::apply_live(
-        &sqlite,
-        positions.clone(),
-        vec![push.clone(), claim.clone(), fence.clone()],
-    )
-    .await
-    .unwrap();
     AsyncProjectionStore::apply_live(&turso, positions, vec![push, claim, fence])
         .await
         .unwrap();
@@ -116,31 +101,20 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
         CommandPosition::new(cohort_shard.clone(), 0, 0),
         CommandPosition::new(cohort_shard.clone(), 0, 1),
     ];
-    AsyncProjectionStore::apply_live(
-        &sqlite,
-        cohort_positions.clone(),
-        vec![cohort_push.clone(), cohort_claim.clone()],
-    )
-    .await
-    .unwrap();
     AsyncProjectionStore::apply_live(&turso, cohort_positions, vec![cohort_push, cohort_claim])
         .await
         .unwrap();
 
     assert!(
-        AsyncProjectionStore::expired_leases(&sqlite, shard.clone(), ts(10), 10)
+        AsyncProjectionStore::expired_leases(&turso, shard.clone(), ts(10), 10)
             .await
             .unwrap()
             .is_empty(),
         "expiry is strict: equal-to-now is not expired"
     );
-    let sqlite_ids = AsyncProjectionStore::expired_leases(&sqlite, shard.clone(), ts(11), 2)
-        .await
-        .unwrap();
     let turso_ids = AsyncProjectionStore::expired_leases(&turso, shard.clone(), ts(11), 2)
         .await
         .unwrap();
-    assert_eq!(turso_ids, sqlite_ids);
     assert_eq!(turso_ids, vec![ids[2], ids[1]]);
 
     let mut expired = envelope(
@@ -153,13 +127,6 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
     // durable expiry is strictly before that time (never a live Class S lease).
     expired.created_at = ts(11);
     AsyncProjectionStore::apply_live(
-        &sqlite,
-        vec![CommandPosition::new(shard.clone(), 0, 3)],
-        vec![expired.clone()],
-    )
-    .await
-    .unwrap();
-    AsyncProjectionStore::apply_live(
         &turso,
         vec![CommandPosition::new(shard.clone(), 0, 3)],
         vec![expired],
@@ -167,12 +134,6 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
     .await
     .unwrap();
     for id in turso_ids {
-        assert_eq!(
-            AsyncProjectionStore::item_state(&sqlite, shard.clone(), id)
-                .await
-                .unwrap(),
-            Some(ItemState::Pending)
-        );
         assert_eq!(
             AsyncProjectionStore::item_state(&turso, shard.clone(), id)
                 .await
@@ -194,7 +155,6 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
         Vec::<ItemId>::new(),
         "cohort leases are excluded from ordinary lease reclamation"
     );
-    sqlite.close_and_drain().await.unwrap();
 }
 
 #[tokio::test]
@@ -207,11 +167,7 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
         max_cohort_size: Some(10),
     });
     let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let sqlite = AsyncSqliteProjectionStore::open(":memory:").await.unwrap();
     let turso = TursoRelational::in_memory().await.unwrap();
-    AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
-        .await
-        .unwrap();
     AsyncProjectionStore::ensure_shard(&turso, definition)
         .await
         .unwrap();
@@ -245,13 +201,6 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
         CommandPosition::new(shard.clone(), 0, 0),
         CommandPosition::new(shard.clone(), 0, 1),
     ];
-    AsyncProjectionStore::apply_live(
-        &sqlite,
-        positions.clone(),
-        vec![push.clone(), claim.clone()],
-    )
-    .await
-    .unwrap();
     AsyncProjectionStore::apply_live(&turso, positions, vec![push, claim])
         .await
         .unwrap();
@@ -260,15 +209,10 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
         cohort_id: cohort_id.clone(),
         cohort_lease_token: token,
     };
-    let sqlite_members =
-        AsyncProjectionStore::cohort_lease_validate(&sqlite, shard.clone(), target.clone(), ts(20))
-            .await
-            .unwrap();
     let turso_members =
         AsyncProjectionStore::cohort_lease_validate(&turso, shard.clone(), target.clone(), ts(20))
             .await
             .unwrap();
-    assert_eq!(turso_members, sqlite_members);
     assert_eq!(
         turso_members
             .iter()
@@ -294,13 +238,6 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
         }),
         ids.to_vec(),
     );
-    AsyncProjectionStore::apply_live(
-        &sqlite,
-        vec![CommandPosition::new(shard.clone(), 0, 2)],
-        vec![renew.clone()],
-    )
-    .await
-    .unwrap();
     AsyncProjectionStore::apply_live(
         &turso,
         vec![CommandPosition::new(shard.clone(), 0, 2)],
@@ -329,13 +266,6 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
         ids.to_vec(),
     );
     AsyncProjectionStore::apply_live(
-        &sqlite,
-        vec![CommandPosition::new(shard.clone(), 0, 3)],
-        vec![retry.clone()],
-    )
-    .await
-    .unwrap();
-    AsyncProjectionStore::apply_live(
         &turso,
         vec![CommandPosition::new(shard.clone(), 0, 3)],
         vec![retry],
@@ -344,17 +274,10 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
     .unwrap();
     for (id, expected) in ids.into_iter().zip([ItemState::Failed, ItemState::Failed]) {
         assert_eq!(
-            AsyncProjectionStore::item_state(&sqlite, shard.clone(), id)
-                .await
-                .unwrap(),
-            Some(expected)
-        );
-        assert_eq!(
             AsyncProjectionStore::item_state(&turso, shard.clone(), id)
                 .await
                 .unwrap(),
             Some(expected)
         );
     }
-    sqlite.close_and_drain().await.unwrap();
 }

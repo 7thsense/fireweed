@@ -619,69 +619,94 @@ impl TursoRelational {
     }
 
     /// Select and materialize item Claims against the serving reader when pools are absent.
+    ///
+    /// No live Deferred snapshot. FIFO queues pass the apply-maintained rowid
+    /// floor so candidate SELECT walks `rowid`, not payload.
     pub async fn item_claim_microbatch_on_serving_reader(
         &self,
         shard: &QueueKey,
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        let rowid_floor = {
+            let fifo = self
+                .claim_scan_default_fifo
+                .lock()
+                .expect("claim-scan-fifo mutex poisoned")
+                .get(shard)
+                .copied()
+                .unwrap_or(false);
+            if fifo {
+                let hints = self
+                    .claim_scan_hints
+                    .lock()
+                    .expect("claim-scan-hint mutex poisoned");
+                Some(hints.get(shard).copied().unwrap_or(1).max(1))
+            } else {
+                None
+            }
+        };
         let mut connection = self.reader.lock().await;
-        Self::item_claim_microbatch_on_connection(&mut connection, shard, members, exclude).await
+        Self::item_claim_microbatch_on_connection_from(
+            &mut connection,
+            shard,
+            members,
+            exclude,
+            rowid_floor,
+        )
+        .await
     }
 
-    /// FIFO item-Claim select and materialize on one Deferred snapshot against an already-borrowed driver.
+    /// FIFO item-Claim select and materialize on an already-borrowed driver.
+    ///
+    /// Statement-level autocommit reads. A Deferred snapshot here pins WAL for the
+    /// whole SELECT and blocks writer TRUNCATE.
     pub async fn item_claim_microbatch_on_connection(
         connection: &mut Connection,
         shard: &QueueKey,
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
-        let snapshot = connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
+        Self::item_claim_microbatch_on_connection_from(connection, shard, members, exclude, None)
             .await
-            .map_err(|error| map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE))?;
-        let result = async {
-            // Latest `now` is the most inclusive eligibility instant across the generation.
-            let Some(now) = members.iter().map(|member| member.0).max() else {
-                return Ok(Vec::new());
-            };
-            let total_max = members.iter().map(|member| member.1).sum();
-            let (mut ids, mut items) = crate::projection::select_and_materialize_item_claims_on(
-                &snapshot,
-                shard,
-                now,
-                total_max,
-                exclude,
-                &members[0].2,
-                members[0].3,
-            )
-            .await?;
-            let mut out = Vec::with_capacity(members.len());
-            for (_, max, token, expires) in members {
-                let take_ids = ids.len().min(*max);
-                let member_ids = ids.drain(..take_ids).collect::<Vec<_>>();
-                let take_items = items.len().min(*max);
-                let mut member_items = items.drain(..take_items).collect::<Vec<_>>();
-                for item in &mut member_items {
-                    item.lease_token = Some(token.clone());
-                    item.lease_expires_at = *expires;
-                }
-                out.push((member_ids, member_items));
+    }
+
+    async fn item_claim_microbatch_on_connection_from(
+        connection: &mut Connection,
+        shard: &QueueKey,
+        members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+        exclude: &[ItemId],
+        rowid_floor: Option<i64>,
+    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        // Latest `now` is the most inclusive eligibility instant across the generation.
+        let Some(now) = members.iter().map(|member| member.0).max() else {
+            return Ok(Vec::new());
+        };
+        let total_max = members.iter().map(|member| member.1).sum();
+        let (mut ids, mut items) = crate::projection::select_and_materialize_item_claims_on(
+            connection,
+            shard,
+            now,
+            total_max,
+            exclude,
+            &members[0].2,
+            members[0].3,
+            rowid_floor,
+        )
+        .await?;
+        let mut out = Vec::with_capacity(members.len());
+        for (_, max, token, expires) in members {
+            let take_ids = ids.len().min(*max);
+            let member_ids = ids.drain(..take_ids).collect::<Vec<_>>();
+            let take_items = items.len().min(*max);
+            let mut member_items = items.drain(..take_items).collect::<Vec<_>>();
+            for item in &mut member_items {
+                item.lease_token = Some(token.clone());
+                item.lease_expires_at = *expires;
             }
-            Ok(out)
+            out.push((member_ids, member_items));
         }
-        .await;
-        match &result {
-            Ok(_) => {
-                snapshot.commit().await.map_err(|error| {
-                    map_pooled_reader_error(error, COMMITTED_DRIVER_POOL_RESOURCE)
-                })?;
-            }
-            Err(_) => {
-                let _ = snapshot.rollback().await;
-            }
-        }
-        result
+        Ok(out)
     }
 
     /// Load a mutation-generation overlay snapshot on an already-borrowed driver connection.
@@ -923,6 +948,17 @@ impl TursoRelational {
     ) -> EngineResult<MutationDriverSnapshot> {
         let connection = self.reader.lock().await;
         load_mutation_driver_snapshot(&connection, shard, definition, keys, batch_keys, now).await
+    }
+
+    /// Recover-time identity only. Not the produce hot path.
+    pub async fn load_applied_identity(
+        &self,
+        shard: &QueueKey,
+        definition: QueueDefinition,
+        now: UtcTimestamp,
+    ) -> EngineResult<MutationDriverSnapshot> {
+        let connection = self.reader.lock().await;
+        load_applied_identity(&connection, shard, definition, now).await
     }
 
     pub async fn mutation_driver_snapshot(
@@ -3183,6 +3219,79 @@ async fn load_mutation_driver_snapshot(
         unique_index_values: HashSet::new(),
         group_counts: HashMap::new(),
         batch_items,
+        leased_ids: HashSet::new(),
+        terminal_ids: HashSet::new(),
+    })
+}
+
+async fn load_applied_identity(
+    connection: &Connection,
+    shard: &QueueKey,
+    definition: QueueDefinition,
+    now: UtcTimestamp,
+) -> EngineResult<MutationDriverSnapshot> {
+    let pause_rows = collect_rows(
+        connection,
+        "SELECT pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
+        vec![
+            Value::Text(shard.tenant_id.as_str().to_string()),
+            Value::Text(shard.queue_id.as_str().to_string()),
+        ],
+    )
+    .await
+    .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let paused_drain_intake = match pause_rows.first().and_then(|row| row.values.first()) {
+        Some(Value::Integer(value)) => *value != 0,
+        Some(Value::Null) | None => false,
+        other => {
+            return Err(EngineError::Storage(format!(
+                "pause_drain_intake read back as {other:?}"
+            )));
+        }
+    };
+    let key_rows = collect_rows(
+        connection,
+        "SELECT client_item_key FROM fireweed_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 \
+         AND lifecycle_state IN ('Pending','Leased')",
+        vec![
+            Value::Text(shard.tenant_id.as_str().to_string()),
+            Value::Text(shard.queue_id.as_str().to_string()),
+        ],
+    )
+    .await
+    .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let mut client_keys = HashSet::new();
+    for row in key_rows {
+        if let Some(Value::Text(key)) = row.values.first() {
+            client_keys.insert(key.clone());
+        }
+    }
+    let retained = collect_rows(
+        connection,
+        "SELECT client_item_key FROM fireweed_item_key_retention \
+         WHERE tenant_id=?1 AND queue_id=?2 AND expires_at>?3",
+        vec![
+            Value::Text(shard.tenant_id.as_str().to_string()),
+            Value::Text(shard.queue_id.as_str().to_string()),
+            Value::Integer(ts_nanos(now)),
+        ],
+    )
+    .await
+    .map_err(|error| EngineError::Storage(error.to_string()))?;
+    for row in retained {
+        if let Some(Value::Text(key)) = row.values.first() {
+            client_keys.insert(key.clone());
+        }
+    }
+    Ok(MutationDriverSnapshot {
+        definition,
+        paused_drain_intake,
+        client_keys,
+        request_fingerprints: HashMap::new(),
+        unique_index_values: HashSet::new(),
+        group_counts: HashMap::new(),
+        batch_items: Vec::new(),
         leased_ids: HashSet::new(),
         terminal_ids: HashSet::new(),
     })

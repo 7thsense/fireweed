@@ -138,27 +138,6 @@ where
     }
 }
 
-/// Legacy Hybrid product: enabled delivery is rejected at startup validation
-/// (`legacy-projection-change-record-delivery-retired`). Fail closed if reached.
-impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogHybridBackend {
-    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
-        &self,
-        _shard: &QueueKey,
-        _sink: &S,
-        _limit: usize,
-        _emitted_at: UtcTimestamp,
-        _source_owner_id: Option<fireweed_core::OwnerId>,
-    ) -> EngineResult<usize> {
-        Err(EngineError::Invalid(
-            "legacy-projection-change-record-delivery-retired",
-        ))
-    }
-
-    fn supports_change_record_emission_cursor(&self) -> bool {
-        false
-    }
-}
-
 fn emit_from_objectlog_store<S: ChangeRecordSink + ?Sized>(
     log: &fireweed_objectlog::ObjectLogEngineStore,
     shard: &QueueKey,
@@ -179,25 +158,6 @@ fn emit_from_objectlog_store<S: ChangeRecordSink + ?Sized>(
 }
 
 impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogMemoryBackend {
-    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
-        &self,
-        shard: &QueueKey,
-        sink: &S,
-        limit: usize,
-        emitted_at: UtcTimestamp,
-        source_owner_id: Option<fireweed_core::OwnerId>,
-    ) -> EngineResult<usize> {
-        self.with_log(|log| {
-            emit_from_objectlog_store(log, shard, sink, limit, emitted_at, source_owner_id)
-        })
-    }
-
-    fn supports_change_record_emission_cursor(&self) -> bool {
-        true
-    }
-}
-
-impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogSqliteBackend {
     fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
         &self,
         shard: &QueueKey,
@@ -255,27 +215,6 @@ impl ChangeRecordEmissionBackend
         _source_owner_id: Option<fireweed_core::OwnerId>,
     ) -> EngineResult<usize> {
         Err(EngineError::ChangeRecordsRequireDurableLog)
-    }
-}
-
-#[cfg(feature = "turso-projection")]
-impl ChangeRecordEmissionBackend
-    for fireweed::turso_compose::AtomicTursoBackend<
-        fireweed_engine::InProcessLogStore<fireweed_sqlite::SqliteLog>,
-    >
-{
-    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
-        &self,
-        _shard: &QueueKey,
-        _sink: &S,
-        _limit: usize,
-        _emitted_at: UtcTimestamp,
-        _source_owner_id: Option<fireweed_core::OwnerId>,
-    ) -> EngineResult<usize> {
-        // Atomic sqlite×turso emission cursor is not yet wired; fail closed rather than silent skip.
-        Err(EngineError::Invalid(
-            "change-record-emission-pending-for-sqlite-turso",
-        ))
     }
 }
 

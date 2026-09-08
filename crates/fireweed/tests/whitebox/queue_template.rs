@@ -1,17 +1,16 @@
 #![allow(dead_code, unused_imports)]
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use fireweed::{
-    CohortOnIncomplete, CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig,
-    ComposedStorageConfig, CreateQueue, EligibilityPolicy, EnsureQueueError, EntitySchemaDocument,
-    Fireweed, GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue,
-    ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, ProjectionRecoveryPolicy, QueueCreationPolicy, QueueDefinition, QueueId,
-    QueueIndex, QueueKey, QueueTemplate, RecurrenceMode, RecurrencePolicy, RetryPolicy,
-    SegmentSettings, TenantId, UtcTimestamp,
+    CohortOnIncomplete, CohortPolicy, CreateQueue, EligibilityPolicy, EnsureQueueError,
+    EntitySchemaDocument, Fireweed, GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec,
+    IndexType, LogConfig, MetadataValue, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, ProjectionStoreConfig, QueueCreationPolicy,
+    QueueDefinition, QueueId, QueueIndex, QueueKey, QueueTemplate, RecurrenceMode,
+    RecurrencePolicy, RetryPolicy, StorageConfig, TenantId, UtcTimestamp, open,
 };
 use fireweed_memory::ManualClock;
 
@@ -216,32 +215,6 @@ fn temporary_path(tag: &str) -> PathBuf {
 async fn durable_public_constructors_reopen_idempotently() {
     let queue = key("tenant", "durable");
 
-    let sqlite = temporary_path("sqlite");
-    let handle =
-        fireweed::open_sqlite(sqlite.to_str().unwrap(), Arc::new(ManualClock::at(10))).unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle =
-        fireweed::open_sqlite(sqlite.to_str().unwrap(), Arc::new(ManualClock::at(20))).unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
-
-    let relational = temporary_path("relational");
-    let handle = fireweed::open_sqlite_relational(
-        relational.to_str().unwrap(),
-        Arc::new(ManualClock::at(10)),
-    )
-    .unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle = fireweed::open_sqlite_relational(
-        relational.to_str().unwrap(),
-        Arc::new(ManualClock::at(20)),
-    )
-    .unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
-
     let objectlog = temporary_path("objectlog");
     let handle = fireweed::open_objectlog(&objectlog, Arc::new(ManualClock::at(10))).unwrap();
     assert_ensure(&handle, &queue, true).await;
@@ -250,42 +223,24 @@ async fn durable_public_constructors_reopen_idempotently() {
     assert_ensure(&handle, &queue, false).await;
     drop(handle);
 
-    let composed_root = temporary_path("composed-root");
-    let composed_sqlite = temporary_path("composed.sqlite");
-    let composed_config = composed_config(&composed_root, &composed_sqlite);
-    let handle =
-        fireweed::open_composed_sqlite(composed_config.clone(), Arc::new(ManualClock::at(10)))
-            .unwrap();
+    let turso_root = temporary_path("filesystem-turso");
+    std::fs::create_dir_all(turso_root.join("log")).unwrap();
+    let mut cfg = StorageConfig::memory();
+    cfg.log = LogConfig::Filesystem {
+        root: turso_root.join("log"),
+    };
+    cfg.projection = ProjectionStoreConfig::Turso {
+        path: turso_root.join("projection.turso"),
+    };
+    let handle = open(cfg.clone(), Arc::new(ManualClock::at(10))).unwrap();
     assert_ensure(&handle, &queue, true).await;
     drop(handle);
-    let handle =
-        fireweed::open_composed_sqlite(composed_config, Arc::new(ManualClock::at(20))).unwrap();
+    let handle = open(cfg, Arc::new(ManualClock::at(20))).unwrap();
     assert_ensure(&handle, &queue, false).await;
     drop(handle);
 
-    std::fs::remove_file(sqlite).unwrap();
-    std::fs::remove_file(relational).unwrap();
     std::fs::remove_dir_all(objectlog).unwrap();
-    std::fs::remove_dir_all(composed_root).unwrap();
-    std::fs::remove_file(composed_sqlite).unwrap();
-}
-
-fn composed_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
-    ComposedStorageConfig {
-        object_log: ObjectLogConfig::Local {
-            root: root.to_path_buf(),
-        },
-        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ComposedProjectionConfig::Sqlite {
-            path: sqlite.to_path_buf(),
-        },
-        response_barrier: CommitResponseBarrier::Strict,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
-        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
-        namespace: "queue-template-reopen".to_string(),
-        recovery: ProjectionRecoveryPolicy::default(),
-    }
+    std::fs::remove_dir_all(turso_root).unwrap();
 }
 
 #[cfg(feature = "postgres")]

@@ -22,13 +22,11 @@ fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-resp = { path = "../fireweed-resp" }
 fireweed-memory = { path = "../fireweed-memory" }
-fireweed-sqlite = { path = "../fireweed-sqlite" }
 # Turso is the public default projection (TD-010 / ADR-016). Composition helpers live on the facade
 # (`fireweed::turso_compose`); the adapter crate is linked so cargo-machete sees a real use.
 fireweed-turso = { path = "../fireweed-turso", optional = true }
 fireweed = { path = "../fireweed", default-features = false, optional = true, features = [
     "memory",
-    "sqlite",
     "objectlog",
     "turso",
     "postgres",
@@ -61,7 +59,7 @@ tokio-util = { version = "0.7" }
 futures = "0.3"
 [features]
 # Stock fireweed-service ships the full public StorageConfig matrix (log × projection)
-# at runtime: memory|sqlite|postgres|filesystem|s3 × memory|sqlite|turso|postgres.
+# at runtime: memory|postgres|filesystem|s3 × memory|turso|postgres.
 # Selecting a cell is FIREWEED_LOG_BACKEND / FIREWEED_PROJECTION_BACKEND only — no rebuild.
 # Turso is the public default projection (TD-010). `tls` stays opt-in (native-tls / OpenSSL).
 default = ["env-config", "postgres", "turso-projection"]
@@ -91,9 +89,9 @@ turso-projection = [
 ]
 
 [dev-dependencies]
-# Class B memory-log cells need memory+sqlite; postgres for memory×postgres (gated by FIREWEED_PG_TEST_URL).
+# Class B memory-log cells need memory+turso; postgres for memory×postgres (gated by FIREWEED_PG_TEST_URL).
 # objectlog is required for P3v server/facade fingerprint comparison on filesystem cells (P10r consumes).
-fireweed = { path = "../fireweed", default-features = false, features = ["memory", "sqlite", "postgres", "objectlog"] }
+fireweed = { path = "../fireweed", default-features = false, features = ["memory", "postgres", "objectlog", "turso"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "test-util"] }
@@ -102,7 +100,6 @@ postgres = "0.19"
 # The TP-002 E3 live object-log ack/recovery benchmark harness emits + strict-validates release-ledger rows.
 fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
 # The hybrid attribution harness frames command envelopes with the same wire codec the object-log write
 # path uses (segmented.rs), so the measured serialize phase reflects real cost.
 # Pure-Rust Kafka CONSUMER for the end-to-end contract test: it consumes change records back over the

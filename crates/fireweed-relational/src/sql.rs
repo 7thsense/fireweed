@@ -141,16 +141,6 @@ pub mod async_projection {
     pub const SET_GATE_UNBLOCKED: &str = "DELETE FROM fireweed_gate_state \
         WHERE tenant_id=?1 AND queue_id=?2 AND gate_key=?3";
 
-    pub fn claim_items(placeholders: usize) -> String {
-        let ids = vec!["?"; placeholders].join(",");
-        format!(
-            "UPDATE fireweed_items SET lifecycle_state='Leased',lease_token_hash=?,\
-             lease_expires_at=?,worker_id=?,retry_count=retry_count+1,item_version=item_version+1,\
-             updated_at=?,last_command_sequence=? WHERE tenant_id=? AND queue_id=? \
-             AND lifecycle_state='Pending' AND item_id IN ({ids})"
-        )
-    }
-
     fn with_item_ids(prefix: &str, placeholders: usize) -> String {
         let ids = vec!["?"; placeholders].join(",");
         format!("{prefix} ({ids})")

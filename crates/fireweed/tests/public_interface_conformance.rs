@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
-    ConfigSecret, Fireweed, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
-    ProjectionConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig, SystemClock,
+    ConfigSecret, Fireweed, LogConfig, ObjectLogAuthority, ProjectionStoreConfig, RecoveryPolicy,
+    ResponseBarrier, SegmentConfig, StorageConfig, SystemClock,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -65,57 +65,52 @@ async fn assert_cell(
     drop(fireweed);
 }
 
-fn filesystem_sqlite_config(
-    root: &Path,
-    barrier: ResponseBarrier,
+fn objectlog_storage(
+    log: LogConfig,
+    projection: ProjectionStoreConfig,
     namespace: &str,
-) -> ObjectLogRuntimeConfig {
-    ObjectLogRuntimeConfig {
-        object_log: ObjectLogStorage::Local {
-            root: root.join("object-log"),
-        },
-        authority: ObjectLogAuthority::NativeConditionalWrite,
-        projection: ProjectionConfig::Sqlite {
-            path: root.join("projection.sqlite"),
-        },
-        response_barrier: barrier,
+) -> StorageConfig {
+    StorageConfig {
+        log,
+        projection,
+        control_plane: None,
+        authority: Some(ObjectLogAuthority::NativeConditionalWrite),
+        response_barrier: ResponseBarrier::Strict,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(262_144, 20).unwrap(),
         namespace: namespace.into(),
-        recovery: RecoveryPolicy {
-            incompatible_projection: RecoveryAction::RebuildProjection,
-            verify_checksums: true,
-            max_tail_commands: 1_000_000,
-        },
+        recovery: RecoveryPolicy::default(),
     }
-}
-
-fn filesystem_sqlite(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
-    fireweed::open_objectlog_sqlite(
-        filesystem_sqlite_config(root, barrier, namespace),
-        Arc::new(SystemClock),
-    )
-    .unwrap()
 }
 
 #[test]
 fn objectlog_authority_validation_accepts_native_conditional_write() {
     let root = FixtureRoot::new("authority-validation");
-    let mut local =
-        filesystem_sqlite_config(root.path(), ResponseBarrier::Strict, "authority-validation");
-    local.authority = ObjectLogAuthority::NativeConditionalWrite;
-    local.validate().unwrap();
+    objectlog_storage(
+        LogConfig::Filesystem {
+            root: root.path().join("object-log"),
+        },
+        ProjectionStoreConfig::Memory,
+        "authority-validation",
+    )
+    .validate()
+    .unwrap();
 
-    let mut s3 = local.clone();
-    s3.object_log = ObjectLogStorage::S3Compatible {
-        endpoint: "http://127.0.0.1:9".into(),
-        bucket: "fixture".into(),
-        region: "us-east-1".into(),
-        access_key_id: ConfigSecret::new("fixture-key"),
-        secret_access_key: ConfigSecret::new("fixture-secret"),
-        allow_insecure_http: true,
-    };
-    s3.authority = ObjectLogAuthority::NativeConditionalWrite;
-    s3.validate().unwrap();
+    objectlog_storage(
+        LogConfig::S3 {
+            endpoint: "http://127.0.0.1:9".into(),
+            bucket: "fixture".into(),
+            region: "us-east-1".into(),
+            access_key_id: ConfigSecret::new("fixture-key"),
+            secret_access_key: ConfigSecret::new("fixture-secret"),
+            allow_insecure_http: true,
+        },
+        ProjectionStoreConfig::Memory,
+        "authority-validation-s3",
+    )
+    .validate()
+    .unwrap();
 }
 
 #[tokio::test]
@@ -126,6 +121,7 @@ async fn memory_memory_public_interface() {
     .await;
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn sqlite_memory_public_interface() {
     assert_cell("sqlite--memory", false, true, |root| {
@@ -138,6 +134,7 @@ async fn sqlite_memory_public_interface() {
     .await;
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn sqlite_sqlite_public_interface() {
     assert_cell("sqlite--sqlite", false, true, |root| {
@@ -158,6 +155,7 @@ async fn filesystem_memory_public_interface() {
     .await;
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn filesystem_sqlite_strict_public_interface() {
     assert_cell("filesystem--sqlite--strict", true, true, |root| {
@@ -166,6 +164,7 @@ async fn filesystem_sqlite_strict_public_interface() {
     .await;
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn filesystem_sqlite_async_public_interface() {
     assert_cell("filesystem--sqlite--async", true, false, |root| {

@@ -83,9 +83,6 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
     let segments = SegmentConfig::new(1024, 5)?;
     let logs = [
         LogConfig::Memory,
-        LogConfig::Sqlite {
-            path: PathBuf::from("log.db"),
-        },
         LogConfig::Postgres {
             url: ConfigSecret::new("postgres://example"),
             schema: None,
@@ -107,8 +104,8 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
     ];
     let projections = [
         ProjectionStoreConfig::Memory,
-        ProjectionStoreConfig::Sqlite {
-            path: PathBuf::from("projection.db"),
+        ProjectionStoreConfig::Turso {
+            path: PathBuf::from("projection.turso"),
         },
         ProjectionStoreConfig::Postgres {
             url: ConfigSecret::new("postgres://example/projection"),
@@ -144,8 +141,8 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
                 root: PathBuf::from("object-log"),
             },
             authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Sqlite {
-                path: PathBuf::from("projection.db"),
+            projection: ProjectionConfig::Postgres {
+                url: ConfigSecret::new("postgres://example/projection"),
             },
             response_barrier: ResponseBarrier::Strict,
             segments,
@@ -160,8 +157,6 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
 async fn every_constructor_returns_one_opaque_type() -> fireweed::EngineResult<()> {
     let clock = || Arc::new(fireweed::SystemClock) as Arc<dyn fireweed::Clock>;
     let _: Fireweed = fireweed::open_memory(clock());
-    let _: Fireweed = fireweed::open_sqlite(":memory:", clock())?;
-    let _: Fireweed = fireweed::open_sqlite_relational(":memory:", clock())?;
     let _: Fireweed = fireweed::open_objectlog(PathBuf::from("object-log"), clock())?;
     let _: Fireweed = fireweed::open_postgres("postgres://example", clock())?;
     let _: Fireweed = fireweed::open_postgres_async("postgres://example", clock()).await?;

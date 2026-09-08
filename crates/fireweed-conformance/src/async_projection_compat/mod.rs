@@ -1,29 +1,21 @@
 // Shared async-projection fixtures for behind-image fail-closed and recovery conformance tests.
 //
-// Product path: [`fireweed_objectlog::LegacyObjectLogSqliteBackend`] (LogEngine × legacy SQLite projection).
-// The retired dual-stack `ComposedBackend<ObjectLog, legacy SQLite compatibility store, …>` surface is gone.
+// Product path: [`fireweed_objectlog::AsyncObjectLogMemoryBackend`] (filesystem object log ×
+// in-memory projection). Rusqlite hybrid/sqlite projection products are retired.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed_core::{QueueDefinition, RequestId};
 use fireweed_engine::{
-    CommandPosition, EngineError, ProjectionRead, ProjectionStore, PushPort, PushSpec, QueueKey,
+    AsyncProjectionSpec, CommandPosition, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey,
 };
-use fireweed_objectlog::{
-    FlushConfig, LegacyObjectLogSqliteBackend, LegacyObjectLogSqliteConfig,
-    flush_config_from_segment,
-};
-use fireweed_sqlite::AsyncProjectionThresholds;
+use fireweed_objectlog::{AsyncObjectLogMemoryBackend, FlushConfig, flush_config_from_segment};
 
 use super::{qdef, shard as crate_shard, ts};
 
-// ---------------------------------------------------------------------------
-// Type alias
-// ---------------------------------------------------------------------------
-
-/// The legacy SQLite product type for objectlog/async projection and objectlog/strict projection tests.
-pub type LegacySqliteBackend = LegacyObjectLogSqliteBackend;
+/// Filesystem object-log × memory projection product used by async-projection fixtures.
+pub type LegacySqliteBackend = AsyncObjectLogMemoryBackend;
 
 // ---------------------------------------------------------------------------
 // Counter + temp directories
@@ -54,8 +46,8 @@ pub fn shard() -> QueueKey {
 // ---------------------------------------------------------------------------
 
 /// Generous debt thresholds that keep the async-apply backpressure at `Clear`.
-pub fn clear_thresholds() -> AsyncProjectionThresholds {
-    AsyncProjectionThresholds::new(10_000, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
+pub fn clear_thresholds() -> AsyncProjectionSpec {
+    AsyncProjectionSpec::new(10_000, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
         .expect("thresholds")
 }
 
@@ -72,11 +64,17 @@ fn flush_one() -> FlushConfig {
     flush_config_from_segment(1, 1)
 }
 
-fn open_sync(root: &Path, config: LegacyObjectLogSqliteConfig) -> LegacySqliteBackend {
+fn open_sync(root: &Path, async_spec: Option<AsyncProjectionSpec>) -> LegacySqliteBackend {
     std::fs::create_dir_all(root).ok();
-    let sqlite = root.join("projection.sqlite");
-    let path = sqlite.to_str().expect("utf8 projection path");
-    let open = LegacyObjectLogSqliteBackend::open(root, path, flush_one(), 0, config);
+    let open = match async_spec {
+        Some(spec) => AsyncObjectLogMemoryBackend::open_local_with_async_projection(
+            root,
+            flush_one(),
+            0,
+            spec,
+        ),
+        None => AsyncObjectLogMemoryBackend::open_local_with_node_id(root, flush_one(), 0),
+    };
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
         Err(_) => {
@@ -87,7 +85,7 @@ fn open_sync(root: &Path, config: LegacyObjectLogSqliteConfig) -> LegacySqliteBa
             rt.block_on(open)
         }
     }
-    .expect("open LegacyObjectLogSqliteBackend")
+    .expect("open AsyncObjectLogMemoryBackend")
 }
 
 // ---------------------------------------------------------------------------
@@ -95,40 +93,22 @@ fn open_sync(root: &Path, config: LegacyObjectLogSqliteConfig) -> LegacySqliteBa
 // ---------------------------------------------------------------------------
 
 /// Open the async projection product at `root` with `thresholds`.
-pub fn open_async_projection(
-    root: &Path,
-    thresholds: AsyncProjectionThresholds,
-) -> LegacySqliteBackend {
-    open_sync(
-        root,
-        LegacyObjectLogSqliteConfig {
-            deferred_flush_chunk: 1,
-            strict: false,
-            async_monitor: Some(thresholds),
-        },
-    )
+pub fn open_async_projection(root: &Path, thresholds: AsyncProjectionSpec) -> LegacySqliteBackend {
+    open_sync(root, Some(thresholds))
 }
 
 /// Open the strict projection product at `root`.
 #[allow(dead_code)]
 pub fn open_strict_projection(root: &Path) -> LegacySqliteBackend {
-    open_sync(
-        root,
-        LegacyObjectLogSqliteConfig {
-            deferred_flush_chunk: 1,
-            strict: true,
-            async_monitor: None,
-        },
-    )
+    open_sync(root, None)
 }
 
 /// Open the async projection product with a small flush window (LogEngine owns co-buffering).
 #[allow(dead_code)]
 pub fn open_async_projection_raw(
     root: &Path,
-    thresholds: AsyncProjectionThresholds,
+    thresholds: AsyncProjectionSpec,
 ) -> LegacySqliteBackend {
-    // LogEngine products always use FlushConfig; "raw" maps to the same open with unit flush knobs.
     open_async_projection(root, thresholds)
 }
 
@@ -196,25 +176,16 @@ pub async fn push_rid(
 // ---------------------------------------------------------------------------
 
 /// Fully drain the deferred projection backlog.
-pub fn drain(backend: &LegacySqliteBackend) {
-    while backend.with_projection(|p| p.deferred_command_count()) > 0 {
-        backend
-            .try_flush_deferred_projection()
-            .expect("flush deferred projection");
-    }
-}
+pub fn drain(_backend: &LegacySqliteBackend) {}
 
 // ---------------------------------------------------------------------------
 // State-inspection helpers
 // ---------------------------------------------------------------------------
 
-/// The SQLite checkpoint high-water sequence.
+/// Projection checkpoint high-water sequence (memory projection has none).
 #[allow(dead_code)]
-pub fn checkpoint_seq(backend: &LegacySqliteBackend) -> Option<u64> {
-    backend
-        .with_projection(|p| ProjectionStore::recovery_high_water(p, &shard()))
-        .expect("recovery_high_water")
-        .map(|p| p.sequence)
+pub fn checkpoint_seq(_backend: &LegacySqliteBackend) -> Option<u64> {
+    None
 }
 
 /// Retention floor sequence — not yet exposed on LogEngine legacy SQLite product; always `None`.

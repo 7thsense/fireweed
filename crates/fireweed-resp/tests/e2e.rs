@@ -1449,14 +1449,21 @@ async fn xautoclaim_redelivers_expired_leases() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
-    use fireweed_sqlite::composed_sqlite_backend;
-    let path = std::env::temp_dir().join(format!("fireweed-resp-crash-{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    let p = path.to_str().unwrap().to_string();
+    use fireweed_objectlog::composed_objectlog_backend;
+    let path = std::env::temp_dir().join(format!(
+        "fireweed-resp-crash-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
 
     // Session 1: produce 3, claim 1 (leave it leased + un-acked), then "crash".
     let leased_id = {
-        let b = Arc::new(composed_sqlite_backend(&p).unwrap());
+        let b = Arc::new(composed_objectlog_backend(&path).unwrap());
         b.create_queue(qdef()).await.unwrap();
         let handle = {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1491,10 +1498,10 @@ async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
         };
         handle.0.abort(); // crash the server
         handle.1
-    }; // backend dropped → sqlite file closed
+    }; // backend dropped → object-log files closed
 
-    // Session 2: reopen the SAME database — projection rebuilt from the durable log.
-    let b = Arc::new(composed_sqlite_backend(&p).unwrap());
+    // Session 2: reopen the SAME log — projection rebuilt from the durable log.
+    let b = Arc::new(composed_objectlog_backend(&path).unwrap());
     let (mut con, _) = serve_backend(b.clone(), Arc::new(SystemClock)).await;
     // The leased item survived as pending-in-flight.
     let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")

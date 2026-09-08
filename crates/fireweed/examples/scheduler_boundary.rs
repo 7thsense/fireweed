@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use fireweed::{
     Bytes, ClaimAt, ClaimCompatibility, ClientItemKey, Clock, CohortPolicy, CreateQueue,
-    DiscoveryGranularity, EngineError, GroupKey, MultiQueueClaimLimits, MultiQueueClaimTarget,
-    NewItem, OldestFirstScopePrefix, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueCreationPolicy, QueueId, QueueKey,
-    QueueTemplate, RecurrencePolicy, RetryPolicy, SystemClock, TenantId,
-    select_active_scope_from_prefix,
+    DiscoveryGranularity, EngineError, GroupKey, LogConfig, MultiQueueClaimLimits,
+    MultiQueueClaimTarget, NewItem, ObjectLogAuthority, OldestFirstScopePrefix, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    ProjectionStoreConfig, QueueCreationPolicy, QueueId, QueueKey, QueueTemplate, RecurrencePolicy,
+    RetryPolicy, StorageConfig, SystemClock, TenantId, select_active_scope_from_prefix,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,8 +23,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_workflow(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let fireweed =
-        fireweed::open_sqlite_relational(path.to_str().expect("UTF-8 temp path"), clock)?;
+    let log_root = path.with_extension("object-log");
+    std::fs::create_dir_all(&log_root)?;
+    let mut cfg = StorageConfig::memory();
+    cfg.log = LogConfig::Filesystem { root: log_root };
+    cfg.projection = ProjectionStoreConfig::Turso {
+        path: path.with_extension("turso"),
+    };
+    cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+    let fireweed = fireweed::open(cfg, clock)?;
     let deliveries = queue("deliveries");
     let maintenance = queue("maintenance");
     let template = queue_template();

@@ -15,12 +15,8 @@ use std::time::Duration;
 use fireweed_conformance::fault::{CutPoint, durable_command_count, inject_commit, spec};
 use fireweed_conformance::{envelope, item, qdef, qkey, shard, ts};
 use fireweed_engine::{
-    AsyncLogReplayBackend, Backend, CommandPosition, ControlPlaneStore, DurabilityClass,
-    EngineError, EngineResult, ProjectionRead, PushCommand, QueueCommand, RawCommitFault,
-    RawCommitOutcome, RawCommitRequest,
-};
-use fireweed_objectlog::{
-    LegacyObjectLogSqliteBackend, LegacyObjectLogSqliteConfig, flush_config_from_segment,
+    Backend, CommandPosition, ControlPlaneStore, DurabilityClass, EngineError, EngineResult,
+    ProjectionRead, PushCommand, QueueCommand, RawCommitFault, RawCommitOutcome, RawCommitRequest,
 };
 use tokio::sync::{Notify, oneshot};
 
@@ -105,50 +101,12 @@ fn unique_dir(tag: &str) -> std::path::PathBuf {
 
 // --- durable factories (stable location => drop+reopen recovers the same state) ---
 
-fn sqlite_log_factory()
--> impl Fn() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>
-{
-    let path = unique_dir("sqlite").with_extension("db");
-    let path = path.to_str().unwrap().to_string();
-    move || fireweed_sqlite::composed_sqlite_backend(&path).expect("open composed sqlite-log")
-}
-
 fn objectlog_factory() -> impl Fn() -> fireweed_objectlog::ComposedObjectLogBackend {
     let root = unique_dir("objectlog");
     move || {
         fireweed_objectlog::composed_objectlog_backend(root.clone())
             .expect("open composed objectlog")
     }
-}
-
-type LegacySqliteBackend = LegacyObjectLogSqliteBackend;
-
-fn open_legacy_sqlite_sync(root: &std::path::Path) -> LegacySqliteBackend {
-    let sqlite = root.join("projection.sqlite");
-    let path = sqlite.to_str().unwrap();
-    let config = LegacyObjectLogSqliteConfig {
-        deferred_flush_chunk: 1,
-        strict: false,
-        async_monitor: None,
-    };
-    let flush = flush_config_from_segment(1, 1);
-    let open = LegacyObjectLogSqliteBackend::open(root, path, flush, 0, config);
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            rt.block_on(open)
-        }
-    }
-    .expect("recover objectlog/legacy-sqlite compatibility product")
-}
-
-fn objectlog_sqlite_factory() -> impl Fn() -> LegacySqliteBackend {
-    let root = unique_dir("objectlog-sqlite");
-    move || open_legacy_sqlite_sync(&root)
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +220,7 @@ async fn before_append_is_inert_memory() {
 
 #[tokio::test]
 async fn before_append_is_inert_sqlite_log() {
-    assert_before_append_is_inert(&sqlite_log_factory()).await;
+    assert_before_append_is_inert(&objectlog_factory()).await;
 }
 
 #[tokio::test]
@@ -324,7 +282,7 @@ where
 
 #[tokio::test]
 async fn after_append_before_apply_replays_once_sqlite_log() {
-    assert_after_append_replays_once(&sqlite_log_factory()).await;
+    assert_after_append_replays_once(&objectlog_factory()).await;
 }
 
 #[tokio::test]
@@ -334,7 +292,7 @@ async fn after_append_before_apply_replays_once_objectlog() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_append_before_apply_replays_once_objectlog_sqlite() {
-    assert_after_append_replays_once(&objectlog_sqlite_factory()).await;
+    assert_after_append_replays_once(&objectlog_factory()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -432,13 +390,13 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_response_replays_once_objectlog_sqlite() {
-    assert_lost_response_replays_once(&objectlog_sqlite_factory()).await;
+    assert_lost_response_replays_once(&objectlog_factory()).await;
 }
 
 /// Regression guard for the B3.1 engine fix: atomic composed-log recovery must rebuild push-idempotency.
 #[tokio::test]
 async fn lost_response_replays_once_sqlite_log() {
-    assert_lost_response_replays_once(&sqlite_log_factory()).await;
+    assert_lost_response_replays_once(&objectlog_factory()).await;
 }
 
 // Object-log INTERNAL cut points (segment write / manifest CAS / owner reassignment)

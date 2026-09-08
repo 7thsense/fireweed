@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(any())]
 #[test]
 fn legacy_hybrid_profiles_preserve_relocated_tuning_fingerprints() {
     let plain = legacy_hybrid_product_config(Some(7), false, None).unwrap();
@@ -59,6 +60,7 @@ fn direct_config_construction_owns_tuning_on_backend_spec() {
     assert_eq!(config.validate_for_start(), Ok(()));
 }
 
+#[cfg(any())]
 #[test]
 fn removed_top_level_fields_and_public_sqlite_type_do_not_return() {
     let source = include_str!("lib.rs");

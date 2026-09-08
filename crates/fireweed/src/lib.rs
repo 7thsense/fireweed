@@ -38,7 +38,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
+#[cfg(any(feature = "objectlog", feature = "postgres", test))]
 mod blocking_backend;
 mod facade;
 mod operator;
@@ -61,8 +61,6 @@ use fireweed_engine::{
     RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
     acquire_and_fence, validate_claim_compatibility,
 };
-#[cfg(feature = "sqlite")]
-pub use fireweed_sqlite::SqliteLogSync;
 
 // ---------------------------------------------------------------------------
 // PUBLIC DEPENDENCY SURFACE (ADR-009): a consumer depends on `fireweed` alone and can name every type its
@@ -142,9 +140,6 @@ mod test_multi_queue_claim;
 #[cfg(test)]
 #[path = "../tests/whitebox/objectlog_postgres_composition.rs"]
 mod test_objectlog_postgres_composition;
-#[cfg(test)]
-#[path = "../tests/whitebox/objectlog_sqlite_composition.rs"]
-mod test_objectlog_sqlite_composition;
 #[cfg(test)]
 #[path = "../tests/whitebox/product_validation_tests.rs"]
 mod test_product_validation;
@@ -784,18 +779,12 @@ impl Default for ProjectionRecoveryPolicy {
     }
 }
 
-#[cfg(all(
-    feature = "postgres",
-    any(feature = "memory", feature = "sqlite", feature = "objectlog")
-))]
+#[cfg(all(feature = "postgres", any(feature = "memory", feature = "objectlog")))]
 use sha2::{Digest, Sha256};
 
 /// Deterministic, legal Postgres schema name derived from an isolation key.
 /// Used for object-log×postgres and other matrix cells that share a DSN.
-#[cfg(all(
-    feature = "postgres",
-    any(feature = "memory", feature = "sqlite", feature = "objectlog")
-))]
+#[cfg(all(feature = "postgres", any(feature = "memory", feature = "objectlog")))]
 fn derived_postgres_schema_name(namespace: &str) -> String {
     const PREFIX: &str = "fireweed_";
     const HASH_BYTES: usize = 27;
@@ -1200,10 +1189,11 @@ impl StorageConfig {
         }
         match &self.log {
             LogConfig::Memory => {}
-            LogConfig::Sqlite { path } if path.as_os_str().is_empty() => {
-                return Err(EngineError::Invalid("sqlite log path must not be empty"));
+            LogConfig::Sqlite { .. } => {
+                return Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection",
+                ));
             }
-            LogConfig::Sqlite { .. } => {}
             LogConfig::Postgres { url, .. } if url.0.is_empty() => {
                 return Err(EngineError::Invalid("postgres log URL must not be empty"));
             }
@@ -1223,12 +1213,11 @@ impl StorageConfig {
 
         match &self.projection {
             ProjectionStoreConfig::Memory => {}
-            ProjectionStoreConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+            ProjectionStoreConfig::Sqlite { .. } => {
                 return Err(EngineError::Invalid(
-                    "sqlite projection path must not be empty",
+                    "sqlite storage is retired; use filesystem log and turso projection",
                 ));
             }
-            ProjectionStoreConfig::Sqlite { .. } => {}
             ProjectionStoreConfig::Turso { path } if path.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
                     "turso projection path must not be empty",
@@ -1276,25 +1265,10 @@ impl StorageConfig {
             return Err(EngineError::Invalid("async-projection-requires-object-log"));
         }
 
-        if let Some(chunk) = self.sqlite_projection_deferred_flush_chunk {
-            if chunk == 0 {
-                return Err(EngineError::Invalid(
-                    "sqlite projection deferred flush chunk must be > 0",
-                ));
-            }
-            if !matches!(&self.projection, ProjectionStoreConfig::Sqlite { .. }) {
-                return Err(EngineError::Invalid(
-                    "sqlite-projection-deferred-flush-requires-sqlite-projection",
-                ));
-            }
-            if !matches!(
-                &self.log,
-                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-            ) {
-                return Err(EngineError::Invalid(
-                    "sqlite-projection-deferred-flush-requires-object-log",
-                ));
-            }
+        if self.sqlite_projection_deferred_flush_chunk.is_some() {
+            return Err(EngineError::Invalid(
+                "sqlite storage is retired; use filesystem log and turso projection",
+            ));
         }
 
         // Provider branches stay independent so filesystem and S3 barrier work can
@@ -1562,14 +1536,17 @@ mod storage_config_matrix_tests {
     }
 
     #[test]
-    fn constructs_and_validates_all_five_logs_and_three_projections() {
-        // Legacy name retained for callers; full 5×4 coverage lives in turso_projection_full_facade_matrix.
+    fn constructs_and_validates_public_four_logs_and_three_projections() {
+        let logs: Vec<_> = all_logs()
+            .into_iter()
+            .filter(|log| !matches!(log, LogConfig::Sqlite { .. }))
+            .collect();
+        assert_eq!(logs.len(), 4);
         let projections: Vec<_> = all_projections()
             .into_iter()
-            .filter(|p| !matches!(p, ProjectionStoreConfig::Turso { .. }))
+            .filter(|p| !matches!(p, ProjectionStoreConfig::Sqlite { .. }))
             .collect();
         assert_eq!(projections.len(), 3);
-        let logs = all_logs();
         let mut cells = 0usize;
         for log in logs {
             for projection in &projections {
@@ -1590,7 +1567,36 @@ mod storage_config_matrix_tests {
                 cells += 1;
             }
         }
-        assert_eq!(cells, 15);
+        assert_eq!(cells, 12);
+    }
+
+    #[test]
+    fn sqlite_log_and_projection_fail_closed_as_retired() {
+        let err = base(
+            LogConfig::Sqlite {
+                path: PathBuf::from("/tmp/log.db"),
+            },
+            ProjectionStoreConfig::Memory,
+        )
+        .validate()
+        .expect_err("sqlite log is retired");
+        assert!(
+            matches!(err, EngineError::Invalid(msg) if msg.contains("sqlite storage is retired")),
+            "got {err:?}"
+        );
+
+        let err = base(
+            LogConfig::Memory,
+            ProjectionStoreConfig::Sqlite {
+                path: PathBuf::from("/tmp/projection.db"),
+            },
+        )
+        .validate()
+        .expect_err("sqlite projection is retired");
+        assert!(
+            matches!(err, EngineError::Invalid(msg) if msg.contains("sqlite storage is retired")),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1617,7 +1623,8 @@ mod storage_config_matrix_tests {
             vec!["memory", "sqlite", "turso", "postgres"]
         );
 
-        let mut cells = 0usize;
+        let mut public_cells = 0usize;
+        let mut retired_cells = 0usize;
         for log in logs {
             for projection in &projections {
                 let mut config = base(log.clone(), projection.clone());
@@ -1627,17 +1634,27 @@ mod storage_config_matrix_tests {
                 ) {
                     config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
                 }
-                config.validate().unwrap_or_else(|e| {
-                    panic!(
+                let retired = matches!(config.log, LogConfig::Sqlite { .. })
+                    || matches!(config.projection, ProjectionStoreConfig::Sqlite { .. });
+                match config.validate() {
+                    Ok(()) => {
+                        assert!(!retired, "retired sqlite cell must fail closed");
+                        public_cells += 1;
+                    }
+                    Err(EngineError::Invalid(msg)) if msg.contains("sqlite storage is retired") => {
+                        assert!(retired, "public cell must not fail as retired sqlite");
+                        retired_cells += 1;
+                    }
+                    Err(e) => panic!(
                         "cell {}×{}: {e:?}",
                         config.log.axis_name(),
                         projection.axis_name()
-                    )
-                });
-                cells += 1;
+                    ),
+                }
             }
         }
-        assert_eq!(cells, 20);
+        assert_eq!(public_cells, 12);
+        assert_eq!(retired_cells, 8);
     }
 
     /// AC: Turso default selection, all five log compositions, single-thread heartbeat.
@@ -1654,7 +1671,7 @@ mod storage_config_matrix_tests {
             .axis_name(),
             "turso"
         );
-        // Explicit sqlite remains selectable.
+        // Enum variant remains for match exhaustiveness; validate() fail-closes it.
         assert_eq!(
             ProjectionStoreConfig::Sqlite {
                 path: PathBuf::from("/tmp/sqlite.db"),
@@ -1663,7 +1680,7 @@ mod storage_config_matrix_tests {
             "sqlite"
         );
 
-        // Open all five local-capable log × turso compositions (postgres/s3 need live fixtures).
+        // Open local-capable public log × turso compositions (postgres/s3 need live fixtures).
         let clock = Arc::new(SystemClock);
         let root = std::env::temp_dir().join(format!(
             "fw-turso-facade-{}-{}",
@@ -1678,12 +1695,6 @@ mod storage_config_matrix_tests {
 
         let cells: Vec<(LogConfig, PathBuf)> = vec![
             (LogConfig::Memory, root.join("mem-turso.db")),
-            (
-                LogConfig::Sqlite {
-                    path: root.join("sqlite-log.db"),
-                },
-                root.join("sqlite-turso.db"),
-            ),
             (
                 LogConfig::Filesystem {
                     root: root.join("fs-log"),
@@ -1813,17 +1824,6 @@ mod storage_config_matrix_tests {
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("root");
 
-            // Class A: sqlite×turso reopen recovers pending from durable log.
-            let log_path = root.join("class-a-log.db");
-            let proj_path = root.join("class-a-turso.db");
-            let cfg = base(
-                LogConfig::Sqlite {
-                    path: log_path.clone(),
-                },
-                ProjectionStoreConfig::Turso {
-                    path: proj_path.clone(),
-                },
-            );
             let def = QueueDefinition {
                 tenant_id: TenantId::new("rec").unwrap(),
                 queue_id: QueueId::new("a").unwrap(),
@@ -1849,34 +1849,9 @@ mod storage_config_matrix_tests {
                 secondary_indexes: vec![],
                 entity_schema: None,
                 typed_indexes: vec![],
-                emit_change_records: true,
+                emit_change_records: false,
             };
             let key = QueueKey::new(TenantId::new("rec").unwrap(), QueueId::new("a").unwrap());
-            let fw = open(cfg.clone(), Arc::clone(&clock) as _).expect("class A open");
-            futures::executor::block_on(async {
-                fw.create_queue(def.clone()).await.expect("create");
-                fw.push(
-                    &key,
-                    NewItem {
-                        priority: Some(PriorityValue::Int64(1)),
-                        ..NewItem::default()
-                    },
-                )
-                .await
-                .expect("push");
-            });
-            drop(fw);
-            // Delete-rebuild: remove projection file; Class A log rebuilds on reopen.
-            let _ = std::fs::remove_file(&proj_path);
-            let reopened = open(cfg, Arc::clone(&clock) as _).expect("class A reopen");
-            let pending = futures::executor::block_on(reopened.metrics(&key))
-                .expect("metrics")
-                .pending;
-            assert_eq!(
-                pending, 1,
-                "Class A reopen/delete-rebuild recovers pending from durable log"
-            );
-            drop(reopened);
 
             // Class B durability disclaimer: memory×turso keeps items via projection only
             // (no durable log-replay claim). Empty process-local memory log is documented.
@@ -1933,9 +1908,13 @@ mod storage_config_matrix_tests {
             mapped.projection,
             ProjectionStoreConfig::Sqlite { .. }
         ));
-        mapped
-            .validate()
-            .expect("mapped object-log config validates");
+        assert!(
+            matches!(
+                mapped.validate(),
+                Err(EngineError::Invalid(msg)) if msg.contains("sqlite storage is retired")
+            ),
+            "mapped sqlite projection must fail closed"
+        );
     }
 
     #[test]
@@ -1966,6 +1945,18 @@ mod storage_config_matrix_tests {
         for log in providers {
             for projection in all_projections() {
                 let strict = base(log.clone(), projection.clone());
+                if matches!(projection, ProjectionStoreConfig::Sqlite { .. }) {
+                    assert!(
+                        matches!(
+                            strict.validate(),
+                            Err(EngineError::Invalid(msg))
+                                if msg.contains("sqlite storage is retired")
+                        ),
+                        "strict {}×sqlite must fail closed",
+                        log.axis_name()
+                    );
+                    continue;
+                }
                 assert_eq!(
                     strict.validate(),
                     Ok(()),
@@ -2387,8 +2378,21 @@ mod storage_config_open_tests {
             drop(fw);
         }
 
-        // memory × sqlite (Class B durable projection)
-        #[cfg(all(feature = "memory", feature = "sqlite"))]
+        // memory × turso (Class B durable projection)
+        #[cfg(all(feature = "memory", feature = "turso"))]
+        {
+            let proj = root.join("mem-turso-proj.db");
+            let cfg = base_cfg(
+                LogConfig::Memory,
+                ProjectionStoreConfig::Turso { path: proj },
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("memory×turso");
+            opened.push(("memory", "turso"));
+            drop(fw);
+        }
+
+        // memory × sqlite (retired)
+        #[cfg(any())]
         {
             let proj = root.join("mem-sqlite-proj.db");
             let cfg = base_cfg(
@@ -2401,7 +2405,7 @@ mod storage_config_open_tests {
         }
 
         // sqlite × memory
-        #[cfg(feature = "sqlite")]
+        #[cfg(any())]
         {
             let log = root.join("sqlite-mem-log.db");
             let cfg = base_cfg(
@@ -2414,7 +2418,7 @@ mod storage_config_open_tests {
         }
 
         // sqlite × sqlite (distinct paths)
-        #[cfg(feature = "sqlite")]
+        #[cfg(any())]
         {
             let log = root.join("sqlite-sqlite-log.db");
             let proj = root.join("sqlite-sqlite-proj.db");
@@ -2441,8 +2445,23 @@ mod storage_config_open_tests {
             drop(fw);
         }
 
-        // filesystem × sqlite
-        #[cfg(all(feature = "objectlog", feature = "sqlite"))]
+        // filesystem × turso
+        #[cfg(all(feature = "objectlog", feature = "turso"))]
+        {
+            let fs_root = root.join("object-log-turso");
+            std::fs::create_dir_all(&fs_root).expect("object-log root");
+            let proj = root.join("fs-turso-proj.db");
+            let cfg = base_cfg(
+                LogConfig::Filesystem { root: fs_root },
+                ProjectionStoreConfig::Turso { path: proj },
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×turso");
+            opened.push(("filesystem", "turso"));
+            drop(fw);
+        }
+
+        // filesystem × sqlite (retired)
+        #[cfg(any())]
         {
             let fs_root = root.join("object-log-sqlite");
             std::fs::create_dir_all(&fs_root).expect("object-log root");
@@ -2460,7 +2479,7 @@ mod storage_config_open_tests {
             opened.len() >= 2,
             "expected multiple matrix cells to open via StorageConfig, got {opened:?}"
         );
-        // Default features open at least memory×memory, sqlite×memory, sqlite×sqlite, filesystem×memory, filesystem×sqlite.
+        // Default features open at least memory×memory, memory×turso, filesystem×memory, filesystem×turso.
         assert!(
             opened.len() >= 4,
             "default feature set should open ≥4 local cells, got {opened:?}"
@@ -2563,7 +2582,7 @@ mod storage_config_open_tests {
 
     #[test]
     fn open_sqlite_wrapper_matches_storage_config_cell() {
-        #[cfg(feature = "sqlite")]
+        #[cfg(any())]
         {
             let root = temp_dir("wrapper");
             let path = root.join("log.db");
@@ -2614,9 +2633,9 @@ impl ComposedStorageConfig {
             )?,
         }
         match &self.projection {
-            ComposedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+            ComposedProjectionConfig::Sqlite { .. } => {
                 return Err(EngineError::Invalid(
-                    "SQLite projection path must not be empty",
+                    "sqlite storage is retired; use filesystem log and turso projection",
                 ));
             }
             ComposedProjectionConfig::Postgres { url } if url.is_empty() => {
@@ -3053,10 +3072,10 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
     }
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 type ObjectLogSqliteBackend = fireweed_objectlog::AsyncObjectLogSqliteBackend;
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 struct ObjectLogSqliteLifecycle {
     backend: Arc<ObjectLogSqliteBackend>,
     executor: blocking_backend::OwnedBlockingExecutor,
@@ -3079,7 +3098,7 @@ struct ObjectLogSqliteLifecycle {
 /// Note for callers: this mutates durable log metadata (`set_high_water`) as a side effect —
 /// it is not a read-only check, even though both call sites below live inside functions named
 /// `validate_*`/`verify_*`.
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 async fn reconcile_objectlog_sqlite_high_water(
     log: &fireweed_objectlog::ObjectLogEngineStore,
     key: &QueueKey,
@@ -3108,7 +3127,7 @@ async fn reconcile_objectlog_sqlite_high_water(
     Ok(last)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn objectlog_reconcile_high_water(
     log: &fireweed_objectlog::ObjectLogEngineStore,
     key: &QueueKey,
@@ -3117,7 +3136,7 @@ fn objectlog_reconcile_high_water(
     fireweed_objectlog::block_on_objectlog(reconcile_objectlog_sqlite_high_water(log, key, from))
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn validate_objectlog_sqlite_catalog(
     log: &fireweed_objectlog::ObjectLogEngineStore,
     projection: &fireweed_sqlite::SqliteProjectionStore,
@@ -3181,7 +3200,7 @@ fn validate_objectlog_sqlite_catalog(
     Ok(definitions)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 async fn verify_objectlog_sqlite_axes(
     backend: &ObjectLogSqliteBackend,
 ) -> EngineResult<ProjectionVerificationState> {
@@ -3261,7 +3280,7 @@ async fn verify_objectlog_sqlite_axes(
     })
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 impl ObjectLogSqliteLifecycle {
     async fn verify_backend(
         backend: &ObjectLogSqliteBackend,
@@ -3342,7 +3361,7 @@ impl ObjectLogSqliteLifecycle {
     }
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
     fn capabilities(&self) -> ProjectionLifecycleCapabilities {
         ProjectionLifecycleCapabilities {
@@ -5813,24 +5832,14 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
     }
 }
 
-#[cfg(any(
-    feature = "sqlite",
-    feature = "objectlog",
-    feature = "postgres",
-    feature = "turso"
-))]
+#[cfg(any(feature = "objectlog", feature = "postgres", feature = "turso"))]
 #[allow(dead_code)] // Feature combinations compile this helper without every caller.
 fn path_utf8(path: &std::path::Path) -> EngineResult<&str> {
     path.to_str()
         .ok_or(EngineError::Invalid("storage path must be valid UTF-8"))
 }
 
-#[cfg(any(
-    feature = "sqlite",
-    feature = "objectlog",
-    feature = "postgres",
-    feature = "turso"
-))]
+#[cfg(any(feature = "objectlog", feature = "postgres", feature = "turso"))]
 #[allow(dead_code)] // Feature combinations compile this helper without every caller.
 fn wrap_blocking_backend<B>(backend: Arc<B>, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>
 where
@@ -5882,28 +5891,10 @@ fn open_memory_log_cell(
             }
         }
         ProjectionStoreConfig::Sqlite { path } => {
-            #[cfg(all(feature = "memory", feature = "sqlite"))]
-            {
-                let _ = namespace;
-                // Memory log is non-blocking; sqlite projection axis uses adapter-local offload
-                // (assemble_async_log_replay_with_axis_offload, fireweed-db4405b6).
-                use fireweed_engine::assemble_async_log_replay_with_axis_offload;
-                let path = path_utf8(&path)?;
-                let log = fireweed_projection::MemoryLog::new();
-                let projection = fireweed_sqlite::SqliteProjectionStore::open(path)?;
-                let backend = Arc::new(
-                    assemble_async_log_replay_with_axis_offload(log, projection, 0, false, true)?
-                        .recover()?,
-                );
-                Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
-            }
-            #[cfg(not(all(feature = "memory", feature = "sqlite")))]
-            {
-                let _ = (path, clock, namespace);
-                Err(EngineError::Invalid(
-                    "memory×sqlite requires the `memory` and `sqlite` cargo features",
-                ))
-            }
+            let _ = (path, clock, namespace);
+            Err(EngineError::Invalid(
+                "sqlite storage is retired; use filesystem log and turso projection",
+            ))
         }
         ProjectionStoreConfig::Turso { path } => {
             #[cfg(all(feature = "memory", feature = "turso"))]
@@ -5950,58 +5941,10 @@ fn open_sqlite_log_cell(
     projection: ProjectionStoreConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    #[cfg(not(feature = "sqlite"))]
-    {
-        let _ = (path, projection, clock);
-        Err(EngineError::Invalid(
-            "sqlite log cells require the `sqlite` cargo feature",
-        ))
-    }
-    #[cfg(feature = "sqlite")]
-    {
-        let log_path = path_utf8(&path)?.to_owned();
-        match projection {
-            ProjectionStoreConfig::Memory => open_sqlite(&log_path, clock),
-            ProjectionStoreConfig::Sqlite {
-                path: projection_path,
-            } => {
-                let proj_path = path_utf8(&projection_path)?;
-                open_sqlite_sqlite_projection(&log_path, proj_path, clock)
-            }
-            ProjectionStoreConfig::Turso {
-                path: projection_path,
-            } => {
-                #[cfg(feature = "turso")]
-                {
-                    let backend = Arc::new(turso_compose::assemble_sqlite_log_turso(
-                        &log_path,
-                        projection_path,
-                    )?);
-                    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
-                }
-                #[cfg(not(feature = "turso"))]
-                {
-                    let _ = (projection_path, clock);
-                    Err(EngineError::Invalid(
-                        "sqlite×turso requires the `turso` cargo feature",
-                    ))
-                }
-            }
-            ProjectionStoreConfig::Postgres { url } => {
-                #[cfg(feature = "postgres")]
-                {
-                    open_sqlite_postgres_projection(&log_path, &url.0.0, clock)
-                }
-                #[cfg(not(feature = "postgres"))]
-                {
-                    let _ = (url, clock);
-                    Err(EngineError::Invalid(
-                        "sqlite×postgres requires the `postgres` cargo feature",
-                    ))
-                }
-            }
-        }
-    }
+    let _ = (path, projection, clock);
+    Err(EngineError::Invalid(
+        "sqlite storage is retired; use filesystem log and turso projection",
+    ))
 }
 
 fn open_postgres_log_cell(
@@ -6037,36 +5980,10 @@ fn open_postgres_log_cell(
                 clock,
             ),
             ProjectionStoreConfig::Sqlite { path } => {
-                #[cfg(feature = "sqlite")]
-                {
-                    use fireweed_engine::assemble_async_log_replay;
-                    let proj_path = path_utf8(&path)?;
-                    let log = match schema.as_deref() {
-                        Some(schema) => {
-                            fireweed_postgres::PostgresLog::connect_in_schema(&url_str, schema)?
-                        }
-                        None => fireweed_postgres::PostgresLog::connect(&url_str)?,
-                    };
-                    let projection = fireweed_sqlite::SqliteProjectionStore::open(proj_path)?;
-                    let node = node_id.unwrap_or(0);
-                    let mut backend =
-                        assemble_async_log_replay(log, projection, node)?.recover()?;
-                    if let Some(node_id) = node_id {
-                        backend = backend.with_node_id(node_id);
-                    }
-                    let _ = (mode, coordination);
-                    // Postgres log axis: adapter-private offload (fireweed-ca319318).
-                    // Residual: sqlite projection still blocks under poll if BLB-free alone;
-                    // whole-op offload keeps the cell runtime-safe until dual-axis actors land.
-                    wrap_postgres_runtime_safe(Arc::new(backend), clock)
-                }
-                #[cfg(not(feature = "sqlite"))]
-                {
-                    let _ = (path, clock, mode, node_id, coordination, schema);
-                    Err(EngineError::Invalid(
-                        "postgres×sqlite requires the `sqlite` cargo feature",
-                    ))
-                }
+                let _ = (path, clock, mode, node_id, coordination, schema);
+                Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection",
+                ))
             }
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
@@ -6164,39 +6081,21 @@ fn open_filesystem_log_cell(
                 clock,
             ),
             ProjectionStoreConfig::Sqlite { path } => {
-                #[cfg(feature = "sqlite")]
-                {
-                    open_composed_sqlite(
-                        composed_storage_config(
-                            ObjectLogConfig::Local { root },
-                            authority,
-                            ComposedProjectionConfig::Sqlite { path },
-                            response_barrier,
-                            async_projection,
-                            sqlite_projection_deferred_flush_chunk,
-                            segments,
-                            namespace,
-                            recovery,
-                        ),
-                        clock,
-                    )
-                }
-                #[cfg(not(feature = "sqlite"))]
-                {
-                    let _ = (
-                        root,
-                        authority,
-                        path,
-                        response_barrier,
-                        segments,
-                        namespace,
-                        recovery,
-                        clock,
-                    );
-                    Err(EngineError::Invalid(
-                        "object-log×sqlite requires the `sqlite` cargo feature",
-                    ))
-                }
+                let _ = (
+                    root,
+                    authority,
+                    path,
+                    response_barrier,
+                    async_projection,
+                    sqlite_projection_deferred_flush_chunk,
+                    segments,
+                    namespace,
+                    recovery,
+                    clock,
+                );
+                Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection",
+                ))
             }
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
@@ -6338,41 +6237,21 @@ fn open_s3_log_cell(
                 clock,
             ),
             ProjectionStoreConfig::Sqlite { path } => {
-                #[cfg(feature = "sqlite")]
-                {
-                    open_s3_composed_sqlite(
-                        composed_storage_config(
-                            s3_object_log_config(provider),
-                            authority,
-                            ComposedProjectionConfig::Sqlite { path },
-                            response_barrier,
-                            async_projection,
-                            sqlite_projection_deferred_flush_chunk,
-                            segments,
-                            namespace,
-                            recovery,
-                        ),
-                        clock,
-                    )
-                }
-                #[cfg(not(feature = "sqlite"))]
-                {
-                    let _ = (
-                        provider,
-                        authority,
-                        path,
-                        response_barrier,
-                        async_projection,
-                        sqlite_projection_deferred_flush_chunk,
-                        segments,
-                        namespace,
-                        recovery,
-                        clock,
-                    );
-                    Err(EngineError::Invalid(
-                        "object-log×sqlite requires the `sqlite` cargo feature",
-                    ))
-                }
+                let _ = (
+                    provider,
+                    authority,
+                    path,
+                    response_barrier,
+                    async_projection,
+                    sqlite_projection_deferred_flush_chunk,
+                    segments,
+                    namespace,
+                    recovery,
+                    clock,
+                );
+                Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection",
+                ))
             }
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
@@ -6654,153 +6533,6 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
     open(StorageConfig::memory(), clock).expect("memory×memory open is infallible after validation")
 }
 
-/// Open a **sole-owner**, SQLite-backed Fireweed handle with a durable command log and an in-memory
-/// projection rebuilt from that log at `path`. Requires the `sqlite` feature (default).
-///
-/// Matrix cell: `log=sqlite` × `projection=memory` (Class A log-replay).
-///
-/// Intentionally **not** wrapped in process-wide [`blocking_backend::BlockingLibBackend`]: the
-/// sqlite log axis offloads rusqlite through adapter-local bounded workers
-/// (`assemble_async_log_replay_with_axis_offload`, fireweed-db4405b6 / API-005).
-#[cfg(feature = "sqlite")]
-pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
-    open_sqlite_with_sync(path, clock, fireweed_sqlite::SqliteLogSync::Full)
-}
-
-/// Same as [`open_sqlite`] with an explicit WAL sync mode.
-///
-/// [`fireweed_sqlite::SqliteLogSync::Full`] is Class A (power-loss durable ack).
-/// `Normal` / `Off` trade that ack for throughput; the memory projection is
-/// rebuildable from whatever the log actually flushed.
-#[cfg(feature = "sqlite")]
-pub fn open_sqlite_with_sync(
-    path: &str,
-    clock: Arc<dyn Clock>,
-    sync: fireweed_sqlite::SqliteLogSync,
-) -> EngineResult<Fireweed> {
-    let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend_with_sync(
-        path, sync,
-    )?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
-}
-
-/// Same as [`open_sqlite`] but also returns the underlying composed backend handle so a caller can
-/// read its commit-section lock-phase counters (wait vs hold time on the log/projection store
-/// mutexes) alongside driving load through the ordinary public API. Diagnostic-only, not part of
-/// the stable product surface (fireweed-77ae7a87 commit-section contention probe).
-#[doc(hidden)]
-#[cfg(feature = "sqlite")]
-pub fn open_sqlite_with_lock_stats_handle(
-    path: &str,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<(
-    Fireweed,
-    Arc<
-        fireweed_engine::AsyncLogReplayBackend<
-            fireweed_sqlite::SqliteLog,
-            fireweed_sqlite::InMemoryProjection,
-        >,
-    >,
-)> {
-    let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
-    let fw = Fireweed::from_runtime(RuntimeCore::new(Arc::clone(&backend), clock));
-    Ok((fw, backend))
-}
-
-/// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
-/// derived sqlite projection at `projection_path` (Class A; distinct store paths required).
-///
-/// Matrix cell: `log=sqlite` × `projection=sqlite`. Recovery-on-open replays only the log tail
-/// beyond the projection high-water. Requires the `sqlite` feature (default).
-///
-/// Both axes use adapter-local offload; no process-wide BlockingLibBackend (fireweed-db4405b6).
-#[cfg(feature = "sqlite")]
-pub fn open_sqlite_sqlite_projection(
-    log_path: &str,
-    projection_path: &str,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    if log_path == projection_path {
-        return Err(EngineError::Invalid(
-            "sqlite×sqlite requires distinct log_path and projection_path",
-        ));
-    }
-    let backend = Arc::new(fireweed_sqlite::composed_sqlite_log_sqlite_projection(
-        log_path,
-        projection_path,
-    )?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
-}
-
-/// Same as [`open_sqlite_sqlite_projection`] plus the composed backend handle (cycle-API probes).
-#[doc(hidden)]
-#[cfg(feature = "sqlite")]
-pub fn open_sqlite_sqlite_projection_with_handle(
-    log_path: &str,
-    projection_path: &str,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<(
-    Fireweed,
-    Arc<
-        fireweed_engine::AsyncLogReplayBackend<
-            fireweed_sqlite::SqliteLog,
-            fireweed_sqlite::SqliteProjectionStore,
-        >,
-    >,
-)> {
-    if log_path == projection_path {
-        return Err(EngineError::Invalid(
-            "sqlite×sqlite requires distinct log_path and projection_path",
-        ));
-    }
-    let backend = Arc::new(fireweed_sqlite::composed_sqlite_log_sqlite_projection(
-        log_path,
-        projection_path,
-    )?);
-    let fw = Fireweed::from_runtime(RuntimeCore::new(Arc::clone(&backend), clock));
-    Ok((fw, backend))
-}
-
-/// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
-/// derived postgres relational projection at `projection_url` (Class A; distinct stores).
-///
-/// Matrix cell: `log=sqlite` × `projection=postgres`. Requires `sqlite` + `postgres` features.
-#[cfg(all(feature = "sqlite", feature = "postgres"))]
-pub fn open_sqlite_postgres_projection(
-    log_path: &str,
-    projection_url: &str,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    let log = fireweed_sqlite::SqliteLog::open(log_path)?;
-    // Unique schema per log path so matrix runs and reopens do not collide on a shared DSN.
-    let schema = derived_postgres_schema_name(&format!("sqlite_pg_{log_path}"));
-    let projection =
-        fireweed_postgres::PostgresRelational::connect_in_schema(projection_url, &schema)?;
-    let backend =
-        Arc::new(fireweed_engine::assemble_async_log_replay(log, projection, 0)?.recover()?);
-    // Postgres projection axis: adapter-private offload (fireweed-ca319318).
-    wrap_postgres_runtime_safe(backend, clock)
-}
-
-/// Open a **sole-owner**, **unified** SQLite Fireweed handle at `path`.
-///
-/// **Not the product durability model.** ADR-012 product cells are orthogonal
-/// `LogStore × ProjectionStore` (log for durability, projection for performance).
-/// This constructor keeps a **single** sqlite file as a unified store (same path on both
-/// axes) for sole-owner discovery/`discover_active_scopes` convenience. Prefer
-/// [`open_sqlite`] / [`open_sqlite_sqlite_projection`] / [`open_memory`] for performance
-/// work and Class A log-replay semantics.
-///
-/// Queue creation is atomic across independently opened handles and returns the definition
-/// decoded from the durable `queues` catalog. Requires the `sqlite` feature (default).
-#[cfg(feature = "sqlite")]
-pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
-    // Unified relational SQLite already implements async product ports; do not install
-    // process-wide BlockingLibBackend (fireweed-db4405b6 residual cleanup).
-    let backend = Arc::new(fireweed_sqlite::composed_sqlite_relational(path)?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
-}
-
 /// Open a **sole-owner**, object-log Fireweed handle rooted at `root`, using the shared composed engine
 /// with an in-memory projection rebuilt from the authoritative log. Requires the `objectlog` feature
 /// (default).
@@ -7037,7 +6769,7 @@ fn finish_objectlog_postgres(
 ///
 /// The SQLite file is a disposable cache: the returned lifecycle handle can verify it, delete it in place,
 /// and rebuild it exactly from authoritative object-log history without changing the live hot projection.
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 #[doc(hidden)]
 pub(crate) fn open_composed_sqlite(
     config: ComposedStorageConfig,
@@ -7054,7 +6786,7 @@ pub(crate) fn open_composed_sqlite(
     finish_composed_sqlite(config, clock, log, projection)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn open_s3_composed_sqlite(
     config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
@@ -7066,21 +6798,21 @@ fn open_s3_composed_sqlite(
     finish_composed_sqlite(config, clock, log, projection)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn open_filesystem_sqlite_projection(
     config: &ComposedStorageConfig,
 ) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
     open_configured_sqlite_projection(config)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn open_s3_sqlite_projection(
     config: &ComposedStorageConfig,
 ) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
     open_configured_sqlite_projection(config)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn open_configured_sqlite_projection(
     config: &ComposedStorageConfig,
 ) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
@@ -7099,7 +6831,7 @@ fn open_configured_sqlite_projection(
     fireweed_sqlite::SqliteProjectionStore::open(projection_path)
 }
 
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 fn finish_composed_sqlite(
     config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
@@ -7169,7 +6901,7 @@ fn finish_composed_sqlite(
 }
 
 /// Open an authoritative object log with a disposable SQLite projection.
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+#[cfg(any())]
 pub fn open_objectlog_sqlite(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
@@ -7822,7 +7554,7 @@ mod tests {
 
     /// Filesystem object-log × sqlite Strict: no process-wide BlockingLibBackend on open;
     /// claim+commit on current-thread runtime (fireweed-8a023735).
-    #[cfg(all(feature = "objectlog", feature = "sqlite"))]
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_objectlog_filesystem_sqlite_claim_and_commit_on_current_thread()
     -> EngineResult<()> {
@@ -7903,7 +7635,7 @@ mod tests {
 
     /// fireweed-2ad3a030 / snorri: object-log × sqlite Strict claim_by_query → commit must
     /// not reject the just-issued ClaimRef as a stale lease (async projection path).
-    #[cfg(all(feature = "objectlog", feature = "sqlite"))]
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_objectlog_sqlite_claim_by_query_then_commit() -> EngineResult<()> {
         use fireweed_core::{
@@ -8124,7 +7856,7 @@ mod tests {
 
     /// Public sqlite×memory open drives AsyncLogReplay without process-wide
     /// BlockingLibBackend. Rusqlite is adapter-local offload only (fireweed-db4405b6).
-    #[cfg(feature = "sqlite")]
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_sqlite_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
         let log_path = std::env::temp_dir().join(format!(
@@ -8201,7 +7933,7 @@ mod tests {
 
     /// Public sqlite×sqlite open without process-wide BlockingLibBackend; both axes
     /// offload rusqlite adapter-locally (fireweed-db4405b6).
-    #[cfg(feature = "sqlite")]
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_sqlite_sqlite_claim_and_commit_on_current_thread() -> EngineResult<()> {
         let stamp = format!(
@@ -8272,7 +8004,7 @@ mod tests {
     }
 
     /// open_async sqlite×memory stays current-thread safe (no block_in_place / BLB).
-    #[cfg(feature = "sqlite")]
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_async_sqlite_memory_claim_and_commit_on_current_thread() -> EngineResult<()>
     {

@@ -17,7 +17,6 @@ use fireweed_core::{
 };
 use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
-use fireweed_sqlite::SqliteRelationalBackend;
 use serde_json::{Value, json};
 
 fn qkey() -> fireweed::QueueKey {
@@ -131,14 +130,6 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
 
 async fn new_fireweed() -> RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>> {
     let backend = Arc::new(composed_memory_backend());
-    let clock = Arc::new(ManualClock::at(0));
-    let fireweed = RuntimeCore::new(backend, clock);
-    fireweed.create_queue(queue_definition()).await.unwrap();
-    fireweed
-}
-
-async fn new_sqlite_relational_fireweed() -> RuntimeCore<SqliteRelationalBackend> {
-    let backend = Arc::new(SqliteRelationalBackend::in_memory().unwrap());
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);
     fireweed.create_queue(queue_definition()).await.unwrap();
@@ -795,121 +786,6 @@ async fn secondary_indexes_upsert_insert_typed_unique_conflict_is_rejected() {
     );
 }
 
-/// Same typed-unique upsert-insert rejection exercised against the SQLite log-replay backend
-/// (no environment variable required — uses an ephemeral in-memory SQLite store). Verifies that
-/// `rebuild_all` and `create_queue` call `.with_typed_indexes` and that the upsert insert path
-/// routes through typed-aware validation.
-#[tokio::test]
-async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_unique_conflict() {
-    use fireweed_sqlite::composed_sqlite_backend_in_memory;
-
-    let backend = Arc::new(composed_sqlite_backend_in_memory().expect("sqlite in-memory"));
-    let clock = Arc::new(ManualClock::at(0));
-    let fireweed = RuntimeCore::new(backend, clock);
-    fireweed.create_queue(queue_definition()).await.unwrap();
-    let q = qkey();
-
-    // Push an item occupying external_id "SLOT".
-    let original = fireweed
-        .push(
-            &q,
-            item(json!({
-                "score": 1,
-                "active": false,
-                "due_at": "2026-06-30T12:00:00Z",
-                "region": "us-east",
-                "zone": 1,
-                "external_id": "SLOT"
-            })),
-        )
-        .await
-        .unwrap();
-
-    // Fresh upsert-insert with a colliding typed-unique key must be Conflict.
-    let fresh_key = ClientItemKey::new("new-sqlite-key").unwrap();
-    let insert_err = fireweed
-        .upsert(
-            &q,
-            fresh_key,
-            item(json!({
-                "score": 2,
-                "active": true,
-                "due_at": "2026-06-30T12:00:00Z",
-                "region": "us-east",
-                "zone": 2,
-                "external_id": "SLOT"
-            })),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        insert_err,
-        fireweed::EngineError::Conflict,
-        "sqlite upsert insert must reject typed-unique collision"
-    );
-
-    // Push another item for the update_fields conflict check.
-    let other = fireweed
-        .push(
-            &q,
-            item(json!({
-                "score": 3,
-                "active": true,
-                "due_at": "2026-06-30T12:00:00Z",
-                "region": "us-east",
-                "zone": 3,
-                "external_id": "OTHER"
-            })),
-        )
-        .await
-        .unwrap();
-
-    // update_fields that would move `other` into the typed-unique slot held by `original`.
-    let update_err = fireweed
-        .update_fields(
-            &q,
-            other,
-            BTreeMap::new(),
-            PayloadUpdate::Keep,
-            Some(json!({
-                "score": 3,
-                "active": true,
-                "due_at": "2026-06-30T12:00:00Z",
-                "region": "us-east",
-                "zone": 3,
-                "external_id": "SLOT"
-            })),
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        update_err,
-        fireweed::EngineError::Conflict,
-        "sqlite update_fields must reject typed-unique collision"
-    );
-
-    // Both items remain in their original indexed positions.
-    assert_eq!(
-        fireweed
-            .query_index_unique(&q, "by_external_id", key(&["SLOT"]))
-            .await
-            .unwrap()
-            .unwrap()
-            .item_id,
-        original
-    );
-    assert_eq!(
-        fireweed
-            .query_index_unique(&q, "by_external_id", key(&["OTHER"]))
-            .await
-            .unwrap()
-            .unwrap()
-            .item_id,
-        other
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Typed query API (ADR-011) — raw-byte bypass prevention + name resolution
 // ---------------------------------------------------------------------------
@@ -1135,7 +1011,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
 
 #[tokio::test]
 async fn secondary_indexes_typed_query_relational_error_precedence_is_explicit() {
-    let fireweed = new_sqlite_relational_fireweed().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
     let err = fireweed
@@ -1158,6 +1034,6 @@ async fn secondary_indexes_typed_query_relational_error_precedence_is_explicit()
         .unwrap();
     assert!(
         hits.is_empty(),
-        "sqlite relational typed indexes are implemented and a valid missing key returns an empty result"
+        "typed indexes are implemented and a valid missing key returns an empty result"
     );
 }
