@@ -33,6 +33,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_group_head_index_is_declared() {
+        assert!(
+            RELATIONAL_SCHEMA.contains("fireweed_items_pending_group_idx"),
+            "group-head reseek needs a group_key pending index"
+        );
+        assert!(
+            RELATIONAL_SCHEMA.contains("group_key, priority_sort, created_seq, item_id"),
+            "pending group index must lead with group_key"
+        );
+    }
+
+    #[test]
     fn owned_projection_tables_are_declared_by_the_schema() {
         for table in OWNED_PROJECTION_TABLES {
             assert!(

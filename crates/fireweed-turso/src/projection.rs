@@ -2262,14 +2262,14 @@ pub async fn select_and_materialize_item_claims_on(
     lease_token: &LeaseToken,
     lease_expires_at: UtcTimestamp,
     rowid_floor: Option<i64>,
-) -> EngineResult<(Vec<ItemId>, Vec<ClaimedItem>)> {
+) -> EngineResult<(Vec<ItemId>, Vec<ClaimedItem>, Option<i64>)> {
     if max == 0 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), None));
     }
     let tenant = shard.tenant_id.as_str();
     let queue = shard.queue_id.as_str();
     if queue_paused(connection, tenant, queue).await? {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), None));
     }
     let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
     let expires = ts_nanos(lease_expires_at);
@@ -2277,6 +2277,7 @@ pub async fn select_and_materialize_item_claims_on(
     let started = Instant::now();
     let mut ids = Vec::with_capacity(max);
     let mut carriers = Vec::with_capacity(max);
+    let mut next_floor = None;
     if let Some(mut floor) = rowid_floor {
         const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
              t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.rowid \
@@ -2336,6 +2337,7 @@ pub async fn select_and_materialize_item_claims_on(
             }
             floor = next;
         }
+        next_floor = Some(floor);
     } else {
         const ORDER_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
              t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size \
@@ -2400,7 +2402,7 @@ pub async fn select_and_materialize_item_claims_on(
         );
     }
     let items = render_class_s_claimed_items(lease_token, carriers)?;
-    Ok((ids, items))
+    Ok((ids, items, next_floor))
 }
 
 fn claim_row_is_due(row: &Row, now_n: i64) -> EngineResult<bool> {
@@ -4343,9 +4345,9 @@ mod committed_pool_helper_tests {
             "pub async fn item_claim_microbatch_on_connection(",
         );
         assert!(
-            serving_claim.contains("claim_scan_default_fifo")
-                && serving_claim.contains("claim_scan_hints"),
-            "serving Claim must use the FIFO rowid floor when the queue is unpriced"
+            serving_claim.contains("claim_scan_is_fifo")
+                && serving_claim.contains("advance_claim_scan_hint"),
+            "serving Claim must advance the FIFO rowid floor under the reader mutex"
         );
 
         let items = finish_retained_claimed(Vec::<ClaimedItem>::new()).expect("retained");

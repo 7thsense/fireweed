@@ -19,11 +19,16 @@ pub fn parts(shard: &QueueKey) -> (String, String) {
 }
 
 pub fn is_fifo_claim_scan_item(item: &PushItem) -> bool {
-    item.priority.is_none()
-        && item.not_before.is_none()
-        && item.group_key.is_none()
-        && item.cohort_size.is_none()
-        && item.gate_keys.is_empty()
+    item.cohort_size.is_none() && item.gate_keys.is_empty()
+}
+
+fn batch_has_uniform_schedule(items: &[&PushItem]) -> bool {
+    let Some(first) = items.first() else {
+        return false;
+    };
+    items
+        .iter()
+        .all(|item| item.priority == first.priority && item.not_before == first.not_before)
 }
 
 pub fn reset_claim_scan_hint(
@@ -41,11 +46,21 @@ pub fn observe_push_for_claim_scan(
     shard: &QueueKey,
     items: &[&PushItem],
 ) {
-    if items.iter().copied().all(is_fifo_claim_scan_item) {
-        claim_scan_default_fifo.entry(shard.clone()).or_insert(true);
+    if !items.is_empty()
+        && items.iter().copied().all(is_fifo_claim_scan_item)
+        && batch_has_uniform_schedule(items)
+    {
+        claim_scan_default_fifo.insert(shard.clone(), true);
     } else {
         reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
     }
+}
+
+pub fn observe_uniform_schedule_for_claim_scan(
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+) {
+    claim_scan_default_fifo.insert(shard.clone(), true);
 }
 
 pub fn queue_paused(tx: &impl RelTx, shard: &QueueKey) -> EngineResult<bool> {

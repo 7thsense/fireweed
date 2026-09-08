@@ -11,8 +11,8 @@ use std::time::Duration;
 use crate::tx::TursoRel;
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, QueueDefinition, QueueId, RequestId, TenantId,
-    UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, QueueDefinition, QueueId, RequestId,
+    TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
     BatchUpdateSnapshotItem, Claimed, ClaimedItem, EngineError, EngineResult, IdempotencyDecision,
@@ -618,43 +618,82 @@ impl TursoRelational {
         }
     }
 
+    /// This process owns the Turso writer. FIFO Claim SELECT advances the
+    /// rowid floor under the serving-reader mutex so the next generation can
+    /// read the following slice without waiting for apply.
+    pub fn claim_scan_is_fifo(&self, shard: &QueueKey) -> bool {
+        self.claim_scan_default_fifo
+            .lock()
+            .expect("claim-scan-fifo mutex poisoned")
+            .get(shard)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn claim_scan_hint(&self, shard: &QueueKey) -> Option<i64> {
+        self.claim_scan_hints
+            .lock()
+            .expect("claim-scan-hint mutex poisoned")
+            .get(shard)
+            .copied()
+    }
+
+    pub fn replace_claim_scan_hint(&self, shard: &QueueKey, hint: Option<i64>) {
+        let mut hints = self
+            .claim_scan_hints
+            .lock()
+            .expect("claim-scan-hint mutex poisoned");
+        match hint {
+            Some(next) => {
+                hints.insert(shard.clone(), next);
+            }
+            None => {
+                hints.remove(shard);
+            }
+        }
+    }
+
+    fn advance_claim_scan_hint(&self, shard: &QueueKey, next: i64) {
+        let mut hints = self
+            .claim_scan_hints
+            .lock()
+            .expect("claim-scan-hint mutex poisoned");
+        let slot = hints.entry(shard.clone()).or_insert(0);
+        if next > *slot {
+            *slot = next;
+        }
+    }
+
     /// Select and materialize item Claims against the serving reader when pools are absent.
     ///
-    /// No live Deferred snapshot. FIFO queues pass the apply-maintained rowid
-    /// floor so candidate SELECT walks `rowid`, not payload.
+    /// No live Deferred snapshot. FIFO queues pass a process-owned rowid floor
+    /// so candidate SELECT walks `rowid`, not payload. The floor advances here
+    /// under the reader mutex; apply may only raise it.
     pub async fn item_claim_microbatch_on_serving_reader(
         &self,
         shard: &QueueKey,
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
-        let rowid_floor = {
-            let fifo = self
-                .claim_scan_default_fifo
-                .lock()
-                .expect("claim-scan-fifo mutex poisoned")
-                .get(shard)
-                .copied()
-                .unwrap_or(false);
-            if fifo {
-                let hints = self
-                    .claim_scan_hints
-                    .lock()
-                    .expect("claim-scan-hint mutex poisoned");
-                Some(hints.get(shard).copied().unwrap_or(1).max(1))
-            } else {
-                None
-            }
-        };
+        let fifo = self.claim_scan_is_fifo(shard);
         let mut connection = self.reader.lock().await;
-        Self::item_claim_microbatch_on_connection_from(
+        let rowid_floor = if fifo {
+            Some(self.claim_scan_hint(shard).unwrap_or(1).max(1))
+        } else {
+            None
+        };
+        let (out, next_floor) = Self::item_claim_microbatch_on_connection_from(
             &mut connection,
             shard,
             members,
             exclude,
             rowid_floor,
         )
-        .await
+        .await?;
+        if fifo && let Some(next) = next_floor {
+            self.advance_claim_scan_hint(shard, next);
+        }
+        Ok(out)
     }
 
     /// FIFO item-Claim select and materialize on an already-borrowed driver.
@@ -667,8 +706,11 @@ impl TursoRelational {
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
-        Self::item_claim_microbatch_on_connection_from(connection, shard, members, exclude, None)
-            .await
+        let (out, _) = Self::item_claim_microbatch_on_connection_from(
+            connection, shard, members, exclude, None,
+        )
+        .await?;
+        Ok(out)
     }
 
     async fn item_claim_microbatch_on_connection_from(
@@ -677,23 +719,24 @@ impl TursoRelational {
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
         rowid_floor: Option<i64>,
-    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+    ) -> EngineResult<(Vec<(Vec<ItemId>, Vec<ClaimedItem>)>, Option<i64>)> {
         // Latest `now` is the most inclusive eligibility instant across the generation.
         let Some(now) = members.iter().map(|member| member.0).max() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
         let total_max = members.iter().map(|member| member.1).sum();
-        let (mut ids, mut items) = crate::projection::select_and_materialize_item_claims_on(
-            connection,
-            shard,
-            now,
-            total_max,
-            exclude,
-            &members[0].2,
-            members[0].3,
-            rowid_floor,
-        )
-        .await?;
+        let (mut ids, mut items, next_floor) =
+            crate::projection::select_and_materialize_item_claims_on(
+                connection,
+                shard,
+                now,
+                total_max,
+                exclude,
+                &members[0].2,
+                members[0].3,
+                rowid_floor,
+            )
+            .await?;
         let mut out = Vec::with_capacity(members.len());
         for (_, max, token, expires) in members {
             let take_ids = ids.len().min(*max);
@@ -706,7 +749,7 @@ impl TursoRelational {
             }
             out.push((member_ids, member_items));
         }
-        Ok(out)
+        Ok((out, next_floor))
     }
 
     /// Load a mutation-generation overlay snapshot on an already-borrowed driver connection.
@@ -1167,6 +1210,41 @@ impl TursoRelational {
         select_claim_outbox(&TursoRel(&writer), tenant_id, queue_id)
     }
 
+    pub async fn remembered_claim_targets(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> Option<Vec<ClaimedItem>> {
+        if ids.is_empty() {
+            return Some(Vec::new());
+        }
+        let tokens = self.live_tokens.lock().await;
+        let expires = UtcTimestamp::new(1, 0).ok()?;
+        let client_item_key = ClientItemKey::new("remembered").ok()?;
+        let mut items = Vec::with_capacity(ids.len());
+        for item_id in ids {
+            let token = tokens.get(&(shard.clone(), *item_id))?.clone();
+            items.push(ClaimedItem {
+                item_id: *item_id,
+                client_item_key: client_item_key.clone(),
+                item_version: 1,
+                priority: None,
+                group_key: None,
+                not_before: None,
+                lease_token: Some(token),
+                lease_expires_at: expires,
+                attempt_count: 0,
+                max_attempts: 1,
+                payload: None,
+                fields: Default::default(),
+                metadata: Metadata::default(),
+                gate_keys: Vec::new(),
+                entity: None,
+            });
+        }
+        Some(items)
+    }
+
     pub async fn remember_leases(&self, shard: &QueueKey, item_ids: &[ItemId], token: LeaseToken) {
         let mut tokens = self.live_tokens.lock().await;
         let mut by_consumer = self.live_tokens_by_consumer.lock().await;
@@ -1540,6 +1618,60 @@ mod class_s_tests {
         .expect("exclude");
         assert_eq!(excluded.len(), 1);
         assert_eq!(excluded[0].0, ids[2..4]);
+    }
+
+    #[tokio::test]
+    async fn serving_reader_fifo_select_advances_floor_without_apply() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        store
+            .execute(
+                "INSERT INTO queues(tenant,queue,definition,paused,pause_drain_intake) \
+                 VALUES('t','q','{}',0,0)",
+                vec![],
+            )
+            .await
+            .expect("queue");
+        let ids: Vec<ItemId> = (1..=4).map(|seq| ItemId::mint(1, 0, seq as u32)).collect();
+        for (seq, item_id) in ids.iter().enumerate() {
+            store
+                .execute(
+                    insert_pending(&item_id.to_string(), (seq as i64) + 1),
+                    vec![],
+                )
+                .await
+                .expect("insert");
+        }
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        store
+            .claim_scan_default_fifo
+            .lock()
+            .expect("fifo")
+            .insert(shard.clone(), true);
+        let token = LeaseToken::new("token-a").expect("token");
+        let now = UtcTimestamp::new(20, 0).unwrap();
+        let expires = UtcTimestamp::new(100, 0).unwrap();
+        let first = store
+            .item_claim_microbatch_on_serving_reader(
+                &shard,
+                &[(now, 2, token.clone(), expires)],
+                &[],
+            )
+            .await
+            .expect("first");
+        let second = store
+            .item_claim_microbatch_on_serving_reader(
+                &shard,
+                &[(now, 2, token.clone(), expires)],
+                &[],
+            )
+            .await
+            .expect("second");
+        assert_eq!(first[0].0, ids[..2]);
+        assert_eq!(second[0].0, ids[2..]);
+        assert!(
+            store.claim_scan_hint(&shard).unwrap_or(0) > 2,
+            "SELECT must raise the floor past the first slice while rows are still Pending"
+        );
     }
 }
 

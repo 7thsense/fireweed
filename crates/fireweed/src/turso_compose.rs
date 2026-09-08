@@ -895,8 +895,16 @@ mod contention_mapping_tests {
             "async fn allocate_accepted_pushes(",
         );
         assert!(
-            drive.contains("wait_selected_frontiers(&queue, has_claim, wait_push_apply)"),
-            "Claim SELECT must wait until prior Claims are Leased in Turso"
+            drive.contains("wait_selected_frontiers(&queue, false, wait_push_apply)"),
+            "Claim SELECT waits for unpublished Push apply, not the previous Claim"
+        );
+        assert!(
+            drive.contains("claim_select.lock()"),
+            "this process owns the Turso writer and sequences Claim SELECT in memory"
+        );
+        assert!(
+            !drive.contains("wait_selected_frontiers(&queue, last_claim"),
+            "item Claim must not wait for prior Claim apply before SELECT"
         );
         let continuation = between(
             preamble,
@@ -1246,6 +1254,10 @@ mod contention_mapping_tests {
         assert!(
             !item_claim.contains("wait_request_entry_coverage"),
             "item Claim must not wait apply before return; Complete uses remembered leases"
+        );
+        assert!(
+            derived_impl.contains("remembered_claim_targets"),
+            "Complete/renew must use process-owned lease tokens before waiting Turso apply"
         );
         let realized = between(
             derived_impl,
@@ -1648,6 +1660,9 @@ where
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> EngineResult<Vec<fireweed_engine::ClaimedItem>> {
+        if let Some(claimed) = self.projection.remembered_claim_targets(shard, ids).await {
+            return Ok(claimed);
+        }
         let claimed = AsyncProjectionStore::render_claimed(
             self.projection.as_ref(),
             shard.clone(),
@@ -3201,6 +3216,10 @@ pub struct DerivedObjectLogTursoBackend {
         >,
     >,
     claim_work_ids: AtomicU64,
+    /// This process owns the Turso writer. Item Claim SELECT and the FIFO
+    /// rowid floor are sequenced here so the next generation can read the
+    /// following slice without waiting for apply.
+    claim_select: tokio::sync::Mutex<()>,
     #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
     drivers: CoordinatorDriverRegistry,
 }
@@ -3310,6 +3329,7 @@ impl DerivedObjectLogTursoBackend {
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
             generation_outcomes: Arc::new(Mutex::new(HashMap::new())),
             claim_work_ids: AtomicU64::new(1),
+            claim_select: tokio::sync::Mutex::new(()),
             drivers,
         };
         backend.recover_async().await?;
@@ -3631,6 +3651,9 @@ impl DerivedObjectLogTursoBackend {
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> EngineResult<Vec<fireweed_engine::ClaimedItem>> {
+        if let Some(claimed) = self.projection.remembered_claim_targets(shard, ids).await {
+            return Ok(claimed);
+        }
         self.wait_request_entry_coverage(shard).await?;
         let claimed = AsyncProjectionStore::render_claimed(
             self.projection.as_ref(),
@@ -4119,11 +4142,6 @@ impl DerivedObjectLogTursoBackend {
         } else {
             false
         };
-        // Claim SELECT uses fireweed_items_pending_order_idx (Pending only).
-        // Previous Claims must be applied to Leased before this read, or the
-        // next generation restarts at the front of a still-Pending table.
-        self.wait_selected_frontiers(&queue, has_claim, wait_push_apply)
-            .await?;
         let mut keys = Vec::new();
         let mut batch_keys = Vec::new();
         let mut claimed = false;
@@ -4157,6 +4175,11 @@ impl DerivedObjectLogTursoBackend {
                 | MutationGenerationWork::Singleton { .. } => {}
             }
         }
+        // New Push rows must exist in Turso before Claim SELECT. Previous
+        // Claims are reserved in-process (claim_select mutex + unpublished
+        // overlay ids). Do not wait for those rows to become Leased.
+        self.wait_selected_frontiers(&queue, false, wait_push_apply)
+            .await?;
         let definition =
             AsyncControlPlane::queue_definition(self.control.as_ref(), queue.clone()).await?;
         let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
@@ -4165,8 +4188,6 @@ impl DerivedObjectLogTursoBackend {
             .acquire_shared(queue.clone())
             .await
             .map_err(map_coord)?;
-        self.wait_selected_frontiers(&queue, has_claim, wait_push_apply)
-            .await?;
         let now = match &works[0] {
             MutationGenerationWork::Push { request, .. } => request.now,
             MutationGenerationWork::BatchUpdate { now, .. }
@@ -4241,6 +4262,12 @@ impl DerivedObjectLogTursoBackend {
         }
         let (mut members, mut folded) =
             validate_inert_mutation_generation_folding(&snapshot, &works)?;
+        let _claim_select = if claimed {
+            Some(self.claim_select.lock().await)
+        } else {
+            None
+        };
+        let saved_claim_hint = claimed.then(|| self.projection.claim_scan_hint(&queue));
         self.realize_accepted_claims(&queue, &works, &mut members, &mut folded)
             .await?;
         self.allocate_accepted_pushes(&definition, &works, &mut members, &mut folded)
@@ -4255,6 +4282,9 @@ impl DerivedObjectLogTursoBackend {
                     .commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
                     .await
                 {
+                    if let Some(hint) = saved_claim_hint {
+                        self.projection.replace_claim_scan_hint(&queue, hint);
+                    }
                     return Err(error);
                 }
             }

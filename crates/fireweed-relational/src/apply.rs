@@ -16,8 +16,9 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     RelRow, RelTx, RelValue, TypedIndexRows, elig_sort, fields_from_json, fields_to_json,
-    has_blocked_gates, lease_hash, metadata_to_json, observe_push_for_claim_scan, parse_priority,
-    parse_state, parts, reset_claim_scan_hint, state_str, to_json, ts_nanos, ts_nanos_opt,
+    has_blocked_gates, lease_hash, metadata_to_json, observe_push_for_claim_scan,
+    observe_uniform_schedule_for_claim_scan, parse_priority, parse_state, parts,
+    reset_claim_scan_hint, state_str, to_json, ts_nanos, ts_nanos_opt,
 };
 
 pub use crate::RELATIONAL_BATCH as SQLITE_BATCH;
@@ -3054,6 +3055,7 @@ fn refresh_lost_group_reps_sql(
                    FROM incoming \
                    LEFT JOIN fireweed_items i ON i.rowid = ( \
                      SELECT i2.rowid FROM fireweed_items i2 \
+                     INDEXED BY fireweed_items_pending_group_idx \
                      WHERE i2.tenant_id=? AND i2.queue_id=? \
                        AND i2.group_key=incoming.group_key \
                        AND i2.lifecycle_state='Pending' AND i2.superseded=0 \
@@ -3121,6 +3123,7 @@ fn decrement_and_rehead_groups_sql(
                    FROM incoming \
                    LEFT JOIN fireweed_items i ON i.rowid = ( \
                      SELECT i2.rowid FROM fireweed_items i2 \
+                     INDEXED BY fireweed_items_pending_group_idx \
                      WHERE i2.tenant_id=? AND i2.queue_id=? \
                        AND i2.group_key=incoming.group_key \
                        AND i2.lifecycle_state='Pending' AND i2.superseded=0 \
@@ -4290,6 +4293,8 @@ fn try_apply_operation_shaped_api001_batch(
         }
         if schedule_reorders_rowid(updates, shape) {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+        } else if shape.priority || shape.not_before {
+            observe_uniform_schedule_for_claim_scan(claim_scan_default_fifo, shard);
         }
         if grouped_schedule {
             maintain_grouped_schedule_summaries(
@@ -4401,6 +4406,8 @@ fn try_apply_operation_shaped_api001_batch(
     }
     if schedule_reorders_rowid(updates, shape) {
         reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+    } else if shape.priority || shape.not_before {
+        observe_uniform_schedule_for_claim_scan(claim_scan_default_fifo, shard);
     }
     if grouped_schedule {
         maintain_grouped_schedule_summaries(tx, shard, added, ranked, left_eligible, false, now)?;
