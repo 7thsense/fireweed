@@ -1,0 +1,156 @@
+{
+  "cell": "filesystem--turso",
+  "claim_batch": 100,
+  "command": "SS_CELL=filesystem--turso SS_N=100000 SS_PUSH_BATCH=100 SS_CLAIM_BATCH=100 SS_INFLIGHT=8 cargo test -p fireweed --test ss_phased_capacity --release ss_phased_capacity_smoke -- --exact --nocapture",
+  "final_residual": {
+    "complete": 100000,
+    "eligible": 0,
+    "failed": 0,
+    "leased": 0,
+    "pending": 0
+  },
+  "host": "sindri",
+  "inflight": 8,
+  "log_axis": "filesystem",
+  "memory": {
+    "hwm_after_run_bytes": 340398080,
+    "hwm_before_open_bytes": 7077888,
+    "projection_bytes": 183218872,
+    "rss_after_run_bytes": 340398080,
+    "rss_before_open_bytes": 7077888,
+    "rss_delta_bytes": 333320192
+  },
+  "n": 100000,
+  "phases": [
+    {
+      "ack_items_per_s": 24045.616444579136,
+      "ack_wall_s": 4.158762169,
+      "calls": [
+        {
+          "op": "BatchPush",
+          "p50_ms": 31.625625999999997,
+          "p95_ms": 41.124327,
+          "p99_ms": 48.066479,
+          "samples": 1000
+        }
+      ],
+      "items": 100000,
+      "mutations": 1,
+      "name": "P1_ingest",
+      "residual": {
+        "complete": 0,
+        "eligible": 100000,
+        "failed": 0,
+        "leased": 0,
+        "pending": 100000
+      },
+      "settled_items_per_s": 15492.083750318776,
+      "settled_mutations_per_s": 15492.083750318776,
+      "settled_wall_s": 6.454909592,
+      "settlement_lag_s": 2.296147423
+    },
+    {
+      "ack_items_per_s": 20524.991622339825,
+      "ack_wall_s": 4.872109175,
+      "calls": [
+        {
+          "op": "BatchUpdate",
+          "p50_ms": 34.682294,
+          "p95_ms": 41.479097,
+          "p99_ms": 49.892694,
+          "samples": 1000
+        }
+      ],
+      "items": 100000,
+      "mutations": 1,
+      "name": "P2_enrich",
+      "residual": {
+        "complete": 0,
+        "eligible": 100000,
+        "failed": 0,
+        "leased": 0,
+        "pending": 100000
+      },
+      "settled_items_per_s": 7272.2187055820905,
+      "settled_mutations_per_s": 7272.2187055820905,
+      "settled_wall_s": 13.750961577,
+      "settlement_lag_s": 8.878852402
+    },
+    {
+      "ack_items_per_s": 25438.69498851619,
+      "ack_wall_s": 3.931019262,
+      "calls": [
+        {
+          "op": "BatchUpdate",
+          "p50_ms": 29.120974,
+          "p95_ms": 35.004879,
+          "p99_ms": 43.135053,
+          "samples": 1000
+        }
+      ],
+      "items": 100000,
+      "mutations": 1,
+      "name": "P3_schedule",
+      "residual": {
+        "complete": 0,
+        "eligible": 100000,
+        "failed": 0,
+        "leased": 0,
+        "pending": 100000
+      },
+      "settled_items_per_s": 2766.762762005566,
+      "settled_mutations_per_s": 2766.762762005566,
+      "settled_wall_s": 36.143322938,
+      "settlement_lag_s": 32.212303676
+    },
+    {
+      "ack_items_per_s": 1553.2961003548485,
+      "ack_wall_s": 64.379225556,
+      "calls": [
+        {
+          "op": "BatchClaim",
+          "p50_ms": 514.2501269999999,
+          "p95_ms": 552.509107,
+          "p99_ms": 560.94493,
+          "samples": 1000
+        },
+        {
+          "op": "BatchFinalize",
+          "p50_ms": 11.178817,
+          "p95_ms": 11.825479999999999,
+          "p99_ms": 20.820482000000002,
+          "samples": 1000
+        }
+      ],
+      "items": 100000,
+      "mutations": 2,
+      "name": "P4_deliver",
+      "residual": {
+        "complete": 100000,
+        "eligible": 0,
+        "failed": 0,
+        "leased": 0,
+        "pending": 0
+      },
+      "settled_items_per_s": 1547.577131733783,
+      "settled_mutations_per_s": 3095.154263467566,
+      "settled_wall_s": 64.617134713,
+      "settlement_lag_s": 0.237909157
+    }
+  ],
+  "process_wall_s": 126.480831557,
+  "projection_axis": "turso",
+  "push_batch": 100,
+  "sampling": {
+    "payload_and_schedule_samples_passed": true,
+    "sample_indices": [
+      0,
+      50000,
+      99999
+    ]
+  },
+  "schema": "ss-phased-summary/v4",
+  "source_sha": "a20ad254964edc2ab84c75049718d2cc3e869b81",
+  "utc": "1788837978",
+  "workers": 1
+}

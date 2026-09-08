@@ -1712,6 +1712,40 @@ fn group_item_refs_from_specs(
     added
 }
 
+fn upsert_item_payloads(
+    tx: &impl RelTx,
+    tenant: &str,
+    queue: &str,
+    rows: impl IntoIterator<Item = (String, Option<Vec<u8>>)>,
+) -> EngineResult<()> {
+    let mut params = Vec::new();
+    let mut count = 0usize;
+    for (item_id, payload) in rows {
+        let Some(payload) = payload else {
+            continue;
+        };
+        params.push(RelValue::Text(tenant.to_string()));
+        params.push(RelValue::Text(queue.to_string()));
+        params.push(RelValue::Text(item_id));
+        params.push(RelValue::Blob(payload));
+        count += 1;
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    let values = vec!["(?,?,?,?)"; count].join(",");
+    crate::rel_exec(
+        tx,
+        &format!(
+            "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+             VALUES {values} \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload"
+        ),
+        params,
+    )?;
+    Ok(())
+}
+
 /// Like [`insert_items`], but each row may carry its own command sequence and timestamp (coalesced Push
 /// envelopes from `apply_committed_batch_sql`).
 pub fn insert_item_specs(
@@ -1764,6 +1798,17 @@ pub fn insert_item_specs(
             .all(|item| is_payload_index_push_item(item))
     {
         insert_payload_index_item_specs(tx, &t, &q, specs, base_seq)?;
+        upsert_item_payloads(
+            tx,
+            &t,
+            &q,
+            specs.iter().map(|spec| {
+                (
+                    spec.item.item_id.to_string(),
+                    spec.item.payload.as_ref().map(|b| b.to_vec()),
+                )
+            }),
+        )?;
         maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
         return Ok(base_seq);
     }
@@ -1783,7 +1828,7 @@ pub fn insert_item_specs(
             RelValue::Integer(not_before.unwrap_or(now_n)),
             opt_text(item.group_key.as_ref().map(|g| g.as_str().to_string())),
             opt_int(item.cohort_size.map(|s| s as i64)),
-            opt_blob(item.payload.as_ref().map(|b| b.to_vec())),
+            RelValue::Null,
             RelValue::Text(fields_to_json(&item.fields)?),
             RelValue::Text(metadata_to_json(&item.metadata)?),
             opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
@@ -1813,6 +1858,17 @@ pub fn insert_item_specs(
         let flat: Vec<RelValue> = chunk.iter().flatten().cloned().collect();
         crate::rel_exec(tx, &sql, &flat)?;
     }
+    upsert_item_payloads(
+        tx,
+        &t,
+        &q,
+        specs.iter().map(|spec| {
+            (
+                spec.item.item_id.to_string(),
+                spec.item.payload.as_ref().map(|b| b.to_vec()),
+            )
+        }),
+    )?;
     insert_gates(tx, &t, &q, &items_only)?;
     // Cohort id stamping uses wall time; for a coalesced run use the latest now in the run.
     let cohort_now_n = specs
@@ -1889,7 +1945,7 @@ pub fn insert_payload_index_item_specs(
     specs: &[InsertItemSpec<'_>],
     base_seq: i64,
 ) -> EngineResult<()> {
-    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,?, '{}','{}',NULL,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL, '{}','{}',NULL,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
@@ -1909,7 +1965,6 @@ pub fn insert_payload_index_item_specs(
             params.push(RelValue::Text(item_id.clone()));
             params.push(RelValue::Text(item_id));
             params.push(RelValue::Integer(now_n));
-            params.push(opt_blob(spec.item.payload.as_ref().map(|b| b.to_vec())));
             params.push(opt_blob(
                 fireweed_engine::index_fields::encode_index_fields_blob(&spec.item.index_fields)?,
             ));
@@ -3367,9 +3422,14 @@ fn apply_one_claim_sql(
         return Ok(());
     }
     let mut pending_moved = 0usize;
-    if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
-        && let Some((min_rowid, max_rowid)) =
-            fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
+    if let Some((min_rowid, max_rowid)) = named_ids_occupy_rowid_slice(tx, shard, &claim.item_ids)?
+        .or(
+            if claim_scan_default_fifo.get(shard).copied().unwrap_or(false) {
+                fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
+            } else {
+                None
+            },
+        )
     {
         pending_moved = crate::rel_exec(
             tx,
@@ -4078,9 +4138,6 @@ fn try_apply_operation_shaped_api001_batch(
     if shape.fields {
         replacement_columns.push("fields");
     }
-    if shape.payload {
-        replacement_columns.push("payload");
-    }
     if shape.metadata {
         replacement_columns.push("metadata");
     }
@@ -4101,14 +4158,6 @@ fn try_apply_operation_shaped_api001_batch(
                         .as_ref()
                         .expect("shape requires fields replacement"),
                 )?));
-            }
-            if shape.payload {
-                let PayloadUpdate::Set(payload) = &update.payload else {
-                    unreachable!("shape requires payload replacement")
-                };
-                values.push(RelValue::opt_blob(
-                    payload.as_ref().map(|bytes| bytes.to_vec()),
-                ));
             }
             if shape.metadata {
                 values.push(RelValue::Text(metadata_to_json(
@@ -4239,7 +4288,7 @@ fn try_apply_operation_shaped_api001_batch(
                 }
             }
         }
-        if shape.priority || shape.not_before {
+        if schedule_reorders_rowid(updates, shape) {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
         }
         if grouped_schedule {
@@ -4253,6 +4302,7 @@ fn try_apply_operation_shaped_api001_batch(
                 now,
             )?;
         }
+        write_shaped_payloads(tx, shard, updates, shape)?;
         return Ok(true);
     }
 
@@ -4349,13 +4399,81 @@ fn try_apply_operation_shaped_api001_batch(
             }
         }
     }
-    if shape.priority || shape.not_before {
+    if schedule_reorders_rowid(updates, shape) {
         reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
     }
     if grouped_schedule {
         maintain_grouped_schedule_summaries(tx, shard, added, ranked, left_eligible, false, now)?;
     }
+    write_shaped_payloads(tx, shard, updates, shape)?;
     Ok(true)
+}
+
+fn schedule_reorders_rowid(updates: &[UpdateFieldsCommand], shape: Api001UpdateShape) -> bool {
+    if !shape.priority && !shape.not_before {
+        return false;
+    }
+    let Some(first) = updates.first() else {
+        return false;
+    };
+    !updates.iter().all(|update| {
+        std::mem::discriminant(&update.set_priority) == std::mem::discriminant(&first.set_priority)
+            && std::mem::discriminant(&update.set_not_before)
+                == std::mem::discriminant(&first.set_not_before)
+            && match (&update.set_priority, &first.set_priority) {
+                (ScheduleUpdate::Keep, ScheduleUpdate::Keep) => true,
+                (ScheduleUpdate::Set(left), ScheduleUpdate::Set(right)) => left == right,
+                _ => false,
+            }
+            && match (&update.set_not_before, &first.set_not_before) {
+                (ScheduleUpdate::Keep, ScheduleUpdate::Keep) => true,
+                (ScheduleUpdate::Set(left), ScheduleUpdate::Set(right)) => left == right,
+                _ => false,
+            }
+    })
+}
+
+fn write_shaped_payloads(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    updates: &[UpdateFieldsCommand],
+    shape: Api001UpdateShape,
+) -> EngineResult<()> {
+    if !shape.payload {
+        return Ok(());
+    }
+    let (tenant, queue) = parts(shard);
+    let mut by_id = Vec::new();
+    for update in updates {
+        let PayloadUpdate::Set(payload) = &update.payload else {
+            continue;
+        };
+        if update.item_id.as_u64() != 0 {
+            by_id.push((
+                update.item_id.to_string(),
+                payload.as_ref().map(|bytes| bytes.to_vec()),
+            ));
+            continue;
+        }
+        let Some(key) = update.client_item_key.as_ref() else {
+            continue;
+        };
+        crate::rel_exec(
+            tx,
+            "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+             SELECT tenant_id,queue_id,item_id,? \
+             FROM fireweed_items \
+             WHERE tenant_id=? AND queue_id=? AND client_item_key=? AND superseded=0 \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload",
+            [
+                RelValue::opt_blob(payload.as_ref().map(|bytes| bytes.to_vec())),
+                RelValue::Text(tenant.clone()),
+                RelValue::Text(queue.clone()),
+                RelValue::Text(key.as_str().to_string()),
+            ],
+        )?;
+    }
+    upsert_item_payloads(tx, &tenant, &queue, by_id)
 }
 
 fn apply_update_fields_batch_sql(
@@ -4618,7 +4736,7 @@ fn apply_update_fields_batch_sql(
                 format!(
                     "WITH incoming(item_id,fields,payload,metadata,priority,priority_sort,not_before,eligible_since) \
                      AS (VALUES {}) \
-                     UPDATE fireweed_items SET fields=incoming.fields,payload=incoming.payload,\
+                     UPDATE fireweed_items SET fields=incoming.fields,\
                      metadata=incoming.metadata,priority=incoming.priority,priority_sort=incoming.priority_sort,\
                      not_before=incoming.not_before,eligible_since=incoming.eligible_since,\
                      item_version=item_version+1,updated_at=?,last_command_sequence=? \
@@ -4655,6 +4773,25 @@ fn apply_update_fields_batch_sql(
             RelValue::Text(q.clone()),
         ]);
         crate::rel_exec(tx, &sql, params)?;
+        if write_payload {
+            upsert_item_payloads(
+                tx,
+                &t,
+                &q,
+                chunk.iter().map(|row| {
+                    let id = match &row[0] {
+                        RelValue::Text(id) => id.clone(),
+                        _ => String::new(),
+                    };
+                    let payload = match &row[2] {
+                        RelValue::Blob(bytes) => Some(bytes.clone()),
+                        RelValue::Null => None,
+                        _ => None,
+                    };
+                    (id, payload)
+                }),
+            )?;
+        }
     }
     let mut gate_deletes = Vec::new();
     let mut gate_inserts = Vec::new();

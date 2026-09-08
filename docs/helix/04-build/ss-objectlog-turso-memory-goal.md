@@ -2,11 +2,12 @@
 
 **Status**: active iteration (2026-09-07). N=10k P1–P4 settled ≥10k with T3
 exact on `filesystem--turso` (see current table). T1 met at N=100k (P1 settled
-16,357/s). T2 unmet on settled P4 (1,398/s); P4 ack is 3,222/s. Claim SELECT
+15,492/s). T2 unmet on settled P4 (1,548/s); P4 ack is 1,553/s. Claim SELECT
 orders by indexed `priority_sort,created_seq` or FIFO `rowid`, never payload.
-Residual eligibility is applied in-process. Turso remains the serving store;
-pending bodies are not duplicated in process memory. Apply still bounds N=100k
-P2/P3/P4 settlement.
+Profile blobs live in `fireweed_item_payloads` and JOIN after LIMIT; Claim
+and Complete do not rewrite them. Residual eligibility is applied in-process.
+Turso remains the serving store; pending bodies are not duplicated in process
+memory. Apply still bounds N=100k P2/P3/P4 settlement.
 
 The 2026-08-17 planner-map artifacts (`1786977588` and `1786977711`) remain
 historical diagnostics. They are not the current design or release evidence:
@@ -27,10 +28,11 @@ the facade while preserving the public maximum of 100 items per request.
    mutations retain at most two generations or sixteen requests.
 2. Item Claim is log-first Claim. A statement-level autocommit SELECT on Turso
    takes the next LIMIT rows by indexed `priority_sort,created_seq` or FIFO
-   `rowid`. Payload is projected from those rows only; it is never a sort or
-   filter key. No live Deferred snapshot pins WAL across that SELECT. Each
-   public request retains its own response, outcome vector, and lease token
-   until Turso applies its authoritative position.
+   `rowid`. Payload is stored in `fireweed_item_payloads` and JOINed only for
+   those LIMIT rows; it is never a sort or filter key, and Claim/Complete
+   UPDATE does not rewrite it. No live Deferred snapshot pins WAL across that
+   SELECT. Each public request retains its own response, outcome vector, and
+   lease token until Turso applies its authoritative position.
 3. Response continuation after publication neither renders from Turso nor
    borrows a projection pool. Queued generations keep request structs; they do
    not clone payloads or pre-render bodies.
@@ -79,12 +81,16 @@ prune is `1788659385`. v0.31.25 cut evidence is `1788626038`.
 | 2026-09-07 | 1788817726 | Claim autocommit + TRUNCATE | 100,000 | 14,566/s | 6,085/s | 2,195/s | 1,317/s |
 | 2026-09-07 | 1788835331 | index-shaped Claim SELECT | 10,000 | 15,374/s | 22,828/s | 16,328/s | 20,220/s |
 | 2026-09-07 | 1788835486 | index-shaped Claim SELECT | 100,000 | 16,357/s | 6,581/s | 2,306/s | 1,398/s |
+| 2026-09-07 | 1788836783 | last-claim wait | 10,000 | 15,247/s | 23,225/s | 16,847/s | 11,605/s |
+| 2026-09-07 | 1788836943 | last-claim wait | 100,000 | 16,730/s | 7,027/s | 2,416/s | 1,227/s |
+| 2026-09-07 | 1788837840 | payload sidecar + FIFO BETWEEN | 10,000 | 14,675/s | 17,657/s | 20,172/s | 11,979/s |
+| 2026-09-07 | 1788837978 | payload sidecar + FIFO BETWEEN | 100,000 | 15,492/s | 7,272/s | 2,767/s | 1,548/s |
 
 Gate score on the current working tree: N=10k P1–P4 settled ≥10,000 and T3 exact
-(`1788835331`). T1 met at N=100k (P1 settled 16,357/s ≥ 8,000). T2 unmet on
-**settled** P4 (1,398/s); P4 **ack** is 3,222/s (Claim p50 248 ms, was 558 ms).
-Claim does not ORDER BY or WHERE payload. Projection file is 22.2 MiB at 10k
-and 150.6 MiB at 100k. RSS/item at 100k is 4.6 kB. N=1M was not re-run.
+(`1788837840`). T1 met at N=100k (P1 settled 15,492/s ≥ 8,000). T2 unmet on
+**settled** P4 (1,548/s); P4 **ack** is 1,553/s (Claim p50 514 ms, p99 561 ms).
+Claim does not ORDER BY or WHERE payload. Projection file is 23.1 MiB at 10k
+and 174.7 MiB at 100k. RSS/item at 100k is 3.3 kB. N=1M was not re-run.
 
 P2/P3 append acknowledgements were 29,163/s and 41,633/s, but settlement lag
 was 34.906 s and 31.335 s. The result isolates ordered background Turso apply,

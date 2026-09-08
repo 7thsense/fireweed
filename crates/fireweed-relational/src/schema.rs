@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
     created_seq INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
+-- Payload lives off the hot row so Claim/Complete/schedule UPDATEs do not
+-- rewrite blobs. fireweed_items.payload stays for legacy rows and is NULL on
+-- new inserts.
+CREATE TABLE IF NOT EXISTS fireweed_item_payloads (
+    tenant_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    payload BLOB,
+    PRIMARY KEY (tenant_id, queue_id, item_id)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
     ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
 -- One pending FIFO index for Claim and peek. group_due and active_scope
@@ -302,6 +312,7 @@ pub const OWNED_PROJECTION_TABLES: &[&str] = &[
     "fireweed_group_summary",
     "relational_emission_cursor",
     "fireweed_id_high_water",
+    "fireweed_item_payloads",
     "fireweed_items",
     "relational_cursor",
     "queues",

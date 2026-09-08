@@ -1,0 +1,156 @@
+{
+  "cell": "filesystem--turso",
+  "claim_batch": 100,
+  "command": "SS_CELL=filesystem--turso SS_N=10000 SS_PUSH_BATCH=100 SS_CLAIM_BATCH=100 SS_INFLIGHT=8 cargo test -p fireweed --test ss_phased_capacity --release ss_phased_capacity_smoke -- --exact --nocapture",
+  "final_residual": {
+    "complete": 10000,
+    "eligible": 0,
+    "failed": 0,
+    "leased": 0,
+    "pending": 0
+  },
+  "host": "sindri",
+  "inflight": 8,
+  "log_axis": "filesystem",
+  "memory": {
+    "hwm_after_run_bytes": 150769664,
+    "hwm_before_open_bytes": 7077888,
+    "projection_bytes": 24239488,
+    "rss_after_run_bytes": 150769664,
+    "rss_before_open_bytes": 7077888,
+    "rss_delta_bytes": 143691776
+  },
+  "n": 10000,
+  "phases": [
+    {
+      "ack_items_per_s": 32251.495510715995,
+      "ack_wall_s": 0.310063141,
+      "calls": [
+        {
+          "op": "BatchPush",
+          "p50_ms": 19.61984,
+          "p95_ms": 25.3907,
+          "p99_ms": 57.671037,
+          "samples": 100
+        }
+      ],
+      "items": 10000,
+      "mutations": 1,
+      "name": "P1_ingest",
+      "residual": {
+        "complete": 0,
+        "eligible": 10000,
+        "failed": 0,
+        "leased": 0,
+        "pending": 10000
+      },
+      "settled_items_per_s": 14675.290479801388,
+      "settled_mutations_per_s": 14675.290479801388,
+      "settled_wall_s": 0.681417517,
+      "settlement_lag_s": 0.371354376
+    },
+    {
+      "ack_items_per_s": 27117.00072239961,
+      "ack_wall_s": 0.368772347,
+      "calls": [
+        {
+          "op": "BatchUpdate",
+          "p50_ms": 23.039594,
+          "p95_ms": 27.15946,
+          "p99_ms": 57.572275,
+          "samples": 100
+        }
+      ],
+      "items": 10000,
+      "mutations": 1,
+      "name": "P2_enrich",
+      "residual": {
+        "complete": 0,
+        "eligible": 10000,
+        "failed": 0,
+        "leased": 0,
+        "pending": 10000
+      },
+      "settled_items_per_s": 17656.711436082493,
+      "settled_mutations_per_s": 17656.711436082493,
+      "settled_wall_s": 0.56635688,
+      "settlement_lag_s": 0.197584533
+    },
+    {
+      "ack_items_per_s": 33355.50429229637,
+      "ack_wall_s": 0.299800594,
+      "calls": [
+        {
+          "op": "BatchUpdate",
+          "p50_ms": 16.812521,
+          "p95_ms": 30.651731,
+          "p99_ms": 60.459206,
+          "samples": 100
+        }
+      ],
+      "items": 10000,
+      "mutations": 1,
+      "name": "P3_schedule",
+      "residual": {
+        "complete": 0,
+        "eligible": 10000,
+        "failed": 0,
+        "leased": 0,
+        "pending": 10000
+      },
+      "settled_items_per_s": 20171.504464812235,
+      "settled_mutations_per_s": 20171.504464812235,
+      "settled_wall_s": 0.495748843,
+      "settlement_lag_s": 0.195948249
+    },
+    {
+      "ack_items_per_s": 12299.536889719333,
+      "ack_wall_s": 0.813038742,
+      "calls": [
+        {
+          "op": "BatchClaim",
+          "p50_ms": 57.420316,
+          "p95_ms": 90.60929900000001,
+          "p99_ms": 91.10752,
+          "samples": 104
+        },
+        {
+          "op": "BatchFinalize",
+          "p50_ms": 11.279526,
+          "p95_ms": 11.794324,
+          "p99_ms": 52.450954,
+          "samples": 100
+        }
+      ],
+      "items": 10000,
+      "mutations": 2,
+      "name": "P4_deliver",
+      "residual": {
+        "complete": 10000,
+        "eligible": 0,
+        "failed": 0,
+        "leased": 0,
+        "pending": 0
+      },
+      "settled_items_per_s": 11978.742217405192,
+      "settled_mutations_per_s": 23957.484434810383,
+      "settled_wall_s": 0.834812188,
+      "settlement_lag_s": 0.021773446
+    }
+  ],
+  "process_wall_s": 8.057292573,
+  "projection_axis": "turso",
+  "push_batch": 100,
+  "sampling": {
+    "payload_and_schedule_samples_passed": true,
+    "sample_indices": [
+      0,
+      5000,
+      9999
+    ]
+  },
+  "schema": "ss-phased-summary/v4",
+  "source_sha": "a20ad254964edc2ab84c75049718d2cc3e869b81",
+  "utc": "1788837840",
+  "workers": 1
+}

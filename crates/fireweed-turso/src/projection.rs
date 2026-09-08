@@ -1968,9 +1968,13 @@ pub(crate) async fn server_live_items_on(
     for key in keys {
         let rows = query_value_rows(
             connection,
-            "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,group_key,not_before,retry_count,payload,fields \
-                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
-                 AND lifecycle_state IN ('Pending','Leased') AND superseded=0 LIMIT 1",
+            "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.group_key,i.not_before,i.retry_count,\
+                 COALESCE(p.payload, i.payload),i.fields \
+                 FROM fireweed_items i \
+                 LEFT JOIN fireweed_item_payloads p \
+                   ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+                 WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.client_item_key=?3 \
+                 AND i.lifecycle_state IN ('Pending','Leased') AND i.superseded=0 LIMIT 1",
             vec![
                 shard.tenant_id.as_str().to_string().into(),
                 shard.queue_id.as_str().to_string().into(),
@@ -2274,11 +2278,17 @@ pub async fn select_and_materialize_item_claims_on(
     let mut ids = Vec::with_capacity(max);
     let mut carriers = Vec::with_capacity(max);
     if let Some(mut floor) = rowid_floor {
-        const FIFO_SQL: &str = "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
-             not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
-             FROM fireweed_items NOT INDEXED \
-             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-             AND rowid>=?4 ORDER BY rowid LIMIT ?3";
+        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
+             t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.rowid \
+             FROM (\
+               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,\
+                not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
+               FROM fireweed_items NOT INDEXED \
+               WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+                AND rowid>=?4 ORDER BY rowid LIMIT ?3\
+             ) t \
+             LEFT JOIN fireweed_item_payloads p \
+               ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id";
         let mut first_page = true;
         while ids.len() < max {
             let extra = if first_page {
@@ -2327,11 +2337,17 @@ pub async fn select_and_materialize_item_claims_on(
             floor = next;
         }
     } else {
-        const ORDER_SQL: &str = "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
-             not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size \
-             FROM fireweed_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-             ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4";
+        const ORDER_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
+             t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size \
+             FROM (\
+               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,\
+                not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size \
+               FROM fireweed_items \
+               WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+               ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4\
+             ) t \
+             LEFT JOIN fireweed_item_payloads p \
+               ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id";
         let mut offset: i64 = 0;
         let mut first_page = true;
         while ids.len() < max {
