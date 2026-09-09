@@ -93,13 +93,15 @@ prune is `1788659385`. v0.31.25 cut evidence is `1788626038`.
 | 2026-09-08 | 1788905551 | group-head idx + FIFO floor | 100,000 | 10,656/s | 5,854/s | 2,245/s | 3,162/s |
 | 2026-09-08 | 1788908867 | skip item Claim/Complete group summary | 10,000 | 13,020/s | 16,702/s | 20,446/s | 21,618/s |
 | 2026-09-08 | 1788908940 | skip item Claim/Complete group summary | 100,000 | 11,175/s | 6,128/s | 5,819/s | 7,040/s |
+| 2026-09-08 | 1788924812 | skip item Claim/Complete group summary | 1,000,000 | 2,265/s | 389/s | 401/s | 510/s |
 
 Gate score on the current working tree: N=10k P1–P4 settled ≥10,000 and T3 exact
 (`1788908867`). T1 met at N=100k (P1 settled 11,175/s ≥ 8,000). T2 met on
 **settled** P4 (7,040/s ≥ 4,000); P4 **ack** is 14,566/s (Claim p50 30 ms,
 p99 199 ms). Claim does not ORDER BY or WHERE payload. Projection file is
-22.5 MiB at 10k and 181.9 MiB at 100k. RSS/item at 100k is 3.2 kB. N=1M was
-not re-run.
+22.5 MiB at 10k, 181.9 MiB at 100k, and 1,759 MiB at 1M. RSS/item is 3.2 kB
+at 100k and 1.2 kB at 1M. N=1M (`1788924812`) is T3 exact (pending=leased=0)
+with P4 settled 510/s; the 512 MiB RSS stretch is unmet (delta 1,131 MiB).
 
 P2/P3 append acknowledgements at N=100k are 20,246/s and 23,996/s, with
 settlement lag 11.380 s and 13.019 s (`1788908940`). Ordered background Turso
