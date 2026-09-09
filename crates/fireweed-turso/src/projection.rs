@@ -1019,6 +1019,11 @@ async fn queue_paused(transaction: &Connection, tenant: &str, queue: &str) -> En
     Ok(integer(&row[0])? != 0)
 }
 
+/// Rebuild group heads whose stored representative is missing or no longer Pending.
+///
+/// Item Claim/Complete and uniform-priority BatchUpdate leave `fireweed_group_summary`
+/// lagged so the serving apply path does not rewrite every touched group. Grouped Claim
+/// repairs those heads here before ranking.
 async fn refresh_due_group_summaries(
     transaction: &Connection,
     tenant: &str,

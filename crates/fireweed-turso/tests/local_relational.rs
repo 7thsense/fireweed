@@ -804,7 +804,8 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     )
     .await
     .unwrap();
-    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    // Item Claim leaves the group summary lagged; grouped Claim relects (BQ-14).
+    assert_eq!(group_summary_count(&turso, &group).await, 2);
     assert_eq!(
         AsyncProjectionStore::purge_validate(&turso, shard.clone(), vec![first], false).await,
         Err(fireweed_engine::EngineError::Conflict)
@@ -929,7 +930,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     )
     .await
     .unwrap();
-    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    assert_eq!(group_summary_count(&turso, &group).await, 2);
     apply_turso(
         &turso,
         &shard,
@@ -981,7 +982,8 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     )
     .await
     .unwrap();
-    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    // Complete also lags; Purge relects the remaining pending member.
+    assert_eq!(group_summary_count(&turso, &group).await, 2);
     apply_turso(
         &turso,
         &shard,

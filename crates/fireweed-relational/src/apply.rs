@@ -1244,14 +1244,13 @@ fn complete_named_ids_pk_sql(
     version_sql: &str,
     pending_pred: &str,
     lease_hash: Option<&[u8]>,
-) -> EngineResult<(usize, Vec<RelRow>)> {
+) -> EngineResult<usize> {
     if ids.is_empty() {
-        return Ok((0, Vec::new()));
+        return Ok(0);
     }
     let (t, q) = parts(shard);
     let extra = if lease_hash.is_some() { 7 } else { 6 };
     let mut pending_moved = 0usize;
-    let mut returning_all = Vec::new();
     for chunk in ids.chunks(bind_chunk_size(1, extra)) {
         let values = vec!["(?)"; chunk.len()].join(",");
         let sql = format!(
@@ -1263,8 +1262,7 @@ fn complete_named_ids_pk_sql(
              FROM incoming \
              WHERE tenant_id=? AND queue_id=? AND superseded=0 \
                AND fireweed_items.item_id=incoming.item_id \
-               AND {pending_pred} \
-             RETURNING group_key,fireweed_items.item_id,eligible_since,priority_sort,created_at,created_seq"
+               AND {pending_pred}"
         );
         let mut params: Vec<RelValue> = chunk.iter().cloned().map(RelValue::Text).collect();
         params.extend([
@@ -1278,11 +1276,9 @@ fn complete_named_ids_pk_sql(
         if let Some(hash) = lease_hash {
             params.push(RelValue::Blob(hash.to_vec()));
         }
-        let returning = crate::rel_query(tx, &sql, params)?;
-        pending_moved += returning.len();
-        returning_all.extend(returning);
+        pending_moved += crate::rel_exec(tx, &sql, params)?;
     }
-    Ok((pending_moved, returning_all))
+    Ok(pending_moved)
 }
 
 // ---------------------------------------------------------------------------
@@ -2599,24 +2595,6 @@ struct GroupItemRef {
     created_seq: i64,
 }
 
-fn group_item_refs_from_returning(rows: Vec<RelRow>) -> EngineResult<Vec<GroupItemRef>> {
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let Some(group) = row.get::<Option<String>>(0)? else {
-            continue;
-        };
-        out.push(GroupItemRef {
-            group_key: GroupKey::new(group).map_err(|e| EngineError::Storage(e.to_string()))?,
-            item_id: row.get(1)?,
-            eligible_since: row.get(2)?,
-            priority_sort: row.get(3)?,
-            created_at: row.get(4)?,
-            created_seq: row.get(5)?,
-        });
-    }
-    Ok(out)
-}
-
 struct LoadedSummary {
     oldest: Option<i64>,
     rep_priority_sort: Option<Vec<u8>>,
@@ -2993,28 +2971,6 @@ fn apply_group_summary_remove(
     relect_group_summaries(tx, shard, &fallback, now)
 }
 
-/// Claim/Complete leave eligibility at the FIFO head. Decrement counts in SQL and
-/// re-seek each lost representative in one statement (no summary SELECT).
-fn drop_claimed_group_heads(
-    tx: &impl RelTx,
-    shard: &QueueKey,
-    removed: &[GroupItemRef],
-    now: UtcTimestamp,
-) -> EngineResult<()> {
-    if removed.is_empty() {
-        return Ok(());
-    }
-    if has_blocked_gates(tx, shard)? {
-        return relect_group_summaries(tx, shard, &unique_groups(removed), now);
-    }
-    let mut counts = HashMap::<GroupKey, i64>::new();
-    for item in removed {
-        *counts.entry(item.group_key.clone()).or_insert(0) += 1;
-    }
-    let lost: Vec<(GroupKey, i64)> = counts.into_iter().collect();
-    decrement_and_rehead_groups_sql(tx, shard, &lost, now)
-}
-
 fn refresh_lost_group_reps_sql(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -3066,74 +3022,6 @@ fn refresh_lost_group_reps_sql(
                  ) \
                  UPDATE fireweed_group_summary SET \
                    eligible_item_count=incoming.new_count, \
-                   oldest_eligible_at=head.eligible_since, \
-                   rep_item_id=head.item_id, \
-                   rep_priority_sort=head.priority_sort, \
-                   rep_created_at=head.created_at, \
-                   rep_created_seq=head.created_seq, \
-                   updated_at=? \
-                 FROM incoming \
-                 LEFT JOIN head ON head.group_key=incoming.group_key \
-                 WHERE fireweed_group_summary.tenant_id=? AND fireweed_group_summary.queue_id=? \
-                   AND fireweed_group_summary.group_key=incoming.group_key"
-            ),
-            params,
-        )?;
-    }
-    Ok(())
-}
-
-fn decrement_and_rehead_groups_sql(
-    tx: &impl RelTx,
-    shard: &QueueKey,
-    lost: &[(GroupKey, i64)],
-    now: UtcTimestamp,
-) -> EngineResult<()> {
-    if lost.is_empty() {
-        return Ok(());
-    }
-    let (tenant, queue) = parts(shard);
-    let now_n = ts_nanos(now);
-    const ROW_BINDS: usize = 2;
-    let extra = 6;
-    for chunk in lost.chunks(bind_chunk_size(ROW_BINDS, extra)) {
-        let values = vec!["(?,?)"; chunk.len()].join(",");
-        let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + extra);
-        for (group, removed) in chunk {
-            params.extend([
-                RelValue::Text(group.as_str().to_string()),
-                RelValue::Integer(*removed),
-            ]);
-        }
-        params.extend([
-            RelValue::Text(tenant.clone()),
-            RelValue::Text(queue.clone()),
-            RelValue::Integer(now_n),
-            RelValue::Integer(now_n),
-            RelValue::Text(tenant.clone()),
-            RelValue::Text(queue.clone()),
-        ]);
-        crate::rel_exec(
-            tx,
-            &format!(
-                "WITH incoming(group_key,removed) AS (VALUES {values}), \
-                 head AS ( \
-                   SELECT incoming.group_key AS group_key, i.item_id, i.priority_sort, \
-                          i.created_at, i.created_seq, i.eligible_since \
-                   FROM incoming \
-                   LEFT JOIN fireweed_items i ON i.rowid = ( \
-                     SELECT i2.rowid FROM fireweed_items i2 \
-                     INDEXED BY fireweed_items_pending_group_idx \
-                     WHERE i2.tenant_id=? AND i2.queue_id=? \
-                       AND i2.group_key=incoming.group_key \
-                       AND i2.lifecycle_state='Pending' AND i2.superseded=0 \
-                       AND (i2.not_before IS NULL OR i2.not_before<=?) \
-                     ORDER BY i2.priority_sort, i2.created_seq, i2.item_id \
-                     LIMIT 1 \
-                   ) \
-                 ) \
-                 UPDATE fireweed_group_summary SET \
-                   eligible_item_count=MAX(0, eligible_item_count-incoming.removed), \
                    oldest_eligible_at=head.eligible_since, \
                    rep_item_id=head.item_id, \
                    rep_priority_sort=head.priority_sort, \
@@ -3260,8 +3148,10 @@ fn apply_group_summary_rerank(
 /// member into the process. `rep_progress_guard_sort`/`at_risk_count` stay NULL/0 while that
 /// derivation is deferred (BQ-14).
 ///
-/// Exact at mutation time, lagged across a time-only `not_before` crossing: the filter is
-/// `not_before<=now`, so a deferred item that becomes due without a later mutation is not in
+/// Exact at mutation time except item Claim/Complete and uniform-priority BatchUpdate, which
+/// leave the summary lagged so the serving apply path does not rewrite `G` group-head rows.
+/// Time-only `not_before` crossings lag the same way: the filter is `not_before<=now`, so a
+/// deferred item that becomes due without a later mutation is not in
 /// `oldest_eligible_at`/`rep_*`/`eligible_item_count` until the next write to its group. Per-item
 /// `select_eligible` re-evaluates `not_before` on read. BQ-14 g1/g4 refresh due groups before
 /// mutation-backed group claims; read-only discovery may under-report until then.
@@ -3374,19 +3264,6 @@ fn authority_first_short_move(moved: usize, named: usize) -> EngineError {
     ))
 }
 
-fn maintain_grouped_after_claim_move(
-    tx: &impl RelTx,
-    grouped_shards: &HashSet<QueueKey>,
-    shard: &QueueKey,
-    ids: &[ItemId],
-    now: UtcTimestamp,
-) -> EngineResult<()> {
-    if !grouped_shards.contains(shard) {
-        return Ok(());
-    }
-    remove_ids_from_group_summaries(tx, shard, ids, now)
-}
-
 fn class_s_live_claim(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -3462,9 +3339,8 @@ fn apply_one_claim_sql(
         }
     } else {
         let worker = worker_id.map_or(RelValue::Null, |worker| RelValue::Text(worker.to_string()));
-        let (moved, grouped_refs) =
+        pending_moved +=
             lease_pending_ids_sql(tx, &t, &q, &ids, &hash, exp, &worker, now_n, seq as i64)?;
-        pending_moved += moved;
         maybe_advance_claim_scan_hint(
             tx,
             grouped_shards,
@@ -3484,9 +3360,6 @@ fn apply_one_claim_sql(
         }
         if pending_moved > 0 {
             persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
-            if grouped_shards.contains(shard) {
-                drop_claimed_group_heads(tx, shard, &grouped_refs, now)?;
-            }
         }
         return Ok(());
     }
@@ -3501,7 +3374,6 @@ fn apply_one_claim_sql(
     }
     if pending_moved > 0 {
         persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
-        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
     }
     Ok(())
 }
@@ -3534,9 +3406,7 @@ fn apply_packed_claims_sql(
     let mut all_ids = Vec::new();
     let mut named = 0usize;
     let mut authority_first = false;
-    let mut last_now = mutating[0].2;
     for (claim, seq, now) in &mutating {
-        last_now = *now;
         authority_first |= claim.authority_first;
         named += claim.item_ids.len();
         let hash = lease_hash(&claim.lease_token);
@@ -3565,7 +3435,6 @@ fn apply_packed_claims_sql(
     const ROW_BINDS: usize = 6;
     let extra = 2;
     let mut pending_moved = 0usize;
-    let mut grouped_refs = Vec::new();
     for chunk in rows.chunks(bind_chunk_size(ROW_BINDS, extra)) {
         let values = vec!["(?,?,?,?,?,?)"; chunk.len()].join(",");
         let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + extra);
@@ -3580,7 +3449,7 @@ fn apply_packed_claims_sql(
             ]);
         }
         params.extend([RelValue::Text(t.clone()), RelValue::Text(q.clone())]);
-        let returning = crate::rel_query(
+        pending_moved += crate::rel_exec(
             tx,
             &format!(
                 "WITH incoming(item_id,hash,exp,worker,now_n,seq) AS (VALUES {values}) \
@@ -3592,13 +3461,10 @@ fn apply_packed_claims_sql(
                  FROM incoming \
                  WHERE tenant_id=? AND queue_id=? \
                    AND fireweed_items.item_id=incoming.item_id \
-                   AND lifecycle_state='Pending' AND superseded=0 \
-                 RETURNING group_key,fireweed_items.item_id,eligible_since,priority_sort,created_at,created_seq"
+                   AND lifecycle_state='Pending' AND superseded=0"
             ),
             params,
         )?;
-        pending_moved += returning.len();
-        grouped_refs.extend(group_item_refs_from_returning(returning)?);
     }
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
@@ -3612,9 +3478,6 @@ fn apply_packed_claims_sql(
         shard,
         &all_ids,
     )?;
-    if grouped_shards.contains(shard) && !grouped_refs.is_empty() {
-        drop_claimed_group_heads(tx, shard, &grouped_refs, last_now)?;
-    }
     Ok(())
 }
 
@@ -3628,9 +3491,8 @@ fn lease_pending_ids_sql(
     worker: &RelValue,
     now_n: i64,
     seq: i64,
-) -> EngineResult<(usize, Vec<GroupItemRef>)> {
+) -> EngineResult<usize> {
     let mut pending_moved = 0usize;
-    let mut grouped_refs = Vec::new();
     let extra = 7;
     for chunk in ids.chunks(bind_chunk_size(1, extra)) {
         let ph = vec!["?"; chunk.len()].join(",");
@@ -3639,8 +3501,7 @@ fn lease_pending_ids_sql(
              lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
              item_version=item_version+1, updated_at=?, last_command_sequence=? \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph}) \
-             AND lifecycle_state='Pending' AND superseded=0 \
-             RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq"
+             AND lifecycle_state='Pending' AND superseded=0"
         );
         let mut params = Vec::with_capacity(chunk.len() + extra);
         params.extend([
@@ -3653,11 +3514,9 @@ fn lease_pending_ids_sql(
             RelValue::Text(queue.to_string()),
         ]);
         params.extend(chunk.iter().cloned().map(RelValue::Text));
-        let rows = crate::rel_query(tx, &sql, params)?;
-        pending_moved += rows.len();
-        grouped_refs.extend(group_item_refs_from_returning(rows)?);
+        pending_moved += crate::rel_exec(tx, &sql, params)?;
     }
-    Ok((pending_moved, grouped_refs))
+    Ok(pending_moved)
 }
 
 fn apply_claim_run_sql(
@@ -3797,12 +3656,9 @@ pub fn apply_fused_claim_complete_sql(
         for id in &claim.item_ids {
             token_ops.push(TokenOp::Clear(shard.clone(), *id));
         }
-        if pending_moved > 0 {
-            maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
-        }
         return Ok(());
     }
-    let (moved, returning) = complete_named_ids_pk_sql(
+    pending_moved = complete_named_ids_pk_sql(
         tx,
         shard,
         &ids,
@@ -3813,8 +3669,6 @@ pub fn apply_fused_claim_complete_sql(
         pending_pred,
         (!pending_only).then_some(hash.as_slice()),
     )?;
-    pending_moved = moved;
-    let grouped_refs = group_item_refs_from_returning(returning)?;
     maybe_advance_claim_scan_hint(
         tx,
         grouped_shards,
@@ -3831,9 +3685,6 @@ pub fn apply_fused_claim_complete_sql(
     }
     for id in &claim.item_ids {
         token_ops.push(TokenOp::Clear(shard.clone(), *id));
-    }
-    if pending_moved > 0 && grouped_shards.contains(shard) {
-        drop_claimed_group_heads(tx, shard, &grouped_refs, now)?;
     }
     Ok(())
 }
@@ -3886,7 +3737,7 @@ fn apply_fused_claim_complete_run_sql(
     let now_n = ts_nanos(last_now);
     const RUN_VERSION_SQL: &str = "retry_count=retry_count+1, item_version=item_version+2,";
     let named_set: HashSet<ItemId> = all_ids.iter().copied().collect();
-    let (pending_moved, grouped_refs) =
+    let pending_moved =
         if let Some((min_rowid, max_rowid)) = named_ids_occupy_rowid_slice(tx, shard, &all_ids)? {
             let returning = crate::rel_query(
                 tx,
@@ -3913,9 +3764,9 @@ fn apply_fused_claim_complete_run_sql(
                     "fused complete moved a row that was not in the named set".into(),
                 ));
             }
-            (returning.len(), group_item_refs_from_returning(returning)?)
+            returning.len()
         } else {
-            let (moved, returning) = complete_named_ids_pk_sql(
+            complete_named_ids_pk_sql(
                 tx,
                 shard,
                 &ids,
@@ -3925,8 +3776,7 @@ fn apply_fused_claim_complete_run_sql(
                 RUN_VERSION_SQL,
                 "lifecycle_state='Pending'",
                 None,
-            )?;
-            (moved, group_item_refs_from_returning(returning)?)
+            )?
         };
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
@@ -3939,9 +3789,6 @@ fn apply_fused_claim_complete_run_sql(
         shard,
         &all_ids,
     )?;
-    if pending_moved > 0 && grouped_shards.contains(shard) {
-        drop_claimed_group_heads(tx, shard, &grouped_refs, last_now)?;
-    }
     Ok(())
 }
 
@@ -4188,17 +4035,18 @@ fn try_apply_operation_shaped_api001_batch(
             Ok::<_, EngineError>(values)
         })
         .collect::<EngineResult<Vec<_>>>()?;
-    let mut added = Vec::new();
-    let mut ranked = Vec::new();
-    let mut left_eligible = Vec::new();
     let uniform_values = replacement_values
         .first()
         .filter(|first| replacement_values.iter().all(|values| values == *first));
-    if let Some(values) = uniform_values {
+    if let Some(values) = uniform_values
+        && updates.len() > 1
+        && claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
+    {
+        // Bulk uniform FIFO replacements keep relative (priority_sort, created_seq) order.
+        // Skip RETURNING + group-summary rerank; grouped Claim relects stale heads (BQ-14).
+        // A 1-item replacement can still move a mixed-queue head, so it keeps the rerank path.
         let range_bind_count = usize::from(shape.address == Api001UpdateAddress::ClientItemKey) * 2;
-        let eligibility_bind_count = usize::from(grouped_schedule);
-        let chunk_size =
-            SQLITE_BIND_CAP - values.len() - 4 - range_bind_count - eligibility_bind_count;
+        let chunk_size = SQLITE_BIND_CAP - values.len() - 4 - range_bind_count;
         for chunk in updates.chunks(chunk_size.max(1)) {
             let mut assignments = replacement_columns
                 .iter()
@@ -4209,107 +4057,44 @@ fn try_apply_operation_shaped_api001_batch(
                 "updated_at=?".to_string(),
                 "last_command_sequence=?".to_string(),
             ]);
-            if !grouped_schedule {
-                let mut params = values.clone();
-                params.extend([
-                    RelValue::Integer(now_n),
-                    RelValue::Integer(seq as i64),
-                    RelValue::Text(tenant.to_string()),
-                    RelValue::Text(queue.to_string()),
-                ]);
-                let targets = chunk.iter().map(target).collect::<Vec<_>>();
-                let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
-                    let first = targets.iter().min().expect("non-empty update chunk");
-                    let last = targets.iter().max().expect("non-empty update chunk");
-                    params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
-                    format!(" AND {address_column} BETWEEN ? AND ?")
-                } else {
-                    String::new()
-                };
-                params.extend(targets.into_iter().map(RelValue::Text));
-                let sql = format!(
-                    "UPDATE fireweed_items SET {} \
-                     WHERE tenant_id=? AND queue_id=?{range_predicate} AND {address_column} IN ({}) \
-                       AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
-                    assignments.join(","),
-                    vec!["?"; chunk.len()].join(",")
-                );
-                crate::rel_exec(tx, &sql, params)?;
-                continue;
-            }
-
-            let mut remaining = chunk.iter().collect::<Vec<_>>();
-            for was_eligible in [true, false] {
-                if remaining.is_empty() {
-                    break;
-                }
-                let mut params = values.clone();
-                params.extend([
-                    RelValue::Integer(now_n),
-                    RelValue::Integer(seq as i64),
-                    RelValue::Text(tenant.to_string()),
-                    RelValue::Text(queue.to_string()),
-                ]);
-                let targets = remaining
-                    .iter()
-                    .map(|update| target(update))
-                    .collect::<Vec<_>>();
-                let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
-                    let first = targets.iter().min().expect("non-empty update partition");
-                    let last = targets.iter().max().expect("non-empty update partition");
-                    params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
-                    format!(" AND {address_column} BETWEEN ? AND ?")
-                } else {
-                    String::new()
-                };
-                params.push(RelValue::Integer(now_n));
-                params.extend(targets.iter().cloned().map(RelValue::Text));
-                let eligibility_predicate = if was_eligible {
-                    " AND (not_before IS NULL OR not_before<=?)"
-                } else {
-                    " AND not_before IS NOT NULL AND not_before>?"
-                };
-                let sql = format!(
-                    "UPDATE fireweed_items SET {} \
-                     WHERE tenant_id=? AND queue_id=?{range_predicate}{eligibility_predicate} \
-                       AND {address_column} IN ({}) AND lifecycle_state='Pending' \
-                       AND superseded=0 AND fenced=0 \
-                     RETURNING {address_column},group_key,item_id,eligible_since,priority_sort,not_before,created_at,created_seq",
-                    assignments.join(","),
-                    vec!["?"; remaining.len()].join(",")
-                );
-                let matched = collect_grouped_schedule_rows(
-                    crate::rel_query(tx, &sql, params)?,
-                    was_eligible,
-                    now_n,
-                    &mut added,
-                    &mut ranked,
-                    &mut left_eligible,
-                )?;
-                if was_eligible {
-                    remaining.retain(|update| !matched.contains(&target(update)));
-                }
-            }
+            let mut params = values.clone();
+            params.extend([
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq as i64),
+                RelValue::Text(tenant.to_string()),
+                RelValue::Text(queue.to_string()),
+            ]);
+            let targets = chunk.iter().map(target).collect::<Vec<_>>();
+            let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
+                let first = targets.iter().min().expect("non-empty update chunk");
+                let last = targets.iter().max().expect("non-empty update chunk");
+                params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
+                format!(" AND {address_column} BETWEEN ? AND ?")
+            } else {
+                String::new()
+            };
+            params.extend(targets.into_iter().map(RelValue::Text));
+            let sql = format!(
+                "UPDATE fireweed_items SET {} \
+                 WHERE tenant_id=? AND queue_id=?{range_predicate} AND {address_column} IN ({}) \
+                   AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
+                assignments.join(","),
+                vec!["?"; chunk.len()].join(",")
+            );
+            crate::rel_exec(tx, &sql, params)?;
         }
         if schedule_reorders_rowid(updates, shape) {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
         } else if shape.priority || shape.not_before {
             observe_uniform_schedule_for_claim_scan(claim_scan_default_fifo, shard);
         }
-        if grouped_schedule {
-            maintain_grouped_schedule_summaries(
-                tx,
-                shard,
-                added,
-                ranked,
-                left_eligible,
-                false,
-                now,
-            )?;
-        }
         write_shaped_payloads(tx, shard, updates, shape)?;
         return Ok(true);
     }
+
+    let mut added = Vec::new();
+    let mut ranked = Vec::new();
+    let mut left_eligible = Vec::new();
 
     let incoming_names = std::iter::once(address_column)
         .chain(replacement_columns.iter().copied())
@@ -4867,7 +4652,9 @@ fn apply_update_fields_batch_sql(
 /// caller must have pre-validated rejectable commands (commit has no rollback past this point), so the
 /// only errors here are storage/`NotFound` faults, never behavioral rejections. Live-token mutations are
 /// appended to `token_ops` (applied post-commit by the caller), never mutated in place. Grouped-item
-/// mutations also refresh `fireweed_group_summary` for the affected group(s) in this same transaction.
+/// mutations refresh `fireweed_group_summary` except item Claim/Complete and uniform-priority
+/// BatchUpdate, which lag until grouped Claim (BQ-14 `refresh_due_group_summaries`) or a
+/// re-entry mutation (Release/Retry/Rearm/LeaseExpired).
 #[allow(clippy::too_many_arguments)]
 pub fn apply_command_sql(
     tx: &impl RelTx,
@@ -5420,12 +5207,11 @@ pub fn apply_command_sql(
             if reenters_eligibility {
                 reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             }
-            // Complete/Fail leave a lease, so Claim already dropped the item from the summary.
-            // Re-running the full group aggregate here is a no-op that dominates P4 on Turso.
+            // Item Claim/Complete leave fireweed_group_summary lagged. Re-entry must relect,
+            // not increment, or Release would double-count a head that was never dropped.
             if grouped_shards.contains(shard) && reenters_eligibility {
-                let added = load_grouped_items(tx, shard, &ids)?;
-                let groups = unique_groups(&added);
-                apply_group_summary_add(tx, shard, &groups, &added, now)?;
+                let groups = groups_of(tx, shard, &ids)?;
+                relect_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }

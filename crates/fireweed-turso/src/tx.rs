@@ -546,7 +546,8 @@ mod packed_authority_first_tests {
         let packed_summary = group_summary(&packed, &shard, &group).await;
         let solo_summary = group_summary(&solo, &solo_shard, &group).await;
         assert_eq!(packed_summary, solo_summary);
-        assert_eq!(packed_summary, (1, Some(g3.item_id.to_string())));
+        // Item Claim/Complete leave the Push-time head lagged until grouped Claim.
+        assert_eq!(packed_summary, (3, Some(g1.item_id.to_string())));
 
         apply(
             &packed,
@@ -935,7 +936,7 @@ mod packed_authority_first_tests {
         );
         assert_eq!(
             group_summary(&packed, &shard, &group).await,
-            (1, Some(g3.item_id.to_string()))
+            (3, Some(g1.item_id.to_string()))
         );
     }
 
