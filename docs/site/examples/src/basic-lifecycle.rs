@@ -28,12 +28,21 @@ async fn exercise_operation_families(fireweed: &Fireweed, queue_name: &str) {
         item_id
     );
     fireweed
-        .update(
+        .batch_update(
             &key,
-            item_id,
-            ScheduleUpdate::Set(Some(PriorityValue::Int64(5))),
-            ScheduleUpdate::Keep,
-            None,
+            BatchUpdateRequest {
+                request_id: RequestId::new("cf-reschedule").unwrap(),
+                updates: vec![BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(item_id),
+                    expected_item_version: None,
+                    priority: BatchUpdateValue::Replace(PriorityValue::Int64(5)),
+                    not_before: BatchUpdateValue::Keep,
+                    payload: BatchUpdateValue::Keep,
+                    metadata: BatchUpdateValue::Keep,
+                    gate_keys: BatchUpdateValue::Keep,
+                    fields: BatchUpdateValue::Keep,
+                }],
+            },
         )
         .await
         .unwrap();

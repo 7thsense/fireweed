@@ -14,7 +14,11 @@ fn role_named_object_log_configuration_validates() {
         namespace: "downstream".to_string(),
         recovery: RecoveryPolicy::default(),
     };
-    config.validate().unwrap();
+    let err = config.validate().expect_err("sqlite projection is retired");
+    assert!(
+        format!("{err:?}").contains("sqlite storage is retired"),
+        "{err:?}"
+    );
 }
 
 // Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_sqlite_log

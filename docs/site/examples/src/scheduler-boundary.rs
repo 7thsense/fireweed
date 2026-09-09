@@ -2,8 +2,15 @@
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn run_workflow(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let fireweed =
-        fireweed::open_sqlite_relational(path.to_str().expect("UTF-8 temp path"), clock)?;
+    let log_root = path.with_extension("object-log");
+    std::fs::create_dir_all(&log_root)?;
+    let mut cfg = StorageConfig::memory();
+    cfg.log = LogConfig::Filesystem { root: log_root };
+    cfg.projection = ProjectionStoreConfig::Turso {
+        path: path.with_extension("turso"),
+    };
+    cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+    let fireweed = fireweed::open(cfg, clock)?;
     let deliveries = queue("deliveries");
     let maintenance = queue("maintenance");
     let template = queue_template();

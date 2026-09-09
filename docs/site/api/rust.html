@@ -52,9 +52,8 @@
         <div class="table-wrap"><table class="data">
           <thead><tr><th>Constructor</th><th>Typical use</th><th>Support note</th></tr></thead>
           <tbody>
-            <tr><td><code>open</code> / <code>open_async</code></td><td>Full matrix via <code>StorageConfig</code></td><td>Canonical 5×4 entry; Turso is the default projection</td></tr>
+            <tr><td><code>open</code> / <code>open_async</code></td><td>Full matrix via <code>StorageConfig</code></td><td>Canonical 4×3 entry; Turso is the default projection</td></tr>
             <tr><td><code>open_memory</code></td><td>Memory log × memory projection</td><td>Class B convenience sugar</td></tr>
-            <tr><td><code>open_sqlite</code> / <code>open_sqlite_*</code></td><td>SQLite log convenience helpers</td><td>Supported Class A cells</td></tr>
             <tr><td><code>open_objectlog</code> / <code>open_objectlog_*</code></td><td>Filesystem object-log helpers</td><td>Supported Class A; prefer typed <code>StorageConfig</code> for S3</td></tr>
             <tr><td><code>open_postgres</code> / <code>open_postgres_*</code></td><td>Postgres log convenience helpers</td><td>Supported Class A (feature-gated packaging fails closed)</td></tr>
           </tbody>
