@@ -635,3 +635,32 @@ with one existing ignored native cache test. All [106 combined release tests](ev
 passed, with one existing ignored Turso test. The native tests use features
 `fs,uuid`; the upstream test module references UUID even when defaults are off.
 The larger-population qualification must still be rerun before accepting the fix.
+
+### Cache fix qualification and page-size follow-up
+
+Clean `793e15d8` (2 KiB pages, adjusted checkpoint window, cache reconciliation)
+passed its first [three-million-workflow qualification](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-793e15d8-500k-8-c6-a.json.gz):
+**6,015.22/sec**, every cycle above target, exact outcomes and storage/RSS
+stability, and sampled per-shard WAL maximum 269.83 MiB. Process output was
+72.887 GiB. The [smaller 16-cycle qualification](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-793e15d8-100k-8-c16-a.json.gz)
+also passed at **7,400.38/sec** over 1.6 million workflows, including every
+cycle and stability check.
+
+The [million-row primitive qualification](evidence/workflow-capacity/fireweed-qualified-primitives-cache-accounting-793e15d8-1m-8-a.json.gz)
+passed with **71,298 inserts/sec**, **34,046 enrichment updates/sec**, and
+**36,333 scheduling updates/sec**, including projection coverage. Claim/complete
+was 16,975/sec and purge 32,601/sec; all correctness checks passed.
+
+The [larger repeat](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-793e15d8-500k-8-c6-b.json.gz)
+failed cycle two (zero-based): its slowest shard took 111.89 seconds, equivalent
+to 4,468.86/sec. It was stopped after that definitive failure, retaining all
+completed-cycle stderr and termination status. This is not a qualifying repeat.
+
+The next candidate retains cache reconciliation but restores new database pages
+to 4 KiB. The smaller-page trials increased main DB size and process write
+accounting; the original 4 KiB setting must now be compared with the actual
+cache-accounting fix in place. Existing files retain their page size, and the
+checkpoint byte-window calculation remains based on actual page-size readback.
+
+The restored-4-KiB/cache-fix candidate passed all 106 combined release tests,
+with one existing ignored test. [Validation](evidence/workflow-capacity/fireweed-cache-accounting-page4k-tests.log.gz).
