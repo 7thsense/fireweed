@@ -461,3 +461,20 @@ also pass, covering diagnostic rejection and v5 WAL growth.
 [full Turso release suite](evidence/workflow-capacity/fireweed-checkpoint-configurable-turso-release-tests.log.gz),
 [public tests](evidence/workflow-capacity/fireweed-checkpoint-configurable-public-tests.log.gz),
 [independent consumer startup](evidence/workflow-capacity/fireweed-checkpoint-public-boundary-smoke.log.gz).
+
+
+The first committed-build v5 qualification on `4625e9f5` completed 1.6 million
+workflows correctly in 206.5 seconds: **7,756 workflows/sec overall, FAIL**.
+Cycle nine's slowest shard took 21.90 seconds, equivalent to 4,565 workflows/sec,
+so the unchanged per-cycle throughput requirement was not met.
+
+The added flat-WAL-size criterion also failed for all eight shards. That criterion
+was too restrictive for the native protocol: `WalFile::prepare_wal_start` truncates
+orphaned frames to the header after restart to preserve authority classification.
+The measured file therefore grows and shrinks normally; final-three-cycle ranges
+such as 91.9 → 75.6 → 54.0 MiB show reclamation rather than a leak. The highest
+end-of-cycle WAL sample was 179.2 MiB. End-of-cycle samples do not establish the
+within-cycle peak, so the next gate must observe that peak against a fixed storage
+budget while retaining the DB/RSS checks. The archived v5 result remains failed,
+and its throughput miss is independent of this measurement correction.
+[First supported-build qualification](evidence/workflow-capacity/fireweed-qualified-checkpoint-4625e9f5-100k-8-c16-a.json.gz).
