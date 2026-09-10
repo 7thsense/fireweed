@@ -109,6 +109,7 @@ async fn full_batches_recycle_original_rows_without_orphaned_leases() {
     let config = Config {
         items: 12_500,
         batch: 1000,
+        purge_batch: Some(8000),
         workers: 4,
         recycle: true,
         cycles: 3,

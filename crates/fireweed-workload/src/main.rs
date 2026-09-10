@@ -18,6 +18,9 @@ async fn main() -> Result<()> {
             "--load-workers" => {
                 config.load_workers = args.next().ok_or("missing load workers")?.parse()?
             }
+            "--purge-batch" => {
+                config.purge_batch = Some(args.next().ok_or("missing purge batch")?.parse()?)
+            }
             "--workers" => config.workers = args.next().ok_or("missing workers")?.parse()?,
             "--payload-bytes" => {
                 config.payload_bytes = args.next().ok_or("missing payload bytes")?.parse()?
@@ -57,7 +60,7 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }

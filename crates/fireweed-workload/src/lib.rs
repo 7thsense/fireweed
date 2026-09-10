@@ -31,6 +31,8 @@ pub struct Config {
     pub workers: usize,
     /// Bounded concurrent public push_batch calls per shard.
     pub load_workers: usize,
+    /// Optional retention batch independent of handler batch size.
+    pub purge_batch: Option<usize>,
     pub profile: Profile,
     pub memory: bool,
     pub projection_root: Option<std::path::PathBuf>,
@@ -49,6 +51,7 @@ impl Default for Config {
             shards: 1,
             workers: 1,
             load_workers: 1,
+            purge_batch: None,
             profile: Profile::Mutable,
             memory: false,
             projection_root: None,
@@ -585,9 +588,10 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         || cfg.workers == 0
         || cfg.load_workers == 0
         || !(1..=1000).contains(&cfg.batch)
+        || cfg.purge_batch.is_some_and(|n| !(1..=8192).contains(&n))
     {
         return Err(
-            "items/shards/workers/load-workers must be positive and batch in 1..=1000".into(),
+            "items/shards/workers/load-workers must be positive, batch in 1..=1000, purge-batch in 1..=8192".into(),
         );
     }
     if cfg.recycle && cfg.profile == Profile::Snorri {
@@ -655,7 +659,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
             if cfg.recycle {
                 clock.set(270 + cycle as u64 * 7200);
                 let retained_ids = loaded_ids.into_inner().unwrap();
-                for chunk in retained_ids.chunks(cfg.batch) {
+                for chunk in retained_ids.chunks(cfg.purge_batch.unwrap_or(cfg.batch)) {
                     let removed = retry(deadline, || fw.purge(&q, chunk.iter().copied(), false)).await?;
                     if removed != chunk.len() as u64 { return Err("recycling purge count mismatch".into()); }
                 }
@@ -690,6 +694,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
         "items": cfg.items, "cycles": if cfg.recycle { cfg.cycles } else { 1 }, "includes_purge": cfg.recycle,
         "physical_shards": cfg.shards, "projection_root": cfg.projection_root, "workers_per_pool": cfg.workers, "load_workers_per_shard": cfg.load_workers,
+        "purge_batch": cfg.purge_batch.unwrap_or(cfg.batch),
         "worker_pools_per_shard": 1,
         "dispatch": if cfg.profile != Profile::Bulk { "shared-normal-claim" } else { "stage-filtered" },
         "atomic_original_row_mutation": cfg.profile == Profile::Mutable,

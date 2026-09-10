@@ -257,3 +257,15 @@ intervals bounded by the first shard finishing a cycle, not perfectly synchroniz
 per-cycle measurements. Projection apply cost per item increased much less.
 Opt-in log tracing now times the existing blob adapter's segment and manifest
 PUTs separately, without replacing its I/O or durability barriers.
+
+The adapter-timed run on `f9326762` reached 4,208 workflows/sec. Late segment and
+manifest PUTs both took roughly 200–260 ms. The phase breakdown showed retention
+cost rising from under one second per shard in cycle zero to 8–10 seconds in
+cycle one. Processing itself also slowed, so retention is only part of the gap.
+[Adapter and phase trace](evidence/workflow-capacity/fireweed-blob-trace-load4-100k-8-c3.json.gz).
+
+`--purge-batch N` now allows retention to use an independent bounded public-API
+batch (1–8,192; defaults to the handler batch). This models periodic bulk cleanup
+without changing 1,000-row loading/handler calls or removing purge from throughput
+measurement. The full-batch original-row recycling regression exercises 8,000-row
+purges and checks exact terminal outcomes and zero remaining rows.
