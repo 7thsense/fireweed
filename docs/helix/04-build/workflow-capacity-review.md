@@ -1,6 +1,6 @@
 # Fireweed original-row workflow capacity
 
-Date: 2026-09-10. Measurement snapshots: `02730571` through `c90c69a5`.
+Date: 2026-09-10. Measurement snapshots: `02730571` through `671555b5`.
 
 **Qualification is still failing.** Million-row insert/update measurements exceed
 10k rows/sec, but completed 1.6-million-workflow soaks sustain about 3k workflows/sec,
@@ -118,7 +118,26 @@ after-image. It charges one claim attempt and both version increments, retains
 Pending/superseded/version guards, persists both command outcomes and advances the
 cursor atomically. Unpaired claims use the ordinary path. A differential test
 compares combined apply with individual replay, including partial claims, duplicate
-replay and rollback of an invalid claim. Its performance remains to be measured.
+replay and rollback of an invalid claim. A traced 300k-workflow run reached 3,816 workflows/sec, but its last cycle fell
+to 2,388/sec at the slowest shard. Four workers/shard were worse: 3,084/sec overall.
+Neither is sustained qualification:
+[eight workers](evidence/workflow-capacity/fireweed-claim-mutation-fusion-trace-100k-8-c3.json.gz),
+[four workers](evidence/workflow-capacity/fireweed-claim-mutation-fusion-trace-100k-8-w4-c3.json.gz).
+
+The million-row primitive qualification **passed** on `671555b5`: 31,390 inserts/sec,
+12,169 enrichments by key/sec, and 22,203 scheduled updates by ID/sec. All rows were
+subsequently delivered and purged correctly; complete run time was 370.6 seconds.
+This is a committed-version pass of the original 10k component targets, not a pass
+of the three-stage workflow target:
+[qualified primitives](evidence/workflow-capacity/fireweed-qualified-primitives-671555b5-1m-8-a.json.gz).
+
+Further EXPLAIN inspection found that the supposed consecutive-row fast path
+still scanned the tenant/queue index prefix for endpoint IN lookup, rowid-range
+validation, and rowid-range UPDATE. FIFO bookkeeping had the same IN scan. The
+current candidate replaces named lookups with full-key joins, explicitly selects
+the integer primary key for rowid ranges, and avoids eagerly evaluating a fallback
+range query after a successful endpoint lookup. Query-plan tests use the production
+SQL for the named reads. Performance of these final query fixes is pending.
 
 The same test exposed anonymous-push response matching by optional client/request
 keys. The candidate matches responses by admitted request identity and driver

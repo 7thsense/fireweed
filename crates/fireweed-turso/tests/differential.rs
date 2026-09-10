@@ -429,3 +429,60 @@ async fn fused_claim_mutation_matches_individual_replay_with_partial_claims() {
     );
     pair.assert_projection_image_and_reads_equal(&ids).await;
 }
+
+#[tokio::test]
+async fn named_rowid_reads_use_full_keys_and_integer_ranges() {
+    use fireweed_relational::{
+        NAMED_ROWID_ENDPOINTS_SQL, NAMED_ROWID_SLICE_SQL, named_rowid_bounds_sql,
+    };
+    use turso::Value;
+    let pair = Pair::memory().await;
+    let keys = vec![
+        Value::Text("t".into()),
+        Value::Text("q".into()),
+        Value::Text("1".into()),
+        Value::Text("1000".into()),
+    ];
+    for (sql, parameters, expected) in [
+        (
+            NAMED_ROWID_ENDPOINTS_SQL.to_string(),
+            keys.clone(),
+            "item_id=?",
+        ),
+        (named_rowid_bounds_sql(2), keys, "item_id=?"),
+        (
+            NAMED_ROWID_SLICE_SQL.to_string(),
+            vec![
+                Value::Text("t".into()),
+                Value::Text("q".into()),
+                Value::Integer(1),
+                Value::Integer(1000),
+            ],
+            "INTEGER PRIMARY KEY",
+        ),
+    ] {
+        let rows = pair
+            .turso
+            .query(format!("EXPLAIN QUERY PLAN {sql}"), parameters)
+            .await
+            .unwrap();
+        let plans: Vec<_> = rows
+            .iter()
+            .map(|row| match &row.values[3] {
+                Value::Text(text) => text.as_str(),
+                other => panic!("unexpected plan: {other:?}"),
+            })
+            .collect();
+        assert!(
+            plans.iter().any(|plan| plan.contains(expected)),
+            "bounded lookup regressed: {plans:?}"
+        );
+        assert!(
+            !plans
+                .iter()
+                .any(|plan| plan.contains("sqlite_autoindex_fireweed_items_1")
+                    && !plan.contains("item_id=?")),
+            "queue-prefix scan: {plans:?}"
+        );
+    }
+}

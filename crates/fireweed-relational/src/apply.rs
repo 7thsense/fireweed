@@ -1120,20 +1120,14 @@ pub fn advance_claim_scan_hint_for_ids(
     let mut rich_rows = 0_i64;
     let ids: Vec<String> = item_ids.iter().map(|id| id.to_string()).collect();
     for chunk in ids.chunks(SQLITE_BATCH) {
-        let ph = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT COUNT(*), MAX(rowid), \
-             COALESCE(SUM(CASE WHEN priority IS NOT NULL OR not_before IS NOT NULL \
-             OR group_key IS NOT NULL OR cohort_size IS NOT NULL THEN 1 ELSE 0 END), 0) \
-             FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
-        );
+        let sql = named_rowid_bounds_sql(chunk.len());
         let mut p: Vec<RelValue> = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
         for id in chunk {
             p.push(RelValue::Text(id.clone()));
         }
         let (count, chunk_max_rowid, chunk_rich): (i64, Option<i64>, i64) =
             crate::query_row(tx, &sql, &p, |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(2)?, row.get(3)?))
             })?;
         seen += count;
         rich_rows += chunk_rich;
@@ -1172,13 +1166,7 @@ pub fn fifo_rowid_range_for_id_strings(
     let mut max_rowid: Option<i64> = None;
     let mut rich_rows = 0_i64;
     for chunk in ids.chunks(SQLITE_BATCH) {
-        let ph = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT COUNT(*), MIN(rowid), MAX(rowid), \
-             COALESCE(SUM(CASE WHEN priority IS NOT NULL OR not_before IS NOT NULL \
-             OR group_key IS NOT NULL OR cohort_size IS NOT NULL THEN 1 ELSE 0 END), 0) \
-             FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
-        );
+        let sql = named_rowid_bounds_sql(chunk.len());
         let mut p: Vec<RelValue> = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
         for id in chunk {
             p.push(RelValue::Text(id.clone()));
@@ -1205,7 +1193,7 @@ pub fn fifo_rowid_range_for_id_strings(
     let range_count: i64 = if let Some(state) = expected_state {
         crate::query_row(
             tx,
-            "SELECT COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT COUNT(*) FROM fireweed_items NOT INDEXED WHERE tenant_id=?1 AND queue_id=?2 \
              AND rowid BETWEEN ?3 AND ?4 AND lifecycle_state=?5",
             [
                 RelValue::Text(t.to_string()),
@@ -1219,7 +1207,7 @@ pub fn fifo_rowid_range_for_id_strings(
     } else {
         crate::query_row(
             tx,
-            "SELECT COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT COUNT(*) FROM fireweed_items NOT INDEXED WHERE tenant_id=?1 AND queue_id=?2 \
              AND rowid BETWEEN ?3 AND ?4",
             [
                 RelValue::Text(t.to_string()),
@@ -1235,6 +1223,32 @@ pub fn fifo_rowid_range_for_id_strings(
     } else {
         Ok(None)
     }
+}
+
+/// Full-key endpoint seeks; IN on the composite key otherwise scans the queue in Turso.
+pub const NAMED_ROWID_ENDPOINTS_SQL: &str = "WITH incoming(item_id) AS (VALUES (?3),(?4)) \
+    SELECT i.item_id,i.rowid FROM incoming CROSS JOIN fireweed_items i \
+    INDEXED BY sqlite_autoindex_fireweed_items_1 \
+    ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id";
+
+/// Force the integer primary-key range instead of the tenant/queue index prefix.
+pub const NAMED_ROWID_SLICE_SQL: &str = "SELECT item_id FROM fireweed_items NOT INDEXED \
+    WHERE tenant_id=? AND queue_id=? AND rowid BETWEEN ? AND ?";
+
+/// Named FIFO bookkeeping is bounded by addressed IDs, including duplicate-ID semantics.
+pub fn named_rowid_bounds_sql(count: usize) -> String {
+    let values = (0..count)
+        .map(|i| format!("(?{})", i + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH incoming(item_id) AS (VALUES {values}), named AS (SELECT DISTINCT item_id FROM incoming) \
+        SELECT COUNT(*),MIN(i.rowid),MAX(i.rowid), \
+        COALESCE(SUM(CASE WHEN i.priority IS NOT NULL OR i.not_before IS NOT NULL \
+        OR i.group_key IS NOT NULL OR i.cohort_size IS NOT NULL THEN 1 ELSE 0 END),0) \
+        FROM named CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+        ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=named.item_id"
+    )
 }
 
 /// Packed waves occupy a dense rowid slice of *exactly* the named ids. Two
@@ -1276,8 +1290,7 @@ fn named_ids_occupy_rowid_slice(
     let (t, q) = parts(shard);
     let rows = crate::rel_query(
         tx,
-        "SELECT item_id, rowid FROM fireweed_items \
-         WHERE tenant_id=? AND queue_id=? AND item_id IN (?,?)",
+        NAMED_ROWID_ENDPOINTS_SQL,
         [
             RelValue::Text(t.to_string()),
             RelValue::Text(q.to_string()),
@@ -1306,8 +1319,7 @@ fn named_ids_occupy_rowid_slice(
     }
     let slice = crate::rel_query(
         tx,
-        "SELECT item_id FROM fireweed_items \
-         WHERE tenant_id=? AND queue_id=? AND rowid BETWEEN ? AND ?",
+        NAMED_ROWID_SLICE_SQL,
         [
             RelValue::Text(t.to_string()),
             RelValue::Text(q.to_string()),
@@ -3474,18 +3486,18 @@ fn apply_one_claim_sql(
         return Ok(());
     }
     let mut pending_moved = 0usize;
-    if let Some((min_rowid, max_rowid)) = named_ids_occupy_rowid_slice(tx, shard, &claim.item_ids)?
-        .or(
-            if claim_scan_default_fifo.get(shard).copied().unwrap_or(false) {
-                fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
-            } else {
-                None
-            },
-        )
-    {
+    let named_range = named_ids_occupy_rowid_slice(tx, shard, &claim.item_ids)?;
+    let range = if named_range.is_some() {
+        named_range
+    } else if claim_scan_default_fifo.get(shard).copied().unwrap_or(false) {
+        fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
+    } else {
+        None
+    };
+    if let Some((min_rowid, max_rowid)) = range {
         pending_moved = crate::rel_exec(
             tx,
-            "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+            "UPDATE fireweed_items NOT INDEXED SET lifecycle_state='Leased', lease_token_hash=?1, \
              lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
              item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
              WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9 \
@@ -3849,7 +3861,7 @@ pub fn apply_fused_claim_complete_sql(
         let returning = crate::rel_query(
             tx,
             &format!(
-                "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+                "UPDATE fireweed_items NOT INDEXED SET lifecycle_state='Complete', lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, fenced=0, \
                  {PAIR_VERSION_SQL} \
                  terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
@@ -3970,47 +3982,48 @@ fn apply_fused_claim_complete_run_sql(
     let now_n = ts_nanos(last_now);
     const RUN_VERSION_SQL: &str = "retry_count=retry_count+1, item_version=item_version+2,";
     let named_set: HashSet<ItemId> = all_ids.iter().copied().collect();
-    let pending_moved =
-        if let Some((min_rowid, max_rowid)) = named_ids_occupy_rowid_slice(tx, shard, &all_ids)? {
-            let returning = crate::rel_query(
-                tx,
-                "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+    let pending_moved = if let Some((min_rowid, max_rowid)) =
+        named_ids_occupy_rowid_slice(tx, shard, &all_ids)?
+    {
+        let returning = crate::rel_query(
+            tx,
+            "UPDATE fireweed_items NOT INDEXED SET lifecycle_state='Complete', lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, fenced=0, \
                  retry_count=retry_count+1, item_version=item_version+2, \
                  terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
                  WHERE tenant_id=? AND queue_id=? AND superseded=0 \
                    AND lifecycle_state='Pending' AND rowid BETWEEN ? AND ? \
                  RETURNING group_key,item_id,eligible_since,priority_sort,created_at,created_seq",
-                [
-                    RelValue::Integer(now_n),
-                    RelValue::Integer(epoch),
-                    RelValue::Integer(now_n),
-                    RelValue::Integer(seq),
-                    RelValue::Text(t.to_string()),
-                    RelValue::Text(q.to_string()),
-                    RelValue::Integer(min_rowid),
-                    RelValue::Integer(max_rowid),
-                ],
-            )?;
-            if fused_complete_moved_unnamed(&returning, &named_set)? {
-                return Err(EngineError::Storage(
-                    "fused complete moved a row that was not in the named set".into(),
-                ));
-            }
-            returning.len()
-        } else {
-            complete_named_ids_pk_sql(
-                tx,
-                shard,
-                &ids,
-                now_n,
-                epoch,
-                seq,
-                RUN_VERSION_SQL,
-                "lifecycle_state='Pending'",
-                None,
-            )?
-        };
+            [
+                RelValue::Integer(now_n),
+                RelValue::Integer(epoch),
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq),
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+                RelValue::Integer(min_rowid),
+                RelValue::Integer(max_rowid),
+            ],
+        )?;
+        if fused_complete_moved_unnamed(&returning, &named_set)? {
+            return Err(EngineError::Storage(
+                "fused complete moved a row that was not in the named set".into(),
+            ));
+        }
+        returning.len()
+    } else {
+        complete_named_ids_pk_sql(
+            tx,
+            shard,
+            &ids,
+            now_n,
+            epoch,
+            seq,
+            RUN_VERSION_SQL,
+            "lifecycle_state='Pending'",
+            None,
+        )?
+    };
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
     }
