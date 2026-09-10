@@ -23,3 +23,10 @@ authoritative log's synchronization. The vendored crate is excluded from the
 Fireweed workspace member list; its sources otherwise retain the published crate
 layout. Remove this override when an upstream release supplies equivalent tested
 checkpoint control. Do not silently replace the pinned sources during upgrades.
+
+The patch also reconciles the page cache's tracked evictable count after WAL
+commit clears dirty flags. Without reconciliation, later allocations can scan
+the entire cache repeatedly despite having clean pages available. Recounting
+once per commit preserves the existing spill decision and eviction safety
+checks. The fallback count stops once the required number of pages is found.
+A native cache regression test covers dirty-to-clean commit reconciliation.

@@ -4356,6 +4356,7 @@ impl Pager {
                     let mut commit_info = self.commit_info.write();
                     wal.commit_prepared_frames(&commit_info.prepared_frames);
                     wal.finalize_committed_pages(&commit_info.prepared_frames);
+                    self.page_cache.write().refresh_evictable_count();
                     wal.finish_append_frames_commit()?;
                     self.dirty_pages.write().clear();
                     commit_info.prepared_frames.clear();

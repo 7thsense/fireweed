@@ -612,3 +612,26 @@ and all throughput/stability gates remain unchanged.
 
 The page-size-adjusted checkpoint candidate passed all 106 combined release
 tests, with one existing ignored test. [Validation log](evidence/workflow-capacity/fireweed-page2k-bytebudget-tests.log.gz).
+
+### Page-cache accounting regression found under the larger WAL window
+
+The [128,000-frame candidate run](evidence/workflow-capacity/fireweed-qualified-workflow-page2k-bytebudget-184f4d60-500k-8-c6-a.json.gz)
+was stopped after its first cycle reached 148.22 seconds (about 3,373/sec).
+CPU was high and I/O pressure low. Host ptrace policy denied live attachment;
+a separate debugger-launched run captured this [stack snapshot](evidence/workflow-capacity/fireweed-page2k-bytebudget-gdb.txt.gz)
+before being interrupted and killed. Neither partial run qualifies.
+
+Three writer stacks were inside `PageCache::count_evictable_pages`, called
+from page allocation. WAL commit clears page dirty flags without reconciling
+`evictable_count`; that stale estimate causes later allocations to repeatedly
+scan the full cache. The next patch refreshes the estimate once per WAL commit
+and short-circuits the fallback count after finding enough evictable pages.
+Native spillability, eviction checks, and durable-write ordering remain intact.
+Capacity improvement is not yet measured.
+
+The cache-accounting patch passed [43 native cache tests](evidence/workflow-capacity/fireweed-core-cache-tests.log.gz)
+and [3 native pager tests](evidence/workflow-capacity/fireweed-core-pager-tests.log.gz),
+with one existing ignored native cache test. All [106 combined release tests](evidence/workflow-capacity/fireweed-cache-accounting-public-tests.log.gz)
+passed, with one existing ignored Turso test. The native tests use features
+`fs,uuid`; the upstream test module references UUID even when defaults are off.
+The larger-population qualification must still be rerun before accepting the fix.

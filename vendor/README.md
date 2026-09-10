@@ -1,4 +1,4 @@
-# Pinned Turso checkpoint-control backport
+# Pinned Turso performance backports
 
 The five crates here are the published Turso 0.7.2 sources. Only `turso_core`
 contains behavior changes; see [its patch and provenance](turso_core/FIREWEED.md).
@@ -12,4 +12,9 @@ or Snorri source change is required. These are excluded from Fireweed's workspac
 member tests. Native checkpoint behavior is tested through the public Turso API
 in `crates/fireweed-turso/tests/checkpoint_policy.rs`, and through Fireweed's
 public workflow/recovery suites. Replace this bundle with a tested upstream
-release once equivalent effective checkpoint configuration is available.
+release once equivalent effective checkpoint configuration and cache accounting
+fixes are available. Native cache tests are also run directly with:
+
+```sh
+cargo test --manifest-path vendor/turso_core/Cargo.toml --no-default-features --features fs,uuid --lib storage::page_cache::tests --target-dir target/core-cache-tests -- --test-threads=1
+```

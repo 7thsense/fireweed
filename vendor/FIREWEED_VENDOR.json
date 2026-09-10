@@ -10,6 +10,8 @@
     },
     "modified_upstream_files": [
       "connection.rs",
+      "storage/page_cache.rs",
+      "storage/pager.rs",
       "storage/wal.rs",
       "translate/pragma.rs"
     ]

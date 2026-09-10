@@ -465,19 +465,34 @@ impl PageCache {
 
         // Slow path: do the full count since our estimate suggests we might need to spill.
         // The actual count may be lower than evictable_count due to locked/pinned pages.
-        self.count_evictable_pages() < needed_evictable
+        self.count_evictable_pages(needed_evictable) < needed_evictable
     }
 
     #[inline]
     /// Count pages that can be evicted without spilling.
-    fn count_evictable_pages(&self) -> usize {
+    fn count_evictable_pages(&self, limit: usize) -> usize {
         self.map
             .values()
             .filter(|&&entry_ptr| {
                 let entry = unsafe { &*entry_ptr };
                 Self::evictable(&entry.page)
             })
+            .take(limit)
             .count()
+    }
+
+    /// WAL commit clears dirty flags outside this cache. Reconcile the tracked
+    /// estimate once per commit, rather than forcing a full cache scan at each
+    /// subsequent page allocation. Pin/lock/refcount checks remain in eviction.
+    pub(crate) fn refresh_evictable_count(&mut self) {
+        self.evictable_count = self
+            .map
+            .values()
+            .filter(|&&entry_ptr| {
+                let entry = unsafe { &*entry_ptr };
+                Self::counted_as_evictable(&entry.page)
+            })
+            .count();
     }
 
     /// Check if spilling is enabled for this cache.
@@ -1867,6 +1882,33 @@ mod tests {
         // Fast path: 9 >= 1, so no spill needed
         assert!(!cache.needs_spill());
 
+        cache.verify_cache_integrity();
+    }
+    #[test]
+    fn committed_clean_pages_restore_the_spill_estimate() {
+        let mut cache = PageCache::new_with_spill(100, true);
+        for id in 1..=100 {
+            insert_page(&mut cache, id);
+        }
+        for id in 2..=100 {
+            let key = create_key(id);
+            cache.notify_page_dirty(key);
+            cache.peek(&key, false).unwrap().set_dirty();
+        }
+        assert_eq!(cache.evictable_count(), 0);
+        assert!(cache.needs_spill());
+        // WAL finalization clears dirty flags without cache notifications.
+        for id in 2..=100 {
+            cache.peek(&create_key(id), false).unwrap().clear_dirty();
+        }
+        cache.refresh_evictable_count();
+        assert_eq!(cache.evictable_count(), 99);
+        assert!(!cache.needs_spill());
+        // Reconciliation is idempotent and never counts the database header.
+        cache.refresh_evictable_count();
+        assert_eq!(cache.evictable_count(), 99);
+        assert_eq!(cache.count_evictable_pages(10), 10);
+        assert_eq!(cache.count_evictable_pages(200), 99);
         cache.verify_cache_integrity();
     }
 }
