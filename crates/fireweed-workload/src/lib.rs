@@ -586,7 +586,9 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         || cfg.load_workers == 0
         || !(1..=1000).contains(&cfg.batch)
     {
-        return Err("items/shards/workers/load-workers must be positive and batch in 1..=1000".into());
+        return Err(
+            "items/shards/workers/load-workers must be positive and batch in 1..=1000".into(),
+        );
     }
     if cfg.recycle && cfg.profile == Profile::Snorri {
         return Err("recycling currently supports original-row mutable and bulk profiles".into());
@@ -648,6 +650,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 return Err(format!("unexpected final metrics: {metrics:?}").into());
             }
             if observations.receipts.lock().unwrap().len() != expected { return Err("missing terminal receipts".into()); }
+            let processing_wall_s = cycle_started.elapsed().as_secs_f64();
+            let purge_started = Instant::now();
             if cfg.recycle {
                 clock.set(270 + cycle as u64 * 7200);
                 let retained_ids = loaded_ids.into_inner().unwrap();
@@ -664,6 +668,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 "delivered": observations.delivered.load(Ordering::SeqCst), "failed": observations.failed.load(Ordering::SeqCst),
                 "retries": observations.retries.load(Ordering::SeqCst), "claims": observations.claims.load(Ordering::SeqCst),
                 "complete": metrics.complete, "pending": metrics.pending, "leased": metrics.leased,
+                "processing_wall_s": processing_wall_s,
+                "purge_wall_s": if cfg.recycle { purge_started.elapsed().as_secs_f64() } else { 0.0 },
                 "wall_s": cycle_started.elapsed().as_secs_f64(), "process_rss_kib": process_rss_kib(),
                 "projection_bytes": std::fs::metadata(projection_root.join("projection.db")).ok().map(|m| m.len()) });
             if cfg.recycle { eprintln!("workflow_cycle_complete {report}"); }

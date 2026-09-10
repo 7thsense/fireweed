@@ -488,6 +488,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         std::fs::create_dir_all(root).map_err(store_err)?;
         let root = std::fs::canonicalize(root).map_err(store_err)?;
         let blob: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(&root));
+        let blob = crate::traced_blob_store::maybe_trace(blob);
         crate::storage_generation::reject_incompatible_storage_generation(
             &blob, "fwlog/", "fwmeta/",
         )

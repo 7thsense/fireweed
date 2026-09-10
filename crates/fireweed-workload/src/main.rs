@@ -15,7 +15,9 @@ async fn main() -> Result<()> {
             "--items" => config.items = args.next().ok_or("missing items")?.parse()?,
             "--batch" => config.batch = args.next().ok_or("missing batch")?.parse()?,
             "--shards" => config.shards = args.next().ok_or("missing shards")?.parse()?,
-            "--load-workers" => config.load_workers = args.next().ok_or("missing load workers")?.parse()?,
+            "--load-workers" => {
+                config.load_workers = args.next().ok_or("missing load workers")?.parse()?
+            }
             "--workers" => config.workers = args.next().ok_or("missing workers")?.parse()?,
             "--payload-bytes" => {
                 config.payload_bytes = args.next().ok_or("missing payload bytes")?.parse()?

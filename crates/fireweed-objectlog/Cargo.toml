@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 # Object-log product backends over crates.io object-log LogEngine.
 [dependencies]
+async-trait = "0.1"
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }

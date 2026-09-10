@@ -1519,6 +1519,7 @@ dependencies = [
 name = "fireweed-objectlog"
 version = "0.31.25"
 dependencies = [
+ "async-trait",
  "aws-sdk-s3",
  "bytes",
  "fireweed-conformance",

@@ -223,3 +223,37 @@ expected to grow and is reported separately.
 Live S3 qualification has not been rerun: Docker socket access is denied on this host,
 and no S3 test endpoint is configured. Local filesystem-log tests do not substitute
 for that remote-store qualification.
+
+## Producer concurrency and compact-row controls
+
+On `5535a71d`, four loaders with eight shards/eight delivery workers reached
+3,964 workflows/sec, with 2.47 commands per append versus approximately 1.8 in the
+million-row single-loader run. Two shards with 32 delivery workers each reached
+only 1,672/sec. Both completed exact outcomes and purge. Increasing to 32 delivery
+workers on each of eight shards reached 3,035/sec and also failed the sustained target.
+
+The 64-byte body control averaged 5,037 workflows/sec over three cycles, but its
+slowest final-cycle shard achieved only 2,838/sec. This is **not** a qualification
+pass. Reported filesystem write traffic fell from 9.65 GiB to 3.41 GiB compared with
+the equivalent 1 KiB-body run, without eliminating the late slowdown. No default
+payload size or throughput gate was weakened.
+
+Raw artifacts:
+[four loaders](evidence/workflow-capacity/fireweed-concurrent-load4-100k-8-c3.json.gz),
+[two shards](evidence/workflow-capacity/fireweed-concurrent-load4-100k-2-w32-c3.json.gz),
+[compact bodies](evidence/workflow-capacity/fireweed-compact64-load4-100k-8-c3.json.gz),
+[32 workers per shard](evidence/workflow-capacity/fireweed-load4-100k-8-w32-c3.json.gz).
+
+The runner now reports processing and purge wall time separately within each
+cycle, while qualification continues to include both in total elapsed time.
+This will distinguish slow delivery from synchronous retention costs in further
+measurements. All 24 public workload tests passed after concurrent loading was
+added, including original-row recovery from the authoritative log alone.
+
+The four-loader trace also exposes the late slowdown directly: mean log-produce
+latency was approximately 17 ms before the first shard completed cycle zero,
+362 ms in the next interval, and 540 ms in the following interval. These are
+intervals bounded by the first shard finishing a cycle, not perfectly synchronized
+per-cycle measurements. Projection apply cost per item increased much less.
+Opt-in log tracing now times the existing blob adapter's segment and manifest
+PUTs separately, without replacing its I/O or durability barriers.

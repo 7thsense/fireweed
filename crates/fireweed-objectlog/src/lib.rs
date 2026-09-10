@@ -12,6 +12,7 @@ mod async_projection_apply;
 pub mod commit_surface;
 pub mod compose_log;
 mod log_engine_store;
+mod traced_blob_store;
 pub mod maintenance;
 pub mod object_store_observability;
 mod port_surface;
