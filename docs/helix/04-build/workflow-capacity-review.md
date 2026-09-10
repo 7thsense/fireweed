@@ -556,3 +556,10 @@ locking, restart, backfill, or authoritative-log synchronization changes.
 The release Turso suite passed 83 tests with one existing ignored test, including
 a bounded/repeatable/database-specific policy test. All 24 public contract,
 recovery, and workflow tests passed. Capacity qualification remains pending.
+
+The [staggered checkpoint run](evidence/workflow-capacity/fireweed-qualified-workflow-spread-2c3b4ca2-100k-8-c16-a.json.gz)
+finished at 7,800.54 workflows/sec but again failed cycle six (4,085.71/sec).
+All other gates passed. Staggering did not resolve the repeated shared stall;
+the experiment is reverted to the supported fixed 64,000-frame policy. The
+next investigation timestamps real log synchronization calls across the slow
+cycle; no durability bypass is permitted.
