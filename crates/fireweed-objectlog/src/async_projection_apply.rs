@@ -544,6 +544,17 @@ where
         target: &CommandPosition,
         deadline: Duration,
     ) -> EngineResult<()> {
+        // Already-covered reads must not interrupt a pending Claim's follow-up
+        // window. Notifying before this check can wake apply on another runtime
+        // thread while the transient coverage-waiter count is still nonzero.
+        self.ensure_healthy(shard)?;
+        let snapshot = self.snapshot(shard).await;
+        if let Some(reason) = snapshot.poison_reason {
+            return Err(poisoned(&reason));
+        }
+        if position_covers(snapshot.applied_high_water.as_ref(), target) {
+            return Ok(());
+        }
         // A dependent read needs Claim applied now. Waiting for a follow-up
         // cannot help when that Complete itself needs projection coverage first.
         struct CoverageWaiter<'a>(&'a AtomicU64);
@@ -856,9 +867,8 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 /// Briefly join a follow-up that invalidates the claimed leases before applying
 /// intermediate Leased rows. Disk-backed append can take hundreds of milliseconds
 /// under concurrent writes; an 80 ms window missed nearly every follow-up in the
-/// sustained workload. A one-second cap covers most append latency under sustained
-/// disk pressure. Coverage waiters bypass this bounded background delay.
-const CLAIM_COMPLETE_JOIN_MS: u64 = 1_000;
+/// sustained workload. Coverage waiters bypass this bounded background delay.
+const CLAIM_COMPLETE_JOIN_MS: u64 = 500;
 
 fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
     let mut claim = false;
@@ -1521,6 +1531,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn covered_read_does_not_interrupt_background_coalescing() {
+        let coordinator = coordinator();
+        coordinator.seed_high_water(shard(), Some(pos(1))).await;
+        let changed = coordinator.inner.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        coordinator
+            .wait_until_covers(&shard(), &pos(1), Duration::from_millis(20))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(2), changed)
+                .await
+                .is_err(),
+            "a covered read must not wake apply and prematurely publish later claims"
+        );
+    }
+
+    #[tokio::test]
     async fn coverage_read_bypasses_claim_followup_delay() {
         let coordinator = coordinator();
         let mut envelope = pause_env("claim-for-read");
@@ -1541,7 +1570,7 @@ mod tests {
         coordinator
             .wait_until_covers(&shard(), &pos(1), Duration::from_millis(200))
             .await
-            .expect("dependent read must bypass the one-second background join window");
+            .expect("dependent read must bypass the 500 ms background join window");
         assert_eq!(coordinator.apply_live_call_count(), 1);
     }
 
