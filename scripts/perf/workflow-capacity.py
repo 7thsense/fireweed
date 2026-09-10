@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,29 @@ def storage_usage(root):
         bucket["allocated_bytes"] += stat.st_blocks * 512
     return groups
 
+
+def file_attributes(root):
+    """Capture projection COW/compression flags as well as mount provenance.
+
+    A projection directory may inherit Btrfs attributes different from its
+    mount defaults. Record the actual DB/WAL flags, without traversing log
+    objects or requiring lsattr on non-Linux/unsupported filesystems.
+    """
+    executable = shutil.which("lsattr")
+    if executable is None:
+        return {"available": False}
+    paths = [root] if root.exists() else []
+    for pattern in ("projection.db", "projection.db-wal"):
+        paths.extend(sorted(root.glob("shard-*/" + pattern)))
+    if not paths:
+        return {"available": True, "paths": []}
+    result = subprocess.run(
+        [executable, "-d", "--", *map(str, paths)],
+        capture_output=True, text=True, check=False,
+    )
+    return {"available": True, "exit_code": result.returncode,
+            "stdout": result.stdout, "stderr": result.stderr}
+
 with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     started = time.monotonic()
     child = subprocess.Popen(command, cwd=repo, stdout=stdout, stderr=stderr)
@@ -80,6 +104,7 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         ) if key in os.environ},
         "filesystem": mount,
         "storage": storage_usage(data_root),
+        "file_attributes": file_attributes(data_root),
         "source_diff_and_workload_sha256": digest.hexdigest(),
         "binary_sha256": binary_sha, "exit_code": child.returncode,
         "process_wall_s": wall, "user_cpu_s": usage.ru_utime,
@@ -92,6 +117,7 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     if "--projection-root" in args:
         projection_root = Path(args[args.index("--projection-root") + 1]).resolve()
         report["projection_storage"] = storage_usage(projection_root)
+        report["projection_file_attributes"] = file_attributes(projection_root)
         report["projection_filesystem"] = json.loads(subprocess.check_output([
             "findmnt", "--json", "--target", str(next(path for path in [projection_root, *projection_root.parents] if path.exists()))
         ]))

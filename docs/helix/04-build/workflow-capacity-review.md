@@ -337,3 +337,14 @@ would weaken durability and is not an acceptable optimization.
 [Syscall diagnostic](evidence/workflow-capacity/fireweed-sync-call-diagnostic-100k-8-c3.json.gz),
 [interposer source](evidence/workflow-capacity/fireweed-fsync-timing.c),
 [build provenance](evidence/workflow-capacity/fireweed-sync-call-diagnostic-provenance.json).
+
+
+The runner now records directory and projection DB/WAL `lsattr` output, where
+available, alongside mount provenance. Mount options alone do not show inherited
+per-file Btrfs attributes. A planned disk-backed control marks only a new empty
+projection directory `chattr +C`, allowing its new DB/WAL files to inherit NOCOW;
+the log root retains its existing attributes and durable publish protocol.
+NOCOW also disables file data checksums and compression, so this is a storage
+tradeoff for a rebuildable projection, not an equivalent filesystem setting.
+[Btrfs documentation](https://btrfs.readthedocs.io/en/stable/Administration.html).
+The disk-backed qualification thresholds remain unchanged.
