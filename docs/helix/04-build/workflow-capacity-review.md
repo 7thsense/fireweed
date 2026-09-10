@@ -2,13 +2,13 @@
 
 Date: 2026-09-10. Exact measurement snapshots are recorded in the linked artifacts.
 
-**Supported-build qualification is pending.** Million-row insert/update measurements
-exceed 10k rows/sec. A checkpoint-coalescing diagnostic sustained 7,644 completed
-workflows/sec over 1.6 million workflows with both the log and projection on disk,
-and passed every throughput cycle. The supported checkpoint backport passes the
-Turso release suite and public workflow/recovery tests. Repeated qualification of
-that committed build, including the new WAL-growth checks, remains outstanding.
-The performance goal stays active; Snorri migration is not yet qualified.
+**Primitive targets pass repeatedly; sustained workflow stability remains pending.**
+Two clean-build million-row runs measured 14.3–14.8k inserts/sec, 23.3–23.5k
+updates by key/sec, and 13.3–13.9k scheduling updates by ID/sec. The supported
+64,000-frame checkpoint policy passed one complete 1.6-million workflow run at
+8,108/sec. Its repeat averaged 7,196/sec but failed one cycle at 4,044/sec.
+Correctness, DB/RSS stability, and the observed WAL budget passed both workflow
+runs. The goal stays active until sustained throughput passes repeatedly.
 
 ## What is being measured
 
@@ -517,3 +517,28 @@ backpressure retry as writes and workflow metrics; all waiting remains included
 in phase wall time. The remaining direct retention metrics read also uses this
 policy. This changes no production API or acceptance threshold. Current-build
 primitive qualification and repeat workflow qualification are still required.
+
+### Repeat evidence after bounded metrics retries
+
+Clean `8ac819e9` retains the production implementation from `097c85f4`, changing
+only workload metrics retry handling. Both million-row primitive runs passed:
+
+| Phase | Run A rows/sec | Run B rows/sec |
+|---|---:|---:|
+| Insert, including projection coverage | 14,788 | 14,347 |
+| Enrichment by key | 23,292 | 23,507 |
+| Scheduling by ID | 13,939 | 13,337 |
+| Claim and complete | 10,255 | 8,834 |
+| Purge | 16,390 | 20,468 |
+
+[Primitive A](evidence/workflow-capacity/fireweed-qualified-primitives-8ac819e9-1m-8-a.json.gz),
+[primitive B](evidence/workflow-capacity/fireweed-qualified-primitives-8ac819e9-1m-8-b.json.gz).
+
+The [workflow repeat](evidence/workflow-capacity/fireweed-qualified-workflow-8ac819e9-100k-8-c16-b.json.gz)
+averaged 7,195.57/sec but failed cycle six: all shards slowed to 20.2–24.7
+seconds, with the slowest equivalent rate 4,043.63/sec. Other checks passed,
+including a sampled WAL maximum of 511.94 MiB. WAL sizes across shards track
+closely through most cycles, suggesting synchronized checkpoint pressure as a
+remaining source of shared-device stalls. This is a hypothesis for a staggered
+checkpoint experiment, not yet a demonstrated fix. Failed evidence is retained
+without changing the gate.
