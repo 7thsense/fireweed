@@ -6062,6 +6062,11 @@ fn apply_command_sql_with_claims(
                 .map(|definition| definition.typed_indexes.as_slice())
                 .unwrap_or(&[]);
 
+            let mut distinct = HashSet::new();
+            let batch_auxiliary = c.items.iter().all(|item| {
+                matches!(item.action, ResolvedItemMutationAction::Replace(_))
+                    && distinct.insert(item.item_id)
+            });
             for item in &c.items {
                 let item_id = item.item_id.to_string();
                 match &item.action {
@@ -6188,35 +6193,37 @@ fn apply_command_sql_with_claims(
                         if changed != 1 {
                             return Err(EngineError::Conflict);
                         }
-                        upsert_item_payloads(
-                            tx,
-                            &t,
-                            &q,
-                            [(
-                                item_id.to_string(),
-                                values.payload.as_ref().map(|p| p.to_vec()),
-                            )],
-                        )?;
-                        crate::rel_exec(
-                            tx,
-                            "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                            [
-                                RelValue::Text(t.to_string()),
-                                RelValue::Text(q.to_string()),
-                                RelValue::from(&item_id),
-                            ],
-                        )?;
-                        for gate_key in &values.gate_keys {
+                        if !batch_auxiliary {
+                            upsert_item_payloads(
+                                tx,
+                                &t,
+                                &q,
+                                [(
+                                    item_id.to_string(),
+                                    values.payload.as_ref().map(|p| p.to_vec()),
+                                )],
+                            )?;
                             crate::rel_exec(
                                 tx,
-                                "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4)",
+                                "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                                 [
                                     RelValue::Text(t.to_string()),
                                     RelValue::Text(q.to_string()),
                                     RelValue::from(&item_id),
-                                    RelValue::from(gate_key),
                                 ],
                             )?;
+                            for gate_key in &values.gate_keys {
+                                crate::rel_exec(
+                                    tx,
+                                    "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4)",
+                                    [
+                                        RelValue::Text(t.to_string()),
+                                        RelValue::Text(q.to_string()),
+                                        RelValue::from(&item_id),
+                                        RelValue::from(gate_key),
+                                    ],
+                                )?;
+                            }
                         }
                         if !typed_indexes.is_empty() {
                             delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
@@ -6232,6 +6239,73 @@ fn apply_command_sql_with_claims(
                             token_ops.push(TokenOp::Clear(shard.clone(), item.item_id));
                         }
                     }
+                }
+            }
+
+            if batch_auxiliary {
+                // Independent replacements can share payload/gate statements after
+                // every version guard has passed. Purges and repeated IDs retain
+                // the sequential path above.
+                for chunk in c.items.chunks(bind_chunk_size(4, 0)) {
+                    upsert_item_payloads(
+                        tx,
+                        &t,
+                        &q,
+                        chunk.iter().map(|item| {
+                            let ResolvedItemMutationAction::Replace(values) = &item.action else {
+                                unreachable!()
+                            };
+                            (
+                                item.item_id.to_string(),
+                                values.payload.as_ref().map(|p| p.to_vec()),
+                            )
+                        }),
+                    )?;
+                }
+                let ids: Vec<_> = c
+                    .items
+                    .iter()
+                    .map(|item| item.item_id.to_string())
+                    .collect();
+                exec_items_in(
+                    tx,
+                    "DELETE FROM fireweed_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                    &[],
+                    &t,
+                    &q,
+                    &ids,
+                )?;
+                let gates: Vec<_> = c
+                    .items
+                    .iter()
+                    .flat_map(|item| {
+                        let ResolvedItemMutationAction::Replace(values) = &item.action else {
+                            unreachable!()
+                        };
+                        values
+                            .gate_keys
+                            .iter()
+                            .map(move |gate| (item.item_id, gate))
+                    })
+                    .collect();
+                for chunk in gates.chunks(bind_chunk_size(4, 0)) {
+                    let placeholders = vec!["(?,?,?,?)"; chunk.len()].join(",");
+                    let mut params = Vec::with_capacity(chunk.len() * 4);
+                    for (id, gate) in chunk {
+                        params.extend([
+                            RelValue::Text(t.clone()),
+                            RelValue::Text(q.clone()),
+                            RelValue::Text(id.to_string()),
+                            RelValue::Text((*gate).clone()),
+                        ]);
+                    }
+                    crate::rel_exec(
+                        tx,
+                        &format!(
+                            "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES {placeholders}"
+                        ),
+                        params,
+                    )?;
                 }
             }
 

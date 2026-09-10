@@ -486,3 +486,152 @@ async fn named_rowid_reads_use_full_keys_and_integer_ranges() {
         );
     }
 }
+
+#[tokio::test]
+async fn addressed_payload_and_gate_writes_are_batched_with_exact_replacements() {
+    use fireweed_conformance::ts;
+    use fireweed_engine::{
+        AddressedMutation, BatchUpdateValue, ItemMutationOperation, ItemMutationRequest,
+        ItemMutationReturning, ItemPatch, LeaseGuard,
+    };
+    let pair = gated_pair().await;
+    let mut definition = qdef();
+    definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+    definition.eligibility_policy.max_gates_per_request = Some(4);
+    let rows: Vec<_> = (1000..1100)
+        .map(|i| {
+            let mut row = item(&i.to_string(), &i.to_string(), i);
+            row.gate_keys = vec!["old".into()];
+            row.payload = Some(Bytes::from_static(b"old"));
+            row
+        })
+        .collect();
+    let ids: Vec<_> = rows.iter().map(|row| row.item_id).collect();
+    pair.apply(
+        0,
+        envelope(QueueCommand::Push(PushCommand { items: rows }), ids.clone()),
+    )
+    .await;
+    let request = ItemMutationRequest {
+        request_id: fireweed_core::RequestId::new("batched-aux").unwrap(),
+        evaluated_at: ts(20),
+        dry_run: false,
+        returning: ItemMutationReturning::Identity,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed {
+            entries: ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| AddressedMutation {
+                    item_id: *id,
+                    expected_item_version: None,
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        payload: BatchUpdateValue::Replace(
+                            (i % 2 == 0).then(|| Bytes::from_static(b"new")),
+                        ),
+                        gate_keys: fireweed_engine::GateKeyDelta {
+                            add: if i % 2 == 0 {
+                                vec!["new".into()]
+                            } else {
+                                vec![]
+                            },
+                            remove: vec!["old".into()],
+                            remove_prefixes: vec![],
+                        },
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+        },
+    };
+    let plan = pair
+        .turso
+        .plan_addressed_item_mutation(&pair.shard, &definition, &request, &[])
+        .await
+        .unwrap();
+    assert_eq!(plan.response.summary.changed, 100);
+    let command = plan.command;
+    pair.apply(
+        1,
+        envelope(QueueCommand::MutateItems(command.clone()), ids.clone()),
+    )
+    .await;
+    let shape = pair.turso.last_apply_statement_shape().unwrap();
+    assert!(
+        shape.write_statement_count < 2 * ids.len(),
+        "payload/gate writes regressed to per-row calls: {shape:?}"
+    );
+    let payloads = pair
+        .turso
+        .query(
+            "SELECT payload FROM fireweed_item_payloads ORDER BY item_id",
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(payloads.len(), 100);
+    for (i, row) in payloads.iter().enumerate() {
+        assert_eq!(
+            row.values[0],
+            if i % 2 == 0 {
+                turso::Value::Blob(b"new".to_vec())
+            } else {
+                turso::Value::Null
+            }
+        );
+    }
+    let gates = pair
+        .turso
+        .query("SELECT gate_key FROM fireweed_item_gates", vec![])
+        .await
+        .unwrap();
+    assert_eq!(gates.len(), 50);
+    assert!(
+        gates
+            .iter()
+            .all(|row| row.values[0] == turso::Value::Text("new".into()))
+    );
+    let mut first = command.items[0].clone();
+    let fireweed_engine::ResolvedItemMutationAction::Replace(values) = &mut first.action else {
+        unreachable!()
+    };
+    values.item_version += 1;
+    values.payload = Some(Bytes::from_static(b"middle"));
+    let mut last = first.clone();
+    let fireweed_engine::ResolvedItemMutationAction::Replace(values) = &mut last.action else {
+        unreachable!()
+    };
+    values.item_version += 1;
+    values.payload = Some(Bytes::from_static(b"last"));
+    values.gate_keys = vec!["last".into()];
+    let mut repeated = command;
+    repeated.items = vec![first, last];
+    pair.apply(
+        2,
+        envelope(QueueCommand::MutateItems(repeated), vec![ids[0], ids[0]]),
+    )
+    .await;
+    let row = pair
+        .turso
+        .query(
+            "SELECT payload FROM fireweed_item_payloads WHERE item_id='1000'",
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row[0].values[0], turso::Value::Blob(b"last".to_vec()));
+    let row = pair
+        .turso
+        .query(
+            "SELECT gate_key FROM fireweed_item_gates WHERE item_id='1000'",
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.len(), 1);
+    assert_eq!(row[0].values[0], turso::Value::Text("last".into()));
+    pair.assert_projection_image_and_reads_equal(&ids).await;
+}

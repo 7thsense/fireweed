@@ -137,7 +137,13 @@ validation, and rowid-range UPDATE. FIFO bookkeeping had the same IN scan. The
 current candidate replaces named lookups with full-key joins, explicitly selects
 the integer primary key for rowid ranges, and avoids eagerly evaluating a fallback
 range query after a successful endpoint lookup. Query-plan tests use the production
-SQL for the named reads. Performance of these final query fixes is pending.
+SQL for the named reads. These fixes passed their query-plan and correctness checks, but subsequent sustained
+workflow cycles still missed the target; that qualification candidate was stopped.
+The current candidate batches payload upserts and gate replacements for disjoint
+row replacements. It retains individual version guards and the sequential path
+for repeated row IDs or purges. A larger regression checks exact payload/gate
+clears, repeated-ID ordering and a bound on SQL statement count. Throughput for
+this auxiliary-write change is pending.
 
 The same test exposed anonymous-push response matching by optional client/request
 keys. The candidate matches responses by admitted request identity and driver
