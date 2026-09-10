@@ -242,10 +242,13 @@ fn finish_inert_mutation_generation_append(
 /// A short aggregation window lets compatible concurrent work share a generation.
 /// Already collected local generations seal their append without another linger.
 /// The former fixed 20 ms capped 100-row sequential batches at 5k records/s.
-const MICROBATCH_LINGER: Duration = Duration::from_millis(1);
+// Peer handlers may need several milliseconds to materialize a full request.
+// Full generations start immediately; a bounded linger also amortizes log syncs
+// for partially filled batches without changing FIFO admission.
+const MICROBATCH_LINGER: Duration = Duration::from_millis(10);
 
-/// Overlay exclude bound: two unpublished generations. Realize LIMIT
-/// padding and prune tests use this; production prune keeps overlay at this size.
+/// Reference size for the configured generation budget. Live reservations
+/// must never be truncated merely to fit this estimate.
 const CLAIM_SELECT_EXCLUDE_CAP: usize =
     GENERATION_MAX_ITEMS.saturating_mul(MUTATION_MAX_GENERATIONS_PER_QUEUE);
 
@@ -1247,7 +1250,10 @@ mod contention_mapping_tests {
                 ItemId::from_u64(3)
             ]
         );
-        assert_eq!(CLAIM_SELECT_EXCLUDE_CAP, 2 * GENERATION_MAX_ITEMS);
+        assert_eq!(
+            CLAIM_SELECT_EXCLUDE_CAP,
+            fireweed_engine::MUTATION_MAX_GENERATIONS_PER_QUEUE * GENERATION_MAX_ITEMS
+        );
         snapshot.leased_ids = (0..(CLAIM_SELECT_EXCLUDE_CAP as u64 + 1))
             .map(ItemId::from_u64)
             .collect();

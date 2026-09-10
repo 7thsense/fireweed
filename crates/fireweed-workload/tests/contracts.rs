@@ -530,7 +530,7 @@ async fn concurrent_full_delivery_batches_remain_disjoint() {
         let fw = open_store(root.path(), false, TestClock::at(200)).unwrap();
         let q = create_queue(&fw, "full-concurrent-batches").await.unwrap();
         let mut ids = std::collections::BTreeSet::new();
-        for batch in 0..4 {
+        for batch in 0..8 {
             ids.extend(
                 fw.push_batch(
                     &q,
@@ -542,21 +542,18 @@ async fn concurrent_full_delivery_batches_remain_disjoint() {
                 .unwrap(),
             );
         }
-        let (a, b, c, d) = tokio::join!(
-            fw.claim(&q, 1000, 1000),
-            fw.claim(&q, 1000, 1000),
-            fw.claim(&q, 1000, 1000),
-            fw.claim(&q, 1000, 1000)
-        );
+        let claimed = futures::future::try_join_all((0..8).map(|_| fw.claim(&q, 1000, 1000)))
+            .await
+            .unwrap();
         let mut seen = std::collections::BTreeSet::new();
-        for rows in [a.unwrap(), b.unwrap(), c.unwrap(), d.unwrap()] {
+        for rows in claimed {
             assert_eq!(rows.len(), 1000);
             for row in rows {
                 assert!(seen.insert(row.item_id), "duplicate lease");
             }
         }
         assert_eq!(ids, seen);
-        assert_eq!(fw.metrics(&q).await.unwrap().leased, 4000);
+        assert_eq!(fw.metrics(&q).await.unwrap().leased, 8000);
     })
     .await
     .unwrap();

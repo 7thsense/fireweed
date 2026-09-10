@@ -21,12 +21,12 @@ use crate::{KeyedQueueGate, QueueGateAcquire, QueueGateError, QueueGatePermit};
 pub const CLAIM_MAX_CALLERS: usize = 1_024;
 pub const CLAIM_MAX_DRIVERS: usize = 8;
 pub const CLAIM_GENERATION_MAX_REQUESTS: usize = 8;
-// Coalesce four ordinary 1,000-row delivery requests while retaining a hard
+// Coalesce eight ordinary 1,000-row delivery requests while retaining a hard
 // materialization byte bound. A generation must be larger than one public
 // request or concurrent batch callers cannot share append/apply work.
-pub const GENERATION_MAX_ITEMS: usize = 4_096;
-pub const GENERATION_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-pub const MUTATION_MAX_GENERATIONS_PER_QUEUE: usize = 2;
+pub const GENERATION_MAX_ITEMS: usize = 8_192;
+pub const GENERATION_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+pub const MUTATION_MAX_GENERATIONS_PER_QUEUE: usize = 4;
 pub const MUTATION_MAX_REQUESTS_PER_QUEUE: usize = 16;
 pub const CLAIM_TURN_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(255);
 pub const DRIVER_SLOT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(95);
@@ -54,7 +54,7 @@ pub const S3M_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
 pub const S3M_DERIVED_CLAIM_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
 /// S3m-derived fence-acquire wait. Floor 500 ms / cap 75 s; S5 activates this bound.
 pub const S3M_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3S_FENCE_ACQUIRE_CARRIED_CAP;
-/// S3m-derived pre-fence/drain/delta coverage and bounded-item/16 MiB work wait. Floor 500 ms / cap 5 s.
+/// S3m-derived pre-fence/drain/delta coverage and bounded-item/32 MiB work wait. Floor 500 ms / cap 5 s.
 pub const S3M_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
 /// S5-activated fence-acquire wait. Same 75 s composition cap as S3m.
 pub const S5_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3M_DERIVED_FENCE_ACQUIRE_WAIT;
@@ -3269,17 +3269,28 @@ mod tests {
     }
 
     #[test]
-    fn mutation_third_generation_and_oversized_descriptor_reject_before_retention() {
+    fn mutation_generation_capacity_and_oversized_descriptor_reject_before_retention() {
         let sequencer = MutationSequencer::<&'static str, u8, usize>::new();
-        let first = sequencer
-            .admit("q", 1, MutationIngress::Direct, Arc::new(1), 1, 1)
-            .unwrap();
-        let second = sequencer
-            .admit("q", 2, MutationIngress::KeyedPermitLive, Arc::new(2), 1, 1)
-            .unwrap();
-        assert_eq!(sequencer.generation_count(&"q"), 2);
+        let tickets: Vec<_> = (0..MUTATION_MAX_GENERATIONS_PER_QUEUE)
+            .map(|key| {
+                sequencer
+                    .admit("q", key as u8, MutationIngress::Direct, Arc::new(key), 1, 1)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            sequencer.generation_count(&"q"),
+            MUTATION_MAX_GENERATIONS_PER_QUEUE
+        );
         assert_error(
-            sequencer.admit("q", 3, MutationIngress::Direct, Arc::new(3), 1, 1),
+            sequencer.admit(
+                "q",
+                MUTATION_MAX_GENERATIONS_PER_QUEUE as u8,
+                MutationIngress::Direct,
+                Arc::new(99),
+                1,
+                1,
+            ),
             CoordinationError::Capacity {
                 resource: MUTATION_SEQUENCER_RESOURCE,
             },
@@ -3297,7 +3308,7 @@ mod tests {
                 resource: MUTATION_SEQUENCER_RESOURCE,
             },
         );
-        drop((first, second));
+        drop(tickets);
         sequencer.close();
         assert_eq!(sequencer.request_count(&"q"), 0);
     }
@@ -3613,7 +3624,7 @@ mod tests {
                         1,
                         1,
                     )
-                    .expect("32 compatible mutations fit two generations"),
+                    .expect("16 compatible mutations fit two generations"),
             );
         }
         assert_eq!(sequencer.generation_count(&0), 2);
