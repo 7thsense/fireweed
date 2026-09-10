@@ -361,6 +361,66 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
             return Err(EngineError::NotFound);
         }
 
+        if !grouped_shards.contains(&pos.queue)
+            && let Some((claim_end, run_end, fused)) = claim_mutation_run(positions, envelopes, i)
+        {
+            for index in i..run_end {
+                let position = &positions[index];
+                let envelope = &envelopes[index];
+                if index < claim_end {
+                    let QueueCommand::Claim(claim) = &envelope.command else {
+                        unreachable!()
+                    };
+                    let mut remaining = claim.clone();
+                    remaining.item_ids.retain(|id| !fused.contains(id));
+                    if !remaining.item_ids.is_empty() {
+                        apply_command_sql(
+                            tx,
+                            queues,
+                            grouped_shards,
+                            claim_scan_hints,
+                            claim_scan_default_fifo,
+                            token_ops,
+                            &position.queue,
+                            position,
+                            position.sequence,
+                            envelope.created_at,
+                            &QueueCommand::Claim(remaining),
+                        )?;
+                    }
+                    crate::delete_claim_outbox(tx, &t, &q, &envelope.command_id.0)?;
+                } else {
+                    apply_command_sql_with_claims(
+                        tx,
+                        queues,
+                        grouped_shards,
+                        claim_scan_hints,
+                        claim_scan_default_fifo,
+                        token_ops,
+                        &position.queue,
+                        position,
+                        position.sequence,
+                        envelope.created_at,
+                        &envelope.command,
+                        Some(&fused),
+                    )?;
+                }
+                persist_request_outcome_sql(tx, queues, &position.queue, envelope, position)?;
+            }
+            let last = &positions[run_end - 1];
+            let next = last
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+            next_seq.insert(pos.queue.clone(), next as i64);
+            max_epoch
+                .entry(pos.queue.clone())
+                .and_modify(|epoch| *epoch = (*epoch).max(last.backend_epoch as i64))
+                .or_insert(last.backend_epoch as i64);
+            i = run_end;
+            continue;
+        }
+
         if let QueueCommand::Claim(claim) = &env.command
             && i + 1 < positions.len()
             && positions[i + 1].queue == pos.queue
@@ -652,6 +712,58 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
         )?;
     }
     Ok(applied_update_fields)
+}
+
+/// Only fuse claims with one later lease-invalidating replacement in a contiguous
+/// Claim-then-MutateItems run. Unpaired rows retain the ordinary claim path.
+fn claim_mutation_run(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    start: usize,
+) -> Option<(usize, usize, HashSet<ItemId>)> {
+    let first = positions.get(start)?;
+    let contiguous = |i: usize| {
+        positions[i].queue == first.queue
+            && positions[i].backend_epoch == first.backend_epoch
+            && Some(positions[i].sequence) == first.sequence.checked_add((i - start) as u64)
+    };
+    let mut claimed = HashSet::new();
+    let mut claim_end = start;
+    while claim_end < envelopes.len() && contiguous(claim_end) {
+        let QueueCommand::Claim(claim) = &envelopes[claim_end].command else {
+            break;
+        };
+        if !claim.authority_first || claim.item_ids.iter().any(|id| !claimed.insert(*id)) {
+            return None;
+        }
+        claim_end += 1;
+    }
+    if claim_end == start {
+        return None;
+    }
+    let mut end = claim_end;
+    let mut visited = HashSet::new();
+    let mut fused = HashSet::new();
+    while end < envelopes.len() && contiguous(end) {
+        let QueueCommand::MutateItems(mutation) = &envelopes[end].command else {
+            break;
+        };
+        for item in &mutation.items {
+            // Multiple replacements/purges of a row need their intermediate state.
+            if !visited.insert(item.item_id) {
+                return None;
+            }
+            if claimed.contains(&item.item_id)
+                && matches!(&item.action, ResolvedItemMutationAction::Replace(values)
+                    if values.invalidate_lease && values.state != ItemState::Leased
+                        && values.item_version >= 2)
+            {
+                fused.insert(item.item_id);
+            }
+        }
+        end += 1;
+    }
+    (!fused.is_empty()).then_some((claim_end, end, fused))
 }
 
 fn coalescible_update_run_end(
@@ -4829,6 +4941,37 @@ pub fn apply_command_sql(
     now: UtcTimestamp,
     command: &QueueCommand,
 ) -> EngineResult<()> {
+    apply_command_sql_with_claims(
+        tx,
+        queues,
+        grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        token_ops,
+        shard,
+        position,
+        seq,
+        now,
+        command,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_command_sql_with_claims(
+    tx: &impl RelTx,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &mut HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    position: &CommandPosition,
+    seq: u64,
+    now: UtcTimestamp,
+    command: &QueueCommand,
+    fused_claims: Option<&HashSet<ItemId>>,
+) -> EngineResult<()> {
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     match command {
@@ -5981,13 +6124,17 @@ pub fn apply_command_sql(
                                 RelValue::Integer(current.3),
                             )
                         };
+                        let claimed_here =
+                            i64::from(fused_claims.is_some_and(|ids| ids.contains(&item.item_id)));
                         let changed = crate::rel_exec(
                             tx,
                             "UPDATE fireweed_items SET lifecycle_state=?4,priority=?5,priority_sort=?6,not_before=?7,\
                              eligible_since=?8,payload=?9,fields=?10,metadata=?11,entity_document=?12,index_fields=?13,\
                              lease_token_hash=?14,lease_expires_at=?15,worker_id=?16,fenced=?17,item_version=?18,\
-                             terminal_at=?19,terminal_command_epoch=?20,updated_at=?21,last_command_sequence=?22 \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?23",
+                             terminal_at=?19,terminal_command_epoch=?20,updated_at=?21,last_command_sequence=?22, \
+                             retry_count=retry_count+?24 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?23 \
+                             AND (?24=0 OR (lifecycle_state='Pending' AND superseded=0))",
                             [
                                 RelValue::Text(t.to_string()),
                                 RelValue::Text(q.to_string()),
@@ -6019,7 +6166,10 @@ pub fn apply_command_sql(
                                 terminal.then_some(position.backend_epoch as i64).into(),
                                 now_n.into(),
                                 (seq as i64).into(),
-                                (values.item_version.saturating_sub(1) as i64).into(),
+                                (values.item_version.saturating_sub(1 + claimed_here as u64)
+                                    as i64)
+                                    .into(),
+                                claimed_here.into(),
                             ],
                         )?;
                         if changed != 1 {

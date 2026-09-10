@@ -255,3 +255,177 @@ async fn sqlite_and_turso_rollback_the_same_conflicting_batch_without_cursor_dri
         None
     );
 }
+
+#[tokio::test]
+async fn fused_claim_mutation_matches_individual_replay_with_partial_claims() {
+    use fireweed_conformance::ts;
+    use fireweed_engine::{
+        AddressedMutation, ItemMutationOperation, ItemMutationRequest, ItemMutationReturning,
+        ItemPatch, LeaseGuard, LifecyclePatch,
+    };
+    let pair = Pair::memory().await;
+    let ids: Vec<_> = ["901", "902", "903"]
+        .into_iter()
+        .map(|id| ItemId::new(id).unwrap())
+        .collect();
+    pair.apply(
+        0,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    item("901", "a", 1),
+                    item("902", "b", 2),
+                    item("903", "c", 3),
+                ],
+            }),
+            ids.clone(),
+        ),
+    )
+    .await;
+    let claims = vec![
+        envelope(
+            QueueCommand::Claim(
+                ClaimCommand::new(
+                    ids[..2].to_vec(),
+                    LeaseToken::new("first").unwrap(),
+                    ts(30),
+                    None,
+                )
+                .with_authority_first(),
+            ),
+            ids[..2].to_vec(),
+        ),
+        envelope(
+            QueueCommand::Claim(
+                ClaimCommand::new(
+                    vec![ids[2]],
+                    LeaseToken::new("second").unwrap(),
+                    ts(30),
+                    None,
+                )
+                .with_authority_first(),
+            ),
+            vec![ids[2]],
+        ),
+    ];
+    for (i, command) in claims.iter().enumerate() {
+        AsyncProjectionStore::apply_live(
+            &pair.reference,
+            vec![CommandPosition::new(pair.shard.clone(), 0, i as u64 + 1)],
+            vec![command.clone()],
+        )
+        .await
+        .unwrap();
+    }
+    let request = ItemMutationRequest {
+        request_id: fireweed_core::RequestId::new("fused").unwrap(),
+        evaluated_at: ts(20),
+        dry_run: false,
+        returning: ItemMutationReturning::Identity,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed {
+            entries: vec![
+                AddressedMutation {
+                    item_id: ids[0],
+                    expected_item_version: None,
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::Match(LeaseToken::new("first").unwrap()),
+                    patch: ItemPatch {
+                        lifecycle: LifecyclePatch::SetPending,
+                        payload: fireweed_engine::BatchUpdateValue::Replace(Some(
+                            Bytes::from_static(b"enriched"),
+                        )),
+                        ..Default::default()
+                    },
+                },
+                AddressedMutation {
+                    item_id: ids[2],
+                    expected_item_version: None,
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::Match(LeaseToken::new("second").unwrap()),
+                    patch: ItemPatch {
+                        lifecycle: LifecyclePatch::SetFailed,
+                        ..Default::default()
+                    },
+                },
+            ],
+        },
+    };
+    let plan = pair
+        .reference
+        .plan_addressed_item_mutation(&pair.shard, &qdef(), &request, &[])
+        .await
+        .unwrap();
+    assert_eq!(plan.response.summary.changed, 2);
+    let mutation = envelope(
+        QueueCommand::MutateItems(plan.command),
+        vec![ids[0], ids[2]],
+    );
+    AsyncProjectionStore::apply_live(
+        &pair.reference,
+        vec![CommandPosition::new(pair.shard.clone(), 0, 3)],
+        vec![mutation.clone()],
+    )
+    .await
+    .unwrap();
+    let mut commands = claims;
+    commands.push(mutation);
+    let positions: Vec<_> = (1..=3)
+        .map(|sequence| CommandPosition::new(pair.shard.clone(), 0, sequence))
+        .collect();
+    AsyncProjectionStore::apply_live(&pair.turso, positions.clone(), commands.clone())
+        .await
+        .unwrap();
+    pair.assert_projection_image_and_reads_equal(&ids).await;
+    // Replay of the already-covered combined prefix must not double-charge claims.
+    AsyncProjectionStore::apply_live(&pair.turso, positions, commands.clone())
+        .await
+        .unwrap();
+    pair.assert_projection_image_and_reads_equal(&ids).await;
+    // A valid base version is insufficient: an authoritative claim must still
+    // start Pending. Reject the whole transaction if a paired row is already leased.
+    let QueueCommand::MutateItems(mut invalid_mutation) = commands[2].command.clone() else {
+        unreachable!()
+    };
+    invalid_mutation.items.truncate(1);
+    invalid_mutation.items[0].item_id = ids[1];
+    let fireweed_engine::ResolvedItemMutationAction::Replace(values) =
+        &mut invalid_mutation.items[0].action
+    else {
+        unreachable!()
+    };
+    values.item_version =
+        AsyncProjectionStore::item_version(&pair.turso, pair.shard.clone(), ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            + 2;
+    let invalid_claim = envelope(
+        QueueCommand::Claim(
+            ClaimCommand::new(
+                vec![ids[1]],
+                LeaseToken::new("illegal-reclaim").unwrap(),
+                ts(40),
+                None,
+            )
+            .with_authority_first(),
+        ),
+        vec![ids[1]],
+    );
+    assert!(
+        AsyncProjectionStore::apply_live(
+            &pair.turso,
+            vec![
+                CommandPosition::new(pair.shard.clone(), 0, 4),
+                CommandPosition::new(pair.shard.clone(), 0, 5)
+            ],
+            vec![
+                invalid_claim,
+                envelope(QueueCommand::MutateItems(invalid_mutation), vec![ids[1]])
+            ]
+        )
+        .await
+        .is_err()
+    );
+    pair.assert_projection_image_and_reads_equal(&ids).await;
+}

@@ -1,6 +1,6 @@
 # Fireweed original-row workflow capacity
 
-Date: 2026-09-10. Measurement snapshots: `02730571` through `5e8384f3`.
+Date: 2026-09-10. Measurement snapshots: `02730571` through `c90c69a5`.
 
 **Qualification is still failing.** Million-row insert/update measurements exceed
 10k rows/sec, but completed 1.6-million-workflow soaks sustain about 3k workflows/sec,
@@ -95,14 +95,30 @@ Both completed soaks pass correctness and the finite RSS/projection-size checks.
 Neither passes the per-cycle throughput checks. Earlier short bursts above 5k/sec
 and RAM-projection controls are not sustained qualification evidence.
 
-The next measured candidate removes the pre-mutation SQL coverage barrier only for
-a complete bounded tail of disjoint authoritative Claim commands. The mutation
-planner incorporates those already-durable lease/version facts, so Claim and
-MutateItems can reach the projection together. It retains the post-mutation
-coverage barrier and falls back to coverage for mixed tails. This uses existing log
-commands and original rows; it introduces no auxiliary workflow records.
-A deterministic paused-apply test checks append progress, lease expiry/token guards
-and the race where the claim has already applied. Throughput benefit is unproven.
+The claim-tail planner (`332f559e`) removes the pre-mutation SQL coverage barrier
+only for a complete bounded tail of disjoint authoritative Claim commands. It
+retains post-mutation coverage and falls back to coverage for mixed tails. A paused
+apply test checks append progress, expiry/token guards and already-applied claims.
+This introduces no auxiliary workflow records.
+
+A traced 300k-workflow run still achieved only 2,848 workflows/sec: mean durable
+append was 312 ms (median 284 ms, p95 729 ms), longer than the 80 ms projection join
+window. Only 41 of 1,714 apply batches contained both claims and mutations. Raising
+the bounded background join window to 500 ms (`c90c69a5`) increased combined batches
+to 327 of 1,332 and achieved 3,457 workflows/sec in the same three-cycle diagnostic.
+Explicit coverage reads bypass the delay; a focused test enforces this behavior.
+These are short traced comparisons, not million-workflow qualification passes:
+[80 ms trace](evidence/workflow-capacity/fireweed-claim-tail-apply-trace-100k-8-c3.json.gz),
+[500 ms trace](evidence/workflow-capacity/fireweed-claim-join500-apply-trace-100k-8-c3.json.gz).
+
+The current candidate also combines eligible Claim/MutateItems projection writes.
+Within a contiguous authoritative claim-then-mutation run, a row with exactly one
+lease-invalidating replacement can move directly from Pending to the recorded
+after-image. It charges one claim attempt and both version increments, retains
+Pending/superseded/version guards, persists both command outcomes and advances the
+cursor atomically. Unpaired claims use the ordinary path. A differential test
+compares combined apply with individual replay, including partial claims, duplicate
+replay and rollback of an invalid claim. Its performance remains to be measured.
 
 The same test exposed anonymous-push response matching by optional client/request
 keys. The candidate matches responses by admitted request identity and driver
