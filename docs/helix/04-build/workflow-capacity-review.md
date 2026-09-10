@@ -2,13 +2,71 @@
 
 Date: 2026-09-10. Exact measurement snapshots are recorded in the linked artifacts.
 
-**Primitive targets pass repeatedly; sustained workflow stability remains pending.**
-Two clean-build million-row runs measured 14.3–14.8k inserts/sec, 23.3–23.5k
-updates by key/sec, and 13.3–13.9k scheduling updates by ID/sec. The supported
-64,000-frame checkpoint policy passed one complete 1.6-million workflow run at
-8,108/sec. Its repeat averaged 7,196/sec but failed one cycle at 4,044/sec.
-Correctness, DB/RSS stability, and the observed WAL budget passed both workflow
-runs. The goal stays active until sustained throughput passes repeatedly.
+**The targets pass repeated qualification on clean build `b0f89563`.** The final
+configuration uses 16 independent filesystem-log/Turso shards, 4 KiB projection
+pages, effective checkpoint control, and repaired page-cache accounting. All four
+qualification reports use the same binary and pass every acceptance check.
+
+| Public-API measurement | Run A | Run B | Target |
+|---|---:|---:|---:|
+| Insert, one million resident rows | 72,832 rows/sec | 94,091 rows/sec | 10,000 |
+| Enrichment update by key | 74,363 rows/sec | 69,567 rows/sec | 10,000 |
+| Scheduling update by ID | 38,956 rows/sec | 40,350 rows/sec | 10,000 |
+| Complete original-row workflow, including faults and purge | 7,873/sec | 8,029/sec | 5,000 |
+
+Each workflow run recycled 500,000 recipients six times: **three million
+lifecycles per run, six million across the repeat**. Every shard met its fair
+share in every cycle. Exact outcomes, zero remaining queue rows after purge,
+last-three-cycle DB/RSS stability, and the sampled 512 MiB/shard WAL budget all
+passed. Workflow peak RSS was about 6.1 GiB in run A; its final-three-cycle RSS
+range was 4.53%. Sampled per-shard WAL peaks were 264.29 and 503.48 MiB. These
+are observed finite-run bounds, not an engine-enforced WAL cap.
+
+[Workflow A](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-page4k-b0f89563-500k-16-c6-a.json.gz),
+[workflow B](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-page4k-b0f89563-500k-16-c6-b.json.gz),
+[primitive A](evidence/workflow-capacity/fireweed-qualified-primitives-cache-accounting-page4k-b0f89563-1m-16-a.json.gz),
+[primitive B](evidence/workflow-capacity/fireweed-qualified-primitives-cache-accounting-page4k-b0f89563-1m-16-b.json.gz).
+
+The napkin target was reasonable. The blocking costs were avoidable projection
+work, ineffective checkpoint configuration, stale native cache accounting, and
+a per-shard working set/configuration that did not sustain the target. The log
+remains the sole durability authority. The workload updates each original row
+through both enrichments and final delivery outcome; it requires no auxiliary
+workflow entities. The existing separate Snorri integration protocol is not the
+capacity baseline and its adapter has not been migrated.
+
+The final native fix reconciles the evictable-page estimate after WAL commit
+clears dirty flags, instead of repeatedly scanning the entire cache during later
+allocations. The fallback count also stops after finding enough pages. All
+native eviction/spill safety checks remain. Four KiB pages retain better packing
+for this payload than the trial 2 KiB pages. Actual checkpoint readback is verified;
+the limit is 64,000 frames at 4 KiB, adjusted by actual page size for existing
+files. Sixteen shards keep the larger population's per-shard working set and
+checkpoint write coalescing effective. Simply doubling workers within eight
+shards was slower. The failed trials remain below and in the raw evidence.
+
+These rates use bounded batches of 1,000 independently addressed rows, 1 KiB
+compressible payloads, and deterministic asynchronous handlers. They do not mean
+10,000 separate durable single-record RPCs/sec. A lifecycle includes an insert,
+three claims, three mutations, purge, and occasional retry work: approximately
+8.105 row operations per lifecycle, or about **64,000 logical row operations/sec**
+at the qualified workflow rate. Sixteen shards share one SSD; they add concurrency
+and smaller per-shard working sets, not sixteen physical devices. Remote S3,
+external delivery services, optional indexes, and Snorri migration remain separate
+qualification scopes, as detailed below.
+
+Reproduce both workloads twice, without competing tests/builds/capacity runs:
+
+```sh
+bash scripts/perf/qualify-workflow-capacity.sh target/workflow-qualification
+```
+
+The output directory must not already exist. The script builds once, runs the
+same four measured commands serially, preserves each complete JSON report, and
+returns failure if any qualification fails. The final implementation passed all
+106 combined Fireweed/Turso release tests, plus 43 native cache and 3 native pager
+tests; the two suites each retain one pre-existing ignored test. Debug-only timing
+sensitivity documented below is not represented as a passing debug suite.
 
 ## What is being measured
 
@@ -204,9 +262,9 @@ right comparison. Index maintenance, serialized log commands and page-based WAL
 writes add to the body bytes.
 
 The measured host has a Ryzen 7 4800H (8 physical cores / 16 threads), 62 GiB RAM,
-and one encrypted Btrfs NVMe filesystem with zstd compression. Eight physical
-projection/log pairs share that same SSD; sharding adds writer concurrency, not
-eight times the disk bandwidth. Payloads are deterministic, about 1 KiB and
+and one encrypted Btrfs NVMe filesystem with zstd compression. The final sixteen
+physical projection/log pairs share that same SSD; sharding adds writer
+concurrency, not sixteen times the disk bandwidth. Payloads are deterministic, about 1 KiB and
 compressible. The results do not establish a rate for arbitrary large or
 incompressible payloads, remote object-store latency or every optional index.
 
@@ -664,3 +722,20 @@ checkpoint byte-window calculation remains based on actual page-size readback.
 
 The restored-4-KiB/cache-fix candidate passed all 106 combined release tests,
 with one existing ignored test. [Validation](evidence/workflow-capacity/fireweed-cache-accounting-page4k-tests.log.gz).
+
+### Final 4 KiB and sharding comparison
+
+The [eight-shard/eight-worker comparison](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-page4k-b0f89563-500k-8-c6-a.json.gz)
+was stopped after cycle two narrowly missed at about 4,972/sec. The
+[eight-shard/sixteen-worker trial](evidence/workflow-capacity/fireweed-qualified-workflow-cache-accounting-page4k-b0f89563-500k-8-w16-c6-a.json.gz)
+was stopped after its second cycle reached only about 4,300/sec. These partial
+failed reports retain completed cycle output and termination status. Increasing
+worker count within the same projections did not fix the larger-population case.
+
+Sixteen physical shards with eight workers each passed both complete six-cycle
+runs on that same binary, at 7,873.17 and 8,029.20 lifecycles/sec. Run A's process
+filesystem output was 46.663 GiB, versus 65.214 GiB for the earlier complete
+eight-shard/4-KiB baseline without cache reconciliation. This comparison combines
+the cache repair and increased physical sharding; it does not isolate either
+change's contribution. Both final million-row primitive runs passed as recorded
+in the opening table. No throughput or stability acceptance threshold was relaxed.

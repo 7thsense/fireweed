@@ -32,9 +32,24 @@ sharding and disk-backed storage and reject external I/O overrides. These are
 measured stability checks; retain the raw cycle reports for longer-run analysis.
 
 ```sh
-scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 8 --deadline-seconds 900
-scripts/perf/workflow-capacity.py --qualify --profile mutable --items 100000 --batch 1000 --shards 8 --workers 4 --recycle --cycles 12 --deadline-seconds 900
+scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 16 --workers 8 --deadline-seconds 900
+scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 16 --workers 8 --load-workers 4 --recycle --cycles 6 --deadline-seconds 1200
 ```
+
+The repeat-qualified configuration is 16 physical shards with eight workers per
+shard. On the measured host it completed 7.9–8.0k full workflows/sec across two
+three-million-workflow runs; both million-row insert/update runs exceeded 10k/sec.
+See the [review and raw evidence](../../docs/helix/04-build/workflow-capacity-review.md).
+Run the exact qualification pair twice with one command (the output directory
+must not exist):
+
+```sh
+bash scripts/perf/qualify-workflow-capacity.sh target/workflow-qualification
+```
+
+The v6 gate additionally samples WAL sizes every 100 ms, requires sampling coverage,
+and checks a 512 MiB peak budget per shard. Normal WAL truncation/reuse is allowed;
+this is an observed acceptance budget, not a hard engine cap.
 
 `--root` requires an empty directory and retains the log/projection for diagnosis.
 Without it a temporary directory is removed after the run. Check its filesystem:
@@ -102,7 +117,7 @@ permanently for IDs divisible by 31. Assertions check exact payloads and termina
 outcomes, retry counts, duplicate deliveries, and final queue counts. `--no-faults`
 provides an explicitly labelled capacity calibration. The acceptance oracle is
 never a source of work for handlers. Equal retry outcomes are submitted as one
-bounded batch per claim response. Workflow report schema v4 records shared
+bounded batch per claim response. Workflow report schema v6 records shared
 dispatch and atomic original-row mutations, cycle counts, and whether purge is
 included. Earlier v3 mutable runs used release plus batch update under a local
 owner mutex; v2 used three stage-filtered pools and Snorri commits for delivery
