@@ -2627,7 +2627,8 @@ impl ProjectionData {
                                 self.remove_record(record)?;
                             }
                         }
-                        ResolvedItemMutationAction::Replace(values) => {
+                        ResolvedItemMutationAction::Replace(values)
+                        | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
                             let old = self
                                 .items
                                 .get(&mutation.item_id)
@@ -2679,7 +2680,9 @@ impl ProjectionData {
                             record.priority = values.priority.clone();
                             record.not_before = values.not_before;
                             record.eligible_since = values.eligible_since;
-                            record.payload = values.payload.clone();
+                            if !mutation.action.keeps_payload() {
+                                record.payload = values.payload.clone();
+                            }
                             record.fields = values.fields.clone();
                             record.metadata = values.metadata.clone();
                             record.gate_keys = values.gate_keys.clone();
@@ -3365,7 +3368,7 @@ impl ProjectionData {
         // collisions were checked while planning each record.
         let mut batch_unique = BTreeMap::<(String, Vec<u8>), ItemId>::new();
         for command in &commands {
-            let ResolvedItemMutationAction::Replace(values) = &command.action else {
+            let Some(values) = command.action.replacement_values() else {
                 continue;
             };
             for (name, key) in self.record_index_keys(
@@ -3604,20 +3607,28 @@ impl ProjectionData {
             outcome,
             (!dry_run).then_some(ResolvedItemMutation {
                 item_id: record.item_id,
-                action: ResolvedItemMutationAction::Replace(Box::new(ResolvedItemValues {
-                    state,
-                    item_version,
-                    priority,
-                    not_before,
-                    eligible_since,
-                    payload,
-                    fields,
-                    metadata,
-                    gate_keys,
-                    index_fields,
-                    entity_document: entity,
-                    invalidate_lease,
-                })),
+                action: {
+                    let keep_payload = payload == record.payload;
+                    let values = Box::new(ResolvedItemValues {
+                        state,
+                        item_version,
+                        priority,
+                        not_before,
+                        eligible_since,
+                        payload: if keep_payload { None } else { payload },
+                        fields,
+                        metadata,
+                        gate_keys,
+                        index_fields,
+                        entity_document: entity,
+                        invalidate_lease,
+                    });
+                    if keep_payload {
+                        ResolvedItemMutationAction::ReplaceKeepingPayload(values)
+                    } else {
+                        ResolvedItemMutationAction::Replace(values)
+                    }
+                },
             }),
         ))
     }

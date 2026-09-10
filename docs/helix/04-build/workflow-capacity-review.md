@@ -276,9 +276,38 @@ candidate: the slowest final-cycle shard took 28.5 seconds, equivalent to only
 3,513 workflows/sec at aggregate fair share.
 [Bulk retention trace](evidence/workflow-capacity/fireweed-purge8k-load4-100k-8-c3.json.gz).
 
-The next production candidate scales the aggregation deadline by the front
+An experimental candidate scaled the aggregation deadline by the front
 queued generation's item count: 40 microseconds per item, capped at 40 ms, with
 full generations starting immediately. This gives large peers more time to join
 an append without imposing the cap on small requests. The previous fixed-delay
 entry point remains available to its existing callers. FIFO admission and all
-item, response-byte and generation-count limits remain unchanged.
+item, response-byte and generation-count limits remained unchanged.
+
+The size-scaled window produced 3.03 commands/append versus 2.96 for the matching
+bulk-retention control, and reached
+only 4,991 workflows/sec in the three-cycle comparison. Its untraced full
+qualification completed 1.6 million workflows correctly in 443.3 seconds:
+**3,611 workflows/sec, FAIL**. Last-three-cycle RSS variation was 1.22%; per-shard
+projection variation was below 0.3%. The previous 10 ms aggregation window was
+restored because a reliable throughput benefit was not demonstrated.
+[Scaled-window trace](evidence/workflow-capacity/fireweed-scaled40-purge8k-load4-100k-8-c3.json.gz),
+[completed qualification](evidence/workflow-capacity/fireweed-qualified-scaled40-purge8k-load4-100k-8-c16-a.json.gz).
+
+A further candidate removes unchanged bodies from addressed-mutation log records.
+The existing `Replace` record continues to represent payload replacement or clear;
+an appended `ReplaceKeepingPayload` variant preserves the preceding version's
+body while recording the remaining resolved values. Version and lease guards
+remain unchanged. This avoids logging a 1 KiB body again when delivery only
+changes outcome metadata, and avoids the associated payload-table lookup/write.
+New readers retain the original record tags and can replay existing logs. Older
+readers do not support the new variant; rollback across newly written records
+requires a reader that understands it. Qualification of this candidate is pending.
+
+Validation for the unchanged-body candidate: all 24 public workload tests passed,
+including log-only recovery; Fireweed library tests passed (148, one ignored),
+and the complete Turso suite passed (79, one ignored). The new differential test
+covers legacy inline payloads, binary log round-trips, explicit clears, equal-body
+replacements and repeated-ID sequential preservation. Engine and local object-log
+unit tests passed; the two live S3 checks were explicitly excluded because no
+endpoint is configured. The PostgreSQL projection was compile-checked across all
+targets; no live PostgreSQL performance claim is made.

@@ -252,13 +252,11 @@ fn finish_inert_mutation_generation_append(
 
 /// A short aggregation window lets compatible concurrent work share a generation.
 /// Already collected local generations seal their append without another linger.
-/// A size-scaled deadline avoids imposing the maximum on small requests.
-/// At 40 microseconds/item, the timer alone permits 25k items/sec.
+/// The former fixed 20 ms capped 100-row sequential batches at 5k records/s.
 // Peer handlers may need several milliseconds to materialize a full request.
 // Full generations start immediately; a bounded linger also amortizes log syncs
 // for partially filled batches without changing FIFO admission.
-const MICROBATCH_LINGER: Duration = Duration::from_millis(40);
-const MICROBATCH_LINGER_PER_ITEM: Duration = Duration::from_micros(40);
+const MICROBATCH_LINGER: Duration = Duration::from_millis(10);
 
 /// Reference size for the configured generation budget. Live reservations
 /// must never be truncated merely to fit this estimate.
@@ -4104,11 +4102,10 @@ impl DerivedObjectLogTursoBackend {
                 drop(ticket);
                 return outcome;
             }
-            if let Some(generation) = self.sequencer.start_generation_scaled_after(
-                &queue,
-                MICROBATCH_LINGER,
-                MICROBATCH_LINGER_PER_ITEM,
-            ) {
+            if let Some(generation) = self
+                .sequencer
+                .start_generation_after(&queue, MICROBATCH_LINGER)
+            {
                 let driven_id = generation.generation_id();
                 let join = self.ensure_generation_join(&queue, driven_id);
                 // Match responses by the admitted request identity and driver order.

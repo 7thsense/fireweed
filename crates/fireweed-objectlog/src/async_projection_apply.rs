@@ -883,10 +883,15 @@ fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
             {
                 complete = true;
             }
-            QueueCommand::MutateItems(mutation) if mutation.items.iter().any(|item| {
-                matches!(&item.action, fireweed_engine::ResolvedItemMutationAction::Replace(values)
-                    if values.invalidate_lease)
-            }) => complete = true,
+            QueueCommand::MutateItems(mutation)
+                if mutation.items.iter().any(|item| {
+                    item.action
+                        .replacement_values()
+                        .is_some_and(|values| values.invalidate_lease)
+                }) =>
+            {
+                complete = true
+            }
             _ => {}
         }
     }

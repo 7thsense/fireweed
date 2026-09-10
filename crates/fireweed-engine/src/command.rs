@@ -124,7 +124,8 @@ pub(crate) fn classify_mutate_items(command: &MutateItemsCommand) {
     for mutation in &command.items {
         match &mutation.action {
             ResolvedItemMutationAction::Purge => {}
-            ResolvedItemMutationAction::Replace(_) => {}
+            ResolvedItemMutationAction::Replace(_)
+            | ResolvedItemMutationAction::ReplaceKeepingPayload(_) => {}
         }
     }
     for change in &command.gate_changes {
@@ -232,10 +233,28 @@ pub struct ResolvedItemMutation {
 pub enum ResolvedItemMutationAction {
     Purge,
     Replace(Box<ResolvedItemValues>),
+    /// Retain the payload from the preceding row version. `values.payload` is
+    /// omitted (None); an explicit clear still uses Replace with payload=None.
+    /// Appended after the original variants to preserve their postcard tags.
+    ReplaceKeepingPayload(Box<ResolvedItemValues>),
 }
 
-/// Complete post-mutation values. Applying this value is deterministic and performs exactly one version
-/// bump already chosen by the planner; replay never re-evaluates a selector or JSON pointer edit.
+impl ResolvedItemMutationAction {
+    pub fn replacement_values(&self) -> Option<&ResolvedItemValues> {
+        match self {
+            Self::Purge => None,
+            Self::Replace(values) | Self::ReplaceKeepingPayload(values) => Some(values),
+        }
+    }
+
+    pub fn keeps_payload(&self) -> bool {
+        matches!(self, Self::ReplaceKeepingPayload(_))
+    }
+}
+
+/// Resolved post-mutation values. ReplaceKeepingPayload retains the preceding payload; all
+/// other values are complete replacements. Replay uses the version chosen by the planner
+/// and never re-evaluates a selector or JSON pointer edit.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedItemValues {
     pub state: ItemState,
@@ -1387,7 +1406,8 @@ pub fn command_envelope_change_records(
                 .map(|mutation| {
                     let (state, version, terminal_at) = match &mutation.action {
                         ResolvedItemMutationAction::Purge => (None, None, Some(env.created_at)),
-                        ResolvedItemMutationAction::Replace(values) => (
+                        ResolvedItemMutationAction::Replace(values)
+                        | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => (
                             Some(change_record_state(values.state)),
                             Some(values.item_version),
                             values.state.is_terminal().then_some(env.created_at),

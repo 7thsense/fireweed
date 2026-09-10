@@ -1397,28 +1397,6 @@ where
         queue: &K,
         linger: Duration,
     ) -> Option<MutationGenerationBatch<K, C, R>> {
-        self.start_generation_with_linger(queue, |_| linger)
-    }
-
-    /// Bound aggregation delay by both elapsed time and the front generation's
-    /// item count. The oldest queue entry owns the deadline, regardless of which
-    /// caller elects its driver. Full generations always start immediately.
-    pub fn start_generation_scaled_after(
-        &self,
-        queue: &K,
-        max_linger: Duration,
-        per_item: Duration,
-    ) -> Option<MutationGenerationBatch<K, C, R>> {
-        self.start_generation_with_linger(queue, |items| {
-            max_linger.min(per_item.saturating_mul(u32::try_from(items).unwrap_or(u32::MAX)))
-        })
-    }
-
-    fn start_generation_with_linger(
-        &self,
-        queue: &K,
-        linger: impl FnOnce(usize) -> Duration,
-    ) -> Option<MutationGenerationBatch<K, C, R>> {
         let (generation_id, requests, items, response_bytes) = {
             let mut state = self
                 .inner
@@ -1432,7 +1410,7 @@ where
             let full = generation.requests.len() >= CLAIM_GENERATION_MAX_REQUESTS
                 || generation.items >= GENERATION_MAX_ITEMS
                 || generation.response_bytes >= GENERATION_MAX_RESPONSE_BYTES;
-            if !full && generation.first_queued_at.elapsed() < linger(generation.items) {
+            if !full && generation.first_queued_at.elapsed() < linger {
                 return None;
             }
             generation.active = true;
@@ -2652,6 +2630,11 @@ mod tests {
         for action in [
             ResolvedItemMutationAction::Purge,
             ResolvedItemMutationAction::Replace(Box::new(resolved_values())),
+            ResolvedItemMutationAction::ReplaceKeepingPayload(Box::new({
+                let mut values = resolved_values();
+                values.payload = None;
+                values
+            })),
         ] {
             catalog.push((
                 QueueCommand::MutateItems(MutateItemsCommand {
@@ -3191,44 +3174,6 @@ mod tests {
         );
         assert_eq!(turns.queued(), 0);
         drop(active_turn);
-    }
-
-    #[test]
-    fn scaled_generation_linger_respects_size_deadline_and_full_batch() {
-        for (items, age_ms, ready) in [
-            (100, 10, true),
-            (1000, 10, false),
-            (1000, 50, true),
-            (GENERATION_MAX_ITEMS, 0, true),
-        ] {
-            let sequencer = MutationSequencer::<&str, u8, u8>::new();
-            let _ticket = sequencer
-                .admit("q", 1, MutationIngress::Direct, Arc::new(1), items, 1)
-                .unwrap();
-            sequencer
-                .inner
-                .state
-                .lock()
-                .unwrap()
-                .queues
-                .get_mut(&"q")
-                .unwrap()
-                .generations
-                .front_mut()
-                .unwrap()
-                .first_queued_at = Instant::now() - Duration::from_millis(age_ms);
-            assert_eq!(
-                sequencer
-                    .start_generation_scaled_after(
-                        &"q",
-                        Duration::from_millis(40),
-                        Duration::from_micros(40)
-                    )
-                    .is_some(),
-                ready,
-                "items={items} age={age_ms}"
-            );
-        }
     }
 
     #[test]

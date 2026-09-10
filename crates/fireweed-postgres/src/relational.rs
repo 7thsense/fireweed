@@ -3057,18 +3057,24 @@ fn apply_mutate_items_sql(
         .items
         .iter()
         .filter_map(|mutation| match &mutation.action {
-            ResolvedItemMutationAction::Replace(values) => Some((mutation.item_id, values)),
+            ResolvedItemMutationAction::Replace(values)
+            | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
+                Some((mutation.item_id, values, mutation.action.keeps_payload()))
+            }
             ResolvedItemMutationAction::Purge => None,
         })
         .collect::<Vec<_>>();
     let replacement_ids = replacements
         .iter()
-        .map(|(item_id, _)| item_id.to_string())
+        .map(|(item_id, _, _)| item_id.to_string())
         .collect::<Vec<_>>();
     let groups = groups_of(
         tx,
         shard,
-        &replacements.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        &replacements
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect::<Vec<_>>(),
     )?;
 
     // Delete all unique-index and gate rows before inserting any replacement. This permits an atomic
@@ -3088,7 +3094,7 @@ fn apply_mutate_items_sql(
     }
 
     let typed_indexes = definition.typed_indexes.as_slice();
-    for (item_id, values) in &replacements {
+    for (item_id, values, keep_payload) in &replacements {
         let item_id_string = item_id.to_string();
         let priority_json = values.priority.as_ref().map(to_json).transpose()?;
         let priority_sort_key = elig_sort(&values.priority, &definition.priority_model);
@@ -3104,7 +3110,7 @@ fn apply_mutate_items_sql(
             fireweed_engine::index_fields::encode_index_fields_blob(&values.index_fields)?;
         let affected = st(tx.execute(
             "UPDATE fireweed_items SET lifecycle_state=$4,item_version=$5,priority=$6,priority_sort=$7, \
-               not_before=$8,eligible_since=$9,payload=$10,fields=$11,metadata=$12,entity_document=$13, \
+               not_before=$8,eligible_since=$9,payload=CASE WHEN $20 THEN payload ELSE $10 END,fields=$11,metadata=$12,entity_document=$13, \
                index_fields=$14, \
                lease_token_hash=CASE WHEN $15 THEN NULL ELSE lease_token_hash END, \
                lease_expires_at=CASE WHEN $15 THEN NULL ELSE lease_expires_at END, \
@@ -3132,6 +3138,7 @@ fn apply_mutate_items_sql(
                 &now_n,
                 &sequence,
                 &(values.item_version.saturating_sub(1) as i64),
+                keep_payload,
             ],
         ))?;
         if affected != 1 {

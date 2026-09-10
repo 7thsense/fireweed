@@ -754,7 +754,7 @@ fn claim_mutation_run(
                 return None;
             }
             if claimed.contains(&item.item_id)
-                && matches!(&item.action, ResolvedItemMutationAction::Replace(values)
+                && matches!(&item.action, ResolvedItemMutationAction::Replace(values) | ResolvedItemMutationAction::ReplaceKeepingPayload(values)
                     if values.invalidate_lease && values.state != ItemState::Leased
                         && values.item_version >= 2)
             {
@@ -6043,7 +6043,10 @@ fn apply_command_sql_with_claims(
                 .items
                 .iter()
                 .filter_map(|item| match &item.action {
-                    ResolvedItemMutationAction::Replace(values) if values.invalidate_lease => {
+                    ResolvedItemMutationAction::Replace(values)
+                    | ResolvedItemMutationAction::ReplaceKeepingPayload(values)
+                        if values.invalidate_lease =>
+                    {
                         Some(item.item_id.to_string())
                     }
                     _ => None,
@@ -6064,8 +6067,7 @@ fn apply_command_sql_with_claims(
 
             let mut distinct = HashSet::new();
             let batch_auxiliary = c.items.iter().all(|item| {
-                matches!(item.action, ResolvedItemMutationAction::Replace(_))
-                    && distinct.insert(item.item_id)
+                item.action.replacement_values().is_some() && distinct.insert(item.item_id)
             });
             for item in &c.items {
                 let item_id = item.item_id.to_string();
@@ -6102,7 +6104,8 @@ fn apply_command_sql_with_claims(
                             }),
                         )?;
                     }
-                    ResolvedItemMutationAction::Replace(values) => {
+                    ResolvedItemMutationAction::Replace(values)
+                    | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
                         let priority_json = values.priority.as_ref().map(to_json).transpose()?;
                         let priority_sort = elig_sort(
                             &values.priority,
@@ -6147,7 +6150,7 @@ fn apply_command_sql_with_claims(
                         let changed = crate::rel_exec(
                             tx,
                             "UPDATE fireweed_items SET lifecycle_state=?4,priority=?5,priority_sort=?6,not_before=?7,\
-                             eligible_since=?8,payload=?9,fields=?10,metadata=?11,entity_document=?12,index_fields=?13,\
+                             eligible_since=?8,payload=CASE WHEN ?25 THEN payload ELSE ?9 END,fields=?10,metadata=?11,entity_document=?12,index_fields=?13,\
                              lease_token_hash=?14,lease_expires_at=?15,worker_id=?16,fenced=?17,item_version=?18,\
                              terminal_at=?19,terminal_command_epoch=?20,updated_at=?21,last_command_sequence=?22, \
                              retry_count=retry_count+?24 \
@@ -6188,21 +6191,24 @@ fn apply_command_sql_with_claims(
                                     as i64)
                                     .into(),
                                 claimed_here.into(),
+                                item.action.keeps_payload().into(),
                             ],
                         )?;
                         if changed != 1 {
                             return Err(EngineError::Conflict);
                         }
                         if !batch_auxiliary {
-                            upsert_item_payloads(
-                                tx,
-                                &t,
-                                &q,
-                                [(
-                                    item_id.to_string(),
-                                    values.payload.as_ref().map(|p| p.to_vec()),
-                                )],
-                            )?;
+                            if !item.action.keeps_payload() {
+                                upsert_item_payloads(
+                                    tx,
+                                    &t,
+                                    &q,
+                                    [(
+                                        item_id.to_string(),
+                                        values.payload.as_ref().map(|p| p.to_vec()),
+                                    )],
+                                )?;
+                            }
                             crate::rel_exec(
                                 tx,
                                 "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
@@ -6251,15 +6257,18 @@ fn apply_command_sql_with_claims(
                         tx,
                         &t,
                         &q,
-                        chunk.iter().map(|item| {
-                            let ResolvedItemMutationAction::Replace(values) = &item.action else {
-                                unreachable!()
-                            };
-                            (
-                                item.item_id.to_string(),
-                                values.payload.as_ref().map(|p| p.to_vec()),
-                            )
-                        }),
+                        chunk
+                            .iter()
+                            .filter(|item| !item.action.keeps_payload())
+                            .map(|item| {
+                                let Some(values) = item.action.replacement_values() else {
+                                    unreachable!()
+                                };
+                                (
+                                    item.item_id.to_string(),
+                                    values.payload.as_ref().map(|p| p.to_vec()),
+                                )
+                            }),
                     )?;
                 }
                 let ids: Vec<_> = c
@@ -6279,7 +6288,7 @@ fn apply_command_sql_with_claims(
                     .items
                     .iter()
                     .flat_map(|item| {
-                        let ResolvedItemMutationAction::Replace(values) = &item.action else {
+                        let Some(values) = item.action.replacement_values() else {
                             unreachable!()
                         };
                         values

@@ -635,3 +635,142 @@ async fn addressed_payload_and_gate_writes_are_batched_with_exact_replacements()
     assert_eq!(row[0].values[0], turso::Value::Text("last".into()));
     pair.assert_projection_image_and_reads_equal(&ids).await;
 }
+
+#[tokio::test]
+async fn addressed_metadata_changes_omit_unchanged_payload_but_clear_and_replace_replay() {
+    use fireweed_conformance::ts;
+    use fireweed_engine::{
+        AddressedMutation, BatchUpdateValue, ItemMutationOperation, ItemMutationRequest,
+        ItemMutationReturning, ItemPatch, LeaseGuard, ResolvedItemMutationAction,
+    };
+    const READ_PAYLOAD: &str = "SELECT CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END \
+        FROM fireweed_items i LEFT JOIN fireweed_item_payloads p \
+        ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id";
+    for legacy_inline_payload in [false, true] {
+        let pair = Pair::memory().await;
+        let definition = qdef();
+        let mut pushed = item("1701", "preserve-payload", 1);
+        let id = pushed.item_id;
+        let body = Bytes::from(vec![0x5a; 64 * 1024]);
+        pushed.payload = Some(body.clone());
+        pair.apply(
+            0,
+            envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![pushed],
+                }),
+                vec![id],
+            ),
+        )
+        .await;
+        if legacy_inline_payload {
+            // Legacy projections kept the body on the main row. A keep action must
+            // retain that body without requiring migration to the separate table.
+            for store in [&pair.reference, &pair.turso] {
+                store
+                    .execute(
+                        "UPDATE fireweed_items SET payload=?1",
+                        vec![turso::Value::Blob(body.to_vec())],
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .execute("DELETE FROM fireweed_item_payloads", vec![])
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut last_command = None;
+        for step in 0..5 {
+            let payload = match step {
+                1 => BatchUpdateValue::Replace(None),
+                3 | 4 => BatchUpdateValue::Replace(Some(body.clone())),
+                _ => BatchUpdateValue::Keep,
+            };
+            let mut metadata = fireweed_core::Metadata::default();
+            metadata.insert(
+                "step",
+                fireweed_core::MetadataValue::String(step.to_string()),
+            );
+            let request = ItemMutationRequest {
+                request_id: fireweed_core::RequestId::new(format!("preserve-{step}")).unwrap(),
+                evaluated_at: ts(20 + step),
+                dry_run: false,
+                returning: ItemMutationReturning::Identity,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed {
+                    entries: vec![AddressedMutation {
+                        item_id: id,
+                        expected_item_version: None,
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::RejectActive,
+                        patch: ItemPatch {
+                            payload,
+                            metadata: BatchUpdateValue::Replace(metadata),
+                            ..Default::default()
+                        },
+                    }],
+                },
+            };
+            let plan = pair
+                .turso
+                .plan_addressed_item_mutation(&pair.shard, &definition, &request, &[])
+                .await
+                .unwrap();
+            assert_eq!(plan.response.summary.changed, 1);
+            assert_eq!(
+                plan.command.items[0].action.keeps_payload(),
+                matches!(step, 0 | 2 | 4)
+            );
+            let command = envelope(QueueCommand::MutateItems(plan.command.clone()), vec![id]);
+            let encoded = fireweed_engine::command_codec::encode_log_batch(0, &[command]).unwrap();
+            if step != 3 {
+                assert!(
+                    encoded.len() < 4096,
+                    "unchanged/cleared body leaked into log: {}",
+                    encoded.len()
+                );
+            }
+            let (_, decoded) = fireweed_engine::command_codec::decode_log_batch(&encoded).unwrap();
+            pair.apply(step as u64 + 1, decoded.into_iter().next().unwrap())
+                .await;
+            pair.assert_projection_image_and_reads_equal(&[id]).await;
+            let rows = pair.turso.query(READ_PAYLOAD, vec![]).await.unwrap();
+            let expected = if matches!(step, 1 | 2) {
+                turso::Value::Null
+            } else {
+                turso::Value::Blob(body.to_vec())
+            };
+            assert_eq!(rows[0].values[0], expected);
+            last_command = Some(plan.command);
+        }
+        // Repeated IDs require sequential semantics: the second action retains the
+        // first action's new body, not the body from before the command.
+        let mut command = last_command.unwrap();
+        let mut first_values = command.items[0]
+            .action
+            .replacement_values()
+            .unwrap()
+            .clone();
+        first_values.item_version += 1;
+        first_values.payload = Some(Bytes::from_static(b"middle"));
+        let mut last_values = first_values.clone();
+        last_values.item_version += 1;
+        last_values.payload = None;
+        command.items = vec![
+            fireweed_engine::ResolvedItemMutation {
+                item_id: id,
+                action: ResolvedItemMutationAction::Replace(Box::new(first_values)),
+            },
+            fireweed_engine::ResolvedItemMutation {
+                item_id: id,
+                action: ResolvedItemMutationAction::ReplaceKeepingPayload(Box::new(last_values)),
+            },
+        ];
+        pair.apply(6, envelope(QueueCommand::MutateItems(command), vec![id]))
+            .await;
+        pair.assert_projection_image_and_reads_equal(&[id]).await;
+        let rows = pair.turso.query(READ_PAYLOAD, vec![]).await.unwrap();
+        assert_eq!(rows[0].values[0], turso::Value::Blob(b"middle".to_vec()));
+    }
+}
