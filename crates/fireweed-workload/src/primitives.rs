@@ -30,7 +30,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 let rows = chunk.iter().map(|id| item(*id, 0, cfg.payload_bytes)).collect::<Vec<_>>();
                 ids.extend(retry(deadline, || fw.push_batch(&q, rows.clone())).await?);
             }
-            let m = fw.metrics(&q).await?;
+            let m = retry(deadline, || fw.metrics(&q)).await?;
             if m.pending != recipients.len() as u64 { return Err("load count mismatch".into()); }
             phases.push(phase_report("insert", recipients.len(), phase, started));
             for stage in 1..=2 {
@@ -58,7 +58,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                         return Err(format!("update rejected: {response:?}").into());
                     }
                 }
-                fw.metrics(&q).await?;
+                retry(deadline, || fw.metrics(&q)).await?;
                 phases.push(phase_report(if stage == 1 { "enrich_by_key" } else { "schedule_by_id" }, recipients.len(), phase, started));
             }
             let phase = Instant::now();
@@ -75,7 +75,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 }
                 retry(deadline, || fw.complete(&q, rows.iter().map(|r| r.item_id))).await?;
             }
-            let m = fw.metrics(&q).await?;
+            let m = retry(deadline, || fw.metrics(&q)).await?;
             if m.complete != recipients.len() as u64 || m.pending != 0 || m.leased != 0 { return Err("completion count mismatch".into()); }
             phases.push(phase_report("claim_and_complete", recipients.len(), phase, started));
             clock.set(600);
@@ -84,7 +84,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 let removed = retry(deadline, || fw.purge(&q, chunk.iter().copied(), false)).await?;
                 if removed != chunk.len() as u64 { return Err("purge count mismatch".into()); }
             }
-            let m = fw.metrics(&q).await?;
+            let m = retry(deadline, || fw.metrics(&q)).await?;
             if m.complete + m.pending + m.leased + m.failed != 0 { return Err("retention left queue rows".into()); }
             phases.push(phase_report("purge", recipients.len(), phase, started));
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({"shard": shard, "items": recipients.len(), "phases": phases}))

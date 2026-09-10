@@ -499,3 +499,21 @@ control and recovery code are unchanged from the backport; this candidate change
 only the selected log-backed checkpoint limit and the measurement contract.
 [Public validation](evidence/workflow-capacity/fireweed-checkpoint64k-public-tests.log.gz),
 [Turso validation](evidence/workflow-capacity/fireweed-checkpoint64k-turso-tests.log.gz).
+
+### First supported 64,000-frame qualification
+
+The clean `097c85f4` build passed the v6 workflow qualification: 1.6 million
+original-row workflows in 197.568 seconds, **8,108.17 workflows/sec**. Every
+cycle throughput check, exact outcome check, and final DB/RSS stability check
+passed. The external monitor collected 1,968 samples with a largest observed
+per-shard WAL of 262.01 MiB against the predeclared 512 MiB budget. Full evidence:
+[evidence](evidence/workflow-capacity/fireweed-qualified-checkpoint64k-100k-8-c16-a.json.gz).
+
+The subsequent million-row primitive run failed at the post-load metrics read
+with retryable projection-coverage backpressure, before reporting any phase.
+[Failed evidence](evidence/workflow-capacity/fireweed-qualified-primitives-checkpoint64k-1m-8-a.json.gz)
+is retained unchanged. Primitive metrics reads now use the same deadline-bounded
+backpressure retry as writes and workflow metrics; all waiting remains included
+in phase wall time. The remaining direct retention metrics read also uses this
+policy. This changes no production API or acceptance threshold. Current-build
+primitive qualification and repeat workflow qualification are still required.

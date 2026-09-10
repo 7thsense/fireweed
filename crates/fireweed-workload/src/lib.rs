@@ -663,7 +663,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                     let removed = retry(deadline, || fw.purge(&q, chunk.iter().copied(), false)).await?;
                     if removed != chunk.len() as u64 { return Err("recycling purge count mismatch".into()); }
                 }
-                let retained = fw.metrics(&q).await?;
+                let retained = retry(deadline, || fw.metrics(&q)).await?;
                 if retained.pending + retained.leased + retained.complete + retained.failed != 0 {
                     return Err("recycling left retained queue rows".into());
                 }
