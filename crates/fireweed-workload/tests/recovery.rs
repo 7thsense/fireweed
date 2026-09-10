@@ -151,7 +151,11 @@ async fn acknowledged_log_rebuild_preserves_ids_payloads_leases_and_receipts() {
                 .len(),
             3
         );
-        let mut claimed = fw.claim(&q, 12, 1000).await.unwrap();
+        let mut claimed = Vec::new();
+        while claimed.len() < 11 {
+            claimed.extend(fw.claim(&q, 11 - claimed.len(), 1000).await.unwrap());
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         assert_eq!(claimed.len(), 11);
         claimed.sort_by_key(recipient);
         assert_eq!(
@@ -164,4 +168,158 @@ async fn acknowledged_log_rebuild_preserves_ids_payloads_leases_and_receipts() {
     })
     .await
     .expect("log-only recovery timed out");
+}
+
+fn basic_mutation(rows: &[ClaimedItem], stage: usize) -> ItemMutationRequest {
+    ItemMutationRequest {
+        request_id: RequestId::new(format!("basic-enrich-{stage}")).unwrap(),
+        evaluated_at: ts(200),
+        dry_run: false,
+        returning: ItemMutationReturning::Identity,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed {
+            entries: rows
+                .iter()
+                .map(|row| {
+                    let id = recipient(row);
+                    AddressedMutation {
+                        item_id: row.item_id,
+                        expected_item_version: Some(row.item_version),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::Match(row.lease_token.clone().unwrap()),
+                        patch: ItemPatch {
+                            lifecycle: LifecyclePatch::SetPending,
+                            payload: BatchUpdateValue::Replace(Some(body(id, stage, 1024))),
+                            metadata: BatchUpdateValue::Replace(metadata(stage, id)),
+                            priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(
+                                if stage == 2 { due(id) } else { id as i64 },
+                            ))),
+                            not_before: BatchUpdateValue::Replace(Some(ts(if stage == 2 {
+                                due(id)
+                            } else {
+                                1
+                            }))),
+                            ..Default::default()
+                        },
+                    }
+                })
+                .collect(),
+        },
+    }
+}
+
+#[test]
+fn acknowledged_basic_child() {
+    let Some(root) = std::env::var_os("FIREWEED_WORKLOAD_RECOVERY_CHILD") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let fw = open_store_with_projection_root(
+                &root,
+                false,
+                TestClock::at(200),
+                &root.join("derived"),
+            )
+            .unwrap();
+            let q = create_queue(&fw, "basic-recovery").await.unwrap();
+            let ids = fw
+                .push_batch(&q, (0..64).map(|id| item(id, 0, 1024)).collect())
+                .await
+                .unwrap();
+            let mut last_request = None;
+            for stage in 1..=2 {
+                let claimed = fw.claim(&q, 64, 3_600_000).await.unwrap();
+                assert_eq!(claimed.len(), 64);
+                for row in &claimed {
+                    assert_eq!(row.payload, Some(body(recipient(row), stage - 1, 1024)));
+                }
+                let request = basic_mutation(&claimed, stage);
+                let response = fw.mutate_items(&q, request.clone()).await.unwrap();
+                assert!(response.results.iter().all(|r| matches!(r.outcome, ItemMutationOutcome::Updated { .. })));
+                last_request = Some(request);
+            }
+            let delivery = fw.claim(&q, 64, 3_600_000).await.unwrap();
+            assert_eq!(delivery.len(), 64);
+            fw.complete(&q, delivery[..16].iter().map(|row| row.item_id))
+                .await
+                .unwrap();
+            fw.fail(&q, delivery[16..24].iter().map(|row| row.item_id))
+                .await
+                .unwrap();
+            let remaining: Vec<_> = delivery[24..].iter().map(|row| row.item_id).collect();
+            std::fs::write(
+                root.join("oracle.json"),
+                serde_json::to_vec(&serde_json::json!({"ids":ids,"remaining":remaining,"last_request":last_request})).unwrap(),
+            )
+            .unwrap();
+            std::process::exit(0);
+        })
+        .await
+        .unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn original_row_enrichments_and_outcomes_rebuild_from_log_alone() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let original = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "acknowledged_basic_child", "--nocapture"])
+            .env("FIREWEED_WORKLOAD_RECOVERY_CHILD", original.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let oracle: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(original.path().join("oracle.json")).unwrap())
+                .unwrap();
+        let ids: Vec<ItemId> = serde_json::from_value(oracle["ids"].clone()).unwrap();
+        let remaining: Vec<ItemId> = serde_json::from_value(oracle["remaining"].clone()).unwrap();
+        let rebuilt = tempfile::tempdir().unwrap();
+        copy_tree(&original.path().join("log"), &rebuilt.path().join("log"));
+        let clock = TestClock::at(200);
+        let fw = open_store(rebuilt.path(), false, clock.clone()).unwrap();
+        let q = create_queue(&fw, "basic-recovery").await.unwrap();
+        let m = fw.metrics(&q).await.unwrap();
+        assert_eq!((m.pending, m.leased, m.complete, m.failed), (0, 40, 16, 8));
+        let request: ItemMutationRequest =
+            serde_json::from_value(oracle["last_request"].clone()).unwrap();
+        let replay = fw.mutate_items(&q, request).await.unwrap();
+        assert_eq!(replay.results.len(), 64);
+        assert!(
+            replay
+                .results
+                .iter()
+                .all(|r| matches!(r.outcome, ItemMutationOutcome::Updated { .. }))
+        );
+        fw.release(&q, remaining.iter().copied()).await.unwrap();
+        // A release acknowledgement covers the log; the worker polls until the
+        // derived queue makes the released rows eligible, without an extra read barrier.
+        let delivery = loop {
+            let rows = fw.claim(&q, 64, 3_600_000).await.unwrap();
+            if !rows.is_empty() {
+                break rows;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        assert_eq!(
+            delivery.iter().map(|row| row.item_id).collect::<Vec<_>>(),
+            remaining
+        );
+        for row in &delivery {
+            assert_eq!(row.payload, Some(body(recipient(row), 2, 1024)));
+        }
+        fw.complete(&q, remaining).await.unwrap();
+        clock.set(1000);
+        assert_eq!(fw.purge(&q, ids, false).await.unwrap(), 64);
+        let m = fw.metrics(&q).await.unwrap();
+        assert_eq!(m.pending + m.leased + m.complete + m.failed, 0);
+    })
+    .await
+    .expect("basic log-only recovery timed out");
 }

@@ -1753,7 +1753,7 @@ async fn configures_and_verifies_the_exact_shared_schema() {
     for index in [
         "fireweed_items_active_key",
         "fireweed_items_pending_order_idx",
-        "fireweed_items_pending_group_idx",
+        "fireweed_items_pending_group_nonnull_idx",
         "fireweed_item_index_key_item_asc_idx",
     ] {
         assert!(report.indexes.iter().any(|actual| actual == index));

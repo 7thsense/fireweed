@@ -17,7 +17,23 @@ Run capacity separately from compilation and other tests:
 cargo build -p fireweed-workload --release
 target/release/fireweed-workload --profile primitives --items 10000 --batch 100 --deadline-seconds 600
 target/release/fireweed-workload --profile mutable --items 10000 --batch 100 --workers 2 --deadline-seconds 600
+scripts/perf/workflow-capacity.py --profile mutable --items 100000 --batch 1000 --shards 8 --recycle --cycles 5 --deadline-seconds 900
 target/release/fireweed-workload --profile snorri --items 10000 --batch 100 --workers 2 --shards 4 --deadline-seconds 600
+```
+
+Add `--qualify` to the Python runner to fail unless the targets are met. For
+`primitives`, it requires at least one million resident rows and 10k records/sec
+for insertion and both individually addressed update phases. For `mutable`, it
+requires at least one million completed workflows across at least three recycling
+cycles, deterministic faults, retention, and 5k workflows/sec overall and at every
+shard's fair share in every cycle. Across the last three cycles, RSS must vary by
+at most 10% and each projection's size by at most 5%. Both gates require physical
+sharding and disk-backed storage and reject external I/O overrides. These are
+measured stability checks; retain the raw cycle reports for longer-run analysis.
+
+```sh
+scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 8 --deadline-seconds 900
+scripts/perf/workflow-capacity.py --qualify --profile mutable --items 100000 --batch 1000 --shards 8 --workers 4 --recycle --cycles 12 --deadline-seconds 900
 ```
 
 `--root` requires an empty directory and retains the log/projection for diagnosis.
@@ -25,7 +41,22 @@ Without it a temporary directory is removed after the run. Check its filesystem:
 `/tmp` can be RAM-backed. For disk-backed capacity, use
 `scripts/perf/workflow-capacity.py` with the same arguments; it defaults data to
 `target/workflow-capacity/`, records the mount and file sizes, and removes its
-temporary data after measurement. The default cell is
+temporary data after measurement. `--projection-root NEW_DIRECTORY` places only
+Turso files in a separate location; the authoritative log remains under `--root`.
+The runner records both filesystems and storage footprints. Use this to isolate
+projection I/O, and label RAM-filesystem results separately from disk projections.
+`FIREWEED_SQL_TRACE=1` optionally records slow SQL timings without bound values.
+`FIREWEED_WORKLOAD_TIMING=1` records public API wait times and backpressure resources;
+`FIREWEED_LOG_TRACE=1` separates log preparation, durable produce, and metadata time.
+The composed Turso projection uses filesystem I/O without stable-storage sync;
+all authoritative-log syncs remain enabled. Turso uses NORMAL checkpoint accounting
+to avoid repeatedly backfilling the same pages. After machine/power failure, a
+projection may need deletion and rebuilding from the log. Projection files are
+never an independent durability source. Ordinary standalone `TursoConfig::local`
+keeps its existing I/O behavior; the composition explicitly opts into log-backed
+projection I/O.
+
+The default cell is
 `filesystem--turso` with asynchronous projection; `--memory` is a semantic/control
 comparison, not a durable performance result. Every shard has its own physical
 log and projection. Multiple queues in one SQLite-family database would still
@@ -35,13 +66,20 @@ Profiles:
 
 * `bulk`: fully load a scheduled backlog, then independent continuous delivery
   loops. Due priorities vary; batches are not assigned one convenient priority.
-* `mutable`: overlap loading, two preparation stages, and delivery. Preparation
-  discovers work through claims. Fireweed's batch update accepts Pending rows,
-  so each stage serializes its scheduler job, releases the batch, then updates it.
-  This mirrors Seventh Sense's outer scheduler-job ownership. It is not an
-  atomic lease-guarded mutation; `mutate_items` is currently unavailable on the
-  composed Turso backend. The job owner must recover an interrupted preparation
-  using the unchanged stage metadata. These stages are deterministic and repeatable.
+* `mutable`: the primary original-row workload. Overlap loading, two enrichment
+  stages, and delivery. A shared priority-ordered claim loop dispatches each row
+  using its stage metadata; both enrichments update that same row. Completion
+  and failure also mutate those rows, including outcome metadata. Every handler
+  batch uses the public `mutate_items` API with the claimed item version and
+  lease token: enrichment and returning to Pending share one durable command.
+  Mixed retry/success/failure outcomes share a batch. Workers run concurrently
+  without a process-local job mutex. This path currently supports addressed,
+  ungrouped rows on queues without secondary indexes, typed indexes, or an
+  entity schema; other mutation shapes remain unavailable on composed Turso.
+  `--recycle --cycles N` runs complete workflows and retention purge repeatedly
+  on the same stores, reusing keys after expiry and checking zero retained queue
+  rows after every cycle. It includes purge in the reported rate and reports
+  per-cycle projection size. This mode currently supports mutable and bulk.
 * `snorri`: one shared worker pool reclaims expired leases, claims transition
   inputs, and dispatches the stub handler indicated by each input's stage. This
   matches the sibling adapter's ordinary-claim fallback; it does not add a
@@ -64,9 +102,13 @@ permanently for IDs divisible by 31. Assertions check exact payloads and termina
 outcomes, retry counts, duplicate deliveries, and final queue counts. `--no-faults`
 provides an explicitly labelled capacity calibration. The acceptance oracle is
 never a source of work for handlers. Equal retry outcomes are submitted as one
-bounded batch per claim response. Workflow report schema v2 records worker pools
-explicitly; v1 diagnostics used individual retry calls and stage-filtered Snorri
-consumers, so their rates are not comparable as backend-only improvements.
+bounded batch per claim response. Workflow report schema v4 records shared
+dispatch and atomic original-row mutations, cycle counts, and whether purge is
+included. Earlier v3 mutable runs used release plus batch update under a local
+owner mutex; v2 used three stage-filtered pools and Snorri commits for delivery
+receipts; v1 also used individual retry calls. Rates across these workload
+versions are not comparable as backend-only improvements. The Snorri profile is a separate integration
+workload, not a prerequisite for qualifying the basic row operations.
 
 An injected logical clock makes eligibility deterministic. Timings use real
 `Instant` wall time, including API waits and final projection coverage. Capacity
@@ -74,7 +116,8 @@ runs make all scheduled work due; separate contracts test future eligibility,
 FIFO ties, expired lease reclamation, stale commits, payload Keep/Replace/clear,
 idempotent update replay, purge, and key reuse. A separate child process exits
 without shutdown after acknowledged calls; the parent rebuilds a projection
-using only the copied log and checks IDs, leases, payloads, and side records.
+using only the copied log and checks original-row IDs, leases, versions, enriched
+payloads, and exact mutation replay.
 
 ## Source mapping
 

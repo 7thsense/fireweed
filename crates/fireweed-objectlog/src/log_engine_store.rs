@@ -1525,6 +1525,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if commands.is_empty() {
             return Ok(Vec::new());
         }
+        let trace_started = Instant::now();
         let pre_budget =
             Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
         let pre_deadline = gate
@@ -1583,7 +1584,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 Some(_) | None => return Err(PackedAppendError::before_timeout()),
             }
         }
+        let pre_us = trace_started.elapsed().as_micros();
+        let bytes = payload.len();
         let produced = async {
+            let produce_started = Instant::now();
             let outcome = self
                 .engine
                 .produce(
@@ -1595,6 +1599,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 )
                 .await
                 .map_err(store_err)?;
+            let produce_us = produce_started.elapsed().as_micros();
+            let metadata_started = Instant::now();
             let base = outcome.base_offset.ok_or_else(|| {
                 EngineError::Storage("sequenced produce missing base_offset".into())
             })? as u64;
@@ -1603,6 +1609,12 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 .collect();
             if let Some(last) = positions.last() {
                 self.advance_high_water_held(shard, last).await?;
+            }
+            if std::env::var_os("FIREWEED_LOG_TRACE").is_some() {
+                eprintln!(
+                    "log_pre_us={pre_us} produce_us={produce_us} metadata_us={} bytes={bytes} commands={record_count} seq={base}",
+                    metadata_started.elapsed().as_micros()
+                );
             }
             EngineResult::Ok(positions)
         };

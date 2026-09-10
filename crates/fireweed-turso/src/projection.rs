@@ -38,6 +38,35 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
 }
 
+/// Optional slow-statement diagnostics; never includes parameter values.
+pub(crate) fn trace_sql(sql: &str, binds: usize, rows: usize, elapsed: Duration) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if elapsed < Duration::from_millis(2)
+        || !*ENABLED.get_or_init(|| std::env::var_os("FIREWEED_SQL_TRACE").is_some())
+    {
+        return;
+    }
+    let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let excerpt = if compact.len() > 700 {
+        let head: String = compact.chars().take(150).collect();
+        let tail: String = compact
+            .chars()
+            .rev()
+            .take(500)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("{head} ... {tail}")
+    } else {
+        compact
+    };
+    eprintln!(
+        "sql_us={} binds={binds} rows={rows} sql={excerpt}",
+        elapsed.as_micros()
+    );
+}
+
 /// Truncate only when the WAL is already large and no reader snapshot is live.
 /// `busy_timeout=0` makes TRUNCATE fail immediately if a Deferred reader holds
 /// the WAL; apply then continues and the next quiet apply retries.
@@ -45,7 +74,7 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
 /// wal_autocheckpoint pragma does not configure that threshold. Explicit
 /// checkpoints additionally clear the pager cache and TRUNCATE syncs the WAL.
 /// Keep WAL history short: a 64 MiB threshold regressed public-API capacity.
-const WAL_TRUNCATE_MIN_BYTES: u64 = 4 * 1024 * 1024;
+// The byte budget is derived at open from the actual database page size.
 
 pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {
     if database == Path::new(":memory:") {
@@ -59,6 +88,7 @@ pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {
 pub(crate) async fn truncate_wal_if_unpinned(
     writer: &Mutex<Connection>,
     wal_path: Option<&Path>,
+    min_bytes: u64,
     busy_timeout: Duration,
 ) {
     let Some(wal_path) = wal_path else {
@@ -67,7 +97,7 @@ pub(crate) async fn truncate_wal_if_unpinned(
     let Ok(len) = std::fs::metadata(wal_path).map(|meta| meta.len()) else {
         return;
     };
-    if len < WAL_TRUNCATE_MIN_BYTES {
+    if len < min_bytes {
         return;
     }
     let Ok(connection) = writer.try_lock() else {
@@ -248,6 +278,8 @@ async fn query_value_rows(
     query: impl AsRef<str>,
     params: Vec<Value>,
 ) -> EngineResult<Vec<Vec<Value>>> {
+    let started = Instant::now();
+    let bind_count = params.len();
     let mut statement = connection
         .prepare_cached(query.as_ref())
         .await
@@ -261,6 +293,12 @@ async fn query_value_rows(
         }
         collected.push(values);
     }
+    trace_sql(
+        query.as_ref(),
+        bind_count,
+        collected.len(),
+        started.elapsed(),
+    );
     Ok(collected)
 }
 
@@ -450,6 +488,8 @@ async fn validation_rows_by_item(
     params.push(Value::Text(tenant.to_string()));
     params.push(Value::Text(queue.to_string()));
     params.extend(ids.iter().map(|id| Value::Text(id.to_string())));
+    let started = Instant::now();
+    let bind_count = params.len();
     let mut statement = connection.prepare_cached(&query).await.map_err(storage)?;
     let mut rows = statement.query(params).await.map_err(storage)?;
     let mut by_item = HashMap::with_capacity(ids.len());
@@ -461,6 +501,7 @@ async fn validation_rows_by_item(
         }
         by_item.insert(item_id, values);
     }
+    trace_sql(&query, bind_count, by_item.len(), started.elapsed());
     Ok(by_item)
 }
 
@@ -1533,6 +1574,12 @@ impl RelTx for ObservedTursoRel<'_> {
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
         let started = Instant::now();
         let result = self.inner.execute(sql, params);
+        trace_sql(
+            sql,
+            params.len(),
+            result.as_ref().copied().unwrap_or(0),
+            started.elapsed(),
+        );
         let elapsed = duration_us(started.elapsed());
         let mut phases = self
             .phases
@@ -1547,6 +1594,12 @@ impl RelTx for ObservedTursoRel<'_> {
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
         let started = Instant::now();
         let result = self.inner.query(sql, params);
+        trace_sql(
+            sql,
+            params.len(),
+            result.as_ref().map(Vec::len).unwrap_or(0),
+            started.elapsed(),
+        );
         let elapsed = duration_us(started.elapsed());
         let mut phases = self
             .phases
@@ -2126,6 +2179,8 @@ async fn query_driver_value_rows(
     query: impl AsRef<str>,
     params: Vec<Value>,
 ) -> EngineResult<Vec<Vec<Value>>> {
+    let started = Instant::now();
+    let bind_count = params.len();
     let mut statement = connection
         .prepare_cached(query.as_ref())
         .await
@@ -2139,6 +2194,12 @@ async fn query_driver_value_rows(
         }
         collected.push(values);
     }
+    trace_sql(
+        query.as_ref(),
+        bind_count,
+        collected.len(),
+        started.elapsed(),
+    );
     Ok(collected)
 }
 
@@ -2558,6 +2619,46 @@ async fn materialize_claimed_on(
     render_class_s_claimed_items(lease_token, relational)
 }
 
+/// Resolve a bounded set of lease targets by full primary-key seeks. An item_id IN
+/// predicate lets Turso scan the whole queue and compare every row against the batch.
+fn addressed_item_rows_sql(count: usize) -> String {
+    let values = (0..count)
+        .map(|i| format!("(?{})", i + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH incoming(item_id) AS (VALUES {values}) \
+                 SELECT i.item_id,i.client_item_key,i.priority,i.not_before,i.eligible_since,i.group_key,i.cohort_size,\
+                 CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END,\
+                 i.fields,i.metadata,i.index_fields,i.entity_document,i.lifecycle_state,i.item_version,\
+                 i.retry_count,i.max_attempts,i.created_seq,b.lease_token,i.lease_expires_at,i.worker_id,\
+                 i.fenced,i.superseded,i.terminal_at,i.terminal_command_epoch,i.last_command_sequence \
+                 FROM incoming CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+                 ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id \
+                 LEFT JOIN fireweed_item_payloads p ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=i.item_id \
+                 LEFT JOIN fireweed_lease_bearers b INDEXED BY sqlite_autoindex_fireweed_lease_bearers_1 ON b.tenant_id=?1 AND b.queue_id=?2 AND b.item_id=i.item_id"
+    )
+}
+
+fn lease_target_rows_sql(count: usize) -> String {
+    let values = (0..count)
+        .map(|index| format!("(?{})", index + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH incoming(item_id) AS (VALUES {values}) \
+         SELECT i.item_id,i.client_item_key,i.item_version,i.priority,i.group_key,i.not_before,\
+         i.lease_expires_at,i.retry_count,i.max_attempts,\
+         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,\
+         i.fields,i.metadata,i.entity_document,i.index_fields \
+         FROM incoming CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+         ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id \
+         LEFT JOIN fireweed_item_payloads p \
+         ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=i.item_id \
+         WHERE i.superseded=0 AND i.lifecycle_state IN ('Pending','Leased')"
+    )
+}
+
 impl TursoRelational {
     /// Atomically create the queue or return its exact durable definition.
     pub async fn create_or_read_queue(
@@ -2797,6 +2898,170 @@ impl TursoRelational {
     ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
         let connection = self.reader.lock().await;
         server_update_snapshot_on(&connection, shard, keys).await
+    }
+
+    /// Plan addressed mutations from full-key reads. The caller must hold the queue's
+    /// mutation fence through append and first cover the committed log frontier.
+    pub async fn plan_addressed_item_mutation(
+        &self,
+        shard: &QueueKey,
+        definition: &QueueDefinition,
+        request: &fireweed_engine::ItemMutationRequest,
+    ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
+        use fireweed_engine::ItemMutationOperation;
+        use fireweed_projection::{ProjectionData, ProjectionImageItem};
+        let ItemMutationOperation::Addressed { entries } = &request.operation else {
+            return Err(EngineError::Unavailable);
+        };
+        // Unique-index validation needs rows outside the addressed set. Cohort
+        // changes likewise need the complete group. Do not validate either against
+        // an incomplete image; these shapes retain their unsupported status.
+        if !definition.secondary_indexes.is_empty()
+            || !definition.typed_indexes.is_empty()
+            || definition.entity_schema.is_some()
+            || definition.cohort_policy.is_some()
+        {
+            return Err(EngineError::Unavailable);
+        }
+        if entries.len() > 1000 {
+            return Err(EngineError::Invalid(
+                "addressed mutation batch exceeds 1000 items",
+            ));
+        }
+        let connection = self.reader.lock().await;
+        let mut image = ProjectionData::from_image(
+            definition,
+            fireweed_projection::ProjectionImage {
+                high_water: None,
+                paused: false,
+                pause_drain_intake: false,
+                blocked_gates: Default::default(),
+                next_seq: 0,
+                items: vec![],
+                side_records: Default::default(),
+                instance_fences: Default::default(),
+                metrics: QueueMetrics::default(),
+            },
+        )?
+        .to_image(None);
+        let ids: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.item_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in ids.chunks(SQLITE_BIND_CAP - 2) {
+            let values = (0..chunk.len())
+                .map(|i| format!("(?{})", i + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut params = vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+            ];
+            params.extend(chunk.iter().map(|id| id.to_string().into()));
+            let rows = query_value_rows(
+                &connection,
+                addressed_item_rows_sql(chunk.len()),
+                params.clone(),
+            )
+            .await?;
+            let mut gates: HashMap<ItemId, Vec<String>> = HashMap::new();
+            for row in query_value_rows(
+                &connection,
+                format!(
+                    "WITH incoming(item_id) AS (VALUES {values}) \
+                 SELECT g.item_id,g.gate_key FROM incoming CROSS JOIN fireweed_item_gates g \
+                 ON g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=incoming.item_id"
+                ),
+                params,
+            )
+            .await?
+            {
+                gates
+                    .entry(ItemId::new(text(&row[0])?).map_err(storage)?)
+                    .or_default()
+                    .push(text(&row[1])?);
+            }
+            for v in rows {
+                if !matches!(v[5], Value::Null) || !matches!(v[6], Value::Null) {
+                    return Err(EngineError::Unavailable);
+                }
+                let item_id = ItemId::new(text(&v[0])?).map_err(storage)?;
+                image.items.push(ProjectionImageItem {
+                    item_id,
+                    client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
+                    priority: parse_priority(optional_text(&v[2])?)?,
+                    not_before: optional_integer(&v[3])?.map(nanos_ts),
+                    eligible_since: optional_integer(&v[4])?.map(nanos_ts),
+                    group_key: None,
+                    cohort_size: None,
+                    payload: optional_blob(&v[7])?.map(Bytes::from),
+                    fields: fields_from_json(text(&v[8])?)?,
+                    metadata: metadata_from_json(text(&v[9])?)?,
+                    gate_keys: gates.remove(&item_id).unwrap_or_default(),
+                    index_fields: fireweed_engine::index_fields::decode_index_fields_blob(
+                        optional_blob(&v[10])?.as_deref(),
+                    )?,
+                    entity_document: entity_from_json(optional_text(&v[11])?)?,
+                    state: parse_state(&text(&v[12])?).map_err(storage)?,
+                    item_version: nonnegative_u64(integer(&v[13])?, "item_version")?,
+                    attempt_count: nonnegative_u32(integer(&v[14])?, "retry_count")?,
+                    max_attempts: nonnegative_u32(integer(&v[15])?, "max_attempts")?,
+                    created_seq: nonnegative_u64(integer(&v[16])?, "created_seq")?,
+                    lease_token: optional_text(&v[17])?
+                        .map(LeaseToken::new)
+                        .transpose()
+                        .map_err(storage)?,
+                    lease_expires_at: optional_integer(&v[18])?.map(nanos_ts),
+                    lease_is_cohort: false,
+                    worker_id: optional_text(&v[19])?
+                        .map(fireweed_core::WorkerId::new)
+                        .transpose()
+                        .map_err(storage)?,
+                    fenced: integer(&v[20])? != 0,
+                    superseded: integer(&v[21])? != 0,
+                    terminal_at: optional_integer(&v[22])?.map(nanos_ts),
+                    terminal_position: optional_integer(&v[23])?
+                        .map(|epoch| {
+                            Ok::<_, EngineError>(CommandPosition::new(
+                                shard.clone(),
+                                nonnegative_u64(epoch, "terminal_epoch")?,
+                                nonnegative_u64(integer(&v[24])?, "terminal_sequence")?,
+                            ))
+                        })
+                        .transpose()?,
+                });
+            }
+        }
+        ProjectionData::from_image(definition, image)?.plan_item_mutation(request)
+    }
+
+    pub async fn item_mutation_replay(
+        &self,
+        shard: &QueueKey,
+        request: &fireweed_engine::ItemMutationRequest,
+        fingerprint: u64,
+    ) -> EngineResult<Option<fireweed_engine::ItemMutationResponse>> {
+        let connection = self.reader.lock().await;
+        let rows = query_value_rows(&connection,
+            "SELECT request_fingerprint,response_payload,command_positions FROM fireweed_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation='item_mutation' AND request_id=?3 AND expires_at>?4",
+            vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), request.request_id.as_str().to_string().into(), ts_nanos(request.evaluated_at).into()]).await?;
+        let Some(v) = rows.first() else {
+            return Ok(None);
+        };
+        if blob(&v[0])? != fingerprint.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        let mut response: fireweed_engine::ItemMutationResponse =
+            serde_json::from_str(&text(&v[1])?).map_err(storage)?;
+        let positions: Vec<(u64, u64)> = serde_json::from_str(&text(&v[2])?).map_err(storage)?;
+        response.position = positions
+            .into_iter()
+            .next()
+            .map(|(epoch, sequence)| CommandPosition::new(shard.clone(), epoch, sequence));
+        Ok(Some(response))
     }
 
     pub async fn batch_update_replay(
@@ -3491,6 +3756,7 @@ impl AsyncProjectionStore for TursoRelational {
         let claim_scan_hints = self.claim_scan_hints.clone();
         let claim_scan_default_fifo = self.claim_scan_default_fifo.clone();
         let wal_path = sqlite_wal_path(self.config().path());
+        let wal_min_bytes = self.wal_truncate_min_bytes;
         let busy_timeout = self.config().busy_timeout();
         async move {
             apply_owned(
@@ -3508,7 +3774,8 @@ impl AsyncProjectionStore for TursoRelational {
                 true,
             )
             .await?;
-            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), busy_timeout).await;
+            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), wal_min_bytes, busy_timeout)
+                .await;
             Ok(())
         }
     }
@@ -3528,6 +3795,7 @@ impl AsyncProjectionStore for TursoRelational {
         let claim_scan_hints = self.claim_scan_hints.clone();
         let claim_scan_default_fifo = self.claim_scan_default_fifo.clone();
         let wal_path = sqlite_wal_path(self.config().path());
+        let wal_min_bytes = self.wal_truncate_min_bytes;
         let busy_timeout = self.config().busy_timeout();
         async move {
             apply_owned(
@@ -3545,7 +3813,8 @@ impl AsyncProjectionStore for TursoRelational {
                 false,
             )
             .await?;
-            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), busy_timeout).await;
+            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), wal_min_bytes, busy_timeout)
+                .await;
             Ok(())
         }
     }
@@ -3801,14 +4070,7 @@ impl AsyncProjectionStore for TursoRelational {
                     shard.queue_id.as_str().to_string().into(),
                 ];
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
-                let item_sql = format!(
-                    "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields \
-                     FROM fireweed_items \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 \
-                     AND lifecycle_state IN ('Pending','Leased') \
-                     AND item_id IN ({placeholders})"
-                );
+                let item_sql = lease_target_rows_sql(chunk.len());
                 for row in self
                     .query(item_sql, params.clone())
                     .await
@@ -5366,6 +5628,20 @@ mod item_mutation_tests {
                 Value::Integer(0),
             ]
         );
+        let bearers = store
+            .query(
+                "SELECT item_id FROM fireweed_lease_bearers WHERE tenant_id=?1 AND queue_id=?2",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(
+            bearers.is_empty(),
+            "invalidated or purged lease bearers survived"
+        );
         let retained = store
             .query(
                 "SELECT item_id FROM fireweed_item_key_retention \
@@ -5381,5 +5657,76 @@ mod item_mutation_tests {
             retained[0].values[0],
             Value::Text(purged.item_id.to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod lease_target_query_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lease_target_resolution_seeks_items_and_payloads_by_full_key() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {}", lease_target_rows_sql(3)),
+                vec![
+                    "tenant".into(),
+                    "queue".into(),
+                    "10".into(),
+                    "200".into(),
+                    "9999".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        for table in ["i", "p"] {
+            assert!(
+                details.iter().any(
+                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
+                ),
+                "{details:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod addressed_query_tests {
+    use super::*;
+    #[tokio::test]
+    async fn addressed_snapshot_uses_full_key_seeks_for_every_join() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {}", addressed_item_rows_sql(3)),
+                vec![
+                    "tenant".into(),
+                    "queue".into(),
+                    "1".into(),
+                    "2".into(),
+                    "3".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        for table in ["i", "p", "b"] {
+            assert!(
+                details.iter().any(
+                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
+                ),
+                "{details:?}"
+            );
+        }
     }
 }

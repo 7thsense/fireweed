@@ -81,6 +81,7 @@ pub struct TursoConfig {
     path: PathBuf,
     busy_timeout: Duration,
     journal_mode: JournalMode,
+    rebuildable_io: bool,
 }
 
 impl TursoConfig {
@@ -89,6 +90,7 @@ impl TursoConfig {
             path: path.into(),
             busy_timeout: DEFAULT_BUSY_TIMEOUT,
             journal_mode: JournalMode::Wal,
+            rebuildable_io: false,
         }
     }
 
@@ -103,6 +105,14 @@ impl TursoConfig {
 
     pub fn with_journal_mode(mut self, mode: JournalMode) -> Self {
         self.journal_mode = mode;
+        self
+    }
+
+    /// Omit filesystem synchronization for a disposable projection whose
+    /// durability comes exclusively from an external authoritative log.
+    /// After a machine/power failure, this file may need a log-only rebuild.
+    pub fn with_log_backed_projection(mut self) -> Self {
+        self.rebuildable_io = true;
         self
     }
 
@@ -532,6 +542,7 @@ pub struct TursoRelational {
     pub(crate) claim_scan_hints: Arc<StdMutex<std::collections::HashMap<QueueKey, i64>>>,
     pub(crate) claim_scan_default_fifo: Arc<StdMutex<std::collections::HashMap<QueueKey, bool>>>,
     pub(crate) grouped_shards: Arc<StdMutex<std::collections::HashSet<QueueKey>>>,
+    pub(crate) wal_truncate_min_bytes: u64,
     config: TursoConfig,
     committed_pools: Option<CommittedReaderPools>,
 }
@@ -554,7 +565,13 @@ impl TursoRelational {
             .path
             .to_str()
             .ok_or_else(|| TursoRelationalError::InvalidPath(config.path.clone()))?;
-        let database = Builder::new_local(path).build().await?;
+        let mut builder = Builder::new_local(path);
+        if config.rebuildable_io && config.path != Path::new(":memory:") {
+            let io = crate::rebuildable_io::RebuildableIo::new()
+                .map_err(|e| TursoRelationalError::Configuration(e.to_string()))?;
+            builder = builder.with_io_impl(Arc::new(io));
+        }
+        let database = builder.build().await?;
         let mut writer = database.connect()?;
         configure_connection(&writer, &config).await?;
         migrate_connection(&mut writer).await?;
@@ -576,6 +593,15 @@ impl TursoRelational {
             None
         };
         let grouped_shards = load_grouped_shards(&writer).await?;
+        let page_size = u64::try_from(scalar_i64(&writer, "PRAGMA page_size").await?)
+            .ok()
+            .filter(|size| size.is_power_of_two() && (512..=65_536).contains(size))
+            .ok_or_else(|| {
+                TursoRelationalError::Configuration("invalid database page size".into())
+            })?;
+        // Preserve the ~1,024-page checkpoint budget for existing databases,
+        // which retain their original page size when opened by this adapter.
+        let wal_truncate_min_bytes = page_size * 1024;
         Ok(Self {
             database,
             writer: Arc::new(Mutex::new(writer)),
@@ -588,6 +614,7 @@ impl TursoRelational {
             claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             grouped_shards: Arc::new(StdMutex::new(grouped_shards)),
+            wal_truncate_min_bytes,
             config,
             committed_pools,
         })
@@ -3003,6 +3030,8 @@ pub(crate) async fn configure_committed_reader(
     // instrumentation are the authoritative evidence.
     let _ = connection.pragma_update("wal_autocheckpoint", "0").await;
     connection.busy_timeout(settings.busy_timeout)?;
+    // Read-only connections never checkpoint or own projection durability.
+    connection.pragma_update("synchronous", "OFF").await?;
     // This must be last because later pragma writes are rejected in query-only mode.
     connection.pragma_update("query_only", "1").await?;
     verify_committed_reader_settings(connection, settings).await
@@ -3040,19 +3069,31 @@ pub(crate) async fn verify_committed_reader_settings(
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
+    // Only takes effect before a new database is initialized; existing files
+    // retain their page size. Smaller pages bound random row-update write traffic.
+    connection.pragma_update("page_size", "2048").await?;
     // `journal_mode` produces a row. Turso's execute_batch rejects row-producing statements after applying
     // their side effect, so each pragma is deliberately driven through the row-aware API.
     connection
         .pragma_update("journal_mode", config.journal_mode.pragma_value())
         .await?;
-    // Projection is derived and rebuildable from the log (ADR-016). Crash durability
-    // lives on the log; OFF avoids a per-commit fsync storm on the serving store.
-    connection.pragma_update("synchronous", "OFF").await?;
+    // NORMAL lets Turso publish completed checkpoint backfills instead of
+    // rewriting them at every auto-checkpoint. The log-backed I/O adapter
+    // omits physical sync; the authoritative log alone provides durability.
+    connection
+        .pragma_update(
+            "synchronous",
+            if config.rebuildable_io {
+                "NORMAL"
+            } else {
+                "OFF"
+            },
+        )
+        .await?;
     // Negative cache_size is KiB. 128 MiB is a cache cap, not an O(N) working set.
     connection.pragma_update("cache_size", "-131072").await?;
-    // Autocheckpoint during ingest fights object-log fsyncs on the same disk and
-    // stalls the reader used for plan SELECTs (busy_timeout). The projection is
-    // rebuildable; checkpoint on close/idle, not on every WAL fill.
+    // Turso 0.7.2 accepts this setter but still auto-checkpoints at 1,000 frames.
+    // Explicit WAL truncation uses the actual database page size.
     let _ = connection.pragma_update("wal_autocheckpoint", "0").await;
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
@@ -3109,9 +3150,10 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.journal_mode, expected_journal
         )));
     }
-    if settings.synchronous != 0 {
+    let expected_sync = if config.rebuildable_io { 1 } else { 0 };
+    if settings.synchronous != expected_sync {
         return Err(TursoRelationalError::Configuration(format!(
-            "synchronous read back as {}, expected OFF (0)",
+            "synchronous read back as {}, expected {expected_sync}",
             settings.synchronous
         )));
     }
@@ -3277,25 +3319,48 @@ async fn load_mutation_driver_snapshot(
         }
     };
     let mut client_keys = HashSet::new();
-    for key in keys {
-        let params = vec![
+    // A batch is a bounded series of full-key seeks, not one driver round trip per key.
+    // CROSS JOIN keeps incoming keys as the outer loop in Turso's query planner.
+    for chunk in keys.chunks(897) {
+        let values = (0..chunk.len())
+            .map(|i| format!("(?{})", i + 4))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = vec![
             Value::Text(shard.tenant_id.as_str().to_string()),
             Value::Text(shard.queue_id.as_str().to_string()),
-            Value::Text(key.as_str().to_string()),
             Value::Integer(ts_nanos(now)),
         ];
-        let rows = collect_rows(
-            connection,
-            "SELECT client_item_key FROM fireweed_items INDEXED BY fireweed_items_active_key \
-             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND superseded=0 \
-             UNION ALL SELECT client_item_key FROM fireweed_item_key_retention \
-             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND expires_at>?4",
-            params,
-        )
-        .await
-        .map_err(|error| EngineError::Storage(error.to_string()))?;
-        if !rows.is_empty() {
-            client_keys.insert(key.as_str().to_string());
+        params.extend(
+            chunk
+                .iter()
+                .map(|key| Value::Text(key.as_str().to_string())),
+        );
+        let sql = format!(
+            "WITH incoming(client_item_key) AS (VALUES {values}) \
+             SELECT i.client_item_key FROM incoming \
+             CROSS JOIN fireweed_items i INDEXED BY fireweed_items_active_key \
+             ON i.tenant_id=?1 AND i.queue_id=?2 AND i.client_item_key=incoming.client_item_key \
+             WHERE i.superseded=0 \
+             UNION ALL SELECT r.client_item_key FROM incoming \
+             CROSS JOIN fireweed_item_key_retention r \
+             ON r.tenant_id=?1 AND r.queue_id=?2 AND r.client_item_key=incoming.client_item_key \
+             WHERE r.expires_at>?3"
+        );
+        let rows = collect_rows(connection, &sql, params)
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        for row in rows {
+            match row.values.first() {
+                Some(Value::Text(key)) => {
+                    client_keys.insert(key.clone());
+                }
+                other => {
+                    return Err(EngineError::Storage(format!(
+                        "invalid client key: {other:?}"
+                    )));
+                }
+            }
         }
     }
     let batch_items =
@@ -3359,6 +3424,8 @@ async fn collect_rows(
     sql: &str,
     params: Vec<Value>,
 ) -> Result<Vec<OwnedRow>> {
+    let started = std::time::Instant::now();
+    let bind_count = params.len();
     let mut statement = connection.prepare_cached(sql).await?;
     let mut rows = statement.query(params).await?;
     let columns = rows.column_names();
@@ -3373,6 +3440,7 @@ async fn collect_rows(
             values,
         });
     }
+    crate::projection::trace_sql(sql, bind_count, collected.len(), started.elapsed());
     Ok(collected)
 }
 
@@ -3393,5 +3461,40 @@ async fn scalar_i64(connection: &Connection, sql: &str) -> Result<i64> {
         value => Err(TursoRelationalError::Schema(format!(
             "{sql} returned {value:?}, expected integer"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod projection_checkpoint_config_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn new_and_existing_files_use_their_actual_page_size() {
+        let root = tempfile::tempdir().unwrap();
+        let new = TursoRelational::open(
+            TursoConfig::local(root.path().join("new.db")).with_log_backed_projection(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(new.wal_truncate_min_bytes, 2048 * 1024);
+        assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
+        let path = root.path().join("existing.db");
+        {
+            let db = Builder::new_local(path.to_str().unwrap())
+                .build()
+                .await
+                .unwrap();
+            let connection = db.connect().unwrap();
+            connection.pragma_update("page_size", "4096").await.unwrap();
+            connection
+                .execute("CREATE TABLE previous_file (id INTEGER)", ())
+                .await
+                .unwrap();
+        }
+        let existing = TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
+            .await
+            .unwrap();
+        assert_eq!(existing.wal_truncate_min_bytes, 4096 * 1024);
+        assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
     }
 }

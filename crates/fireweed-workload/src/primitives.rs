@@ -20,7 +20,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         let root = root.join(format!("shard-{shard}"));
         tasks.spawn(async move {
             let clock = TestClock::at(200);
-            let fw = open_store(&root, cfg.memory, clock.clone())?;
+            let projection_root = cfg.projection_root.as_ref().map(|path| path.join(format!("shard-{shard}"))).unwrap_or_else(|| root.clone());
+            let fw = open_store_with_projection_root(&root, cfg.memory, clock.clone(), &projection_root)?;
             let q = create_queue(&fw, "primitives").await?;
             let recipients: Vec<_> = (shard..cfg.items).step_by(cfg.shards).collect();
             let mut ids = vec![]; let mut phases = vec![];

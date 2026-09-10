@@ -9,6 +9,8 @@ mod local;
 #[cfg(feature = "local")]
 mod projection;
 #[cfg(feature = "local")]
+mod rebuildable_io;
+#[cfg(feature = "local")]
 mod tx;
 
 #[cfg(feature = "local")]

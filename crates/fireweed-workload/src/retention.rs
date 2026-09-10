@@ -14,7 +14,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         );
     }
     let clock = TestClock::at(200);
-    let fw = open_store(root, cfg.memory, clock.clone())?;
+    let projection_root = cfg.projection_root.as_deref().unwrap_or(root);
+    let fw = open_store_with_projection_root(root, cfg.memory, clock.clone(), projection_root)?;
     let mut d = definition("retention");
     d.request_id_retention_ms = 1000;
     let q = QueueKey::new(d.tenant_id.clone(), d.queue_id.clone());
@@ -100,15 +101,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         }
         drop(ids);
         drop(consumed);
-        let rss_kib = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|line| line.starts_with("VmRSS:"))
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .and_then(|v| v.parse::<u64>().ok())
-            });
-        let projection_bytes = std::fs::metadata(root.join("projection.db"))
+        let rss_kib = process_rss_kib();
+        let projection_bytes = std::fs::metadata(projection_root.join("projection.db"))
             .ok()
             .map(|m| m.len());
         let wall = phase.elapsed().as_secs_f64();

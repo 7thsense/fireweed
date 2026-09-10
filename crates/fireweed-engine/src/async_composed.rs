@@ -315,6 +315,12 @@ pub enum MutationGenerationWork {
         expected_epoch: u64,
         command_id: CommandId,
     },
+    ItemMutation {
+        id: u64,
+        shard: QueueKey,
+        request: crate::ItemMutationRequest,
+        expected_epoch: Option<u64>,
+    },
     Singleton {
         id: u64,
         commit: RawCommitRequest,
@@ -346,6 +352,10 @@ pub enum MutationGenerationMemberOutcome {
     Singleton {
         request: RawCommitRequest,
     },
+    ItemMutation {
+        id: u64,
+        result: EngineResult<crate::ItemMutationResponse>,
+    },
     Rejected(EngineError),
 }
 
@@ -376,6 +386,9 @@ impl MutationGenerationWork {
             Self::Claim { .. } | Self::Finalize { .. } => {
                 MutationSequencerKey::Compatible(MutationGenerationKind::Update)
             }
+            Self::ItemMutation { .. } => {
+                MutationSequencerKey::Compatible(MutationGenerationKind::Addressed)
+            }
             Self::Singleton { id, .. } => MutationSequencerKey::Singleton(*id),
         }
     }
@@ -383,7 +396,9 @@ impl MutationGenerationWork {
     pub fn queue(&self) -> QueueKey {
         match self {
             Self::Push { request, .. } => request.shard.clone(),
-            Self::BatchUpdate { shard, .. } | Self::Finalize { shard, .. } => shard.clone(),
+            Self::BatchUpdate { shard, .. }
+            | Self::Finalize { shard, .. }
+            | Self::ItemMutation { shard, .. } => shard.clone(),
             Self::Claim { request, .. } => request.shard.clone(),
             Self::Singleton { commit, .. } => commit.shard().clone(),
         }
@@ -395,6 +410,10 @@ impl MutationGenerationWork {
             Self::BatchUpdate { request, .. } => request.updates.len(),
             Self::Claim { request, .. } => request.max_items.max(1),
             Self::Finalize { outcomes, .. } => outcomes.len().max(1),
+            Self::ItemMutation { request, .. } => match &request.operation {
+                crate::ItemMutationOperation::Addressed { entries } => entries.len().max(1),
+                crate::ItemMutationOperation::SelectFirst { .. } => 1,
+            },
             Self::Singleton { .. } => 1,
         }
     }
@@ -405,6 +424,7 @@ impl MutationGenerationWork {
             Self::BatchUpdate { request, .. } => request.updates.len().saturating_mul(64),
             Self::Claim { request, .. } => request.max_items.saturating_mul(4 * 1024),
             Self::Finalize { outcomes, .. } => outcomes.len().saturating_mul(64),
+            Self::ItemMutation { .. } => self.items().saturating_mul(4 * 1024),
             Self::Singleton { .. } => 64,
         }
     }
@@ -585,6 +605,14 @@ impl MutationGenerationOverlay {
                 expected_epoch,
                 command_id,
             } => self.validate_finalize(shard, outcomes, *now, *expected_epoch, command_id.clone()),
+            // This family requires full row snapshots and is planned by the
+            // adapter's exclusive driver, never by the identity-only overlay.
+            MutationGenerationWork::ItemMutation { id, .. } => {
+                MutationGenerationMemberOutcome::ItemMutation {
+                    id: *id,
+                    result: Err(EngineError::Unavailable),
+                }
+            }
             MutationGenerationWork::Singleton { commit, .. } => {
                 MutationGenerationMemberOutcome::Singleton {
                     request: commit.clone(),

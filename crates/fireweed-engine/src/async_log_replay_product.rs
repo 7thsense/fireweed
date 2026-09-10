@@ -3752,6 +3752,11 @@ where
                 return Ok(response);
             }
 
+            let retention_ms =
+                AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone())
+                    .await?
+                    .request_id_retention_ms;
+
             // Scan log for retained request-id outcome.
             let mut from = self
                 .log
@@ -3761,7 +3766,10 @@ where
                     AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
                         .await?;
                 for (position, envelope) in &page.entries {
-                    if envelope.request_id.as_ref() != Some(&request_id) {
+                    if envelope.request_id.as_ref() != Some(&request_id)
+                        || crate::request_expires_at(envelope.created_at, retention_ms)
+                            <= evaluated_at
+                    {
                         continue;
                     }
                     if envelope.request_fingerprint != Some(fingerprint.0) {

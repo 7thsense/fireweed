@@ -10,6 +10,7 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--recycle" => config.recycle = true,
             "--cycles" => config.cycles = args.next().ok_or("missing cycles")?.parse()?,
             "--items" => config.items = args.next().ok_or("missing items")?.parse()?,
             "--batch" => config.batch = args.next().ok_or("missing batch")?.parse()?,
@@ -24,6 +25,11 @@ async fn main() -> Result<()> {
             }
             "--memory" => config.memory = true,
             "--no-faults" => config.faults = false,
+            "--projection-root" => {
+                config.projection_root = Some(std::path::PathBuf::from(
+                    args.next().ok_or("missing projection root")?,
+                ))
+            }
             "--root" => root = Some(std::path::PathBuf::from(args.next().ok_or("missing root")?)),
             "--profile" => {
                 config.profile = match args.next().as_deref() {
@@ -48,7 +54,7 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--cycles N] [--batch 1..1000] [--shards N] [--workers N] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
@@ -59,6 +65,14 @@ async fn main() -> Result<()> {
     let root = root.as_deref().unwrap_or(temporary.path());
     if root.exists() && std::fs::read_dir(root)?.next().is_some() {
         return Err("root must be empty; refusing to overwrite data".into());
+    }
+    if let Some(path) = &config.projection_root {
+        if config.memory {
+            return Err("projection-root requires the durable-log Turso cell".into());
+        }
+        if path.exists() && std::fs::read_dir(path)?.next().is_some() {
+            return Err("projection root must be empty; refusing to overwrite data".into());
+        }
     }
     let report = if retention {
         fireweed_workload::retention::run(config, root).await?

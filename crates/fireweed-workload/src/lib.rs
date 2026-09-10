@@ -23,12 +23,14 @@ pub enum Profile {
 pub struct Config {
     pub items: usize,
     pub cycles: usize,
+    pub recycle: bool,
     pub batch: usize,
     /// Independent physical projection/log pairs, not merely queue labels.
     pub shards: usize,
     pub workers: usize,
     pub profile: Profile,
     pub memory: bool,
+    pub projection_root: Option<std::path::PathBuf>,
     pub faults: bool,
     pub payload_bytes: usize,
     pub deadline: Duration,
@@ -39,11 +41,13 @@ impl Default for Config {
         Self {
             items: 120,
             cycles: 3,
+            recycle: false,
             batch: 30,
             shards: 1,
             workers: 1,
             profile: Profile::Mutable,
             memory: false,
+            projection_root: None,
             faults: true,
             payload_bytes: 1024,
             deadline: Duration::from_secs(120),
@@ -67,22 +71,44 @@ impl Clock for TestClock {
         ts(self.0.load(Ordering::SeqCst) as i64)
     }
 }
+pub(crate) fn process_rss_kib() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse().ok())
+        })
+}
+
 pub fn ts(seconds: i64) -> UtcTimestamp {
     UtcTimestamp::new(seconds, 0).unwrap()
 }
 
 pub fn open_store(root: &Path, memory: bool, clock: Arc<dyn Clock>) -> Result<Fireweed> {
+    open_store_with_projection_root(root, memory, clock, root)
+}
+
+pub fn open_store_with_projection_root(
+    root: &Path,
+    memory: bool,
+    clock: Arc<dyn Clock>,
+    projection_root: &Path,
+) -> Result<Fireweed> {
     if memory {
         return Ok(open_memory(clock));
     }
     std::fs::create_dir_all(root)?;
+    std::fs::create_dir_all(projection_root)?;
     Ok(open(
         StorageConfig {
             log: LogConfig::Filesystem {
                 root: root.join("log"),
             },
             projection: ProjectionStoreConfig::Turso {
-                path: root.join("projection.db"),
+                path: projection_root.join("projection.db"),
             },
             control_plane: None,
             authority: None,
@@ -188,25 +214,48 @@ pub fn recipient(item: &ClaimedItem) -> usize {
     }
 }
 
-pub async fn retry<T, F, Fut>(deadline: Instant, mut call: F) -> Result<T>
+#[track_caller]
+pub fn retry<T, F, Fut>(
+    deadline: Instant,
+    mut call: F,
+) -> impl std::future::Future<Output = Result<T>>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = EngineResult<T>>,
 {
-    loop {
-        match call().await {
-            Ok(value) => return Ok(value),
-            Err(EngineError::Backpressure { .. }) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(2)).await
+    let site = std::panic::Location::caller();
+    async move {
+        let started = Instant::now();
+        let result = loop {
+            match call().await {
+                Ok(value) => break Ok(value),
+                Err(EngineError::Backpressure { resource }) if Instant::now() < deadline => {
+                    if std::env::var_os("FIREWEED_WORKLOAD_TIMING").is_some() {
+                        eprintln!(
+                            "api_retry resource={resource} at={}:{}",
+                            site.file(),
+                            site.line()
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await
+                }
+                Err(error) => break Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
+        };
+        if std::env::var_os("FIREWEED_WORKLOAD_TIMING").is_some() {
+            eprintln!(
+                "api_us={} at={}:{}",
+                started.elapsed().as_micros(),
+                site.file(),
+                site.line()
+            );
         }
+        result
     }
 }
 
 #[derive(Default)]
 struct Observations {
-    stage_locks: [tokio::sync::Mutex<()>; 2],
     prepared: [AtomicUsize; 2],
     delivered: AtomicUsize,
     failed: AtomicUsize,
@@ -229,6 +278,7 @@ async fn worker(
     observations: Arc<Observations>,
     expected: usize,
     deadline: Instant,
+    now: UtcTimestamp,
 ) -> Result<()> {
     let debug = std::env::var_os("FIREWEED_WORKLOAD_DEBUG").is_some();
     let mut generation = 0;
@@ -245,17 +295,10 @@ async fn worker(
         if Instant::now() >= deadline {
             return Err(format!("stage {stage} timed out: {completed}/{expected}").into());
         }
-        // Seventh Sense serializes each scheduler job using a SKIP LOCKED job row.
-        // Model that application-level ownership while batch_update requires Pending.
-        let _stage_guard = if stage < 2 && cfg.profile == Profile::Mutable {
-            Some(observations.stage_locks[stage].lock().await)
-        } else {
-            None
-        };
         if debug && generation == 0 {
             eprintln!("stage={stage} worker={worker} requesting claim");
         }
-        if stage == SHARED_DISPATCH {
+        if stage == SHARED_DISPATCH && cfg.profile == Profile::Snorri {
             retry(deadline, || fw.reclaim_expired_at(&q, None, ts(200)))
                 .await
                 .map_err(|e| format!("reclaim worker {worker} generation {generation}: {e}"))?;
@@ -291,11 +334,13 @@ async fn worker(
         if cfg.faults && generation % 3 == 0 {
             tokio::task::yield_now().await;
         }
-        let mut patches = vec![];
+        let mut mutations = vec![];
         let mut commits = vec![];
         let mut successes = vec![];
         let mut failures = vec![];
         let mut retry_ids = vec![];
+        let mut complete_ids = vec![];
+        let mut failed_ids = vec![];
         let mut prepared = [0usize; 2];
         for claimed in &claimed {
             let stage = if stage == SHARED_DISPATCH {
@@ -331,29 +376,34 @@ async fn worker(
                         }),
                     });
                 } else {
-                    patches.push(BatchUpdateEntry {
-                        item_ref: BatchUpdateItemRef::ClientItemKey(
-                            claimed.client_item_key.clone(),
+                    mutations.push(AddressedMutation {
+                        item_id: claimed.item_id,
+                        expected_item_version: Some(claimed.item_version),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::Match(
+                            claimed
+                                .lease_token
+                                .clone()
+                                .ok_or("missing enrichment lease")?,
                         ),
-                        expected_item_version: None,
-                        payload: BatchUpdateValue::Replace(Some(body(
-                            id,
-                            stage + 1,
-                            cfg.payload_bytes,
-                        ))),
-                        metadata: BatchUpdateValue::Replace(metadata(stage + 1, id)),
-                        priority: BatchUpdateValue::Replace(PriorityValue::Int64(if stage == 1 {
-                            due(id)
-                        } else {
-                            id as i64
-                        })),
-                        not_before: BatchUpdateValue::Replace(Some(ts(if stage == 1 {
-                            due(id)
-                        } else {
-                            1
-                        }))),
-                        fields: BatchUpdateValue::Keep,
-                        gate_keys: BatchUpdateValue::Keep,
+                        patch: ItemPatch {
+                            lifecycle: LifecyclePatch::SetPending,
+                            payload: BatchUpdateValue::Replace(Some(body(
+                                id,
+                                stage + 1,
+                                cfg.payload_bytes,
+                            ))),
+                            metadata: BatchUpdateValue::Replace(metadata(stage + 1, id)),
+                            priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(
+                                if stage == 1 { due(id) } else { id as i64 },
+                            ))),
+                            not_before: BatchUpdateValue::Replace(Some(ts(if stage == 1 {
+                                due(id)
+                            } else {
+                                1
+                            }))),
+                            ..Default::default()
+                        },
                     });
                 }
             } else {
@@ -361,28 +411,82 @@ async fn worker(
                     && id % 19 == 0
                     && observations.transient_failures.lock().unwrap().insert(id)
                 {
-                    retry_ids.push(claimed.item_id);
+                    if cfg.profile == Profile::Mutable {
+                        if claimed.attempt_count >= claimed.max_attempts {
+                            return Err(
+                                "retry exhausted before the deterministic transient failure".into(),
+                            );
+                        }
+                        mutations.push(AddressedMutation {
+                            item_id: claimed.item_id,
+                            expected_item_version: Some(claimed.item_version),
+                            predicates: vec![],
+                            lease_guard: LeaseGuard::Match(
+                                claimed.lease_token.clone().ok_or("missing retry lease")?,
+                            ),
+                            patch: ItemPatch {
+                                lifecycle: LifecyclePatch::SetPending,
+                                not_before: BatchUpdateValue::Replace(Some(ts(100))),
+                                ..Default::default()
+                            },
+                        });
+                        observations.retries.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        retry_ids.push(claimed.item_id);
+                    }
                     continue;
                 }
                 let failed = cfg.faults && id % 31 == 0;
-                commits.push(CommitEntry {
-                    claim_ref: claim_ref(claimed),
-                    finalize: if failed {
-                        FinalizeKind::Fail
-                    } else {
-                        FinalizeKind::Complete
-                    },
-                    side_records: vec![SideRecord {
-                        key: format!("receipt/{id}").into_bytes(),
-                        payload: Bytes::from(format!(
-                            "{}:{}",
-                            if failed { "failed" } else { "accepted" },
-                            claimed.attempt_count
-                        )),
-                    }],
-                    lifecycle_items: vec![],
-                    instance_fence: None,
-                });
+                if cfg.profile == Profile::Snorri {
+                    commits.push(CommitEntry {
+                        claim_ref: claim_ref(claimed),
+                        finalize: if failed {
+                            FinalizeKind::Fail
+                        } else {
+                            FinalizeKind::Complete
+                        },
+                        side_records: vec![SideRecord {
+                            key: format!("receipt/{id}").into_bytes(),
+                            payload: Bytes::from(format!(
+                                "{}:{}",
+                                if failed { "failed" } else { "accepted" },
+                                claimed.attempt_count
+                            )),
+                        }],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    });
+                } else if cfg.profile == Profile::Mutable {
+                    let mut tracking = claimed.metadata.clone();
+                    tracking.insert(
+                        "outcome",
+                        MetadataValue::String(if failed { "failed" } else { "accepted" }.into()),
+                    );
+                    mutations.push(AddressedMutation {
+                        item_id: claimed.item_id,
+                        expected_item_version: Some(claimed.item_version),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::Match(
+                            claimed
+                                .lease_token
+                                .clone()
+                                .ok_or("missing delivery lease")?,
+                        ),
+                        patch: ItemPatch {
+                            lifecycle: if failed {
+                                LifecyclePatch::SetFailed
+                            } else {
+                                LifecyclePatch::SetComplete
+                            },
+                            metadata: BatchUpdateValue::Replace(tracking),
+                            ..Default::default()
+                        },
+                    });
+                } else if failed {
+                    failed_ids.push(claimed.item_id);
+                } else {
+                    complete_ids.push(claimed.item_id);
+                }
                 if failed {
                     failures.push(id);
                 } else {
@@ -405,27 +509,27 @@ async fn worker(
         }
         let request_id = RequestId::new(format!("s{stage}-w{worker}-g{generation}")).unwrap();
         generation += 1;
-        if !patches.is_empty() {
-            retry(deadline, || {
-                fw.release(&q, claimed.iter().map(|c| c.item_id))
-            })
-            .await?;
-            let request = BatchUpdateRequest {
+        if !mutations.is_empty() {
+            let request = ItemMutationRequest {
                 request_id: request_id.clone(),
-                updates: patches,
+                evaluated_at: now,
+                dry_run: false,
+                returning: ItemMutationReturning::Identity,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed { entries: mutations },
             };
-            if debug {
-                eprintln!("stage={stage} released; updating");
-            }
-            let response = retry(deadline, || fw.batch_update(&q, request.clone())).await?;
-            if debug {
-                eprintln!("stage={stage} updated");
-            }
+            let response = retry(deadline, || fw.mutate_items(&q, request.clone())).await?;
             for result in response.results {
-                if !matches!(result, BatchUpdateOutcome::Updated { .. }) {
-                    return Err(format!("stage update rejected: {result:?}").into());
+                if !matches!(result.outcome, ItemMutationOutcome::Updated { .. }) {
+                    return Err(format!("stage mutation rejected: {result:?}").into());
                 }
             }
+        }
+        if !complete_ids.is_empty() {
+            retry(deadline, || fw.complete(&q, complete_ids.iter().copied())).await?;
+        }
+        if !failed_ids.is_empty() {
+            retry(deadline, || fw.fail(&q, failed_ids.iter().copied())).await?;
         }
         if !commits.is_empty() {
             let request = CommitRequest {
@@ -471,8 +575,16 @@ pub async fn run(cfg: Config, root: &Path) -> Result<serde_json::Value> {
 }
 
 async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
-    if cfg.items == 0 || cfg.shards == 0 || cfg.workers == 0 || !(1..=1000).contains(&cfg.batch) {
+    if cfg.items == 0
+        || cfg.cycles == 0
+        || cfg.shards == 0
+        || cfg.workers == 0
+        || !(1..=1000).contains(&cfg.batch)
+    {
         return Err("items/shards/workers must be positive and batch in 1..=1000".into());
+    }
+    if cfg.recycle && cfg.profile == Profile::Snorri {
+        return Err("recycling currently supports original-row mutable and bulk profiles".into());
     }
     let start = Instant::now();
     let deadline = start + cfg.deadline;
@@ -481,15 +593,26 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         let cfg = cfg.clone();
         let root = root.join(format!("shard-{shard}"));
         handles.spawn(async move {
-            let fw = Arc::new(open_store(&root, cfg.memory, TestClock::at(200))?);
-            let q = create_queue(&fw, "workflow").await?;
+            let clock = TestClock::at(200);
+            let projection_root = cfg.projection_root.as_ref().map(|path| path.join(format!("shard-{shard}"))).unwrap_or_else(|| root.clone());
+            let fw = Arc::new(open_store_with_projection_root(&root, cfg.memory, clock.clone(), &projection_root)?);
+            let mut d = definition("workflow");
+            if cfg.recycle { d.request_id_retention_ms = 1000; }
+            let q = QueueKey::new(d.tenant_id.clone(), d.queue_id.clone());
+            fw.create_queue(d).await?;
             let ids: Vec<_> = (shard..cfg.items).step_by(cfg.shards).collect(); let expected = ids.len();
+            let mut cycles = Vec::new();
+            for cycle in 0..if cfg.recycle { cfg.cycles } else { 1 } {
+            clock.set(200 + cycle as u64 * 7200);
+            let cycle_started = Instant::now();
+            let loaded_ids = std::sync::Mutex::new(Vec::with_capacity(expected));
             let observations = Arc::new(Observations::default());
             let load = async {
                 for chunk in ids.chunks(cfg.batch) {
                     let items: Vec<_> = chunk.iter().map(|id| item(*id, if cfg.profile == Profile::Bulk { 2 } else { 0 }, cfg.payload_bytes)).collect();
-                    retry(deadline, || fw.push_batch(&q, items.clone())).await
+                    let accepted = retry(deadline, || fw.push_batch(&q, items.clone())).await
                         .map_err(|e| format!("load shard {shard} starting recipient {}: {e}", chunk[0]))?;
+                    loaded_ids.lock().unwrap().extend(accepted);
                     if std::env::var_os("FIREWEED_WORKLOAD_DEBUG").is_some() { eprintln!("loaded {}", chunk.len()); }
                 }
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
@@ -498,12 +621,11 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 let mut workers = vec![];
                 let stages = match cfg.profile {
                     Profile::Bulk => 2..3,
-                    Profile::Mutable => 0..3,
-                    Profile::Snorri => SHARED_DISPATCH..SHARED_DISPATCH + 1,
+                    Profile::Mutable | Profile::Snorri => SHARED_DISPATCH..SHARED_DISPATCH + 1,
                 };
                 for stage in stages {
                     for w in 0..cfg.workers {
-                        workers.push(worker(fw.clone(), q.clone(), stage, w, cfg.clone(), observations.clone(), expected, deadline));
+                        workers.push(worker(fw.clone(), q.clone(), stage, w, cfg.clone(), observations.clone(), expected, deadline, clock.now()));
                     }
                 }
                 futures::future::try_join_all(workers).await.map(|_| ())
@@ -517,10 +639,30 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 return Err(format!("unexpected final metrics: {metrics:?}").into());
             }
             if observations.receipts.lock().unwrap().len() != expected { return Err("missing terminal receipts".into()); }
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({"shard": shard, "items": expected,
+            if cfg.recycle {
+                clock.set(270 + cycle as u64 * 7200);
+                let retained_ids = loaded_ids.into_inner().unwrap();
+                for chunk in retained_ids.chunks(cfg.batch) {
+                    let removed = retry(deadline, || fw.purge(&q, chunk.iter().copied(), false)).await?;
+                    if removed != chunk.len() as u64 { return Err("recycling purge count mismatch".into()); }
+                }
+                let retained = fw.metrics(&q).await?;
+                if retained.pending + retained.leased + retained.complete + retained.failed != 0 {
+                    return Err("recycling left retained queue rows".into());
+                }
+            }
+            let report = serde_json::json!({"shard": shard, "cycle": cycle, "items": expected,
                 "delivered": observations.delivered.load(Ordering::SeqCst), "failed": observations.failed.load(Ordering::SeqCst),
                 "retries": observations.retries.load(Ordering::SeqCst), "claims": observations.claims.load(Ordering::SeqCst),
-                "complete": metrics.complete, "pending": metrics.pending, "leased": metrics.leased }))
+                "complete": metrics.complete, "pending": metrics.pending, "leased": metrics.leased,
+                "wall_s": cycle_started.elapsed().as_secs_f64(), "process_rss_kib": process_rss_kib(),
+                "projection_bytes": std::fs::metadata(projection_root.join("projection.db")).ok().map(|m| m.len()) });
+            if cfg.recycle { eprintln!("workflow_cycle_complete {report}"); }
+            cycles.push(report);
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(if cfg.recycle {
+                serde_json::json!({"shard": shard, "cycles": cycles})
+            } else { cycles.pop().unwrap() })
         });
     }
     let mut reports = vec![];
@@ -529,13 +671,15 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
     }
     reports.sort_by_key(|r| r["shard"].as_u64());
     Ok(
-        serde_json::json!({ "schema": "workflow-capacity/v2", "profile": format!("{:?}", cfg.profile),
+        serde_json::json!({ "schema": "workflow-capacity/v4", "profile": format!("{:?}", cfg.profile),
         "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
-        "items": cfg.items, "physical_shards": cfg.shards, "workers_per_pool": cfg.workers,
-        "worker_pools_per_shard": if cfg.profile == Profile::Mutable { 3 } else { 1 },
-        "dispatch": if cfg.profile == Profile::Snorri { "shared-normal-claim" } else { "stage-filtered" },
+        "items": cfg.items, "cycles": if cfg.recycle { cfg.cycles } else { 1 }, "includes_purge": cfg.recycle,
+        "physical_shards": cfg.shards, "projection_root": cfg.projection_root, "workers_per_pool": cfg.workers,
+        "worker_pools_per_shard": 1,
+        "dispatch": if cfg.profile != Profile::Bulk { "shared-normal-claim" } else { "stage-filtered" },
+        "atomic_original_row_mutation": cfg.profile == Profile::Mutable,
         "batch": cfg.batch, "payload_bytes": cfg.payload_bytes, "faults": cfg.faults,
         "settled_wall_s": start.elapsed().as_secs_f64(),
-        "completed_lifecycles_per_s": cfg.items as f64 / start.elapsed().as_secs_f64(), "shards": reports }),
+        "completed_lifecycles_per_s": (cfg.items * if cfg.recycle { cfg.cycles } else { 1 }) as f64 / start.elapsed().as_secs_f64(), "shards": reports }),
     )
 }

@@ -71,3 +71,57 @@ async fn retained_store_capacity_profile_reuses_keys() {
             .unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn original_rows_recycle_across_shards_with_exact_fault_outcomes() {
+    for memory in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            memory,
+            items: 240,
+            shards: 2,
+            workers: 2,
+            recycle: true,
+            cycles: 4,
+            deadline: std::time::Duration::from_secs(60),
+            ..Default::default()
+        };
+        let report = fireweed_workload::run(config, root.path()).await.unwrap();
+        assert_eq!(report["includes_purge"], true);
+        for shard in report["shards"].as_array().unwrap() {
+            assert_eq!(shard["cycles"].as_array().unwrap().len(), 4);
+            for cycle in shard["cycles"].as_array().unwrap() {
+                assert_eq!(cycle["items"], 120);
+                assert_eq!(cycle["delivered"], 116);
+                assert_eq!(cycle["failed"], 4);
+                assert_eq!(cycle["pending"], 0);
+                assert_eq!(cycle["leased"], 0);
+            }
+        }
+    }
+}
+
+// Full-sized claim/mutation batches must deliver every result to its caller,
+// including when one worker drives another worker's generation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_batches_recycle_original_rows_without_orphaned_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let config = Config {
+        items: 12_500,
+        batch: 1000,
+        workers: 4,
+        recycle: true,
+        cycles: 3,
+        deadline: std::time::Duration::from_secs(120),
+        ..Default::default()
+    };
+    let report = fireweed_workload::run(config, root.path()).await.unwrap();
+    for cycle in report["shards"][0]["cycles"].as_array().unwrap() {
+        assert_eq!(cycle["pending"], 0);
+        assert_eq!(cycle["leased"], 0);
+        assert_eq!(
+            cycle["delivered"].as_u64().unwrap() + cycle["failed"].as_u64().unwrap(),
+            12_500
+        );
+    }
+}

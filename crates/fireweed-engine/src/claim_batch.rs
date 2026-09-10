@@ -21,10 +21,11 @@ use crate::{KeyedQueueGate, QueueGateAcquire, QueueGateError, QueueGatePermit};
 pub const CLAIM_MAX_CALLERS: usize = 1_024;
 pub const CLAIM_MAX_DRIVERS: usize = 8;
 pub const CLAIM_GENERATION_MAX_REQUESTS: usize = 8;
-// Admit the 1,000-row delivery batches used by the public queue API. The
-// independent byte budget still bounds materialization memory.
-pub const GENERATION_MAX_ITEMS: usize = 1_024;
-pub const GENERATION_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+// Coalesce four ordinary 1,000-row delivery requests while retaining a hard
+// materialization byte bound. A generation must be larger than one public
+// request or concurrent batch callers cannot share append/apply work.
+pub const GENERATION_MAX_ITEMS: usize = 4_096;
+pub const GENERATION_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MUTATION_MAX_GENERATIONS_PER_QUEUE: usize = 2;
 pub const MUTATION_MAX_REQUESTS_PER_QUEUE: usize = 16;
 pub const CLAIM_TURN_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(255);
@@ -53,7 +54,7 @@ pub const S3M_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
 pub const S3M_DERIVED_CLAIM_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
 /// S3m-derived fence-acquire wait. Floor 500 ms / cap 75 s; S5 activates this bound.
 pub const S3M_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3S_FENCE_ACQUIRE_CARRIED_CAP;
-/// S3m-derived pre-fence/drain/delta coverage and bounded-item/4 MiB work wait. Floor 500 ms / cap 5 s.
+/// S3m-derived pre-fence/drain/delta coverage and bounded-item/16 MiB work wait. Floor 500 ms / cap 5 s.
 pub const S3M_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
 /// S5-activated fence-acquire wait. Same 75 s composition cap as S3m.
 pub const S5_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3M_DERIVED_FENCE_ACQUIRE_WAIT;
@@ -77,6 +78,8 @@ pub enum MutationGenerationKind {
     Push,
     /// Pending-row content/order replacements require apply before later selection.
     Rewrite,
+    /// Addressed mutations planned under a queue writer fence by the adapter.
+    Addressed,
     Update,
 }
 

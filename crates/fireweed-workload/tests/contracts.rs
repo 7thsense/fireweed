@@ -117,7 +117,11 @@ async fn due_order_fifo_and_expired_lease_fencing() {
             clock.set(102);
             let reclaimed = fw.reclaim_expired_at(&q, Some(3), ts(102)).await.unwrap();
             assert_eq!(reclaimed.len(), 3);
-            let fresh = fw.claim(&q, 3, 1000).await.unwrap();
+            let mut fresh = Vec::new();
+            while fresh.len() < 3 {
+                fresh.extend(fw.claim(&q, 3 - fresh.len(), 1000).await.unwrap());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
             assert_eq!(fresh.len(), 3);
             let stale = fw
                 .commit(
@@ -406,6 +410,230 @@ async fn immediate_retry_uses_the_acknowledged_claim_attempt_and_version() {
         let metrics = fw.metrics(&q).await.unwrap();
         assert_eq!(metrics.failed, 240);
         assert_eq!(metrics.pending + metrics.leased, 0);
+    })
+    .await
+    .unwrap();
+}
+
+fn addressed_request(name: &str, entries: Vec<AddressedMutation>) -> ItemMutationRequest {
+    ItemMutationRequest {
+        request_id: RequestId::new(name).unwrap(),
+        evaluated_at: ts(200),
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed { entries },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leased_rows_are_atomically_enriched_and_mixed_outcomes_replay() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        for memory in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let fw = open_store(root.path(), memory, TestClock::at(200)).unwrap();
+            let q = create_queue(&fw, "atomic-enrichment").await.unwrap();
+            let ids = fw
+                .push_batch(&q, (0..3).map(|id| item(id, 0, 32)).collect())
+                .await
+                .unwrap();
+            let claimed = fw.claim(&q, 3, 1000).await.unwrap();
+            assert_eq!(claimed.len(), 3);
+            let entries: Vec<_> = claimed
+                .iter()
+                .enumerate()
+                .map(|(i, row)| AddressedMutation {
+                    item_id: row.item_id,
+                    expected_item_version: Some(row.item_version),
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::Match(row.lease_token.clone().unwrap()),
+                    patch: ItemPatch {
+                        lifecycle: [
+                            LifecyclePatch::SetPending,
+                            LifecyclePatch::SetComplete,
+                            LifecyclePatch::SetFailed,
+                        ][i],
+                        payload: BatchUpdateValue::Replace(Some(Bytes::from_static(b"enriched"))),
+                        metadata: BatchUpdateValue::Replace(metadata(1, i)),
+                        ..Default::default()
+                    },
+                })
+                .collect();
+            let request = addressed_request("atomic-1", entries.clone());
+            let result = fw.mutate_items(&q, request.clone()).await.unwrap();
+            assert_eq!(result.summary.changed, 3, "{result:?}");
+            assert!(result.position.is_some());
+            assert_eq!(fw.mutate_items(&q, request.clone()).await.unwrap(), result);
+            let mut conflicting = request;
+            conflicting.returning = ItemMutationReturning::Identity;
+            assert_eq!(
+                fw.mutate_items(&q, conflicting).await.unwrap_err(),
+                EngineError::RequestIdConflict
+            );
+            let next = fw.claim(&q, 3, 1000).await.unwrap();
+            assert_eq!(next.len(), 1);
+            assert_eq!(next[0].item_id, ids[0]);
+            assert_eq!(next[0].payload.as_deref(), Some(b"enriched".as_slice()));
+            let mut stale = entries[0].clone();
+            stale.expected_item_version = None;
+            let rejected = fw
+                .mutate_items(&q, addressed_request("stale-token", vec![stale]))
+                .await
+                .unwrap();
+            assert!(matches!(
+                rejected.results[0].outcome,
+                ItemMutationOutcome::StaleLease
+            ));
+            let m = fw.metrics(&q).await.unwrap();
+            assert_eq!((m.pending, m.leased, m.complete, m.failed), (0, 1, 1, 1));
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_addressed_updates_have_one_version_winner() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let root = tempfile::tempdir().unwrap();
+        let fw = std::sync::Arc::new(open_store(root.path(), false, TestClock::at(200)).unwrap());
+        let q = create_queue(&fw, "atomic-cas").await.unwrap();
+        fw.push_batch(&q, vec![item(0, 0, 32)]).await.unwrap();
+        let row = fw.claim(&q, 1, 1000).await.unwrap().remove(0);
+        let entry = AddressedMutation {
+            item_id: row.item_id,
+            expected_item_version: Some(row.item_version),
+            predicates: vec![],
+            lease_guard: LeaseGuard::Match(row.lease_token.unwrap()),
+            patch: ItemPatch {
+                lifecycle: LifecyclePatch::SetPending,
+                ..Default::default()
+            },
+        };
+        let (a, b) = tokio::join!(
+            fw.mutate_items(&q, addressed_request("writer-a", vec![entry.clone()])),
+            fw.mutate_items(&q, addressed_request("writer-b", vec![entry]))
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.summary.changed + b.summary.changed, 1);
+        assert_eq!(a.summary.rejected + b.summary.rejected, 1);
+        assert_eq!(fw.claim(&q, 1, 1000).await.unwrap().len(), 1);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_full_delivery_batches_remain_disjoint() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let root = tempfile::tempdir().unwrap();
+        let fw = open_store(root.path(), false, TestClock::at(200)).unwrap();
+        let q = create_queue(&fw, "full-concurrent-batches").await.unwrap();
+        let mut ids = std::collections::BTreeSet::new();
+        for batch in 0..4 {
+            ids.extend(
+                fw.push_batch(
+                    &q,
+                    (batch * 1000..(batch + 1) * 1000)
+                        .map(|id| item(id, 0, 1024))
+                        .collect(),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let (a, b, c, d) = tokio::join!(
+            fw.claim(&q, 1000, 1000),
+            fw.claim(&q, 1000, 1000),
+            fw.claim(&q, 1000, 1000),
+            fw.claim(&q, 1000, 1000)
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for rows in [a.unwrap(), b.unwrap(), c.unwrap(), d.unwrap()] {
+            assert_eq!(rows.len(), 1000);
+            for row in rows {
+                assert!(seen.insert(row.item_id), "duplicate lease");
+            }
+        }
+        assert_eq!(ids, seen);
+        assert_eq!(fw.metrics(&q).await.unwrap().leased, 4000);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_mutation_caller_does_not_strand_batch_peers() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let root = tempfile::tempdir().unwrap();
+        let fw = std::sync::Arc::new(open_store(root.path(), false, TestClock::at(200)).unwrap());
+        let q = create_queue(&fw, "cancelled-mutation").await.unwrap();
+        for batch in 0..2 {
+            fw.push_batch(
+                &q,
+                (batch * 1000..(batch + 1) * 1000)
+                    .map(|id| item(id, 0, 1024))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        }
+        let mut requests = Vec::new();
+        for batch in 0..2 {
+            let rows = fw.claim(&q, 1000, 1000).await.unwrap();
+            assert_eq!(rows.len(), 1000);
+            requests.push(addressed_request(
+                &format!("cancel-batch-{batch}"),
+                rows.into_iter()
+                    .map(|row| AddressedMutation {
+                        item_id: row.item_id,
+                        expected_item_version: Some(row.item_version),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::Match(row.lease_token.unwrap()),
+                        patch: ItemPatch {
+                            lifecycle: LifecyclePatch::SetPending,
+                            payload: BatchUpdateValue::Replace(Some(Bytes::from_static(
+                                b"committed",
+                            ))),
+                            ..Default::default()
+                        },
+                    })
+                    .collect(),
+            ));
+        }
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let mut calls = Vec::new();
+        for request in &requests {
+            let (fw, q, barrier, request) =
+                (fw.clone(), q.clone(), barrier.clone(), request.clone());
+            calls.push(tokio::spawn(async move {
+                barrier.wait().await;
+                fw.mutate_items(&q, request).await
+            }));
+        }
+        barrier.wait().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        calls.remove(0).abort();
+        let peer = calls.remove(0).await.unwrap().unwrap();
+        assert_eq!(peer.summary.changed, 1000);
+        // The aborted caller may have been queued or already accepted. Either
+        // way, retry must return one exact successful result, never a second CAS.
+        let recovered = fw.mutate_items(&q, requests[0].clone()).await.unwrap();
+        assert_eq!(recovered.summary.changed, 1000);
+        assert_eq!(
+            fw.mutate_items(&q, requests[1].clone()).await.unwrap(),
+            peer
+        );
+        assert_eq!(fw.metrics(&q).await.unwrap().pending, 2000);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2 {
+            let rows = fw.claim(&q, 1000, 1000).await.unwrap();
+            assert_eq!(rows.len(), 1000);
+            for row in rows {
+                assert!(seen.insert(row.item_id));
+                assert_eq!(row.payload.as_deref(), Some(b"committed".as_slice()));
+            }
+        }
     })
     .await
     .unwrap();

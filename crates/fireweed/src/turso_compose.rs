@@ -118,7 +118,7 @@ pub async fn open_turso_projection_async(path: &Path) -> EngineResult<TursoRelat
         std::fs::create_dir_all(parent)
             .map_err(|e| EngineError::Storage(format!("turso projection parent: {e}")))?;
     }
-    TursoRelational::open(TursoConfig::local(path))
+    TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
         .await
         .map_err(|e| EngineError::Storage(e.to_string()))
 }
@@ -187,6 +187,22 @@ struct GenerationJoin {
     outcome: Mutex<Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>>,
 }
 
+impl GenerationJoin {
+    fn member(
+        &self,
+        work: &MutationGenerationWork,
+    ) -> Option<EngineResult<MutationGenerationMemberOutcome>> {
+        self.outcome
+            .lock()
+            .expect("generation outcome")
+            .as_ref()
+            .map(|outcome| match outcome {
+                Ok(members) => member_for_work(work, members),
+                Err(error) => Err(error.clone()),
+            })
+    }
+}
+
 /// Post-apply send of a pre-materialized grouped/cohort envelope.
 fn finish_retained_grouped_cohort_response(claimed: Claimed) -> EngineResult<Claimed> {
     Ok(claimed)
@@ -217,6 +233,7 @@ fn finish_inert_mutation_generation_append(
             fireweed_engine::MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_))
             | fireweed_engine::MutationGenerationMemberOutcome::PushAccepted
             | fireweed_engine::MutationGenerationMemberOutcome::ClaimAccepted { .. }
+            | fireweed_engine::MutationGenerationMemberOutcome::ItemMutation { .. }
             | fireweed_engine::MutationGenerationMemberOutcome::Rejected(_) => None,
         })
         .collect())
@@ -546,7 +563,7 @@ fn push_member_matches(
 
 fn member_for_work(
     work: &MutationGenerationWork,
-    members: Vec<fireweed_engine::MutationGenerationMember>,
+    members: &[fireweed_engine::MutationGenerationMember],
 ) -> EngineResult<MutationGenerationMemberOutcome> {
     let mut rejected = None;
     for member in members {
@@ -554,16 +571,16 @@ fn member_for_work(
             (MutationGenerationWork::Push { request, .. }, outcome)
                 if push_member_matches(request, outcome) =>
             {
-                return Ok(member.outcome);
+                return Ok(member.outcome.clone());
             }
             (
                 MutationGenerationWork::BatchUpdate { request, .. },
                 MutationGenerationMemberOutcome::BatchUpdate { response, .. },
-            ) if response.request_id == request.request_id => return Ok(member.outcome),
+            ) if response.request_id == request.request_id => return Ok(member.outcome.clone()),
             (
                 MutationGenerationWork::Claim { id, .. },
                 MutationGenerationMemberOutcome::Claim { id: claimed_id, .. },
-            ) if id == claimed_id => return Ok(member.outcome),
+            ) if id == claimed_id => return Ok(member.outcome.clone()),
             (
                 MutationGenerationWork::Finalize { command_id, .. },
                 MutationGenerationMemberOutcome::Finalize { request },
@@ -573,14 +590,18 @@ fn member_for_work(
                 .map(|envelope| &envelope.command_id)
                 == Some(command_id) =>
             {
-                return Ok(member.outcome);
+                return Ok(member.outcome.clone());
             }
-            (MutationGenerationWork::Singleton { .. }, _) => return Ok(member.outcome),
+            (
+                MutationGenerationWork::ItemMutation { id, .. },
+                MutationGenerationMemberOutcome::ItemMutation { id: result_id, .. },
+            ) if id == result_id => return Ok(member.outcome.clone()),
+            (MutationGenerationWork::Singleton { .. }, _) => return Ok(member.outcome.clone()),
             (
                 _,
                 MutationGenerationMemberOutcome::Rejected(_)
                 | MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_)),
-            ) => rejected = Some(member.outcome),
+            ) => rejected = Some(member.outcome.clone()),
             _ => {}
         }
     }
@@ -2514,11 +2535,11 @@ macro_rules! impl_turso_product_ports {
         impl ItemMutationPort for $ty {
             fn mutate_items(
                 &self,
-                _shard: &QueueKey,
-                _request: ItemMutationRequest,
-                _expected_epoch: Option<u64>,
+                shard: &QueueKey,
+                request: ItemMutationRequest,
+                expected_epoch: Option<u64>,
             ) -> impl std::future::Future<Output = EngineResult<ItemMutationResponse>> + Send {
-                std::future::ready(Err(EngineError::Unavailable))
+                self.dispatch_item_mutation(shard, request, expected_epoch)
             }
         }
 
@@ -3253,8 +3274,9 @@ type ObjectLogEngine = AsyncComposedBackend<
 
 /// Provider-neutral object-log × Turso product (not a public `ObjectLogTursoBackend` alias).
 #[cfg(feature = "objectlog")]
+#[derive(Clone)]
 pub struct DerivedObjectLogTursoBackend {
-    engine: ObjectLogEngine,
+    engine: Arc<ObjectLogEngine>,
     log: Arc<ObjectLogEngineStore>,
     projection: Arc<TursoRelational>,
     #[allow(dead_code)]
@@ -3279,16 +3301,11 @@ pub struct DerivedObjectLogTursoBackend {
     selection_fence: SelectionFence<QueueKey>,
     fence_admission: SelectionFenceAdmission,
     generation_joins: Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>,
-    generation_outcomes: Arc<
-        Mutex<
-            HashMap<(QueueKey, u64), EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>,
-        >,
-    >,
-    claim_work_ids: AtomicU64,
+    claim_work_ids: Arc<AtomicU64>,
     /// This process owns the Turso writer. Item Claim SELECT and the FIFO
     /// rowid floor are sequenced here so the next generation can read the
     /// following slice without waiting for apply.
-    claim_select: tokio::sync::Mutex<()>,
+    claim_select: Arc<tokio::sync::Mutex<()>>,
     #[allow(dead_code)] // S4b test hook: dropping_objectlog_turso_drains_registered_driver
     drivers: CoordinatorDriverRegistry,
 }
@@ -3373,7 +3390,7 @@ impl DerivedObjectLogTursoBackend {
                 .with_append_admission(AppendAdmissionClass::KeyedPermitLive);
 
         let backend = Self {
-            engine,
+            engine: Arc::new(engine),
             log,
             projection,
             projection_path,
@@ -3396,9 +3413,8 @@ impl DerivedObjectLogTursoBackend {
             selection_fence,
             fence_admission,
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
-            generation_outcomes: Arc::new(Mutex::new(HashMap::new())),
-            claim_work_ids: AtomicU64::new(1),
-            claim_select: tokio::sync::Mutex::new(()),
+            claim_work_ids: Arc::new(AtomicU64::new(1)),
+            claim_select: Arc::new(tokio::sync::Mutex::new(())),
             drivers,
         };
         backend.recover_async().await?;
@@ -3776,18 +3792,6 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
-    fn generation_outcome(
-        &self,
-        queue: &QueueKey,
-        generation_id: u64,
-    ) -> Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>> {
-        self.generation_outcomes
-            .lock()
-            .expect("generation outcome map")
-            .get(&(queue.clone(), generation_id))
-            .cloned()
-    }
-
     fn ensure_generation_join(&self, queue: &QueueKey, generation_id: u64) -> Arc<GenerationJoin> {
         self.generation_joins
             .lock()
@@ -3809,35 +3813,14 @@ impl DerivedObjectLogTursoBackend {
         join: &GenerationJoin,
         driven: EngineResult<Vec<fireweed_engine::MutationGenerationMember>>,
     ) {
-        *join.outcome.lock().expect("generation outcome") = Some(driven.clone());
-        let stale = {
-            let mut outcomes = self
-                .generation_outcomes
-                .lock()
-                .expect("generation outcome map");
-            outcomes.insert((queue.clone(), generation_id), driven);
-            if outcomes.len() > 64 {
-                let stale: Vec<_> = outcomes
-                    .keys()
-                    .filter(|(key, id)| key != queue || *id != generation_id)
-                    .take(outcomes.len().saturating_sub(32))
-                    .cloned()
-                    .collect();
-                for key in &stale {
-                    outcomes.remove(key);
-                }
-                stale
-            } else {
-                Vec::new()
-            }
-        };
+        *join.outcome.lock().expect("generation outcome") = Some(driven);
+        // Every admitted caller owns this cell. Completed payloads need no
+        // global cache, and cannot be evicted out from under a delayed caller.
+        self.generation_joins
+            .lock()
+            .expect("generation join map")
+            .remove(&(queue.clone(), generation_id));
         join.notify.notify_waiters();
-        if !stale.is_empty() {
-            let mut joins = self.generation_joins.lock().expect("generation join map");
-            for key in stale {
-                joins.remove(&key);
-            }
-        }
     }
 
     async fn wait_request_entry_coverage(&self, shard: &QueueKey) -> EngineResult<()> {
@@ -4078,6 +4061,7 @@ impl DerivedObjectLogTursoBackend {
             | MutationGenerationMemberOutcome::ClaimAccepted { .. }
             | MutationGenerationMemberOutcome::Claim { .. }
             | MutationGenerationMemberOutcome::Finalize { .. }
+            | MutationGenerationMemberOutcome::ItemMutation { .. }
             | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
                 "push generation produced a non-push outcome".into(),
             )),
@@ -4135,6 +4119,7 @@ impl DerivedObjectLogTursoBackend {
             | MutationGenerationMemberOutcome::ClaimAccepted { .. }
             | MutationGenerationMemberOutcome::Claim { .. }
             | MutationGenerationMemberOutcome::Finalize { .. }
+            | MutationGenerationMemberOutcome::ItemMutation { .. }
             | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
                 "batch-update generation produced a non-batch outcome".into(),
             )),
@@ -4158,23 +4143,44 @@ impl DerivedObjectLogTursoBackend {
         }
         let key = work.sequencer_key();
         let work = Arc::new(work);
-        let ticket = self
-            .sequencer
-            .admit(
-                queue.clone(),
-                key,
-                MutationIngress::Direct,
-                Arc::clone(&work),
-                items,
-                response_bytes,
-            )
-            .map_err(map_coord)?;
+        // Retain the response cell at admission. A caller may drive another
+        // generation or be descheduled for arbitrarily many later generations. Its
+        // acknowledged result must remain available either way.
+        // Holding the join map across admission also prevents publication from
+        // racing the installation of this cell.
+        let (ticket, own_join) = {
+            let mut joins = self.generation_joins.lock().expect("generation join map");
+            // Remove cells whose queued callers all cancelled before a driver
+            // started. Active drivers and live callers retain their own Arc.
+            joins.retain(|_, join| Arc::strong_count(join) > 1);
+            let ticket = self
+                .sequencer
+                .admit(
+                    queue.clone(),
+                    key,
+                    MutationIngress::Direct,
+                    Arc::clone(&work),
+                    items,
+                    response_bytes,
+                )
+                .map_err(map_coord)?;
+            let join = joins
+                .entry((queue.clone(), ticket.generation_id()))
+                .or_insert_with(|| {
+                    Arc::new(GenerationJoin {
+                        notify: tokio::sync::Notify::new(),
+                        outcome: Mutex::new(None),
+                    })
+                })
+                .clone();
+            (ticket, join)
+        };
         let generation_id = ticket.generation_id();
         let started = Instant::now();
         loop {
-            if let Some(outcome) = self.generation_outcome(&queue, generation_id) {
+            if let Some(outcome) = own_join.member(&work) {
                 drop(ticket);
-                return member_for_work(&work, outcome?);
+                return outcome;
             }
             if let Some(generation) = self
                 .sequencer
@@ -4182,33 +4188,31 @@ impl DerivedObjectLogTursoBackend {
             {
                 let driven_id = generation.generation_id();
                 let join = self.ensure_generation_join(&queue, driven_id);
-                let driven = self.drive_started_generation(generation).await;
-                self.publish_generation_outcome(&queue, driven_id, &join, driven.clone());
-                if driven_id != generation_id {
-                    continue;
+                // Publication belongs to an owned, drainable driver. Cancelling
+                // the caller that started a generation must not strand its peers.
+                let runner = self.clone();
+                let publish_queue = queue.clone();
+                let driver = CoordinatorOwnedDispatcher {
+                    inner: ObjectLogTaskDispatcher::new(),
+                    registry: self.drivers.clone(),
                 }
-                drop(ticket);
-                return member_for_work(&work, driven?);
-            }
-            let join = self
-                .generation_joins
-                .lock()
-                .expect("generation join map")
-                .get(&(queue.clone(), generation_id))
-                .cloned();
-            if let Some(join) = join {
-                let notified = join.notify.notified();
-                tokio::pin!(notified);
-                if let Some(outcome) = join.outcome.lock().expect("generation outcome").clone() {
-                    drop(ticket);
-                    return member_for_work(&work, outcome?);
-                }
-                if let Some(outcome) = self.generation_outcome(&queue, generation_id) {
-                    drop(ticket);
-                    return member_for_work(&work, outcome?);
-                }
-                notified.await;
+                .submit(Box::new(move || {
+                    Box::pin(async move {
+                        let driven = runner.drive_started_generation(generation).await;
+                        runner.publish_generation_outcome(&publish_queue, driven_id, &join, driven);
+                    })
+                }))
+                .map_err(|error| EngineError::Storage(format!("generation dispatch: {error:?}")))?;
+                driver.await.map_err(|error| {
+                    EngineError::Storage(format!("generation driver: {error:?}"))
+                })?;
                 continue;
+            }
+            let notified = own_join.notify.notified();
+            tokio::pin!(notified);
+            if let Some(outcome) = own_join.member(&work) {
+                drop(ticket);
+                return outcome;
             }
             if started.elapsed() >= MUTATION_SEQUENCER_DEFAULT_MAX_WAIT
                 && !self
@@ -4220,7 +4224,12 @@ impl DerivedObjectLogTursoBackend {
                     resource: "mutation sequencer wait",
                 });
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            // Queued generations still need a caller to start them after the
+            // linger interval. Publication wakes active-generation waiters.
+            tokio::select! {
+                _ = &mut notified => {},
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {},
+            }
         }
     }
 
@@ -4232,6 +4241,12 @@ impl DerivedObjectLogTursoBackend {
             MutationGenerationWork,
         >,
     ) -> EngineResult<Vec<fireweed_engine::MutationGenerationMember>> {
+        if matches!(
+            generation.requests()[0].as_ref(),
+            MutationGenerationWork::ItemMutation { .. }
+        ) {
+            return self.drive_addressed_generation(generation).await;
+        }
         let queue = generation.requests()[0].queue();
         debug_assert!(generation.requests().len() <= CLAIM_GENERATION_MAX_REQUESTS);
         let works: Vec<MutationGenerationWork> = generation
@@ -4283,6 +4298,11 @@ impl DerivedObjectLogTursoBackend {
                     }
                 }
                 MutationGenerationWork::Claim { .. } => claimed = true,
+                MutationGenerationWork::ItemMutation { .. } => {
+                    return Err(EngineError::Invalid(
+                        "addressed request in identity generation",
+                    ));
+                }
                 MutationGenerationWork::Finalize { .. }
                 | MutationGenerationWork::Singleton { .. } => {}
             }
@@ -4300,11 +4320,15 @@ impl DerivedObjectLogTursoBackend {
             .acquire_shared(queue.clone())
             .await
             .map_err(map_coord)?;
+        // An exclusive addressed mutation may have applied while admission waited.
+        // Do not overlay older leased identities onto those now-visible replacements.
+        self.prune_unpublished_applied(&queue).await;
         let now = match &works[0] {
             MutationGenerationWork::Push { request, .. } => request.now,
             MutationGenerationWork::BatchUpdate { now, .. }
             | MutationGenerationWork::Finalize { now, .. } => *now,
             MutationGenerationWork::Claim { request, .. } => request.now,
+            MutationGenerationWork::ItemMutation { request, .. } => request.evaluated_at,
             MutationGenerationWork::Singleton { commit, .. } => commit
                 .commands()
                 .first()
@@ -4646,6 +4670,7 @@ impl DerivedObjectLogTursoBackend {
             | MutationGenerationMemberOutcome::BatchUpdate { .. }
             | MutationGenerationMemberOutcome::ClaimAccepted { .. }
             | MutationGenerationMemberOutcome::Finalize { .. }
+            | MutationGenerationMemberOutcome::ItemMutation { .. }
             | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
                 "claim generation produced a non-claim outcome".into(),
             )),
@@ -4856,6 +4881,7 @@ impl DerivedObjectLogTursoBackend {
                 | MutationGenerationMemberOutcome::BatchUpdate { .. }
                 | MutationGenerationMemberOutcome::ClaimAccepted { .. }
                 | MutationGenerationMemberOutcome::Claim { .. }
+                | MutationGenerationMemberOutcome::ItemMutation { .. }
                 | MutationGenerationMemberOutcome::Singleton { .. } => Err(EngineError::Storage(
                     "finalize generation produced a non-finalize outcome".into(),
                 )),
@@ -4930,6 +4956,249 @@ impl_turso_product_ports!(
     DurabilityClass::EventualApply,
     "object-log append then Turso apply (SeparateReplayCommit)"
 );
+
+impl<L: AsyncLogStore + 'static> AtomicTursoBackend<L> {
+    async fn dispatch_item_mutation(
+        &self,
+        _shard: &QueueKey,
+        _request: ItemMutationRequest,
+        _expected_epoch: Option<u64>,
+    ) -> EngineResult<ItemMutationResponse> {
+        Err(EngineError::Unavailable)
+    }
+}
+
+#[cfg(feature = "objectlog")]
+impl DerivedObjectLogTursoBackend {
+    async fn dispatch_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: ItemMutationRequest,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<ItemMutationResponse> {
+        let fireweed_engine::ItemMutationOperation::Addressed { entries } = &request.operation
+        else {
+            return Err(EngineError::Unavailable);
+        };
+        if entries.len() > 1000 {
+            return Err(EngineError::Invalid(
+                "addressed mutation batch exceeds 1000 items",
+            ));
+        }
+        let work = MutationGenerationWork::ItemMutation {
+            id: self.claim_work_ids.fetch_add(1, Ordering::Relaxed),
+            shard: shard.clone(),
+            request,
+            expected_epoch,
+        };
+        match self.drive_candidate_mutation(work).await? {
+            MutationGenerationMemberOutcome::ItemMutation { result, .. } => result,
+            MutationGenerationMemberOutcome::Rejected(error) => Err(error),
+            _ => Err(EngineError::Storage(
+                "addressed generation returned another operation's outcome".into(),
+            )),
+        }
+    }
+
+    async fn drive_addressed_generation(
+        &self,
+        generation: fireweed_engine::MutationGenerationBatch<
+            QueueKey,
+            MutationSequencerKey,
+            MutationGenerationWork,
+        >,
+    ) -> EngineResult<Vec<fireweed_engine::MutationGenerationMember>> {
+        let shard = generation.requests()[0].queue();
+        // Only disjoint requests share an append. Overlaps and repeated request
+        // IDs start a new group, after the previous group has applied, so every
+        // lease/version check and replay decision observes its FIFO predecessor.
+        let mut groups = Vec::new();
+        let mut group = Vec::new();
+        let mut addressed = HashSet::new();
+        let mut request_ids = HashSet::new();
+        for work in generation.requests() {
+            let MutationGenerationWork::ItemMutation {
+                id,
+                request,
+                expected_epoch,
+                ..
+            } = work.as_ref()
+            else {
+                return Err(EngineError::Invalid("mixed addressed generation"));
+            };
+            let fireweed_engine::ItemMutationOperation::Addressed { entries } = &request.operation
+            else {
+                return Err(EngineError::Unavailable);
+            };
+            let intersects = request_ids.contains(&request.request_id)
+                || entries
+                    .iter()
+                    .any(|entry| addressed.contains(&entry.item_id));
+            if !group.is_empty() && (intersects || !request.gate_changes.is_empty()) {
+                groups.push(std::mem::take(&mut group));
+                addressed.clear();
+                request_ids.clear();
+            }
+            addressed.extend(entries.iter().map(|entry| entry.item_id));
+            request_ids.insert(request.request_id.clone());
+            group.push((*id, request.clone(), *expected_epoch));
+            if !request.gate_changes.is_empty() {
+                groups.push(std::mem::take(&mut group));
+                addressed.clear();
+                request_ids.clear();
+            }
+        }
+        if !group.is_empty() {
+            groups.push(group);
+        }
+        // The generation owner survives caller cancellation and retains the
+        // sequencer through SQL publication. Legacy operations share the keyed
+        // gate; all native generations share the selection fence.
+        let _generation = generation;
+        let coordinator = self.async_apply.clone();
+        let log = Arc::clone(&self.log);
+        let strategy = self.engine.commit_strategy();
+        let projection = Arc::clone(&self.projection);
+        let control = Arc::clone(&self.control);
+        let ids = Arc::clone(&self.ids);
+        let fence = self.selection_fence.clone();
+        let admission = self.fence_admission.clone();
+        self.engine
+            .submit_operation(shard.clone(), move || {
+                Box::pin(async move {
+                    let _waiter = admission.admit_waiter().map_err(map_coord)?;
+                    let _fence = fence
+                        .acquire_exclusive(shard.clone())
+                        .await
+                        .map_err(map_coord)?;
+                    let epoch = AsyncLogStore::current_epoch(log.as_ref(), shard.clone()).await?;
+                    if let Some(coordinator) = &coordinator {
+                        if let Some(target) =
+                            AsyncLogStore::high_water(log.as_ref(), shard.clone()).await?
+                        {
+                            coordinator
+                                .wait_until_covers(
+                                    &shard,
+                                    &target,
+                                    S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
+                                )
+                                .await?;
+                        }
+                    }
+                    let definition =
+                        AsyncControlPlane::queue_definition(control.as_ref(), shard.clone())
+                            .await?;
+                    let mut members = Vec::new();
+                    let mut response_bytes = 0usize;
+                    for group in groups {
+                        let mut commands = Vec::new();
+                        let mut command_members = Vec::new();
+                        for (id, request, expected_epoch) in group {
+                            let result = async {
+                                if expected_epoch.is_some_and(|expected| expected != epoch) {
+                                    return Err(EngineError::EpochFenced);
+                                }
+                                let fingerprint =
+                                    fireweed_engine::item_mutation_fingerprint(&request)?;
+                                let replay = projection
+                                    .item_mutation_replay(&shard, &request, fingerprint)
+                                    .await?;
+                                let (response, command) = if let Some(response) = replay {
+                                    (response, None)
+                                } else {
+                                    let plan = projection
+                                        .plan_addressed_item_mutation(&shard, &definition, &request)
+                                        .await?;
+                                    (plan.response, (!request.dry_run).then_some(plan.command))
+                                };
+                                let response_payload = serde_json::to_string(&response)
+                                    .map_err(|e| EngineError::Storage(e.to_string()))?;
+                                let next_bytes =
+                                    response_bytes.saturating_add(response_payload.len());
+                                if next_bytes > fireweed_engine::GENERATION_MAX_RESPONSE_BYTES {
+                                    return Err(EngineError::BatchTooLarge);
+                                }
+                                response_bytes = next_bytes;
+                                if let Some(command) = command {
+                                    commands.push(CommandEnvelope {
+                                        command_id: ids.next_command_id(),
+                                        request_id: Some(request.request_id),
+                                        request_fingerprint: Some(fingerprint),
+                                        request_outcome: Some(RequestOutcome::ItemMutation {
+                                            response_payload,
+                                        }),
+                                        item_ids: command
+                                            .items
+                                            .iter()
+                                            .map(|item| item.item_id)
+                                            .collect(),
+                                        command: QueueCommand::MutateItems(command),
+                                        checksum: CommandChecksum(0),
+                                        created_at: request.evaluated_at,
+                                    });
+                                    command_members.push(members.len());
+                                }
+                                Ok(response)
+                            }
+                            .await;
+                            members.push(fireweed_engine::MutationGenerationMember {
+                                outcome: MutationGenerationMemberOutcome::ItemMutation {
+                                    id,
+                                    result,
+                                },
+                            });
+                        }
+                        if !commands.is_empty() {
+                            let outcome = strategy
+                                .commit(
+                                    RawCommitRequest::new(shard.clone(), commands, epoch)
+                                        .with_append_admission(
+                                            AppendAdmissionClass::SharedSelectionLive,
+                                        ),
+                                )
+                                .await?;
+                            if outcome.positions().len() != command_members.len() {
+                                return Err(EngineError::Storage(
+                                    "addressed append position count mismatch".into(),
+                                ));
+                            }
+                            for (member, position) in
+                                command_members.into_iter().zip(outcome.positions())
+                            {
+                                let MutationGenerationMemberOutcome::ItemMutation {
+                                    result: Ok(response),
+                                    ..
+                                } = &mut members[member].outcome
+                                else {
+                                    return Err(EngineError::Storage(
+                                        "addressed append lost response".into(),
+                                    ));
+                                };
+                                response.position = Some(position.clone());
+                            }
+                            // Arbitrary replacements are not represented by the native
+                            // identity overlay. Make them visible before another group
+                            // or a claim can validate against the SQL projection.
+                            if let (Some(coordinator), Some(position)) =
+                                (&coordinator, outcome.positions().last())
+                            {
+                                coordinator
+                                    .wait_until_covers(
+                                        &shard,
+                                        position,
+                                        S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
+                                    )
+                                    .await?;
+                            }
+                        }
+                    }
+                    Ok(members)
+                })
+            })
+            .await
+            .map_err(map_submit_error)?
+    }
+}
 
 #[cfg(feature = "objectlog")]
 impl fireweed_engine::CommitTransitionPort for DerivedObjectLogTursoBackend {
@@ -5584,6 +5853,39 @@ mod s3c_activation {
             grouped.items[0].payload.as_ref().map(Bytes::as_ref),
             Some(&b"grouped"[..])
         );
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn delayed_generation_waiter_retains_result_without_global_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-delayed-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let shard = QueueKey::new(
+            TenantId::new("t").unwrap(),
+            QueueId::new("delayed").unwrap(),
+        );
+        let delayed = backend.ensure_generation_join(&shard, 0);
+        let notified = delayed.notify.notified();
+        backend.publish_generation_outcome(&shard, 0, &delayed, Err(EngineError::Conflict));
+        // Do not poll the original waiter until well beyond the old cache's
+        // capacity. Completion ownership must survive unrelated publication.
+        for id in 1..256 {
+            let join = backend.ensure_generation_join(&shard, id);
+            backend.publish_generation_outcome(&shard, id, &join, Ok(Vec::new()));
+        }
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+        assert!(matches!(
+            *delayed.outcome.lock().unwrap(),
+            Some(Err(EngineError::Conflict))
+        ));
+        assert!(backend.generation_joins.lock().unwrap().is_empty());
         drop(backend);
         let _ = std::fs::remove_dir_all(root);
     }

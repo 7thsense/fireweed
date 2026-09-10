@@ -73,9 +73,11 @@ CREATE INDEX IF NOT EXISTS fireweed_items_pending_order_idx
     WHERE lifecycle_state = 'Pending' AND superseded = 0;
 -- Group-head reseek after Claim/Complete/schedule. pending_order_idx has no
 -- group_key, so interleaved groups walked O(G) pending rows per rehead.
-CREATE INDEX IF NOT EXISTS fireweed_items_pending_group_idx
+CREATE INDEX IF NOT EXISTS fireweed_items_pending_group_nonnull_idx
     ON fireweed_items (tenant_id, queue_id, group_key, priority_sort, created_seq, item_id)
-    WHERE lifecycle_state = 'Pending' AND superseded = 0;
+    WHERE lifecycle_state = 'Pending' AND superseded = 0 AND group_key IS NOT NULL;
+-- Ungrouped rows do not need a second copy of the pending priority index.
+DROP INDEX IF EXISTS fireweed_items_pending_group_idx;
 CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx
     ON fireweed_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = 0 AND superseded = 0;

@@ -1746,7 +1746,9 @@ fn upsert_item_payloads(
         &format!(
             "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
              VALUES {values} \
-             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload"
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload \
+             WHERE fireweed_item_payloads.payload != excluded.payload \
+             OR (fireweed_item_payloads.payload IS NULL) != (excluded.payload IS NULL)"
         ),
         params,
     )?;
@@ -3069,9 +3071,9 @@ fn refresh_lost_group_reps_sql(
                    FROM incoming \
                    LEFT JOIN fireweed_items i ON i.rowid = ( \
                      SELECT i2.rowid FROM fireweed_items i2 \
-                     INDEXED BY fireweed_items_pending_group_idx \
+                     INDEXED BY fireweed_items_pending_group_nonnull_idx \
                      WHERE i2.tenant_id=? AND i2.queue_id=? \
-                       AND i2.group_key=incoming.group_key \
+                       AND i2.group_key=incoming.group_key AND i2.group_key IS NOT NULL \
                        AND i2.lifecycle_state='Pending' AND i2.superseded=0 \
                        AND (i2.not_before IS NULL OR i2.not_before<=?) \
                      ORDER BY i2.priority_sort, i2.created_seq, i2.item_id \
@@ -5765,6 +5767,14 @@ pub fn apply_command_sql(
                 &q,
                 &id_strs,
             )?;
+            exec_items_in(
+                tx,
+                "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                &[],
+                &t,
+                &q,
+                &id_strs,
+            )?;
             delete_typed_index_rows(tx, &t, &q, &id_strs)?;
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(shard.clone(), *id));
@@ -5868,7 +5878,29 @@ pub fn apply_command_sql(
         QueueCommand::MutateItems(c) => {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             let item_ids = c.items.iter().map(|item| item.item_id).collect::<Vec<_>>();
-            let groups = groups_of(tx, shard, &item_ids)?;
+            let groups = if grouped_shards.contains(shard) {
+                groups_of(tx, shard, &item_ids)?
+            } else {
+                Vec::new()
+            };
+            let invalidated: Vec<String> = c
+                .items
+                .iter()
+                .filter_map(|item| match &item.action {
+                    ResolvedItemMutationAction::Replace(values) if values.invalidate_lease => {
+                        Some(item.item_id.to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            exec_items_in(
+                tx,
+                "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                &[],
+                &t,
+                &q,
+                &invalidated,
+            )?;
             let typed_indexes = queues
                 .get(shard)
                 .map(|definition| definition.typed_indexes.as_slice())

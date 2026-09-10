@@ -35,7 +35,7 @@ mod tests {
     #[test]
     fn pending_group_head_index_is_declared() {
         assert!(
-            RELATIONAL_SCHEMA.contains("fireweed_items_pending_group_idx"),
+            RELATIONAL_SCHEMA.contains("fireweed_items_pending_group_nonnull_idx"),
             "group-head reseek needs a group_key pending index"
         );
         assert!(

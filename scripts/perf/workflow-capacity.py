@@ -12,9 +12,12 @@ import time
 repo = Path(__file__).resolve().parents[2]
 binary = repo / "target/release/fireweed-workload"
 args = sys.argv[1:]
+qualification_requested = "--qualify" in args
+args = [arg for arg in args if arg != "--qualify"]
 if not args or args == ["--help"]:
     print("Build with cargo build -p fireweed-workload --release, then:\n"
-          "scripts/perf/workflow-capacity.py --profile primitives --items 10000 --batch 100 --deadline-seconds 600")
+          "scripts/perf/workflow-capacity.py --profile primitives --items 10000 --batch 100 --deadline-seconds 600\n"
+          "Add --qualify to enforce the million-row 10k insert/update or sustained 5k workflow gates.")
     raise SystemExit(0)
 
 def git(*args):
@@ -71,6 +74,10 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     errors = stderr.read().decode()
     report = {
         "command": command, "head": head, "dirty": bool(status),
+        "diagnostics": {key: os.environ[key] for key in (
+            "FIREWEED_SQL_TRACE", "FIREWEED_WORKLOAD_TIMING",
+            "FIREWEED_LOG_TRACE", "FIREWEED_WORKLOAD_DEBUG", "LD_PRELOAD",
+        ) if key in os.environ},
         "filesystem": mount,
         "storage": storage_usage(data_root),
         "source_diff_and_workload_sha256": digest.hexdigest(),
@@ -82,13 +89,22 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         "voluntary_context_switches": usage.ru_nvcsw,
         "involuntary_context_switches": usage.ru_nivcsw,
     }
+    if "--projection-root" in args:
+        projection_root = Path(args[args.index("--projection-root") + 1]).resolve()
+        report["projection_storage"] = storage_usage(projection_root)
+        report["projection_filesystem"] = json.loads(subprocess.check_output([
+            "findmnt", "--json", "--target", str(next(path for path in [projection_root, *projection_root.parents] if path.exists()))
+        ]))
     if child.returncode == 0:
         report["result"] = json.loads(raw)
     else:
         report["stdout"] = raw
     if errors:
         report["stderr"] = errors
+    if qualification_requested:
+        from workflow_capacity_gate import qualify
+        report["qualification"] = qualify(report)
     print(json.dumps(report, indent=2))
     if data_directory is not None:
         data_directory.cleanup()
-    raise SystemExit(child.returncode)
+    raise SystemExit(child.returncode or (1 if qualification_requested and not report["qualification"]["passed"] else 0))
