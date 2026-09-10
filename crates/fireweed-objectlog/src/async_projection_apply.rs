@@ -544,7 +544,7 @@ where
         target: &CommandPosition,
         deadline: Duration,
     ) -> EngineResult<()> {
-        // A dependent read needs Claim applied now. Waiting 80 ms for Complete
+        // A dependent read needs Claim applied now. Waiting for a follow-up
         // cannot help when that Complete itself needs projection coverage first.
         struct CoverageWaiter<'a>(&'a AtomicU64);
         impl Drop for CoverageWaiter<'_> {
@@ -853,10 +853,11 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
     })
 }
 
-/// Wait for Complete envelopes of the same ids before applying a Claim-only
-/// generation. Completes are packed after Claim responses return (~30ms);
-/// applying Claim first writes Leased rows that Complete immediately discards.
-const CLAIM_COMPLETE_JOIN_MS: u64 = 80;
+/// Briefly join a follow-up that invalidates the claimed leases before applying
+/// intermediate Leased rows. Disk-backed append can take hundreds of milliseconds
+/// under concurrent writes; an 80 ms window missed nearly every follow-up in the
+/// sustained workload. Coverage waiters bypass this bounded background delay.
+const CLAIM_COMPLETE_JOIN_MS: u64 = 500;
 
 fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
     let mut claim = false;
@@ -1516,6 +1517,31 @@ mod tests {
             .enqueue_reserved(reservation, vec![pos(sequence)], commands)
             .await
             .expect("enqueue");
+    }
+
+    #[tokio::test]
+    async fn coverage_read_bypasses_claim_followup_delay() {
+        let coordinator = coordinator();
+        let mut envelope = pause_env("claim-for-read");
+        envelope.command = QueueCommand::Claim(fireweed_engine::ClaimCommand::new(
+            vec![],
+            fireweed_core::LeaseToken::new("read-token").unwrap(),
+            fireweed_core::UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        ));
+        let commands = vec![envelope];
+        let reservation = coordinator.reserve(shard(), &commands).await.unwrap();
+        coordinator
+            .enqueue_reserved(reservation, vec![pos(1)], commands)
+            .await
+            .unwrap();
+        // Let the background worker enter its join window before requesting coverage.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        coordinator
+            .wait_until_covers(&shard(), &pos(1), Duration::from_millis(200))
+            .await
+            .expect("dependent read must bypass the 500 ms background join window");
+        assert_eq!(coordinator.apply_live_call_count(), 1);
     }
 
     #[tokio::test]
