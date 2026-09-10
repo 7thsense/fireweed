@@ -1,0 +1,6 @@
+{
+  "source_sha256": "2eb659e2905d8099a0fc8dcf93ac9d0722f66314cdd59dd0a2e204acccb0ed3a",
+  "binary_sha256": "29106bb8963cdfa668224051ece205c94dec4028cad04a869a8d34a462a2ffd5",
+  "build_command": "cc -shared -fPIC -O2 -Wall -Wextra -o /tmp/fireweed-fsync-timing.so /tmp/fireweed-fsync-timing.c -ldl",
+  "purpose": "Diagnostic only; forwards actual fsync/fdatasync and records latency. LD_PRELOAD is rejected by qualification."
+}

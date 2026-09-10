@@ -1,6 +1,6 @@
 # Fireweed original-row workflow capacity
 
-Date: 2026-09-10. Measurement snapshots: `02730571` through `7398887e`.
+Date: 2026-09-10. Measurement snapshots: `02730571` through `2d6996ff`.
 
 **Qualification is still failing.** Million-row insert/update measurements exceed
 10k rows/sec, but completed 1.6-million-workflow soaks sustain about 3k workflows/sec,
@@ -311,3 +311,29 @@ replacements and repeated-ID sequential preservation. Engine and local object-lo
 unit tests passed; the two live S3 checks were explicitly excluded because no
 endpoint is configured. The PostgreSQL projection was compile-checked across all
 targets; no live PostgreSQL performance claim is made.
+
+
+The unchanged-body candidate on `2d6996ff` reduced serialized log bytes from
+1,362.4 MiB to 1,053.4 MiB across 300,000 workflows (about 23%). Its short run
+reached 5,152 workflows/sec overall, but the slowest final-cycle shard took
+29.2 seconds. This is a log-volume improvement, not a sustained throughput pass.
+Keeping the same 8,000-row in-flight worker capacity with 500-row batches and
+16 workers per shard regressed to 3,712 workflows/sec. More commands per append
+in that control still meant fewer rows per append.
+[Unchanged-body trace](evidence/workflow-capacity/fireweed-keep-payload-purge8k-load4-100k-8-c3.json.gz),
+[500-row control](evidence/workflow-capacity/fireweed-keep-payload-b500-w16-load8-purge8k-100k-8-c3.json.gz).
+
+A separate syscall-timing diagnostic forwarded every real `fsync` and `fdatasync`
+while measuring file and directory calls. Across 806 appends, segment file sync
+averaged 268 ms and segment directory sync 104 ms; manifest file and directory
+sync averaged 105 ms and 107 ms. The last 100 segment file calls averaged 710 ms.
+These are overlapping per-call durations across shards, not additive wall time.
+Instrumentation and machine variability prevent attributing the diagnostic's
+3,090 workflows/sec directly to the production candidate. It is explicitly
+ineligible for qualification because it uses `LD_PRELOAD`. The result does show
+that namespace durability barriers contribute substantial latency alongside file
+barriers. Removing either barrier from the existing file-per-object protocol
+would weaken durability and is not an acceptable optimization.
+[Syscall diagnostic](evidence/workflow-capacity/fireweed-sync-call-diagnostic-100k-8-c3.json.gz),
+[interposer source](evidence/workflow-capacity/fireweed-fsync-timing.c),
+[build provenance](evidence/workflow-capacity/fireweed-sync-call-diagnostic-provenance.json).
