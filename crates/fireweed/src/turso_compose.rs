@@ -183,6 +183,7 @@ struct QueueFrontiers {
 }
 
 struct GenerationJoin {
+    requests: Mutex<Vec<Arc<MutationGenerationWork>>>,
     notify: tokio::sync::Notify,
     outcome: Mutex<Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>>,
 }
@@ -197,7 +198,17 @@ impl GenerationJoin {
             .expect("generation outcome")
             .as_ref()
             .map(|outcome| match outcome {
-                Ok(members) => member_for_work(work, members),
+                Ok(members) => {
+                    let requests = self.requests.lock().expect("generation request order");
+                    requests
+                        .iter()
+                        .position(|request| std::ptr::eq(request.as_ref(), work))
+                        .and_then(|index| members.get(index))
+                        .map(|member| member.outcome.clone())
+                        .ok_or_else(|| {
+                            EngineError::Storage("mutation generation lost member outcome".into())
+                        })
+                }
                 Err(error) => Err(error.clone()),
             })
     }
@@ -510,105 +521,6 @@ fn coalesce_generation_commits(
                 .with_append_admission(admission)
         })
         .collect())
-}
-
-fn push_spec_keys(request: &AsyncPushRequest) -> Vec<String> {
-    request
-        .items
-        .iter()
-        .filter_map(|item| {
-            item.client_item_key
-                .as_ref()
-                .map(|key| key.as_str().to_string())
-        })
-        .collect()
-}
-
-fn push_commit_keys(commit: &RawCommitRequest) -> Vec<String> {
-    commit
-        .commands()
-        .iter()
-        .flat_map(|envelope| match &envelope.command {
-            QueueCommand::Push(command) => command
-                .items
-                .iter()
-                .map(|item| item.client_item_key.as_str().to_string())
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
-        .collect()
-}
-
-fn push_member_matches(
-    request: &AsyncPushRequest,
-    outcome: &MutationGenerationMemberOutcome,
-) -> bool {
-    match outcome {
-        MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
-            request: commit, ..
-        }) => {
-            let id_match = request.request_id.is_some()
-                && request.request_id
-                    == commit
-                        .commands()
-                        .first()
-                        .and_then(|envelope| envelope.request_id.clone());
-            let spec_keys = push_spec_keys(request);
-            let key_match = !spec_keys.is_empty() && spec_keys == push_commit_keys(commit);
-            id_match || key_match
-        }
-        MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_)) => {
-            request.request_id.is_some()
-        }
-        _ => false,
-    }
-}
-
-fn member_for_work(
-    work: &MutationGenerationWork,
-    members: &[fireweed_engine::MutationGenerationMember],
-) -> EngineResult<MutationGenerationMemberOutcome> {
-    let mut rejected = None;
-    for member in members {
-        match (work, &member.outcome) {
-            (MutationGenerationWork::Push { request, .. }, outcome)
-                if push_member_matches(request, outcome) =>
-            {
-                return Ok(member.outcome.clone());
-            }
-            (
-                MutationGenerationWork::BatchUpdate { request, .. },
-                MutationGenerationMemberOutcome::BatchUpdate { response, .. },
-            ) if response.request_id == request.request_id => return Ok(member.outcome.clone()),
-            (
-                MutationGenerationWork::Claim { id, .. },
-                MutationGenerationMemberOutcome::Claim { id: claimed_id, .. },
-            ) if id == claimed_id => return Ok(member.outcome.clone()),
-            (
-                MutationGenerationWork::Finalize { command_id, .. },
-                MutationGenerationMemberOutcome::Finalize { request },
-            ) if request
-                .commands()
-                .first()
-                .map(|envelope| &envelope.command_id)
-                == Some(command_id) =>
-            {
-                return Ok(member.outcome.clone());
-            }
-            (
-                MutationGenerationWork::ItemMutation { id, .. },
-                MutationGenerationMemberOutcome::ItemMutation { id: result_id, .. },
-            ) if id == result_id => return Ok(member.outcome.clone()),
-            (MutationGenerationWork::Singleton { .. }, _) => return Ok(member.outcome.clone()),
-            (
-                _,
-                MutationGenerationMemberOutcome::Rejected(_)
-                | MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_)),
-            ) => rejected = Some(member.outcome.clone()),
-            _ => {}
-        }
-    }
-    rejected.ok_or_else(|| EngineError::Storage("mutation generation lost member outcome".into()))
 }
 
 #[cfg(test)]
@@ -3805,6 +3717,7 @@ impl DerivedObjectLogTursoBackend {
             .entry((queue.clone(), generation_id))
             .or_insert_with(|| {
                 Arc::new(GenerationJoin {
+                    requests: Mutex::new(Vec::new()),
                     notify: tokio::sync::Notify::new(),
                     outcome: Mutex::new(None),
                 })
@@ -4174,6 +4087,7 @@ impl DerivedObjectLogTursoBackend {
                 .entry((queue.clone(), ticket.generation_id()))
                 .or_insert_with(|| {
                     Arc::new(GenerationJoin {
+                        requests: Mutex::new(Vec::new()),
                         notify: tokio::sync::Notify::new(),
                         outcome: Mutex::new(None),
                     })
@@ -4194,6 +4108,10 @@ impl DerivedObjectLogTursoBackend {
             {
                 let driven_id = generation.generation_id();
                 let join = self.ensure_generation_join(&queue, driven_id);
+                // Match responses by the admitted request identity and driver order.
+                // Client keys and optional request IDs are not unique caller IDs.
+                *join.requests.lock().expect("generation request order") =
+                    generation.requests().to_vec();
                 // Publication belongs to an owned, drainable driver. Cancelling
                 // the caller that started a generation must not strand its peers.
                 let runner = self.clone();
@@ -4974,6 +4892,40 @@ impl<L: AsyncLogStore + 'static> AtomicTursoBackend<L> {
     }
 }
 
+/// Accept only a complete, contiguous tail of disjoint authoritative claims.
+/// Anything else retains the normal projection-coverage barrier.
+#[cfg(feature = "objectlog")]
+fn claim_only_tail(
+    applied: &CommandPosition,
+    target: &CommandPosition,
+    entries: Vec<(CommandPosition, CommandEnvelope)>,
+) -> Option<Vec<fireweed_engine::ClaimCommand>> {
+    if applied.backend_epoch != target.backend_epoch || applied.queue != target.queue {
+        return None;
+    }
+    let mut sequence = applied.sequence;
+    let mut seen = HashSet::new();
+    let mut claims = Vec::new();
+    for (position, envelope) in entries {
+        sequence = sequence.checked_add(1)?;
+        if position.queue != target.queue
+            || position.backend_epoch != target.backend_epoch
+            || position.sequence != sequence
+            || sequence > target.sequence
+        {
+            return None;
+        }
+        let QueueCommand::Claim(claim) = envelope.command else {
+            return None;
+        };
+        if !claim.authority_first || claim.item_ids.iter().any(|id| !seen.insert(*id)) {
+            return None;
+        }
+        claims.push(claim);
+    }
+    (sequence == target.sequence && !claims.is_empty()).then_some(claims)
+}
+
 #[cfg(feature = "objectlog")]
 impl DerivedObjectLogTursoBackend {
     async fn dispatch_item_mutation(
@@ -5078,17 +5030,41 @@ impl DerivedObjectLogTursoBackend {
                         .await
                         .map_err(map_coord)?;
                     let epoch = AsyncLogStore::current_epoch(log.as_ref(), shard.clone()).await?;
+                    let mut pending_claims = Vec::new();
                     if let Some(coordinator) = &coordinator {
                         if let Some(target) =
                             AsyncLogStore::high_water(log.as_ref(), shard.clone()).await?
                         {
-                            coordinator
-                                .wait_until_covers(
-                                    &shard,
-                                    &target,
-                                    S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
-                                )
-                                .await?;
+                            let applied = coordinator.snapshot(&shard).await.applied_high_water;
+                            if !position_covers(applied.as_ref(), &target) {
+                                // The exclusive fence freezes the log tail. A bounded tail
+                                // containing only disjoint authoritative claims can validate
+                                // the next mutation without publishing intermediate leases.
+                                if let Some(applied) = applied.as_ref().filter(|p| {
+                                    p.backend_epoch == target.backend_epoch
+                                        && target.sequence.saturating_sub(p.sequence) <= 16
+                                }) {
+                                    let page = AsyncLogStore::read_from(
+                                        log.as_ref(),
+                                        shard.clone(),
+                                        Some(applied.clone()),
+                                        16,
+                                    )
+                                    .await?;
+                                    pending_claims =
+                                        claim_only_tail(applied, &target, page.entries)
+                                            .unwrap_or_default();
+                                }
+                                if pending_claims.is_empty() {
+                                    coordinator
+                                        .wait_until_covers(
+                                            &shard,
+                                            &target,
+                                            S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
+                                        )
+                                        .await?;
+                                }
+                            }
                         }
                     }
                     let definition =
@@ -5113,7 +5089,12 @@ impl DerivedObjectLogTursoBackend {
                                     (response, None)
                                 } else {
                                     let plan = projection
-                                        .plan_addressed_item_mutation(&shard, &definition, &request)
+                                        .plan_addressed_item_mutation(
+                                            &shard,
+                                            &definition,
+                                            &request,
+                                            &pending_claims,
+                                        )
                                         .await?;
                                     (plan.response, (!request.dry_run).then_some(plan.command))
                                 };
@@ -5196,6 +5177,7 @@ impl DerivedObjectLogTursoBackend {
                                     )
                                     .await?;
                             }
+                            pending_claims.clear();
                         }
                     }
                     Ok(members)
@@ -5731,6 +5713,199 @@ mod s3c_activation {
                 Err(error) => panic!("concurrent push: {error:?}"),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn addressed_mutation_appends_behind_unapplied_claim_with_lease_guards() {
+        use fireweed_engine::{
+            AddressedMutation, ItemMutationOperation, ItemMutationOutcome, ItemMutationReturning,
+            ItemPatch, LeaseGuard, LifecyclePatch,
+        };
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let root = std::env::temp_dir().join(format!(
+                "fireweed-claim-tail-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            let backend = Arc::new(open(&root).await);
+            let definition = qdef("claim-tail");
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            backend.create_queue(definition.clone()).await.unwrap();
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default(), PushSpec::default()],
+                    UtcTimestamp::new(1, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            backend.peek(&shard, 1).await.unwrap(); // cover the push before pausing
+            let coordinator = backend.async_apply.as_ref().unwrap().clone();
+            coordinator.pause();
+            let applied = coordinator
+                .snapshot(&shard)
+                .await
+                .applied_high_water
+                .unwrap();
+            let token = LeaseToken::new("claim-tail-token").unwrap();
+            let claimed = backend
+                .claim(ClaimRequest {
+                    shard: shard.clone(),
+                    worker_id: WorkerId::new("w").unwrap(),
+                    max_items: 2,
+                    lease_token: token.clone(),
+                    lease_expires_at: UtcTimestamp::new(30, 0).unwrap(),
+                    now: UtcTimestamp::new(2, 0).unwrap(),
+                    eligibility_time: None,
+                    compatibility: ClaimCompatibility::default(),
+                    expected_epoch: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(claimed.items.len(), 2);
+            let target = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let page = AsyncLogStore::read_from(
+                backend.log.as_ref(),
+                shard.clone(),
+                Some(applied.clone()),
+                16,
+            )
+            .await
+            .unwrap();
+            let tail =
+                claim_only_tail(&applied, &target, page.entries.clone()).expect("claim-only tail");
+            let mut invalid = page.entries.clone();
+            invalid[0].0.sequence += 1;
+            assert!(
+                claim_only_tail(&applied, &target, invalid).is_none(),
+                "gaps must wait for coverage"
+            );
+            let mut invalid = page.entries.clone();
+            let QueueCommand::Claim(claim) = &mut invalid[0].1.command else {
+                unreachable!()
+            };
+            claim.authority_first = false;
+            assert!(
+                claim_only_tail(&applied, &target, invalid).is_none(),
+                "historical claims must wait"
+            );
+            let mut invalid = page.entries.clone();
+            let QueueCommand::Claim(claim) = &mut invalid[0].1.command else {
+                unreachable!()
+            };
+            claim.item_ids.push(claim.item_ids[0]);
+            assert!(
+                claim_only_tail(&applied, &target, invalid).is_none(),
+                "repeated IDs must wait"
+            );
+            let request = ItemMutationRequest {
+                request_id: RequestId::new("tail-update").unwrap(),
+                evaluated_at: UtcTimestamp::new(3, 0).unwrap(),
+                dry_run: false,
+                returning: ItemMutationReturning::BeforeSnapshot,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed {
+                    entries: vec![AddressedMutation {
+                        item_id: claimed.items[0].item_id,
+                        expected_item_version: Some(claimed.items[0].item_version),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::Match(token),
+                        patch: ItemPatch {
+                            lifecycle: LifecyclePatch::SetComplete,
+                            ..Default::default()
+                        },
+                    }],
+                },
+            };
+            let valid = backend
+                .projection
+                .plan_addressed_item_mutation(&shard, &definition, &request, &tail)
+                .await
+                .unwrap();
+            assert_eq!(valid.response.summary.changed, 1, "{:?}", valid.response);
+            let mut stale = request.clone();
+            let ItemMutationOperation::Addressed { entries } = &mut stale.operation else {
+                unreachable!()
+            };
+            entries[0].lease_guard = LeaseGuard::Match(LeaseToken::new("wrong-token").unwrap());
+            let rejected = backend
+                .projection
+                .plan_addressed_item_mutation(&shard, &definition, &stale, &tail)
+                .await
+                .unwrap();
+            assert!(matches!(
+                rejected.response.results[0].outcome,
+                ItemMutationOutcome::StaleLease
+            ));
+            let mut expired = request.clone();
+            expired.evaluated_at = UtcTimestamp::new(31, 0).unwrap();
+            let rejected = backend
+                .projection
+                .plan_addressed_item_mutation(&shard, &definition, &expired, &tail)
+                .await
+                .unwrap();
+            assert!(matches!(
+                rejected.response.results[0].outcome,
+                ItemMutationOutcome::StaleLease
+            ));
+            let mut caught_up_request = request.clone();
+            let ItemMutationOperation::Addressed { entries } = &mut caught_up_request.operation
+            else {
+                unreachable!()
+            };
+            entries[0].item_id = claimed.items[1].item_id;
+            entries[0].expected_item_version = Some(claimed.items[1].item_version);
+            let worker = {
+                let backend = Arc::clone(&backend);
+                let shard = shard.clone();
+                tokio::spawn(
+                    async move { backend.dispatch_item_mutation(&shard, request, None).await },
+                )
+            };
+            loop {
+                let high = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if high.sequence > target.sequence {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                coordinator.snapshot(&shard).await.applied_high_water,
+                Some(applied)
+            );
+            assert!(
+                !worker.is_finished(),
+                "response must still cover the mutation before releasing fence"
+            );
+            coordinator.resume();
+            let response = worker.await.unwrap().unwrap();
+            assert_eq!(response.summary.changed, 1);
+            let metrics = backend.metrics(&shard).await.unwrap();
+            assert_eq!(
+                (metrics.pending, metrics.leased, metrics.complete),
+                (0, 1, 1)
+            );
+            let caught_up = backend
+                .projection
+                .plan_addressed_item_mutation(&shard, &definition, &caught_up_request, &tail)
+                .await
+                .unwrap();
+            assert_eq!(
+                caught_up.response.summary.changed, 1,
+                "already-applied claim must not bump version twice"
+            );
+            drop(backend);
+            let _ = std::fs::remove_dir_all(root);
+        })
+        .await
+        .expect("unapplied-claim mutation must append without waiting for SQL");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

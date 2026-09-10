@@ -2901,12 +2901,14 @@ impl TursoRelational {
     }
 
     /// Plan addressed mutations from full-key reads. The caller must hold the queue's
-    /// mutation fence through append and first cover the committed log frontier.
+    /// mutation fence through append and cover the committed log frontier, except
+    /// for the supplied contiguous, disjoint authoritative Claim-only tail.
     pub async fn plan_addressed_item_mutation(
         &self,
         shard: &QueueKey,
         definition: &QueueDefinition,
         request: &fireweed_engine::ItemMutationRequest,
+        pending_claims: &[fireweed_engine::ClaimCommand],
     ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
         use fireweed_engine::ItemMutationOperation;
         use fireweed_projection::{ProjectionData, ProjectionImageItem};
@@ -3032,6 +3034,34 @@ impl TursoRelational {
                         })
                         .transpose()?,
                 });
+            }
+        }
+        let claims_by_id: HashMap<_, _> = pending_claims
+            .iter()
+            .flat_map(|claim| claim.item_ids.iter().map(move |id| (*id, claim)))
+            .collect();
+        for item in &mut image.items {
+            if let Some(claim) = claims_by_id.get(&item.item_id) {
+                match item.state {
+                    ItemState::Pending => {
+                        item.state = ItemState::Leased;
+                        item.item_version = item
+                            .item_version
+                            .checked_add(1)
+                            .ok_or_else(|| storage("item version overflow"))?;
+                        item.attempt_count = item
+                            .attempt_count
+                            .checked_add(1)
+                            .ok_or_else(|| storage("attempt count overflow"))?;
+                        item.lease_token = Some(claim.lease_token.clone());
+                        item.lease_expires_at = Some(claim.lease_expires_at);
+                        item.worker_id = claim.worker_id.clone();
+                    }
+                    ItemState::Leased if item.lease_token.as_ref() == Some(&claim.lease_token) => {
+                        // Apply caught up while the SQL snapshot was being read.
+                    }
+                    _ => return Err(storage("claim tail conflicts with projection state")),
+                }
             }
         }
         ProjectionData::from_image(definition, image)?.plan_item_mutation(request)

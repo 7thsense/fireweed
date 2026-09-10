@@ -635,3 +635,42 @@ async fn cancelling_a_mutation_caller_does_not_strand_batch_peers() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_anonymous_pushes_return_their_own_rows() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir().unwrap();
+        let fw = std::sync::Arc::new(open_store(root.path(), false, TestClock::at(200)).unwrap());
+        let q = create_queue(&fw, "anonymous-push").await.unwrap();
+        let mut workers = Vec::new();
+        for worker in 0..8 {
+            let fw = fw.clone();
+            let q = q.clone();
+            workers.push(tokio::spawn(async move {
+                let mut row = item(worker, 0, 32);
+                row.client_item_key = None;
+                let ids = fw.push_batch(&q, vec![row]).await.unwrap();
+                assert_eq!(ids.len(), 1);
+                (ids[0], body(worker, 0, 32))
+            }));
+        }
+        let mut expected = std::collections::HashMap::new();
+        for worker in workers {
+            let (id, payload) = worker.await.unwrap();
+            assert!(
+                expected.insert(id, payload).is_none(),
+                "two callers received the same row"
+            );
+        }
+        let mut seen = 0;
+        while seen < 8 {
+            for claimed in fw.claim(&q, 8, 1000).await.unwrap() {
+                assert_eq!(claimed.payload, expected.remove(&claimed.item_id));
+                seen += 1;
+            }
+        }
+        assert!(expected.is_empty());
+    })
+    .await
+    .expect("anonymous pushes must retain distinct responses");
+}
