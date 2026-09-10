@@ -3075,8 +3075,8 @@ pub(crate) async fn verify_committed_reader_settings(
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
     // Only takes effect before a new database is initialized; existing files
-    // retain their page size. Match the 4 KiB filesystem block size for new files.
-    connection.pragma_update("page_size", "4096").await?;
+    // retain their page size. Smaller pages reduce WAL traffic for scattered row updates.
+    connection.pragma_update("page_size", "2048").await?;
     // `journal_mode` produces a row. Turso's execute_batch rejects row-producing statements after applying
     // their side effect, so each pragma is deliberately driven through the row-aware API.
     connection
@@ -3491,7 +3491,7 @@ mod projection_checkpoint_config_tests {
         )
         .await
         .unwrap();
-        assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
+        assert_eq!(new.wal_truncate_min_bytes, 2048 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
         let path = root.path().join("existing.db");
         {
@@ -3500,7 +3500,7 @@ mod projection_checkpoint_config_tests {
                 .await
                 .unwrap();
             let connection = db.connect().unwrap();
-            connection.pragma_update("page_size", "2048").await.unwrap();
+            connection.pragma_update("page_size", "4096").await.unwrap();
             connection
                 .execute("CREATE TABLE previous_file (id INTEGER)", ())
                 .await
@@ -3509,7 +3509,7 @@ mod projection_checkpoint_config_tests {
         let existing = TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
             .await
             .unwrap();
-        assert_eq!(existing.wal_truncate_min_bytes, 2048 * 1024);
+        assert_eq!(existing.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
     }
 }

@@ -1,0 +1,6 @@
+{
+  "source_sha256": "c17a7ab1e5bac5d7bdbbf0eb2521d3442b2a84b6af75c223d96b817aa6533ba4",
+  "binary_sha256": "3a07eda55ee0fed862ed8d9ef033172cd2b160238f48399808004f1b304df6ff",
+  "build": "cc -shared -fPIC -O2 /tmp/fireweed-fsync-timeline.c -ldl -o /tmp/fireweed-fsync-timeline.so",
+  "behavior": "Forwards real fsync/fdatasync; timestamps calls on log paths; diagnostics only."
+}

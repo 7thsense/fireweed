@@ -563,3 +563,35 @@ All other gates passed. Staggering did not resolve the repeated shared stall;
 the experiment is reverted to the supported fixed 64,000-frame policy. The
 next investigation timestamps real log synchronization calls across the slow
 cycle; no durability bypass is permitted.
+
+### Larger resident population exposes sustained write pressure
+
+The fixed-policy [500,000-row, six-cycle run](evidence/workflow-capacity/fireweed-qualified-workflow-a74a6218-500k-8-c6-a.json.gz)
+completed three million original-row workflows at **4,955.44/sec** over 605.73
+process seconds. The final four cycles failed throughput (slowest-shard
+equivalents 4,786, 3,844, 3,515, and 3,536/sec). Correctness, DB/RSS stability,
+and WAL-budget checks passed. Process filesystem output was **65.214 GiB**,
+about 23.3 KiB per workflow; this is process accounting, not physical NVMe
+traffic. A late live sample showed zero physical read bytes and substantial
+system I/O pressure. This workload is retained as a required larger-population
+regression case for subsequent optimization.
+
+A preceding [eight-cycle synchronization diagnostic](evidence/workflow-capacity/fireweed-fsync-timeline-a74a6218-100k-8-c8.json.gz)
+completed at 9,059/sec and did not reproduce the failing cycle. Real log-sync
+mean latency rose from roughly 3 ms in early ten-second buckets to 79.1 ms in
+the 50–60-second bucket (maximum 161.5 ms); another bucket reached a 239.6 ms
+maximum. The wrapper preserves real synchronization and is excluded from
+qualification. [Source](evidence/workflow-capacity/fireweed-fsync-timeline.c)
+and [provenance](evidence/workflow-capacity/fireweed-fsync-timeline-provenance.json)
+are preserved. Direct wrapper writes can interleave with stderr cycle lines;
+structured result cycles remain intact.
+
+The next candidate changes only new projection pages from 4 KiB to 2 KiB,
+keeping the 64,000-frame checkpoint threshold. Existing projection files retain
+their page size. The experiment tests whether smaller WAL frames reduce
+random row-update write amplification; it has not yet qualified.
+
+The 2 KiB candidate passed the combined release suites: 82 Turso tests and
+24 public contract/recovery/workflow tests, with one existing ignored test.
+The page-size compatibility test now checks new 2 KiB files and retention
+of existing 4 KiB files. [Validation log](evidence/workflow-capacity/fireweed-page2k-tests.log.gz).
