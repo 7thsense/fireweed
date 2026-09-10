@@ -16,13 +16,14 @@ def qualify(report):
             mounts = report[name].get("filesystems", [])
             check(name + "_on_disk", bool(mounts) and all(m.get("fstype") not in ("tmpfs", "ramfs", None) for m in mounts))
     check("no_external_io_override", not report.get("diagnostics", {}).get("LD_PRELOAD"))
+    check("no_unqualified_diagnostic_override", "diagnostic_provenance" not in report)
     if result.get("schema") == "primitive-capacity/v1":
         check("million_resident_rows", result.get("items", 0) >= 1_000_000, result.get("items"), 1_000_000)
         phases = {p["phase"]: p["records_per_s"] for p in result.get("aggregate_phases", [])}
         for name in ("insert", "enrich_by_key", "schedule_by_id"):
             rate = phases.get(name, 0)
             check(name, rate >= 10_000, rate, 10_000)
-    elif result.get("schema") == "workflow-capacity/v4":
+    elif result.get("schema") in ("workflow-capacity/v4", "workflow-capacity/v5"):
         check("original_row_workflow", result.get("profile") == "Mutable" and result.get("atomic_original_row_mutation") is True and result.get("dispatch") == "shared-normal-claim")
         check("faults_and_retention", result.get("faults") is True and result.get("includes_purge") is True)
         cycles = result.get("cycles", 0)
@@ -47,6 +48,10 @@ def qualify(report):
                 sizes = [c.get("projection_bytes") or 0 for c in shard["cycles"][-3:]]
                 growth = (max(sizes) / min(sizes) - 1) if min(sizes) > 0 else None
                 check(f"shard_{index}_projection_stable", growth is not None and growth <= .05, growth, "<=5% range")
+                if result.get("schema") == "workflow-capacity/v5":
+                    wal_sizes = [c.get("projection_wal_bytes") or 0 for c in shard["cycles"][-3:]]
+                    wal_growth = (max(wal_sizes) / min(wal_sizes) - 1) if min(wal_sizes) > 0 else None
+                    check(f"shard_{index}_projection_wal_stable", wal_growth is not None and wal_growth <= .10, wal_growth, "<=10% range")
     else:
         check("supported_qualification_profile", False, result.get("schema"))
     return {"passed": all(c["passed"] for c in checks), "checks": checks}

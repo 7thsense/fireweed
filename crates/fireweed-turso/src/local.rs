@@ -1886,12 +1886,13 @@ mod committed_reader_tests {
         );
         assert!(update.expect("set historical keyword form").is_empty());
         assert_eq!(readback, None);
-        assert!(
+        assert_eq!(
             wal_autocheckpoint_update
                 .expect("set wal_autocheckpoint")
-                .is_empty()
+                .len(),
+            1
         );
-        assert_eq!(wal_autocheckpoint_readback, None);
+        assert_eq!(wal_autocheckpoint_readback, Some(0));
         assert!(cache_spill_update.expect("set cache_spill").is_empty());
         assert_eq!(cache_spill_readback, Some(1));
         assert_query_only_rejection(query_only_write).expect("query_only rejection");
@@ -2632,7 +2633,7 @@ mod committed_pool_tests {
         eprintln!(
             "wal_freeze readers={} elapsed_us={} wal_before={} wal_after_writes={} \
              wal_after_reads={} checkpoint_invocations={} \
-             wal_autocheckpoint_readback=unavailable_not_inferred",
+             wal_autocheckpoint_readback=verified_in_reader_configuration",
             observed.len(),
             elapsed.as_micros(),
             wal_before,
@@ -3029,10 +3030,8 @@ pub(crate) async fn configure_committed_reader(
     connection
         .pragma_update("cache_size", settings.cache_size_kib.to_string())
         .await?;
-    // Turso 0.7 accepts this setter but exposes no readback row. Keep the
-    // request non-fatal; committed-reader liveness and explicit checkpoint
-    // instrumentation are the authoritative evidence.
-    let _ = connection.pragma_update("wal_autocheckpoint", "0").await;
+    // The pinned checkpoint-control backport makes this effective and queryable.
+    connection.pragma_update("wal_autocheckpoint", "0").await?;
     connection.busy_timeout(settings.busy_timeout)?;
     // Read-only connections never checkpoint or own projection durability.
     connection.pragma_update("synchronous", "OFF").await?;
@@ -3050,6 +3049,7 @@ pub(crate) async fn verify_committed_reader_settings(
     let cache_size_kib = scalar_i64(connection, "PRAGMA cache_size").await?;
     let busy_timeout_ms = scalar_i64(connection, "PRAGMA busy_timeout").await?;
     let query_only = scalar_i64(connection, "PRAGMA query_only").await?;
+    let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     let expected_timeout_ms = i64::try_from(expected.busy_timeout.as_millis()).map_err(|_| {
         TursoRelationalError::Configuration(
             "committed-reader busy timeout exceeds i64 milliseconds".to_string(),
@@ -3060,12 +3060,13 @@ pub(crate) async fn verify_committed_reader_settings(
         || cache_size_kib != expected.cache_size_kib
         || busy_timeout_ms != expected_timeout_ms
         || query_only != 1
+        || checkpoint_frames != 0
     {
         return Err(TursoRelationalError::Configuration(format!(
             "committed reader settings read back as journal_mode={journal_mode:?}, \
              synchronous={synchronous}, cache_size={cache_size_kib}, \
-             busy_timeout={busy_timeout_ms}, query_only={query_only}; expected \
-             wal, 0, {}, {}, 1",
+             busy_timeout={busy_timeout_ms}, query_only={query_only}, wal_autocheckpoint={checkpoint_frames}; expected \
+             wal, 0, {}, {}, 1, 0",
             expected.cache_size_kib, expected_timeout_ms
         )));
     }
@@ -3096,9 +3097,12 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
         .await?;
     // Negative cache_size is KiB. 128 MiB is a cache cap, not an O(N) working set.
     connection.pragma_update("cache_size", "-131072").await?;
-    // Turso 0.7.2 accepts this setter but still auto-checkpoints at 1,000 frames.
-    // Explicit WAL truncation uses the actual database page size.
-    let _ = connection.pragma_update("wal_autocheckpoint", "0").await;
+    // Coalesce repeated page versions before writing the rebuildable main DB.
+    // Preserve the upstream 1,000-frame policy for standalone projections.
+    let checkpoint_frames = if config.rebuildable_io { 32_000 } else { 1_000 };
+    connection
+        .pragma_update("wal_autocheckpoint", checkpoint_frames)
+        .await?;
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
 }
@@ -3159,6 +3163,13 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
         return Err(TursoRelationalError::Configuration(format!(
             "synchronous read back as {}, expected {expected_sync}",
             settings.synchronous
+        )));
+    }
+    let expected_checkpoint_frames = if config.rebuildable_io { 32_000 } else { 1_000 };
+    let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
+    if checkpoint_frames != expected_checkpoint_frames {
+        return Err(TursoRelationalError::Configuration(format!(
+            "wal_autocheckpoint read back as {checkpoint_frames}, expected {expected_checkpoint_frames}"
         )));
     }
     let expected_timeout = i64::try_from(config.busy_timeout.as_millis()).map_err(|_| {

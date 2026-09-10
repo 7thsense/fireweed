@@ -70,10 +70,11 @@ pub(crate) fn trace_sql(sql: &str, binds: usize, rows: usize, elapsed: Duration)
 /// Truncate only when the WAL is already large and no reader snapshot is live.
 /// `busy_timeout=0` makes TRUNCATE fail immediately if a Deferred reader holds
 /// the WAL; apply then continues and the next quiet apply retries.
-/// Turso 0.7.2 still auto-checkpoints at 1,000 frames: the accepted
-/// wal_autocheckpoint pragma does not configure that threshold. Explicit
-/// checkpoints additionally clear the pager cache and TRUNCATE syncs the WAL.
-/// Keep WAL history short: a 64 MiB threshold regressed public-API capacity.
+/// Standalone OFF-mode projections retain the 1,000-frame automatic policy and
+/// this truncation workaround. Log-backed projections use NORMAL accounting
+/// and an explicitly verified checkpoint limit, and bypass forced truncation.
+/// Explicit checkpoints clear the pager cache and TRUNCATE syncs the WAL; keep
+/// the OFF-mode workaround bounded rather than accumulating unreusable history.
 // The byte budget is derived at open from the actual database page size.
 
 pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {

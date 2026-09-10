@@ -15,6 +15,11 @@ binary = repo / "target/release/fireweed-workload"
 args = sys.argv[1:]
 qualification_requested = "--qualify" in args
 args = [arg for arg in args if arg != "--qualify"]
+diagnostic_provenance = None
+if "--diagnostic-provenance" in args:
+    index = args.index("--diagnostic-provenance")
+    diagnostic_provenance = json.loads(Path(args[index + 1]).read_text())
+    del args[index:index + 2]
 if not args or args == ["--help"]:
     print("Build with cargo build -p fireweed-workload --release, then:\n"
           "scripts/perf/workflow-capacity.py --profile primitives --items 10000 --batch 100 --deadline-seconds 600\n"
@@ -127,6 +132,8 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         report["stdout"] = raw
     if errors:
         report["stderr"] = errors
+    if diagnostic_provenance is not None:
+        report["diagnostic_provenance"] = diagnostic_provenance
     if qualification_requested:
         from workflow_capacity_gate import qualify
         report["qualification"] = qualify(report)

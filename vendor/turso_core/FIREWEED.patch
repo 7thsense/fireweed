@@ -1,0 +1,139 @@
+--- a/connection.rs
++++ b/connection.rs
+@@ -3721,6 +3721,31 @@
+     pub fn set_short_column_names(&self, value: bool) {
+         self.short_column_names.store(value, Ordering::SeqCst);
+         self.bump_prepare_context_generation();
++    }
++
++    /// Automatic checkpoint limit for this connection's ordinary WAL, in frames.
++    pub fn wal_autocheckpoint(&self) -> Result<usize> {
++        self.get_pager()
++            .wal
++            .as_ref()
++            .and_then(|wal| wal.auto_checkpoint_threshold())
++            .ok_or_else(|| {
++                LimboError::InvalidArgument(
++                    "automatic checkpoint configuration requires an ordinary WAL".into(),
++                )
++            })
++    }
++
++    pub fn set_wal_autocheckpoint(&self, frames: usize) -> Result<()> {
++        let pager = self.get_pager();
++        let wal = pager.wal.as_ref().ok_or_else(|| {
++            LimboError::InvalidArgument(
++                "automatic checkpoint configuration requires an ordinary WAL".into(),
++            )
++        })?;
++        wal.set_auto_checkpoint_threshold(frames)?;
++        self.bump_prepare_context_generation();
++        Ok(())
+     }
+ 
+     pub fn get_sync_mode(&self) -> SyncMode {
+--- a/storage/wal.rs
++++ b/storage/wal.rs
+@@ -726,6 +726,18 @@
+     /// Complete append of frames by updating shared wal state. Before this
+     /// all changes were stored locally.
+     fn finish_append_frames_commit(&self) -> Result<()>;
++
++    /// Automatic checkpoint limit in WAL frames, when supported by this WAL.
++    fn auto_checkpoint_threshold(&self) -> Option<usize> {
++        None
++    }
++
++    /// Zero disables automatic checkpoints; explicit and shutdown checkpoints remain available.
++    fn set_auto_checkpoint_threshold(&self, _frames: usize) -> Result<()> {
++        Err(LimboError::InvalidArgument(
++            "this WAL does not support configuring automatic checkpoints".into(),
++        ))
++    }
+ 
+     fn should_checkpoint(&self) -> bool;
+     fn checkpoint(&self, pager: &Pager, mode: CheckpointMode)
+@@ -2662,7 +2674,7 @@
+     write_lock_held: AtomicBool,
+ 
+     ongoing_checkpoint: RwLock<OngoingCheckpoint>,
+-    checkpoint_threshold: usize,
++    checkpoint_threshold: AtomicUsize,
+     /// This is the index to the read_lock in WalFileShared that we are holding. This lock contains
+     /// the max frame for this connection.
+     max_frame_read_lock_index: AtomicUsize,
+@@ -3848,10 +3860,20 @@
+         Ok(())
+     }
+ 
++    fn auto_checkpoint_threshold(&self) -> Option<usize> {
++        Some(self.checkpoint_threshold.load(Ordering::SeqCst))
++    }
++
++    fn set_auto_checkpoint_threshold(&self, frames: usize) -> Result<()> {
++        self.checkpoint_threshold.store(frames, Ordering::SeqCst);
++        Ok(())
++    }
++
+     #[instrument(skip_all, level = Level::DEBUG)]
+     fn should_checkpoint(&self) -> bool {
++        let threshold = self.checkpoint_threshold.load(Ordering::SeqCst);
+         let snapshot = self.load_coordination_snapshot();
+-        snapshot.max_frame as usize > self.checkpoint_threshold + snapshot.nbackfills as usize
++        threshold > 0 && snapshot.max_frame.saturating_sub(snapshot.nbackfills) > threshold as u64
+     }
+ 
+     #[instrument(skip_all, level = Level::DEBUG)]
+@@ -4617,7 +4639,7 @@
+                 pages_to_checkpoint: Vec::new(),
+                 inflight_reads: Vec::with_capacity(MAX_INFLIGHT_READS),
+             }),
+-            checkpoint_threshold: 1000,
++            checkpoint_threshold: AtomicUsize::new(1000),
+             buffer_pool,
+             checkpoint_seq: AtomicU32::new(0),
+             syncing: Arc::new(AtomicBool::new(false)),
+--- a/translate/pragma.rs
++++ b/translate/pragma.rs
+@@ -34,6 +34,9 @@
+         let register = program.emit_string8_new_reg(x.to_string());
+         program.emit_result_row(register, 1);
+     }
++    // Compatibility backport: keep the parser crate unchanged.
++    let register = program.emit_string8_new_reg("wal_autocheckpoint".into());
++    program.emit_result_row(register, 1);
+     program.add_pragma_result_column("pragma_list".into());
+ }
+ 
+@@ -222,6 +225,31 @@
+ 
+     if name.name.as_str().eq_ignore_ascii_case("pragma_list") {
+         list_pragmas(program);
++        return Ok(());
++    }
++
++    // Compatibility backport for the existing SQL spelling, without changing
++    // the parser's public enum. Like synchronous, this is connection-local.
++    if name
++        .name
++        .as_str()
++        .eq_ignore_ascii_case("wal_autocheckpoint")
++    {
++        resolver.resolve_database_id(name)?;
++        if let Some(ast::PragmaBody::Equals(value) | ast::PragmaBody::Call(value)) = body {
++            let frames = match parse_signed_number(&value)? {
++                Value::Numeric(Numeric::Integer(frames)) => usize::try_from(frames.max(0))
++                    .map_err(|_| {
++                        LimboError::InvalidArgument("checkpoint limit is too large".into())
++                    })?,
++                _ => bail_parse_error!("wal_autocheckpoint requires an integer frame count"),
++            };
++            connection.set_wal_autocheckpoint(frames)?;
++        }
++        let register = program.alloc_register();
++        program.emit_int(connection.wal_autocheckpoint()? as i64, register);
++        program.emit_result_row(register, 1);
++        program.add_pragma_result_column("wal_autocheckpoint".into());
+         return Ok(());
+     }
+ 

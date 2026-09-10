@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 use fireweed::{
     ConfigSecret, ControlPlaneConfig, Fireweed, LogConfig, ObjectLogAuthority,
     ObjectLogRuntimeConfig, ObjectLogStorage, OwnerId, PostgresCoordinationConfig, PostgresMode,
-    PostgresRuntimeConfig, ProjectionConfig, ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier,
-    SegmentConfig, StorageConfig,
+    PostgresRuntimeConfig, ProjectionConfig, ProjectionStoreConfig, RecoveryPolicy,
+    ResponseBarrier, SegmentConfig, StorageConfig,
 };
 
 #[allow(unused_imports)]
@@ -135,21 +135,20 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
         }
     }
     let _: StorageConfig = StorageConfig::memory();
-    let _: StorageConfig =
-        ObjectLogRuntimeConfig {
-            object_log: ObjectLogStorage::Local {
-                root: PathBuf::from("object-log"),
-            },
-            authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Postgres {
-                url: ConfigSecret::new("postgres://example/projection"),
-            },
-            response_barrier: ResponseBarrier::Strict,
-            segments,
-            namespace: "fixture".to_owned(),
-            recovery: RecoveryPolicy::default(),
-        }
-        .into_matrix_config();
+    let _: StorageConfig = ObjectLogRuntimeConfig {
+        object_log: ObjectLogStorage::Local {
+            root: PathBuf::from("object-log"),
+        },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
+        projection: ProjectionConfig::Postgres {
+            url: ConfigSecret::new("postgres://example/projection"),
+        },
+        response_barrier: ResponseBarrier::Strict,
+        segments,
+        namespace: "fixture".to_owned(),
+        recovery: RecoveryPolicy::default(),
+    }
+    .into_matrix_config();
     Ok(())
 }
 
@@ -192,12 +191,14 @@ async fn every_constructor_returns_one_opaque_type() -> fireweed::EngineResult<(
         clock(),
     )
     .await?;
-    let _: Fireweed = fireweed::open_objectlog_sqlite(
-        objectlog_config(ProjectionConfig::Sqlite {
-            path: PathBuf::from("projection.sqlite"),
-        }),
-        clock(),
-    )?;
+    let mut local_config = StorageConfig::memory();
+    local_config.log = LogConfig::Filesystem {
+        root: PathBuf::from("object-log"),
+    };
+    local_config.projection = ProjectionStoreConfig::Turso {
+        path: PathBuf::from("projection.turso"),
+    };
+    let _: Fireweed = fireweed::open_async(local_config, clock()).await?;
     let postgres_config = || {
         objectlog_config(ProjectionConfig::Postgres {
             url: ConfigSecret::new("postgres://example"),
@@ -212,4 +213,18 @@ fn main() {
     assert_send_sync::<Fireweed>();
     let queue = fireweed::open_memory(Arc::new(fireweed::SystemClock));
     assert_eq!(format!("{queue:?}"), "Fireweed { .. }");
+    // Optional runtime smoke from this independent workspace. Opening verifies
+    // that the effective checkpoint setting reaches downstream consumers.
+    if let Some(root) = std::env::args_os().nth(1).map(PathBuf::from) {
+        std::fs::create_dir_all(&root).expect("create smoke root");
+        let mut config = StorageConfig::memory();
+        config.log = LogConfig::Filesystem {
+            root: root.join("log"),
+        };
+        config.projection = ProjectionStoreConfig::Turso {
+            path: root.join("projection.db"),
+        };
+        let _local = fireweed::open(config, Arc::new(fireweed::SystemClock))
+            .expect("open log-backed Turso from independent consumer workspace");
+    }
 }

@@ -675,7 +675,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 "processing_wall_s": processing_wall_s,
                 "purge_wall_s": if cfg.recycle { purge_started.elapsed().as_secs_f64() } else { 0.0 },
                 "wall_s": cycle_started.elapsed().as_secs_f64(), "process_rss_kib": process_rss_kib(),
-                "projection_bytes": std::fs::metadata(projection_root.join("projection.db")).ok().map(|m| m.len()) });
+                "projection_bytes": std::fs::metadata(projection_root.join("projection.db")).ok().map(|m| m.len()),
+                "projection_wal_bytes": std::fs::metadata(projection_root.join("projection.db-wal")).ok().map(|m| m.len()) });
             if cfg.recycle { eprintln!("workflow_cycle_complete {report}"); }
             cycles.push(report);
             }
@@ -690,7 +691,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
     }
     reports.sort_by_key(|r| r["shard"].as_u64());
     Ok(
-        serde_json::json!({ "schema": "workflow-capacity/v4", "profile": format!("{:?}", cfg.profile),
+        serde_json::json!({ "schema": "workflow-capacity/v5", "profile": format!("{:?}", cfg.profile),
         "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
         "items": cfg.items, "cycles": if cfg.recycle { cfg.cycles } else { 1 }, "includes_purge": cfg.recycle,
         "physical_shards": cfg.shards, "projection_root": cfg.projection_root, "workers_per_pool": cfg.workers, "load_workers_per_shard": cfg.load_workers,

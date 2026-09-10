@@ -1,11 +1,14 @@
 # Fireweed original-row workflow capacity
 
-Date: 2026-09-10. Measurement snapshots: `02730571` through `2d6996ff`.
+Date: 2026-09-10. Exact measurement snapshots are recorded in the linked artifacts.
 
-**Qualification is still failing.** Million-row insert/update measurements exceed
-10k rows/sec, but completed 1.6-million-workflow soaks sustain about 3k workflows/sec,
-below the 5k target. Memory and projection sizes remain bounded in those runs.
-The optimization work and performance goal remain active; Snorri migration is not qualified.
+**Supported-build qualification is pending.** Million-row insert/update measurements
+exceed 10k rows/sec. A checkpoint-coalescing diagnostic sustained 7,644 completed
+workflows/sec over 1.6 million workflows with both the log and projection on disk,
+and passed every throughput cycle. The supported checkpoint backport passes the
+Turso release suite and public workflow/recovery tests. Repeated qualification of
+that committed build, including the new WAL-growth checks, remains outstanding.
+The performance goal stays active; Snorri migration is not yet qualified.
 
 ## What is being measured
 
@@ -377,3 +380,84 @@ There is no completed-run throughput claim for this interrupted candidate, and
 no NOCOW production default was introduced.
 [Interrupted NOCOW control](evidence/workflow-capacity/fireweed-nocow-projection-2d6996ff-100k-8-c16.json.gz),
 [stop reason](evidence/workflow-capacity/fireweed-nocow-projection-2d6996ff-100k-8-c16-stop.json).
+
+
+An isolated `turso_core 0.7.2` dependency diagnostic increased the native automatic
+checkpoint threshold from 1,000 to 8,000 frames. The short disk-log/disk-projection
+run completed 300,000 workflows at **9,415/sec**, with slowest-shard cycle times
+11.25, 10.71 and 11.08 seconds. Process filesystem write accounting fell from
+8.60 GiB in the matching original-body-preservation control to 5.22 GiB. The
+larger threshold lets a checkpoint collapse more repeated page versions before
+writing the main database. Native file writes, WAL restart, and durable log
+synchronization were retained.
+
+The dependency patch is not yet a supported product change. Its exact one-line
+diff, build command and dependency tree hash are embedded as diagnostic
+provenance. The runner now accepts `--diagnostic-provenance PATH` and the gate
+rejects any artifact containing that field, preventing experimental dependency
+builds from being mistaken for production qualification. The runner compiles as
+Python and all three gate unit tests pass, including the new rejection case.
+[8,000-frame short diagnostic](evidence/workflow-capacity/fireweed-checkpoint-8000-100k-8-c3.json.gz).
+
+
+The 8,000-frame sustained diagnostic completed 1.6 million workflows correctly
+in 300.9 seconds: **5,322 workflows/sec overall**. Process write accounting was
+30.48 GiB; last-three-cycle RSS variation was 0.68%. The overall average improved
+substantially over earlier disk-backed soaks, but 11 of 16 cycles missed the
+slowest-shard-equivalent threshold. The slowest cycle was equivalent to 2,868/sec.
+It therefore remains a failed sustained candidate, independently of its diagnostic
+dependency status. The next isolation run raises the native threshold to 32,000
+frames to measure further checkpoint coalescing and its WAL-space cost.
+[8,000-frame sustained diagnostic](evidence/workflow-capacity/fireweed-checkpoint-8000-100k-8-c16.json.gz).
+
+
+The 32,000-frame diagnostic completed 300,000 workflows at **9,535/sec** with
+4.07 GiB of process writes. Its sustained run completed **1.6 million workflows
+at 7,644/sec**, with 22.90 GiB of process writes. Every cycle passed the throughput
+threshold; RSS variation over the final three cycles was 0.47%, and all measured
+main database sizes stabilized. Its sole gate rejection is the experimental
+source override. This is evidence for the checkpoint fix, not final production
+qualification.
+[32,000-frame short diagnostic](evidence/workflow-capacity/fireweed-checkpoint-32000-100k-8-c3.json.gz),
+[32,000-frame sustained diagnostic](evidence/workflow-capacity/fireweed-checkpoint-32000-100k-8-c16.json.gz).
+
+The supported candidate backports effective ordinary-WAL checkpoint configuration
+into the pinned Turso core. The upstream default remains 1,000 frames; Fireweed's
+log-backed projection explicitly selects 32,000 and verifies readback, while
+standalone projections keep 1,000. Read-only connections select zero. The
+checkpoint protocol, native file I/O, and authoritative log are unchanged.
+
+The published core and four small binding/support crates are vendored with their
+upstream license, checksums and minimal diffs. Only the core contains behavior
+changes; the binding manifests use local paths so the fix remains effective when
+Fireweed is consumed from a separate workspace. A root-only Cargo patch would
+not provide that guarantee. No Snorri edit or consumer-side override is required.
+
+Three focused tests verify connection-local and cached setting readback, actual
+checkpoint suppression/backfill, explicit checkpoints, reopen and pinned-reader
+snapshot correctness. The workload report advances to v5, adding per-cycle WAL
+sizes; the v5 qualification gate requires stable final-three-cycle WAL size as
+well as the existing DB-size and RSS bounds. Historical v4 artifacts retain their
+original evaluation contract. Supported-build qualification remains pending.
+
+
+Validation exposed an existing debug-build timing sensitivity: the 24-reader
+probe's fixed 90 ms assertion failed at 107 ms with the candidate and 110 ms in
+an unchanged `e3bc93c6` checkout on this machine. Snapshot and setting checks did
+not report a correctness failure. The assertion has not been relaxed; the full
+Turso suite is being run in release mode to evaluate its tight timing contract.
+
+
+Supported-candidate validation: the complete Turso release suite passed **82 tests
+with one existing ignored test**, including the unchanged 90 ms reader assertion
+and the three new checkpoint tests. All **24 public workload tests** passed,
+including four log-only recovery cases and full-batch recycling. The independent
+public-crate fixture successfully opened a filesystem-log/Turso instance with no
+consumer override; its stale retired-SQLite constructor example was replaced by
+the supported storage API, and its lockfile was refreshed. The Python gate tests
+also pass, covering diagnostic rejection and v5 WAL growth.
+[Baseline debug timing failure](evidence/workflow-capacity/fireweed-checkpoint-reader-baseline-test.log.gz),
+[candidate debug timing failure](evidence/workflow-capacity/fireweed-checkpoint-reader-isolated-test.log.gz),
+[full Turso release suite](evidence/workflow-capacity/fireweed-checkpoint-configurable-turso-release-tests.log.gz),
+[public tests](evidence/workflow-capacity/fireweed-checkpoint-configurable-public-tests.log.gz),
+[independent consumer startup](evidence/workflow-capacity/fireweed-checkpoint-public-boundary-smoke.log.gz).

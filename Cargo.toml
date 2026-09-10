@@ -26,6 +26,7 @@ members = [
     "crates/fireweed-sim-support",
     "crates/fireweed-workload",
 ]
+exclude = ["vendor/turso_core", "vendor/turso", "vendor/turso_sdk_kit", "vendor/turso_sync_sdk_kit", "vendor/turso_sync_engine"]
 resolver = "3"
 
 [workspace.package]

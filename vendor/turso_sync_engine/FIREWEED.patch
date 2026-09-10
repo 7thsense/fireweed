@@ -1,0 +1,10 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -65,6 +65,7 @@
+ version = "0.1.41"
+ 
+ [dependencies.turso_core]
++path = "../turso_core"
+ version = "0.7.2"
+ features = ["conn_raw_api"]
+ 

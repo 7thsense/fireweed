@@ -1,0 +1,18 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -127,12 +127,15 @@
+ version = "0.3.20"
+ 
+ [dependencies.turso_core]
++path = "../turso_core"
+ version = "0.7.2"
+ 
+ [dependencies.turso_sdk_kit]
++path = "../turso_sdk_kit"
+ version = "0.7.2"
+ 
+ [dependencies.turso_sync_sdk_kit]
++path = "../turso_sync_sdk_kit"
+ version = "0.7.2"
+ 
+ [dev-dependencies.anyhow]

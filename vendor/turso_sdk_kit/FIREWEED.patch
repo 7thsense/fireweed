@@ -1,0 +1,10 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -63,6 +63,7 @@
+ features = ["env-filter"]
+ 
+ [dependencies.turso_core]
++path = "../turso_core"
+ version = "0.7.2"
+ features = [
+     "conn_raw_api",

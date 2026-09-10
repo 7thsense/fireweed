@@ -19,6 +19,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_ram_and_io_override_cannot_qualify(self):
         for change in ({"projection_filesystem": {"filesystems": [{"fstype": "tmpfs"}]}},
+                       {"diagnostic_provenance": {"dependency": "experimental engine"}},
                        {"diagnostics": {"LD_PRELOAD": "/tmp/override.so"}}, {"exit_code": 1}):
             report = self.baseline()
             report.update(change)
@@ -34,6 +35,15 @@ class QualificationTests(unittest.TestCase):
                                                       "process_rss_kib": 1000, "projection_bytes": 1000}
                                                      for _ in range(3)]} for _ in range(2)]}
         self.assertTrue(qualify(report)["passed"])
+        with_wal = copy.deepcopy(report)
+        with_wal["result"]["schema"] = "workflow-capacity/v5"
+        self.assertFalse(qualify(with_wal)["passed"], "v5 requires WAL evidence")
+        for shard in with_wal["result"]["shards"]:
+            for cycle in shard["cycles"]:
+                cycle["projection_wal_bytes"] = 1000
+        self.assertTrue(qualify(with_wal)["passed"])
+        with_wal["result"]["shards"][0]["cycles"][2]["projection_wal_bytes"] = 2000
+        self.assertFalse(qualify(with_wal)["passed"], "stable DB size must not hide growing WAL")
         slow = copy.deepcopy(report)
         slow["result"]["shards"][0]["cycles"][2]["wall_s"] = 100
         self.assertFalse(qualify(slow)["passed"])
