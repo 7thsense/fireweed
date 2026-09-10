@@ -269,3 +269,16 @@ batch (1–8,192; defaults to the handler batch). This models periodic bulk clea
 without changing 1,000-row loading/handler calls or removing purge from throughput
 measurement. The full-batch original-row recycling regression exercises 8,000-row
 purges and checks exact terminal outcomes and zero remaining rows.
+
+The 8,000-row retention run on `0e4647ea` reached **5,207 workflows/sec** overall,
+with later purge phases around 2–3 seconds per shard. It remains a failed sustained
+candidate: the slowest final-cycle shard took 28.5 seconds, equivalent to only
+3,513 workflows/sec at aggregate fair share.
+[Bulk retention trace](evidence/workflow-capacity/fireweed-purge8k-load4-100k-8-c3.json.gz).
+
+The next production candidate scales the aggregation deadline by the front
+queued generation's item count: 40 microseconds per item, capped at 40 ms, with
+full generations starting immediately. This gives large peers more time to join
+an append without imposing the cap on small requests. The previous fixed-delay
+entry point remains available to its existing callers. FIFO admission and all
+item, response-byte and generation-count limits remain unchanged.
