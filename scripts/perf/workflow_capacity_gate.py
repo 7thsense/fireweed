@@ -23,7 +23,7 @@ def qualify(report):
         for name in ("insert", "enrich_by_key", "schedule_by_id"):
             rate = phases.get(name, 0)
             check(name, rate >= 10_000, rate, 10_000)
-    elif result.get("schema") in ("workflow-capacity/v4", "workflow-capacity/v5"):
+    elif result.get("schema") in ("workflow-capacity/v4", "workflow-capacity/v5", "workflow-capacity/v6"):
         check("original_row_workflow", result.get("profile") == "Mutable" and result.get("atomic_original_row_mutation") is True and result.get("dispatch") == "shared-normal-claim")
         check("faults_and_retention", result.get("faults") is True and result.get("includes_purge") is True)
         cycles = result.get("cycles", 0)
@@ -35,6 +35,21 @@ def qualify(report):
         shards = result.get("shards", [])
         check("complete_cycle_reports", bool(shards) and len(shards) == result.get("physical_shards") and all(len(s.get("cycles", [])) == cycles for s in shards))
         if shards and cycles >= 3 and all(len(s.get("cycles", [])) == cycles for s in shards):
+            if result.get("schema") == "workflow-capacity/v6":
+                observation = report.get("projection_wal_observation", {})
+                check("wal_sampling_valid", 0 < observation.get("interval_ms", 0) <= 100
+                      and report.get("process_wall_s", 0) > 0
+                      and observation.get("samples", 0) >= max(2, report.get("process_wall_s", 0) * 8)
+                      and observation.get("errors") == [])
+                for index, shard in enumerate(shards):
+                    sampled_peak = observation.get("peak_bytes", {}).get(f"shard-{index}", 0)
+                    endpoints = [c.get("projection_wal_bytes") or 0 for c in shard["cycles"]]
+                    peak = max([sampled_peak, *endpoints])
+                    # Fixed before measurement: 512 MiB per physical shard.
+                    # WAL restart legitimately shrinks the file; flatness is not required.
+                    check(f"shard_{index}_wal_within_budget", sampled_peak > 0
+                          and all(size > 0 for size in endpoints) and peak <= 512 * 1024 * 1024,
+                          peak, "<=512 MiB, sampled and cycle endpoints")
             # Each shard must sustain its fair share in every cycle, preventing
             # a fast shard or initial burst from hiding starvation or a slowdown.
             for index in range(cycles):

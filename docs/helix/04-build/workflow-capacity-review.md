@@ -478,3 +478,24 @@ within-cycle peak, so the next gate must observe that peak against a fixed stora
 budget while retaining the DB/RSS checks. The archived v5 result remains failed,
 and its throughput miss is independent of this measurement correction.
 [First supported-build qualification](evidence/workflow-capacity/fireweed-qualified-checkpoint-4625e9f5-100k-8-c16-a.json.gz).
+
+
+The next candidate selects 64,000 checkpoint frames. The v6 qualification contract
+replaces only v5's flat-WAL-size rule: the runner samples WAL lengths every 100 ms,
+retains the maximum for each shard across restarts/removal, and combines those
+observations with cycle-end measurements. Every shard must remain within a fixed
+**512 MiB WAL budget**, declared before the candidate run. This allows roughly
+two 64,000-frame windows at the current 4 KiB page size. It is an acceptance
+budget, not an engine-enforced hard cap; sampling may miss very short transients.
+Missing shard observations, sampling errors, or less than 80% of the nominal
+sampling frequency fail qualification. DB-size/RSS
+stability, every-cycle throughput, correctness and durability requirements remain
+unchanged. Historical v4/v5 evaluations are preserved. Four Python tests cover
+normal restart shrinkage, missing evidence and excessive sampled peaks.
+
+The 64,000-frame candidate passed all 24 public workload tests and the complete
+Turso release suite (82 passed, one existing ignored test). Native checkpoint
+control and recovery code are unchanged from the backport; this candidate changes
+only the selected log-backed checkpoint limit and the measurement contract.
+[Public validation](evidence/workflow-capacity/fireweed-checkpoint64k-public-tests.log.gz),
+[Turso validation](evidence/workflow-capacity/fireweed-checkpoint64k-turso-tests.log.gz).

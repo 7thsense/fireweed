@@ -3099,7 +3099,7 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection.pragma_update("cache_size", "-131072").await?;
     // Coalesce repeated page versions before writing the rebuildable main DB.
     // Preserve the upstream 1,000-frame policy for standalone projections.
-    let checkpoint_frames = if config.rebuildable_io { 32_000 } else { 1_000 };
+    let checkpoint_frames = if config.rebuildable_io { 64_000 } else { 1_000 };
     connection
         .pragma_update("wal_autocheckpoint", checkpoint_frames)
         .await?;
@@ -3165,7 +3165,7 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.synchronous
         )));
     }
-    let expected_checkpoint_frames = if config.rebuildable_io { 32_000 } else { 1_000 };
+    let expected_checkpoint_frames = if config.rebuildable_io { 64_000 } else { 1_000 };
     let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     if checkpoint_frames != expected_checkpoint_frames {
         return Err(TursoRelationalError::Configuration(format!(

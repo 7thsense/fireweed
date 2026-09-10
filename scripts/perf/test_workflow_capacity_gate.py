@@ -44,6 +44,20 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(qualify(with_wal)["passed"])
         with_wal["result"]["shards"][0]["cycles"][2]["projection_wal_bytes"] = 2000
         self.assertFalse(qualify(with_wal)["passed"], "stable DB size must not hide growing WAL")
+        bounded = copy.deepcopy(with_wal)
+        bounded["result"]["schema"] = "workflow-capacity/v6"
+        bounded["process_wall_s"] = 10
+        bounded["projection_wal_observation"] = {"interval_ms": 100, "samples": 100,
+            "errors": [], "peak_bytes": {"shard-0": 3000, "shard-1": 3000}}
+        self.assertTrue(qualify(bounded)["passed"], "bounded WAL growth/shrink is legitimate")
+        sparse = copy.deepcopy(bounded)
+        sparse["projection_wal_observation"]["samples"] = 2
+        self.assertFalse(qualify(sparse)["passed"], "sparse sampling cannot establish the footprint")
+        excessive = copy.deepcopy(bounded)
+        excessive["projection_wal_observation"]["peak_bytes"]["shard-0"] = 513 * 1024 * 1024
+        self.assertFalse(qualify(excessive)["passed"], "endpoints cannot hide an excessive sampled peak")
+        del bounded["projection_wal_observation"]["peak_bytes"]["shard-1"]
+        self.assertFalse(qualify(bounded)["passed"], "every shard requires sampling")
         slow = copy.deepcopy(report)
         slow["result"]["shards"][0]["cycles"][2]["wall_s"] = 100
         self.assertFalse(qualify(slow)["passed"])

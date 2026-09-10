@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from workflow_storage_monitor import WalMonitor
 
 repo = Path(__file__).resolve().parents[2]
 binary = repo / "target/release/fireweed-workload"
@@ -93,8 +94,15 @@ def file_attributes(root):
 
 with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     started = time.monotonic()
+    projection_root = (Path(args[args.index("--projection-root") + 1]).resolve()
+                       if "--projection-root" in args else data_root)
+    monitor = WalMonitor(projection_root)
     child = subprocess.Popen(command, cwd=repo, stdout=stdout, stderr=stderr)
-    _, status_code, usage = os.wait4(child.pid, 0)
+    monitor.start()
+    try:
+        _, status_code, usage = os.wait4(child.pid, 0)
+    finally:
+        wal_observation = monitor.finish()
     child.returncode = os.waitstatus_to_exitcode(status_code)
     wall = time.monotonic() - started
     stdout.seek(0)
@@ -109,6 +117,7 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         ) if key in os.environ},
         "filesystem": mount,
         "storage": storage_usage(data_root),
+        "projection_wal_observation": wal_observation,
         "file_attributes": file_attributes(data_root),
         "source_diff_and_workload_sha256": digest.hexdigest(),
         "binary_sha256": binary_sha, "exit_code": child.returncode,
