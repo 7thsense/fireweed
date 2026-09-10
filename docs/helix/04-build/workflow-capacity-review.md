@@ -1,6 +1,6 @@
 # Fireweed original-row workflow capacity
 
-Date: 2026-09-10. Measurement snapshots: `02730571` through `671555b5`.
+Date: 2026-09-10. Measurement snapshots: `02730571` through `7398887e`.
 
 **Qualification is still failing.** Million-row insert/update measurements exceed
 10k rows/sec, but completed 1.6-million-workflow soaks sustain about 3k workflows/sec,
@@ -74,7 +74,7 @@ durability. Ordinary standalone TursoConfig::local does not opt into this adapte
 
 ## Evidence and qualification
 
-All runs below use eight physical shards on the same disk, 1 KiB deterministic
+Unless stated otherwise, runs below use eight physical shards on the same disk, 1 KiB deterministic
 payloads and bounded public-API batches. These are measurements, not final-version
 qualification or a guarantee for independent one-row transactions.
 
@@ -142,8 +142,30 @@ workflow cycles still missed the target; that qualification candidate was stoppe
 The current candidate batches payload upserts and gate replacements for disjoint
 row replacements. It retains individual version guards and the sequential path
 for repeated row IDs or purges. A larger regression checks exact payload/gate
-clears, repeated-ID ordering and a bound on SQL statement count. Throughput for
-this auxiliary-write change is pending.
+clears, repeated-ID ordering and a bound on SQL statement count. This change
+reached 4,058 workflows/sec over three cycles; the final cycle still fell short.
+Doubling the claim follow-up join window to one second reduced throughput to
+3,564/sec, so it was restored to 500 ms. Covered reads now avoid waking background
+apply unnecessarily, with a deterministic notification regression test.
+
+A complete million-recipient original-row workflow on `7398887e` passed outcome,
+retry and purge checks in 355.9 seconds: **2,811 workflows/sec**, still below target.
+It used approximately 2.9 CPU cores on average. Its 5,311 durable appends averaged
+359 ms and 1.82 commands per append. These observations point to append batching
+and storage contention as investigation targets, not proof of a hardware ceiling.
+Sixteen shards with four workers each (the same 64 total workers) achieved only
+3,011/sec over three 100k-recipient cycles.
+
+Raw comparisons:
+[batched payload/gates](evidence/workflow-capacity/fireweed-batched-mutation-aux-trace-100k-8-c3.json.gz),
+[one-second join](evidence/workflow-capacity/fireweed-join1000-batched-aux-trace-100k-8-c3.json.gz),
+[million-recipient workflow](evidence/workflow-capacity/fireweed-covered-read-workflow-1m-8-c1.json.gz),
+[sixteen shards](evidence/workflow-capacity/fireweed-covered-read-workflow-100k-16-w4-c3.json.gz).
+
+The workload now offers explicit `--load-workers N` bounded concurrent public
+`push_batch` calls per shard (default one). Ordinal priorities and all original-row
+outcome/recycling checks remain unchanged. This tests producer concurrency without
+changing Fireweed's interface or substituting a private load path.
 
 The same test exposed anonymous-push response matching by optional client/request
 keys. The candidate matches responses by admitted request identity and driver

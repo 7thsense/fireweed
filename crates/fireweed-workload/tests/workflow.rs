@@ -125,3 +125,34 @@ async fn full_batches_recycle_original_rows_without_orphaned_leases() {
         );
     }
 }
+
+// Concurrent producers use the same public API as sequential loading. Every
+// original recipient must survive overlapping loads, claims, retries and purge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_loaders_recycle_every_original_recipient() {
+    for memory in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            memory,
+            items: 240,
+            shards: 2,
+            batch: 10,
+            workers: 2,
+            load_workers: 4,
+            recycle: true,
+            cycles: 3,
+            deadline: std::time::Duration::from_secs(60),
+            ..Default::default()
+        };
+        let report = fireweed_workload::run(config, root.path()).await.unwrap();
+        assert_eq!(report["load_workers_per_shard"], 4);
+        for shard in report["shards"].as_array().unwrap() {
+            for cycle in shard["cycles"].as_array().unwrap() {
+                assert_eq!(cycle["delivered"], 116);
+                assert_eq!(cycle["failed"], 4);
+                assert_eq!(cycle["pending"], 0);
+                assert_eq!(cycle["leased"], 0);
+            }
+        }
+    }
+}

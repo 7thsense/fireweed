@@ -4,6 +4,7 @@ pub mod primitives;
 pub mod retention;
 
 use fireweed::*;
+use futures::{StreamExt, TryStreamExt};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -28,6 +29,8 @@ pub struct Config {
     /// Independent physical projection/log pairs, not merely queue labels.
     pub shards: usize,
     pub workers: usize,
+    /// Bounded concurrent public push_batch calls per shard.
+    pub load_workers: usize,
     pub profile: Profile,
     pub memory: bool,
     pub projection_root: Option<std::path::PathBuf>,
@@ -45,6 +48,7 @@ impl Default for Config {
             batch: 30,
             shards: 1,
             workers: 1,
+            load_workers: 1,
             profile: Profile::Mutable,
             memory: false,
             projection_root: None,
@@ -579,9 +583,10 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         || cfg.cycles == 0
         || cfg.shards == 0
         || cfg.workers == 0
+        || cfg.load_workers == 0
         || !(1..=1000).contains(&cfg.batch)
     {
-        return Err("items/shards/workers must be positive and batch in 1..=1000".into());
+        return Err("items/shards/workers/load-workers must be positive and batch in 1..=1000".into());
     }
     if cfg.recycle && cfg.profile == Profile::Snorri {
         return Err("recycling currently supports original-row mutable and bulk profiles".into());
@@ -608,13 +613,17 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
             let loaded_ids = std::sync::Mutex::new(Vec::with_capacity(expected));
             let observations = Arc::new(Observations::default());
             let load = async {
-                for chunk in ids.chunks(cfg.batch) {
+                futures::stream::iter(0..ids.len().div_ceil(cfg.batch)).map(|batch_index| {
+                    let ids = &ids; let cfg = &cfg; let fw = &fw; let q = &q; let loaded_ids = &loaded_ids;
+                    async move {
+                    let chunk = &ids[batch_index * cfg.batch..((batch_index + 1) * cfg.batch).min(ids.len())];
                     let items: Vec<_> = chunk.iter().map(|id| item(*id, if cfg.profile == Profile::Bulk { 2 } else { 0 }, cfg.payload_bytes)).collect();
                     let accepted = retry(deadline, || fw.push_batch(&q, items.clone())).await
                         .map_err(|e| format!("load shard {shard} starting recipient {}: {e}", chunk[0]))?;
                     loaded_ids.lock().unwrap().extend(accepted);
                     if std::env::var_os("FIREWEED_WORKLOAD_DEBUG").is_some() { eprintln!("loaded {}", chunk.len()); }
-                }
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+                }}).buffer_unordered(cfg.load_workers).try_collect::<Vec<_>>().await?;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
             };
             let consume = async {
@@ -674,7 +683,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         serde_json::json!({ "schema": "workflow-capacity/v4", "profile": format!("{:?}", cfg.profile),
         "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
         "items": cfg.items, "cycles": if cfg.recycle { cfg.cycles } else { 1 }, "includes_purge": cfg.recycle,
-        "physical_shards": cfg.shards, "projection_root": cfg.projection_root, "workers_per_pool": cfg.workers,
+        "physical_shards": cfg.shards, "projection_root": cfg.projection_root, "workers_per_pool": cfg.workers, "load_workers_per_shard": cfg.load_workers,
         "worker_pools_per_shard": 1,
         "dispatch": if cfg.profile != Profile::Bulk { "shared-normal-claim" } else { "stage-filtered" },
         "atomic_original_row_mutation": cfg.profile == Profile::Mutable,

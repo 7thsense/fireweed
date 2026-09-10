@@ -15,6 +15,7 @@ async fn main() -> Result<()> {
             "--items" => config.items = args.next().ok_or("missing items")?.parse()?,
             "--batch" => config.batch = args.next().ok_or("missing batch")?.parse()?,
             "--shards" => config.shards = args.next().ok_or("missing shards")?.parse()?,
+            "--load-workers" => config.load_workers = args.next().ok_or("missing load workers")?.parse()?,
             "--workers" => config.workers = args.next().ok_or("missing workers")?.parse()?,
             "--payload-bytes" => {
                 config.payload_bytes = args.next().ok_or("missing payload bytes")?.parse()?
@@ -54,7 +55,7 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
