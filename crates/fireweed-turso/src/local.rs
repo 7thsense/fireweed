@@ -3073,6 +3073,21 @@ pub(crate) async fn verify_committed_reader_settings(
     Ok(())
 }
 
+async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Result<i64> {
+    if !config.rebuildable_io {
+        return Ok(1_000);
+    }
+    // Preserve the checkpoint byte budget across new and existing page sizes.
+    // In particular, smaller pages must not halve the coalescing window.
+    let page_size = scalar_i64(connection, "PRAGMA page_size").await?;
+    if !(512..=65_536).contains(&page_size) || !(page_size as u64).is_power_of_two() {
+        return Err(TursoRelationalError::Configuration(format!(
+            "invalid projection page size {page_size}"
+        )));
+    }
+    Ok(64_000 * 4096 / page_size)
+}
+
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
     // Only takes effect before a new database is initialized; existing files
     // retain their page size. Smaller pages reduce WAL traffic for scattered row updates.
@@ -3099,7 +3114,7 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection.pragma_update("cache_size", "-131072").await?;
     // Coalesce repeated page versions before writing the rebuildable main DB.
     // Preserve the upstream 1,000-frame policy for standalone projections.
-    let checkpoint_frames = if config.rebuildable_io { 64_000 } else { 1_000 };
+    let checkpoint_frames = checkpoint_frames(connection, config).await?;
     connection
         .pragma_update("wal_autocheckpoint", checkpoint_frames)
         .await?;
@@ -3165,7 +3180,7 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.synchronous
         )));
     }
-    let expected_checkpoint_frames = if config.rebuildable_io { 64_000 } else { 1_000 };
+    let expected_checkpoint_frames = checkpoint_frames(connection, config).await?;
     let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     if checkpoint_frames != expected_checkpoint_frames {
         return Err(TursoRelationalError::Configuration(format!(

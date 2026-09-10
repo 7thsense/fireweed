@@ -595,3 +595,20 @@ The 2 KiB candidate passed the combined release suites: 82 Turso tests and
 24 public contract/recovery/workflow tests, with one existing ignored test.
 The page-size compatibility test now checks new 2 KiB files and retention
 of existing 4 KiB files. [Validation log](evidence/workflow-capacity/fireweed-page2k-tests.log.gz).
+
+The [2 KiB / 64,000-frame run](evidence/workflow-capacity/fireweed-qualified-workflow-page2k-558b34f7-500k-8-c6-a.json.gz)
+completed three million workflows at **5,664.93/sec**, 14.3% above the 4 KiB
+baseline, but failed cycle four at 4,261.53/sec. All other checks passed.
+Process filesystem output increased to **83.852 GiB**, so these measurements
+do not establish reduced write traffic as the reason for improvement.
+
+The next candidate preserves the prior checkpoint byte window across page
+sizes: `64,000 * 4096 / actual_page_size` frames, giving 128,000 frames for
+new 2 KiB databases and retaining 64,000 for existing 4 KiB databases. Startup
+uses actual page-size readback and verifies the resulting checkpoint setting.
+This separates smaller-page behavior from the inadvertently halved checkpoint
+byte budget in the preceding trial. The fixed 512 MiB WAL acceptance budget
+and all throughput/stability gates remain unchanged.
+
+The page-size-adjusted checkpoint candidate passed all 106 combined release
+tests, with one existing ignored test. [Validation log](evidence/workflow-capacity/fireweed-page2k-bytebudget-tests.log.gz).
