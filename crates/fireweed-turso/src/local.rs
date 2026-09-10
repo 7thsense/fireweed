@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -114,6 +115,18 @@ impl TursoConfig {
     pub fn with_log_backed_projection(mut self) -> Self {
         self.rebuildable_io = true;
         self
+    }
+
+    // Shards often receive the same workload. A shared fixed threshold makes
+    // their checkpoint writes arrive together on a shared disk. Keep each
+    // database's policy repeatable while spreading those flush boundaries.
+    fn checkpoint_frames(&self) -> i64 {
+        if !self.rebuildable_io {
+            return 1_000;
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.path.hash(&mut hash);
+        48_000 + (hash.finish() % 16_001) as i64
     }
 
     pub fn path(&self) -> &Path {
@@ -2294,6 +2307,7 @@ mod committed_reader_tests {
 #[cfg(test)]
 mod committed_pool_tests {
     use std::future::Future;
+    use std::hash::{Hash, Hasher};
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -3099,7 +3113,7 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection.pragma_update("cache_size", "-131072").await?;
     // Coalesce repeated page versions before writing the rebuildable main DB.
     // Preserve the upstream 1,000-frame policy for standalone projections.
-    let checkpoint_frames = if config.rebuildable_io { 64_000 } else { 1_000 };
+    let checkpoint_frames = config.checkpoint_frames();
     connection
         .pragma_update("wal_autocheckpoint", checkpoint_frames)
         .await?;
@@ -3165,7 +3179,7 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.synchronous
         )));
     }
-    let expected_checkpoint_frames = if config.rebuildable_io { 64_000 } else { 1_000 };
+    let expected_checkpoint_frames = config.checkpoint_frames();
     let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     if checkpoint_frames != expected_checkpoint_frames {
         return Err(TursoRelationalError::Configuration(format!(
@@ -3511,5 +3525,32 @@ mod projection_checkpoint_config_tests {
             .unwrap();
         assert_eq!(existing.wal_truncate_min_bytes, 2048 * 1024);
         assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_spread_tests {
+    use super::TursoConfig;
+
+    #[test]
+    fn log_backed_checkpoint_spread_is_bounded_repeatable_and_database_specific() {
+        let mut values = std::collections::BTreeSet::new();
+        for shard in 0..128 {
+            let path = format!("/capacity/shard-{shard}/projection.db");
+            assert_eq!(TursoConfig::local(&path).checkpoint_frames(), 1_000);
+            let value = TursoConfig::local(&path)
+                .with_log_backed_projection()
+                .checkpoint_frames();
+            assert!((48_000..=64_000).contains(&value));
+            assert_eq!(
+                value,
+                TursoConfig::local(&path)
+                    .with_log_backed_projection()
+                    .checkpoint_frames()
+            );
+            values.insert(value);
+        }
+        assert!(values.len() > 100);
+        assert!(values.last().unwrap() - values.first().unwrap() > 14_000);
     }
 }

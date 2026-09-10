@@ -542,3 +542,17 @@ closely through most cycles, suggesting synchronized checkpoint pressure as a
 remaining source of shared-device stalls. This is a hypothesis for a staggered
 checkpoint experiment, not yet a demonstrated fix. Failed evidence is retained
 without changing the gate.
+
+### Staggered checkpoint candidate
+
+The next production candidate hashes each configured database path into a
+48,000–64,000-frame automatic checkpoint threshold. Identical shard workloads
+therefore have different checkpoint boundaries on a shared device. The policy
+is repeatable for each path, verified by actual connection readback, and retains
+the prior maximum threshold. Standalone projections retain the native 1,000
+frames; committed read-only connections retain zero. No native checkpoint
+locking, restart, backfill, or authoritative-log synchronization changes.
+
+The release Turso suite passed 83 tests with one existing ignored test, including
+a bounded/repeatable/database-specific policy test. All 24 public contract,
+recovery, and workflow tests passed. Capacity qualification remains pending.
