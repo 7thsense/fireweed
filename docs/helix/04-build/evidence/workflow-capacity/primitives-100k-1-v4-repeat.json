@@ -1,0 +1,145 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "primitives",
+    "--items",
+    "100000",
+    "--batch",
+    "1000",
+    "--deadline-seconds",
+    "600",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/tmpjvp5q2d8"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "shard-0/projection.db": {
+      "files": 1,
+      "bytes": 202272768,
+      "allocated_bytes": 202272768
+    },
+    "shard-0/projection.db-wal": {
+      "files": 1,
+      "bytes": 3576192,
+      "allocated_bytes": 3579904
+    },
+    "shard-0/log": {
+      "files": 1202,
+      "bytes": 243167821,
+      "allocated_bytes": 246767616
+    }
+  },
+  "source_diff_and_workload_sha256": "b45cab97dc7e00512738a9d4ce84b112309c0c67d1a4a9bfdc5b5dca81daa6a4",
+  "binary_sha256": "0ae5689d1e6abf6ce633bf06b78ae05e875a10ef4b2e475e2aae35ead89af70f",
+  "exit_code": 0,
+  "process_wall_s": 97.29578935399877,
+  "user_cpu_s": 40.682181,
+  "system_cpu_s": 9.076005,
+  "max_rss_kib": 733924,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 11362280,
+  "voluntary_context_switches": 110386,
+  "involuntary_context_switches": 3272,
+  "result": {
+    "aggregate_phases": [
+      {
+        "phase": "insert",
+        "records": 100000,
+        "records_per_s": 15480.912159928152,
+        "wall_window_s": 6.45956769
+      },
+      {
+        "phase": "enrich_by_key",
+        "records": 100000,
+        "records_per_s": 5339.863688731456,
+        "wall_window_s": 18.727069796000002
+      },
+      {
+        "phase": "schedule_by_id",
+        "records": 100000,
+        "records_per_s": 9722.089798042167,
+        "wall_window_s": 10.285854387000004
+      },
+      {
+        "phase": "claim_and_complete",
+        "records": 100000,
+        "records_per_s": 2654.433165953053,
+        "wall_window_s": 37.672826455999996
+      },
+      {
+        "phase": "purge",
+        "records": 100000,
+        "records_per_s": 4169.731471245936,
+        "wall_window_s": 23.982359701000007
+      }
+    ],
+    "batch": 1000,
+    "cell": "filesystem--turso",
+    "items": 100000,
+    "payload_bytes": 1024,
+    "physical_shards": 1,
+    "schema": "primitive-capacity/v1",
+    "settled_wall_s": 97.206393621,
+    "shards": [
+      {
+        "items": 100000,
+        "phases": [
+          {
+            "end_s": 6.49265173,
+            "phase": "insert",
+            "records": 100000,
+            "records_per_s": 15480.912159928152,
+            "settled_wall_s": 6.45956769,
+            "start_s": 0.03308404
+          },
+          {
+            "end_s": 25.219768669,
+            "phase": "enrich_by_key",
+            "records": 100000,
+            "records_per_s": 5339.863688731457,
+            "settled_wall_s": 18.727069796,
+            "start_s": 6.492698873
+          },
+          {
+            "end_s": 35.505662028,
+            "phase": "schedule_by_id",
+            "records": 100000,
+            "records_per_s": 9722.08979804217,
+            "settled_wall_s": 10.285854387,
+            "start_s": 25.219807641
+          },
+          {
+            "end_s": 73.178529761,
+            "phase": "claim_and_complete",
+            "records": 100000,
+            "records_per_s": 2654.4331659530526,
+            "settled_wall_s": 37.672826456,
+            "start_s": 35.505703305
+          },
+          {
+            "end_s": 97.16092557,
+            "phase": "purge",
+            "records": 100000,
+            "records_per_s": 4169.731471245937,
+            "settled_wall_s": 23.982359701,
+            "start_s": 73.178565869
+          }
+        ],
+        "shard": 0
+      }
+    ]
+  },
+  "stderr": "phase_complete {\"end_s\":6.49265173,\"phase\":\"insert\",\"records\":100000,\"records_per_s\":15480.912159928152,\"settled_wall_s\":6.45956769,\"start_s\":0.03308404}\nphase_complete {\"end_s\":25.219768669,\"phase\":\"enrich_by_key\",\"records\":100000,\"records_per_s\":5339.863688731457,\"settled_wall_s\":18.727069796,\"start_s\":6.492698873}\nphase_complete {\"end_s\":35.505662028,\"phase\":\"schedule_by_id\",\"records\":100000,\"records_per_s\":9722.08979804217,\"settled_wall_s\":10.285854387,\"start_s\":25.219807641}\nphase_complete {\"end_s\":73.178529761,\"phase\":\"claim_and_complete\",\"records\":100000,\"records_per_s\":2654.4331659530526,\"settled_wall_s\":37.672826456,\"start_s\":35.505703305}\nphase_complete {\"end_s\":97.16092557,\"phase\":\"purge\",\"records\":100000,\"records_per_s\":4169.731471245937,\"settled_wall_s\":23.982359701,\"start_s\":73.178565869}\n"
+}

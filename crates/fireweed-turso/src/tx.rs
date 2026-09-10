@@ -142,6 +142,10 @@ fn turso_reltx_worker() -> &'static TursoRelTxWorker {
 }
 
 impl RelTx for TursoRel<'_> {
+    fn prefer_point_updates(&self) -> bool {
+        true
+    }
+
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
         let params: Vec<Value> = params.iter().map(to_turso).collect();
         if USE_LOCAL_RT.get() {
@@ -294,6 +298,61 @@ mod packed_authority_first_tests {
             .map(|offset| CommandPosition::new(shard.clone(), 0, start + offset))
             .collect();
         AsyncProjectionStore::apply_live(store, positions, commands).await
+    }
+
+    #[tokio::test]
+    async fn purge_reclaims_payload_sidecars_across_cycles() {
+        let (store, shard) = open_store().await;
+        for cycle in 0..8 {
+            let items: Vec<_> = (1..=32)
+                .map(|i| {
+                    let n = cycle * 32 + i;
+                    let mut row = item(&n.to_string(), &format!("payload-{n}"), n);
+                    row.payload = Some(Bytes::from(vec![n as u8; 8192]));
+                    row
+                })
+                .collect();
+            let ids = items.iter().map(|i| i.item_id).collect::<Vec<_>>();
+            apply(
+                &store,
+                &shard,
+                cycle as u64 * 2,
+                vec![envelope(
+                    QueueCommand::Push(PushCommand { items }),
+                    ids.clone(),
+                )],
+            )
+            .await
+            .unwrap();
+            let rows = store
+                .query("SELECT count(*) FROM fireweed_item_payloads", vec![])
+                .await
+                .unwrap();
+            assert_eq!(rows[0].values[0], Value::Integer(32));
+            apply(
+                &store,
+                &shard,
+                cycle as u64 * 2 + 1,
+                vec![envelope(
+                    QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
+                        item_ids: ids.clone(),
+                        force: false,
+                    }),
+                    ids,
+                )],
+            )
+            .await
+            .unwrap();
+            let rows = store
+                .query("SELECT count(*) FROM fireweed_item_payloads", vec![])
+                .await
+                .unwrap();
+            assert_eq!(
+                rows[0].values[0],
+                Value::Integer(0),
+                "cycle {cycle} leaked bodies"
+            );
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

@@ -19,7 +19,10 @@ pub fn parts(shard: &QueueKey) -> (String, String) {
 }
 
 pub fn is_fifo_claim_scan_item(item: &PushItem) -> bool {
-    item.cohort_size.is_none() && item.gate_keys.is_empty()
+    item.cohort_size.is_none()
+        && item.gate_keys.is_empty()
+        && item.priority.is_none()
+        && item.not_before.is_none()
 }
 
 fn batch_has_uniform_schedule(items: &[&PushItem]) -> bool {
@@ -46,7 +49,8 @@ pub fn observe_push_for_claim_scan(
     shard: &QueueKey,
     items: &[&PushItem],
 ) {
-    if !items.is_empty()
+    if claim_scan_default_fifo.get(shard) != Some(&false)
+        && !items.is_empty()
         && items.iter().copied().all(is_fifo_claim_scan_item)
         && batch_has_uniform_schedule(items)
     {
@@ -60,7 +64,9 @@ pub fn observe_uniform_schedule_for_claim_scan(
     claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
     shard: &QueueKey,
 ) {
-    claim_scan_default_fifo.insert(shard.clone(), true);
+    // Uniformity of one update batch does not prove uniformity of the queue.
+    // A partial rewrite must continue using the indexed priority order.
+    claim_scan_default_fifo.insert(shard.clone(), false);
 }
 
 pub fn queue_paused(tx: &impl RelTx, shard: &QueueKey) -> EngineResult<bool> {

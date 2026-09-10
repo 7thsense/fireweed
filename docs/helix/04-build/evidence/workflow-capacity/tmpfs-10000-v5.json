@@ -1,0 +1,114 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "primitives",
+    "--items",
+    "10000",
+    "--batch",
+    "1000",
+    "--deadline-seconds",
+    "180"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "source_diff_and_workload_sha256": "8ac52b4645d58dc4df2ce07712ac6cd3bfd01eee12f18c0f01f8c363ffde1e9a",
+  "binary_sha256": "cd574c55690363bb017a998b24b3fee2f7d5df9af6522617fc1619d420c06664",
+  "exit_code": 0,
+  "process_wall_s": 5.112614232999476,
+  "user_cpu_s": 5.018135,
+  "system_cpu_s": 0.71255,
+  "max_rss_kib": 238552,
+  "voluntary_context_switches": 8861,
+  "involuntary_context_switches": 76,
+  "result": {
+    "aggregate_phases": [
+      {
+        "phase": "insert",
+        "records": 10000,
+        "records_per_s": 11399.026272833682,
+        "wall_window_s": 0.877267914
+      },
+      {
+        "phase": "enrich_by_key",
+        "records": 10000,
+        "records_per_s": 16647.064831063417,
+        "wall_window_s": 0.6007064969999999
+      },
+      {
+        "phase": "schedule_by_id",
+        "records": 10000,
+        "records_per_s": 14126.849527931476,
+        "wall_window_s": 0.707871913
+      },
+      {
+        "phase": "claim_and_complete",
+        "records": 10000,
+        "records_per_s": 16833.42990167065,
+        "wall_window_s": 0.594055998
+      },
+      {
+        "phase": "purge",
+        "records": 10000,
+        "records_per_s": 4513.588497820223,
+        "wall_window_s": 2.2155320549999997
+      }
+    ],
+    "batch": 1000,
+    "cell": "filesystem--turso",
+    "items": 10000,
+    "payload_bytes": 1024,
+    "physical_shards": 1,
+    "schema": "primitive-capacity/v1",
+    "settled_wall_s": 5.067350865,
+    "shards": [
+      {
+        "items": 10000,
+        "phases": [
+          {
+            "end_s": 0.907319757,
+            "phase": "insert",
+            "records": 10000,
+            "records_per_s": 11399.026272833682,
+            "settled_wall_s": 0.877267914,
+            "start_s": 0.030051843
+          },
+          {
+            "end_s": 1.5081545539999999,
+            "phase": "enrich_by_key",
+            "records": 10000,
+            "records_per_s": 16647.064831063413,
+            "settled_wall_s": 0.600706497,
+            "start_s": 0.907448057
+          },
+          {
+            "end_s": 2.216061318,
+            "phase": "schedule_by_id",
+            "records": 10000,
+            "records_per_s": 14126.849527931476,
+            "settled_wall_s": 0.707871913,
+            "start_s": 1.508189405
+          },
+          {
+            "end_s": 2.810208739,
+            "phase": "claim_and_complete",
+            "records": 10000,
+            "records_per_s": 16833.42990167065,
+            "settled_wall_s": 0.594055998,
+            "start_s": 2.216152741
+          },
+          {
+            "end_s": 5.025775156,
+            "phase": "purge",
+            "records": 10000,
+            "records_per_s": 4513.588497820222,
+            "settled_wall_s": 2.215532055,
+            "start_s": 2.810243101
+          }
+        ],
+        "shard": 0
+      }
+    ]
+  },
+  "stderr": "phase_complete {\"end_s\":0.907319757,\"phase\":\"insert\",\"records\":10000,\"records_per_s\":11399.026272833682,\"settled_wall_s\":0.877267914,\"start_s\":0.030051843}\nphase_complete {\"end_s\":1.5081545539999999,\"phase\":\"enrich_by_key\",\"records\":10000,\"records_per_s\":16647.064831063413,\"settled_wall_s\":0.600706497,\"start_s\":0.907448057}\nphase_complete {\"end_s\":2.216061318,\"phase\":\"schedule_by_id\",\"records\":10000,\"records_per_s\":14126.849527931476,\"settled_wall_s\":0.707871913,\"start_s\":1.508189405}\nphase_complete {\"end_s\":2.810208739,\"phase\":\"claim_and_complete\",\"records\":10000,\"records_per_s\":16833.42990167065,\"settled_wall_s\":0.594055998,\"start_s\":2.216152741}\nphase_complete {\"end_s\":5.025775156,\"phase\":\"purge\",\"records\":10000,\"records_per_s\":4513.588497820222,\"settled_wall_s\":2.215532055,\"start_s\":2.810243101}\n"
+}

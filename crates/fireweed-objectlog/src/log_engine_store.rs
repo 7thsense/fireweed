@@ -753,6 +753,12 @@ impl ObjectLogEngineStore<ManifestSequencer> {
 }
 
 impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
+    /// Local filesystem appends can prioritize dependent-call latency without
+    /// changing the object packing policy of remote blob stores.
+    pub fn uses_local_filesystem(&self) -> bool {
+        matches!(self.definition_authority, DefinitionAuthority::Local { .. })
+    }
+
     fn epoch_key(&self, shard: &QueueKey) -> String {
         format!(
             "{}epochs/{}",

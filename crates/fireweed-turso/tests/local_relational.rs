@@ -1132,7 +1132,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     .unwrap();
     let before_item = turso
         .query(
-            "SELECT fields,payload,entity_document FROM fireweed_items WHERE item_id=?1",
+            "SELECT fields,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload,entity_document FROM fireweed_items WHERE item_id=?1",
             vec![Value::Text(first.to_string())],
         )
         .await
@@ -1178,7 +1178,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT fields,payload,entity_document FROM fireweed_items WHERE item_id=?1",
+                "SELECT fields,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload,entity_document FROM fireweed_items WHERE item_id=?1",
                 vec![Value::Text(first.to_string())],
             )
             .await
@@ -1233,7 +1233,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
         .unwrap();
     let changed = turso
         .query(
-            "SELECT fields,payload,entity_document FROM fireweed_items WHERE item_id=?1",
+            "SELECT fields,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload,entity_document FROM fireweed_items WHERE item_id=?1",
             vec![Value::Text(first.to_string())],
         )
         .await

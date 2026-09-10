@@ -1,0 +1,14 @@
+{
+  "current": {
+    "sql": "WITH requested(item_id,client_item_key) AS (VALUES ('absent','absent-key')) SELECT 1 FROM requested r WHERE EXISTS(SELECT 1 FROM fireweed_items i WHERE i.tenant_id='workflow-workload' AND i.queue_id='workflow' AND (i.item_id=r.item_id OR (i.client_item_key=r.client_item_key AND i.superseded=0)))",
+    "plan": "QUERY PLAN\n|--SCAN requested AS r\n`--SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=?)\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  "point": {
+    "sql": "WITH requested(item_id,client_item_key) AS (VALUES ('absent','absent-key')) SELECT 1 FROM requested r WHERE EXISTS(SELECT 1 FROM fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 WHERE i.tenant_id='workflow-workload' AND i.queue_id='workflow' AND i.item_id=r.item_id) OR EXISTS(SELECT 1 FROM fireweed_items i INDEXED BY fireweed_items_active_key WHERE i.tenant_id='workflow-workload' AND i.queue_id='workflow' AND i.client_item_key=r.client_item_key AND i.superseded=0)",
+    "plan": "QUERY PLAN\n|--SCAN requested AS r\n|--SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)\n`--SEARCH i USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=? AND client_item_key=?)\n",
+    "stderr": "",
+    "exit_code": 0
+  }
+}

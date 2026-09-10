@@ -98,7 +98,7 @@ pub mod async_projection {
     pub const SELECT_ITEM_VERSION: &str = "SELECT item_version FROM fireweed_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
     pub const SELECT_CLAIMED_ITEM: &str = "SELECT client_item_key,item_version,priority,group_key,\
-        not_before,lease_expires_at,retry_count,payload,fields,metadata FROM fireweed_items \
+        not_before,lease_expires_at,retry_count,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata FROM fireweed_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND item_id=?3";
     pub const SELECT_ITEM_GATES: &str = "SELECT gate_key FROM fireweed_item_gates \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 ORDER BY gate_key";

@@ -1,0 +1,52 @@
+{
+  "recorded_at": "2026-09-10T00:11:07.230186+00:00",
+  "device": "nvme0n1",
+  "run": "final-primitives-1m-8",
+  "samples": [
+    {
+      "elapsed_s": 1.0003540799998518,
+      "write_mib_s": 45.40579771515175,
+      "writes_per_s": 1817.3565104070644,
+      "io_busy_fraction": 0.9276715300647722,
+      "weighted_io_ms": 206727,
+      "flushes_per_s": 46.98336413043566,
+      "flush_ms": 39
+    },
+    {
+      "elapsed_s": 1.000354568000148,
+      "write_mib_s": 42.72703785963386,
+      "writes_per_s": 2010.287216481929,
+      "io_busy_fraction": 0.8886849007719716,
+      "weighted_io_ms": 44014,
+      "flushes_per_s": 97.96526465202837,
+      "flush_ms": 88
+    },
+    {
+      "elapsed_s": 1.0003585490003388,
+      "write_mib_s": 40.68463131611245,
+      "writes_per_s": 2108.2440911886342,
+      "io_busy_fraction": 0.8696881741745432,
+      "weighted_io_ms": 35684,
+      "flushes_per_s": 116.9580648027834,
+      "flush_ms": 101
+    },
+    {
+      "elapsed_s": 1.000312663000841,
+      "write_mib_s": 38.92142446063114,
+      "writes_per_s": 1900.4058134155619,
+      "io_busy_fraction": 0.7527646383492468,
+      "weighted_io_ms": 37999,
+      "flushes_per_s": 83.97374451704745,
+      "flush_ms": 72
+    },
+    {
+      "elapsed_s": 1.0003693750004459,
+      "write_mib_s": 40.08285064702439,
+      "writes_per_s": 1994.2633689671986,
+      "io_busy_fraction": 0.7887086707343959,
+      "weighted_io_ms": 30399,
+      "flushes_per_s": 95.96455309315843,
+      "flush_ms": 81
+    }
+  ]
+}

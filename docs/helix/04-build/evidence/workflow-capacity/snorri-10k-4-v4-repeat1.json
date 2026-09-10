@@ -1,0 +1,165 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "snorri",
+    "--items",
+    "10000",
+    "--batch",
+    "100",
+    "--workers",
+    "2",
+    "--shards",
+    "4",
+    "--deadline-seconds",
+    "600",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/tmpb79kn0ee"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "shard-2/projection.db": {
+      "files": 1,
+      "bytes": 18063360,
+      "allocated_bytes": 18063360
+    },
+    "shard-2/projection.db-wal": {
+      "files": 1,
+      "bytes": 992952,
+      "allocated_bytes": 995328
+    },
+    "shard-1/projection.db": {
+      "files": 1,
+      "bytes": 18083840,
+      "allocated_bytes": 18083840
+    },
+    "shard-1/projection.db-wal": {
+      "files": 1,
+      "bytes": 671592,
+      "allocated_bytes": 671744
+    },
+    "shard-0/projection.db": {
+      "files": 1,
+      "bytes": 18116608,
+      "allocated_bytes": 18116608
+    },
+    "shard-0/projection.db-wal": {
+      "files": 1,
+      "bytes": 486192,
+      "allocated_bytes": 487424
+    },
+    "shard-3/projection.db": {
+      "files": 1,
+      "bytes": 17195008,
+      "allocated_bytes": 17195008
+    },
+    "shard-3/projection.db-wal": {
+      "files": 1,
+      "bytes": 3699792,
+      "allocated_bytes": 3702784
+    },
+    "shard-3/log": {
+      "files": 438,
+      "bytes": 14718362,
+      "allocated_bytes": 16187392
+    },
+    "shard-0/log": {
+      "files": 440,
+      "bytes": 14721289,
+      "allocated_bytes": 16179200
+    },
+    "shard-1/log": {
+      "files": 436,
+      "bytes": 14718559,
+      "allocated_bytes": 16162816
+    },
+    "shard-2/log": {
+      "files": 436,
+      "bytes": 14718201,
+      "allocated_bytes": 16166912
+    }
+  },
+  "source_diff_and_workload_sha256": "b45cab97dc7e00512738a9d4ce84b112309c0c67d1a4a9bfdc5b5dca81daa6a4",
+  "binary_sha256": "0ae5689d1e6abf6ce633bf06b78ae05e875a10ef4b2e475e2aae35ead89af70f",
+  "exit_code": 0,
+  "process_wall_s": 21.444194261999655,
+  "user_cpu_s": 28.265369,
+  "system_cpu_s": 9.393015,
+  "max_rss_kib": 254128,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 1095512,
+  "voluntary_context_switches": 139933,
+  "involuntary_context_switches": 4320,
+  "result": {
+    "batch": 100,
+    "cell": "filesystem--turso",
+    "completed_lifecycles_per_s": 467.5379795623697,
+    "dispatch": "shared-normal-claim",
+    "faults": true,
+    "items": 10000,
+    "payload_bytes": 1024,
+    "physical_shards": 4,
+    "profile": "Snorri",
+    "schema": "workflow-capacity/v2",
+    "settled_wall_s": 21.388631487,
+    "shards": [
+      {
+        "claims": 7632,
+        "complete": 7419,
+        "delivered": 2419,
+        "failed": 81,
+        "items": 2500,
+        "leased": 0,
+        "pending": 0,
+        "retries": 132,
+        "shard": 0
+      },
+      {
+        "claims": 7631,
+        "complete": 7420,
+        "delivered": 2420,
+        "failed": 80,
+        "items": 2500,
+        "leased": 0,
+        "pending": 0,
+        "retries": 131,
+        "shard": 1
+      },
+      {
+        "claims": 7632,
+        "complete": 7419,
+        "delivered": 2419,
+        "failed": 81,
+        "items": 2500,
+        "leased": 0,
+        "pending": 0,
+        "retries": 132,
+        "shard": 2
+      },
+      {
+        "claims": 7632,
+        "complete": 7419,
+        "delivered": 2419,
+        "failed": 81,
+        "items": 2500,
+        "leased": 0,
+        "pending": 0,
+        "retries": 132,
+        "shard": 3
+      }
+    ],
+    "worker_pools_per_shard": 1,
+    "workers_per_pool": 2
+  }
+}

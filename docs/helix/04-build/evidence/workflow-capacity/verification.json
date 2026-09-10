@@ -1,0 +1,60 @@
+{
+  "functional_checks": [
+    {
+      "name": "libraries",
+      "command": "cargo test --release -p fireweed-engine -p fireweed-relational -p fireweed-turso -p fireweed-objectlog -p fireweed --features fireweed-turso/local --lib --no-fail-fast -- --skip log_engine_store::tests::s3_emission_cursor_native_cas_monotonic_and_reopen --skip s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set",
+      "results": [
+        "ok. 146 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.57s",
+        "ok. 274 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s",
+        "ok. 62 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.14s",
+        "ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s"
+      ],
+      "passed": 518,
+      "failed": false
+    },
+    {
+      "name": "final_turso_and_workload",
+      "command": "cargo test --release -p fireweed-turso -p fireweed-workload --features fireweed-turso/local --no-fail-fast",
+      "results": [
+        "ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s",
+        "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+        "ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+        "ok. 9 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.62s",
+        "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s",
+        "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s",
+        "ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.09s",
+        "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "passed": 85,
+      "failed": false
+    },
+    {
+      "name": "final_facade",
+      "command": "cargo test --release -p fireweed --lib",
+      "results": [
+        "ok. 146 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.56s"
+      ],
+      "passed": 146,
+      "failed": false
+    }
+  ],
+  "limitations": [
+    "Two live-S3 library tests explicitly excluded because no live endpoint is configured.",
+    "Strict Turso clippy fails on four pre-existing engine lints (unchanged patterns verified in initial HEAD).",
+    "Broader integration selection encounters retired open_sqlite/open_sqlite_relational/open_objectlog_sqlite constructor references; the full workspace/CI lane is not claimed green.",
+    "The library check preceded the final successor-validation SQL and retry coverage fixes; the final adapter/workload and facade checks include them."
+  ],
+  "strict_lint": {
+    "command": "cargo clippy -p fireweed-turso --all-targets --features local -- -D warnings",
+    "status": "blocked by existing lints",
+    "diagnostics": "\n   --> crates/fireweed-engine/src/async_composed.rs:607:9\n    |\n607 | /         if let (Some(request_id), Some(fingerprint)) = (request.request_id.as_ref(), fingerprint) {\n608 | |             if self.request_fingerprints.contains_key(request_id) {\n609 | |                 let _ = fingerprint;\n610 | |                 return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);\n611 | |             }\n612 | |         }\n    | |_________^\n    |\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if\n    = note: `-D clippy::collapsible-if` implied by `-D warnings`\n    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`\nhelp: collapse nested if block\n    |\n607 ~         if let (Some(request_id), Some(fingerprint)) = (request.request_id.as_ref(), fingerprint)\n608 ~             && self.request_fingerprints.contains_key(request_id) {\n609 |                 let _ = fingerprint;\n610 |                 return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);\n611 ~             }\n    |\n\nerror: this function has too many arguments (8/7)\n   --> crates/fireweed-engine/src/async_composed.rs:668:5\n    |\n668 | /     fn validate_batch_update(\n669 | |         &mut self,\n670 | |         snapshot: &MutationDriverSnapshot,\n671 | |         shard: &QueueKey,\n...   |\n676 | |         command_id: CommandId,\n677 | |     ) -> MutationGenerationMemberOutcome {\n    | |________________________________________^\n    |\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_arguments\n    = note: `-D clippy::too-many-arguments` implied by `-D warnings`\n    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`\n\nerror: this `if` statement can be collapsed\n   --> crates/fireweed-engine/src/async_composed.rs:696:17\n    |\n696 | /                 if let crate::BatchUpdateOutcome::Updated {\n697 | |                     item_id,\n698 | |                     item_version,\n699 | |                     ..\n...   |\n709 | |                 }\n    | |_________________^\n    |\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if\nhelp: collapse nested if block\n    |\n700 ~                 } = outcome\n701 ~                     && let Some(item) = self\n702 |                         .batch_items\n...\n706 |                         item.item_version = *item_version;\n707 ~                     }\n    |\n\nerror: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`\n  --> crates/fireweed-engine/src/async_push_planner.rs:77:17\n   |\n77 | /                 match resolve_push_idempotency_snapshot(\n78 | |                     log.as_ref(),\n79 | |                     projection.as_ref(),\n80 | |                     request.shard.clone(),\n...  |\n88 | |                     None => {}\n89 | |                 }\n   | |_________________^\n   |\n   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#single_match\n   = note: `-D clippy::single-match` implied by `-D warnings`\n   = help: to override `-D warnings` add `#[allow(clippy::single_match)]`\nhelp: try\n   |\n77 ~                 if let Some(item_ids) = resolve_push_idempotency_snapshot(\n78 +                     log.as_ref(),\n79 +                     projection.as_ref(),\n80 +                     request.shard.clone(),\n81 +                     request_id,\n82 +                     fingerprint,\n83 +                     request.now,\n84 +                 )\n85 +                 .await? { return Ok(AsyncPushPlan::replay(item_ids)) }\n   |\n\nerror: could not compile `fireweed-engine` (lib) due to 4 previous errors\nwarning: build failed, waiting for other jobs to finish...\n"
+  }
+}

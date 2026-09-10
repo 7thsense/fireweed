@@ -20,6 +20,9 @@ pub enum AppendAdmissionClass {
     KeyedPermitLive,
     /// A direct derived append that will require selection admission before fence activation.
     SelectionRequired,
+    /// The mutation generation owns a shared selection permit through append.
+    /// Reacquiring it would deadlock behind a queued exclusive selector.
+    SharedSelectionLive,
     /// A direct derived append whose leased-only/non-work command class bypasses selection fencing.
     Bypass,
     /// An atomic Turso append governed by the native atomic writer path.
@@ -149,6 +152,7 @@ mod append_admission_tests {
             AppendAdmissionClass::NonDerived,
             AppendAdmissionClass::KeyedPermitLive,
             AppendAdmissionClass::SelectionRequired,
+            AppendAdmissionClass::SharedSelectionLive,
             AppendAdmissionClass::Bypass,
             AppendAdmissionClass::AtomicNative,
             AppendAdmissionClass::RecoveryOnly,

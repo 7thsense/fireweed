@@ -1,0 +1,145 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "primitives",
+    "--items",
+    "100000",
+    "--batch",
+    "1000",
+    "--deadline-seconds",
+    "600",
+    "--root",
+    "target/workflow-capacity/nocow-control"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "shard-0/projection.db": {
+      "files": 1,
+      "bytes": 202272768,
+      "allocated_bytes": 202272768
+    },
+    "shard-0/projection.db-wal": {
+      "files": 1,
+      "bytes": 3576192,
+      "allocated_bytes": 3579904
+    },
+    "shard-0/log": {
+      "files": 1202,
+      "bytes": 243167821,
+      "allocated_bytes": 246767616
+    }
+  },
+  "source_diff_and_workload_sha256": "b45cab97dc7e00512738a9d4ce84b112309c0c67d1a4a9bfdc5b5dca81daa6a4",
+  "binary_sha256": "0ae5689d1e6abf6ce633bf06b78ae05e875a10ef4b2e475e2aae35ead89af70f",
+  "exit_code": 0,
+  "process_wall_s": 55.12036469299892,
+  "user_cpu_s": 37.708798,
+  "system_cpu_s": 8.098066,
+  "max_rss_kib": 581032,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 10011280,
+  "voluntary_context_switches": 67913,
+  "involuntary_context_switches": 3314,
+  "result": {
+    "aggregate_phases": [
+      {
+        "phase": "insert",
+        "records": 100000,
+        "records_per_s": 7535.5704873857685,
+        "wall_window_s": 13.270395409
+      },
+      {
+        "phase": "enrich_by_key",
+        "records": 100000,
+        "records_per_s": 12098.897066515538,
+        "wall_window_s": 8.265216196999999
+      },
+      {
+        "phase": "schedule_by_id",
+        "records": 100000,
+        "records_per_s": 12016.312996127856,
+        "wall_window_s": 8.322020243
+      },
+      {
+        "phase": "claim_and_complete",
+        "records": 100000,
+        "records_per_s": 11408.611615332828,
+        "wall_window_s": 8.765308468
+      },
+      {
+        "phase": "purge",
+        "records": 100000,
+        "records_per_s": 6143.1448669374495,
+        "wall_window_s": 16.278307311
+      }
+    ],
+    "batch": 1000,
+    "cell": "filesystem--turso",
+    "items": 100000,
+    "payload_bytes": 1024,
+    "physical_shards": 1,
+    "schema": "primitive-capacity/v1",
+    "settled_wall_s": 55.036929531,
+    "shards": [
+      {
+        "items": 100000,
+        "phases": [
+          {
+            "end_s": 13.366299178,
+            "phase": "insert",
+            "records": 100000,
+            "records_per_s": 7535.5704873857685,
+            "settled_wall_s": 13.270395409,
+            "start_s": 0.095903769
+          },
+          {
+            "end_s": 21.631562868,
+            "phase": "enrich_by_key",
+            "records": 100000,
+            "records_per_s": 12098.897066515536,
+            "settled_wall_s": 8.265216197,
+            "start_s": 13.366346671
+          },
+          {
+            "end_s": 29.953625016,
+            "phase": "schedule_by_id",
+            "records": 100000,
+            "records_per_s": 12016.312996127856,
+            "settled_wall_s": 8.322020243,
+            "start_s": 21.631604773
+          },
+          {
+            "end_s": 38.718975598,
+            "phase": "claim_and_complete",
+            "records": 100000,
+            "records_per_s": 11408.611615332828,
+            "settled_wall_s": 8.765308468,
+            "start_s": 29.95366713
+          },
+          {
+            "end_s": 54.997320973,
+            "phase": "purge",
+            "records": 100000,
+            "records_per_s": 6143.1448669374495,
+            "settled_wall_s": 16.278307311,
+            "start_s": 38.719013662
+          }
+        ],
+        "shard": 0
+      }
+    ]
+  },
+  "stderr": "phase_complete {\"end_s\":13.366299178,\"phase\":\"insert\",\"records\":100000,\"records_per_s\":7535.5704873857685,\"settled_wall_s\":13.270395409,\"start_s\":0.095903769}\nphase_complete {\"end_s\":21.631562868,\"phase\":\"enrich_by_key\",\"records\":100000,\"records_per_s\":12098.897066515536,\"settled_wall_s\":8.265216197,\"start_s\":13.366346671}\nphase_complete {\"end_s\":29.953625016,\"phase\":\"schedule_by_id\",\"records\":100000,\"records_per_s\":12016.312996127856,\"settled_wall_s\":8.322020243,\"start_s\":21.631604773}\nphase_complete {\"end_s\":38.718975598,\"phase\":\"claim_and_complete\",\"records\":100000,\"records_per_s\":11408.611615332828,\"settled_wall_s\":8.765308468,\"start_s\":29.95366713}\nphase_complete {\"end_s\":54.997320973,\"phase\":\"purge\",\"records\":100000,\"records_per_s\":6143.1448669374495,\"settled_wall_s\":16.278307311,\"start_s\":38.719013662}\n"
+}

@@ -1,0 +1,52 @@
+{
+  "uniform_update": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items SET metadata='{}',item_version=item_version+1,updated_at=1,last_command_sequence=1 WHERE tenant_id='t' AND queue_id='q' AND client_item_key BETWEEN 'key-0050001' AND 'key-0050100' AND client_item_key IN ('key-0050001','key-0050002','key-0050003','key-0050004','key-0050005','key-0050006','key-0050007','key-0050008','key-0050009','key-0050010','key-0050011','key-0050012','key-0050013','key-0050014','key-0050015','key-0050016','key-0050017','key-0050018','key-0050019','key-0050020','key-0050021','key-0050022','key-0050023','key-0050024','key-0050025','key-0050026','key-0050027','key-0050028','key-0050029','key-0050030','key-0050031','key-0050032','key-0050033','key-0050034','key-0050035','key-0050036','key-0050037','key-0050038','key-0050039','key-0050040','key-0050041','key-0050042','key-0050043','key-0050044','key-0050045','key-0050046','key-0050047','key-0050048','key-0050049','key-0050050','key-0050051','key-0050052','key-0050053','key-0050054','key-0050055','key-0050056','key-0050057','key-0050058','key-0050059','key-0050060','key-0050061','key-0050062','key-0050063','key-0050064','key-0050065','key-0050066','key-0050067','key-0050068','key-0050069','key-0050070','key-0050071','key-0050072','key-0050073','key-0050074','key-0050075','key-0050076','key-0050077','key-0050078','key-0050079','key-0050080','key-0050081','key-0050082','key-0050083','key-0050084','key-0050085','key-0050086','key-0050087','key-0050088','key-0050089','key-0050090','key-0050091','key-0050092','key-0050093','key-0050094','key-0050095','key-0050096','key-0050097','key-0050098','key-0050099','key-0050100') AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;\n",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX fireweed_items_pending_group_idx (tenant_id=? AND queue_id=?)\n",
+    "stderr": ""
+  },
+  "payload_by_key": {
+    "sql": "EXPLAIN QUERY PLAN INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) SELECT tenant_id,queue_id,item_id,zeroblob(1024) FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' AND client_item_key='key-0050001' AND superseded=0 ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload;\n",
+    "plan": "2|0|0|SEARCH fireweed_items USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=? AND client_item_key=?)\n",
+    "stderr": ""
+  },
+  "varied_update": {
+    "sql": "EXPLAIN QUERY PLAN WITH incoming(client_item_key,priority_sort) AS (VALUES ('key-0050001',x'01'),('key-0050002',x'02')) UPDATE fireweed_items SET priority_sort=incoming.priority_sort FROM incoming WHERE tenant_id='t' AND queue_id='q' AND fireweed_items.client_item_key=incoming.client_item_key AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;\n",
+    "plan": "2|0|0|SEARCH fireweed_items USING INDEX fireweed_items_pending_group_idx (tenant_id=? AND queue_id=?)\n3|0|0|SCAN incoming\n",
+    "stderr": ""
+  },
+  "retention": {
+    "sql": "EXPLAIN QUERY PLAN SELECT item_id FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' AND superseded=0 AND lifecycle_state IN ('Complete','Failed') AND terminal_at IS NOT NULL AND terminal_at<=1;\n",
+    "plan": "1|0|0|SEARCH fireweed_items USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=?)\n",
+    "stderr": ""
+  },
+  "forced_range": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items INDEXED BY fireweed_items_active_key SET metadata='{}',item_version=item_version+1,updated_at=1,last_command_sequence=1 WHERE tenant_id='t' AND queue_id='q' AND client_item_key BETWEEN 'key-0050001' AND 'key-0050100' AND client_item_key IN ('key-0050001','key-0050002','key-0050003','key-0050004','key-0050005','key-0050006','key-0050007','key-0050008','key-0050009','key-0050010','key-0050011','key-0050012','key-0050013','key-0050014','key-0050015','key-0050016','key-0050017','key-0050018','key-0050019','key-0050020','key-0050021','key-0050022','key-0050023','key-0050024','key-0050025','key-0050026','key-0050027','key-0050028','key-0050029','key-0050030','key-0050031','key-0050032','key-0050033','key-0050034','key-0050035','key-0050036','key-0050037','key-0050038','key-0050039','key-0050040','key-0050041','key-0050042','key-0050043','key-0050044','key-0050045','key-0050046','key-0050047','key-0050048','key-0050049','key-0050050','key-0050051','key-0050052','key-0050053','key-0050054','key-0050055','key-0050056','key-0050057','key-0050058','key-0050059','key-0050060','key-0050061','key-0050062','key-0050063','key-0050064','key-0050065','key-0050066','key-0050067','key-0050068','key-0050069','key-0050070','key-0050071','key-0050072','key-0050073','key-0050074','key-0050075','key-0050076','key-0050077','key-0050078','key-0050079','key-0050080','key-0050081','key-0050082','key-0050083','key-0050084','key-0050085','key-0050086','key-0050087','key-0050088','key-0050089','key-0050090','key-0050091','key-0050092','key-0050093','key-0050094','key-0050095','key-0050096','key-0050097','key-0050098','key-0050099','key-0050100') AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;\n",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=? AND client_item_key>=? AND client_item_key<=?)\n",
+    "stderr": ""
+  },
+  "forced_in_only": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items INDEXED BY fireweed_items_active_key SET metadata='{}',item_version=item_version+1,updated_at=1,last_command_sequence=1 WHERE tenant_id='t' AND queue_id='q' AND client_item_key IN ('key-0050001','key-0050002','key-0050003','key-0050004','key-0050005','key-0050006','key-0050007','key-0050008','key-0050009','key-0050010','key-0050011','key-0050012','key-0050013','key-0050014','key-0050015','key-0050016','key-0050017','key-0050018','key-0050019','key-0050020','key-0050021','key-0050022','key-0050023','key-0050024','key-0050025','key-0050026','key-0050027','key-0050028','key-0050029','key-0050030','key-0050031','key-0050032','key-0050033','key-0050034','key-0050035','key-0050036','key-0050037','key-0050038','key-0050039','key-0050040','key-0050041','key-0050042','key-0050043','key-0050044','key-0050045','key-0050046','key-0050047','key-0050048','key-0050049','key-0050050','key-0050051','key-0050052','key-0050053','key-0050054','key-0050055','key-0050056','key-0050057','key-0050058','key-0050059','key-0050060','key-0050061','key-0050062','key-0050063','key-0050064','key-0050065','key-0050066','key-0050067','key-0050068','key-0050069','key-0050070','key-0050071','key-0050072','key-0050073','key-0050074','key-0050075','key-0050076','key-0050077','key-0050078','key-0050079','key-0050080','key-0050081','key-0050082','key-0050083','key-0050084','key-0050085','key-0050086','key-0050087','key-0050088','key-0050089','key-0050090','key-0050091','key-0050092','key-0050093','key-0050094','key-0050095','key-0050096','key-0050097','key-0050098','key-0050099','key-0050100') AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;\n",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=?)\n",
+    "stderr": ""
+  },
+  "single_key": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items SET item_version=item_version+1 WHERE tenant_id='t' AND queue_id='q' AND client_item_key='key-0050001' AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX fireweed_items_pending_group_idx (tenant_id=? AND queue_id=?)\n",
+    "stderr": ""
+  },
+  "single_key_forced": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items INDEXED BY fireweed_items_active_key SET item_version=item_version+1 WHERE tenant_id='t' AND queue_id='q' AND client_item_key='key-0050001' AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=? AND client_item_key=?)\n",
+    "stderr": ""
+  },
+  "single_id": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items SET item_version=item_version+1 WHERE tenant_id='t' AND queue_id='q' AND item_id='50001' AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX fireweed_items_pending_group_idx (tenant_id=? AND queue_id=?)\n",
+    "stderr": ""
+  },
+  "single_id_forced": {
+    "sql": "EXPLAIN QUERY PLAN UPDATE fireweed_items INDEXED BY sqlite_autoindex_fireweed_items_1 SET item_version=item_version+1 WHERE tenant_id='t' AND queue_id='q' AND item_id='50001' AND lifecycle_state='Pending' AND superseded=0 AND fenced=0;",
+    "plan": "3|0|0|SEARCH fireweed_items USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)\n",
+    "stderr": ""
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "retention",
+    "--items",
+    "100000",
+    "--batch",
+    "1000",
+    "--cycles",
+    "3",
+    "--deadline-seconds",
+    "600",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/tmpfsr3vs8c"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "projection.db": {
+      "files": 1,
+      "bytes": 187420672,
+      "allocated_bytes": 187420672
+    },
+    "projection.db-wal": {
+      "files": 1,
+      "bytes": 3526752,
+      "allocated_bytes": 3530752
+    },
+    "log/776f726b666c6f772d776f726b6c6f6164": {
+      "files": 3002,
+      "bytes": 677666986,
+      "allocated_bytes": 686600192
+    }
+  },
+  "source_diff_and_workload_sha256": "080f8c1ecc3f2bdd939848ead36484c277437e905c15df7a8dab3cb54ea7c332",
+  "binary_sha256": "4382400ad4080f568d063588a050d42076aef658265cfc18d64b1e0700aa47e1",
+  "exit_code": 0,
+  "process_wall_s": 192.52988448799988,
+  "user_cpu_s": 119.898117,
+  "system_cpu_s": 14.165178,
+  "max_rss_kib": 410572,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 13811376,
+  "voluntary_context_switches": 217091,
+  "involuntary_context_switches": 8962,
+  "result": {
+    "batch": 1000,
+    "cell": "filesystem--turso",
+    "cycles": [
+      {
+        "cycle": 0,
+        "items": 100000,
+        "lifecycles_per_s": 1752.2500822385985,
+        "projection_bytes": 186265600,
+        "rss_kib": 367492,
+        "wall_s": 57.069479416
+      },
+      {
+        "cycle": 1,
+        "items": 100000,
+        "lifecycles_per_s": 1506.8445747996748,
+        "projection_bytes": 187420672,
+        "rss_kib": 405452,
+        "wall_s": 66.363845132
+      },
+      {
+        "cycle": 2,
+        "items": 100000,
+        "lifecycles_per_s": 1450.9690899560424,
+        "projection_bytes": 187420672,
+        "rss_kib": 408532,
+        "wall_s": 68.919455757
+      }
+    ],
+    "items_per_cycle": 100000,
+    "schema": "retention-capacity/v1",
+    "settled_wall_s": 192.352964199
+  },
+  "stderr": "cycle_complete {\"cycle\":0,\"items\":100000,\"lifecycles_per_s\":1752.2500822385985,\"projection_bytes\":186265600,\"rss_kib\":367492,\"wall_s\":57.069479416}\ncycle_complete {\"cycle\":1,\"items\":100000,\"lifecycles_per_s\":1506.8445747996748,\"projection_bytes\":187420672,\"rss_kib\":405452,\"wall_s\":66.363845132}\ncycle_complete {\"cycle\":2,\"items\":100000,\"lifecycles_per_s\":1450.9690899560424,\"projection_bytes\":187420672,\"rss_kib\":408532,\"wall_s\":68.919455757}\n"
+}

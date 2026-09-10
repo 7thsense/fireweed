@@ -1,0 +1,106 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "snorri",
+    "--items",
+    "10000",
+    "--batch",
+    "100",
+    "--workers",
+    "2",
+    "--shards",
+    "4",
+    "--deadline-seconds",
+    "600",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/tmpdb8mhxb4"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "shard-0/projection.db": {
+      "files": 1,
+      "bytes": 18104320,
+      "allocated_bytes": 18104320
+    },
+    "shard-0/projection.db-wal": {
+      "files": 1,
+      "bytes": 0,
+      "allocated_bytes": 0
+    },
+    "shard-1/projection.db": {
+      "files": 1,
+      "bytes": 17936384,
+      "allocated_bytes": 17936384
+    },
+    "shard-1/projection.db-wal": {
+      "files": 1,
+      "bytes": 1116552,
+      "allocated_bytes": 1118208
+    },
+    "shard-2/projection.db": {
+      "files": 1,
+      "bytes": 16523264,
+      "allocated_bytes": 16523264
+    },
+    "shard-2/projection.db-wal": {
+      "files": 1,
+      "bytes": 3011752,
+      "allocated_bytes": 3014656
+    },
+    "shard-3/projection.db": {
+      "files": 1,
+      "bytes": 16666624,
+      "allocated_bytes": 16666624
+    },
+    "shard-3/projection.db-wal": {
+      "files": 1,
+      "bytes": 3427872,
+      "allocated_bytes": 3428352
+    },
+    "shard-3/log": {
+      "files": 410,
+      "bytes": 14314909,
+      "allocated_bytes": 15667200
+    },
+    "shard-2/log": {
+      "files": 408,
+      "bytes": 14164470,
+      "allocated_bytes": 15519744
+    },
+    "shard-1/log": {
+      "files": 428,
+      "bytes": 14709951,
+      "allocated_bytes": 16138240
+    },
+    "shard-0/log": {
+      "files": 424,
+      "bytes": 14672316,
+      "allocated_bytes": 16068608
+    }
+  },
+  "source_diff_and_workload_sha256": "325f9d64e1aede22ae361a19e9e036c58c2afc0d9c71d43b5a71e056f90c927a",
+  "binary_sha256": "4758af83344021fd39d399eb78836f8d37b30c0083b8183f033c303523f91b11",
+  "exit_code": 1,
+  "process_wall_s": 10.068517267000061,
+  "user_cpu_s": 24.855305,
+  "system_cpu_s": 8.814404,
+  "max_rss_kib": 252588,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 1058376,
+  "voluntary_context_switches": 159439,
+  "involuntary_context_switches": 4396,
+  "stdout": "",
+  "stderr": "Error: Conflict\n"
+}

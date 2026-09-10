@@ -77,6 +77,7 @@ where
     next_id: AtomicU64,
     paused: AtomicBool,
     worker_running: AtomicBool,
+    coverage_waiters: AtomicU64,
     state: Mutex<CoordinatorState>,
     poisoned: std::sync::RwLock<HashMap<QueueKey, String>>,
     changed: Notify,
@@ -190,6 +191,7 @@ where
                 next_id: AtomicU64::new(1),
                 paused: AtomicBool::new(false),
                 worker_running: AtomicBool::new(false),
+                coverage_waiters: AtomicU64::new(0),
                 state: Mutex::new(CoordinatorState::default()),
                 poisoned: std::sync::RwLock::new(HashMap::new()),
                 changed: Notify::new(),
@@ -542,6 +544,17 @@ where
         target: &CommandPosition,
         deadline: Duration,
     ) -> EngineResult<()> {
+        // A dependent read needs Claim applied now. Waiting 80 ms for Complete
+        // cannot help when that Complete itself needs projection coverage first.
+        struct CoverageWaiter<'a>(&'a AtomicU64);
+        impl Drop for CoverageWaiter<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        self.inner.coverage_waiters.fetch_add(1, Ordering::AcqRel);
+        let _coverage_waiter = CoverageWaiter(&self.inner.coverage_waiters);
+        self.inner.changed.notify_waiters();
         let started = Instant::now();
         loop {
             self.ensure_healthy(shard)?;
@@ -699,7 +712,9 @@ where
 
         if generation_is_claim_without_complete(&generation) {
             let deadline = Instant::now() + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
-            while generation_is_claim_without_complete(&generation) {
+            while generation_is_claim_without_complete(&generation)
+                && inner.coverage_waiters.load(Ordering::Acquire) == 0
+            {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };

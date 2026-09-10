@@ -1253,8 +1253,20 @@ fn complete_named_ids_pk_sql(
     let mut pending_moved = 0usize;
     for chunk in ids.chunks(bind_chunk_size(1, extra)) {
         let values = vec!["(?)"; chunk.len()].join(",");
-        let sql = format!(
-            "WITH incoming(item_id) AS (VALUES {values}) \
+        let sql = if tx.prefer_point_updates() {
+            format!(
+                "WITH incoming(item_id) AS (VALUES {values}) \
+                UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+                lease_expires_at=NULL, worker_id=NULL, fenced=0, {version_sql} \
+                terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+                WHERE rowid IN (SELECT i.rowid FROM incoming \
+                    CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+                    ON i.tenant_id=? AND i.queue_id=? AND i.item_id=incoming.item_id) \
+                AND superseded=0 AND {pending_pred}"
+            )
+        } else {
+            format!(
+                "WITH incoming(item_id) AS (VALUES {values}) \
              UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
              lease_expires_at=NULL, worker_id=NULL, fenced=0, \
              {version_sql} \
@@ -1263,7 +1275,8 @@ fn complete_named_ids_pk_sql(
              WHERE tenant_id=? AND queue_id=? AND superseded=0 \
                AND fireweed_items.item_id=incoming.item_id \
                AND {pending_pred}"
-        );
+            )
+        };
         let mut params: Vec<RelValue> = chunk.iter().cloned().map(RelValue::Text).collect();
         params.extend([
             RelValue::Integer(now_n),
@@ -1718,13 +1731,10 @@ fn upsert_item_payloads(
     let mut params = Vec::new();
     let mut count = 0usize;
     for (item_id, payload) in rows {
-        let Some(payload) = payload else {
-            continue;
-        };
         params.push(RelValue::Text(tenant.to_string()));
         params.push(RelValue::Text(queue.to_string()));
         params.push(RelValue::Text(item_id));
-        params.push(RelValue::Blob(payload));
+        params.push(payload.map(RelValue::Blob).unwrap_or(RelValue::Null));
         count += 1;
     }
     if count == 0 {
@@ -2193,6 +2203,46 @@ pub fn exec_items_in(
     if ids.is_empty() {
         return Ok(());
     }
+    // IN on a composite key can scan an entire queue in Turso. For this
+    // exact helper shape, resolve rowids by indexed points first, then mutate
+    // those integer primary keys. Keep one statement per bounded batch.
+    if tx.prefer_point_updates() {
+        if let Some(statement) =
+            prefix.strip_suffix(" WHERE tenant_id=? AND queue_id=? AND item_id IN")
+        {
+            let table = statement.strip_prefix("DELETE FROM ").or_else(|| {
+                statement
+                    .strip_prefix("UPDATE ")
+                    .and_then(|s| s.split_once(" SET ").map(|(table, _)| table))
+            });
+            if let Some(
+                table @ ("fireweed_items"
+                | "fireweed_item_payloads"
+                | "fireweed_item_gates"
+                | "fireweed_lease_bearers"),
+            ) = table
+            {
+                for chunk in ids.chunks(bind_chunk_size(1, lead.len() + 2)) {
+                    let values = vec!["(?)"; chunk.len()].join(",");
+                    let sql = format!(
+                        "WITH incoming(item_id) AS (VALUES {values}) \
+                        {statement} WHERE rowid IN (SELECT i.rowid FROM incoming \
+                        CROSS JOIN {table} i INDEXED BY sqlite_autoindex_{table}_1 \
+                        ON i.tenant_id=? AND i.queue_id=? AND i.item_id=incoming.item_id)"
+                    );
+                    let mut params = chunk
+                        .iter()
+                        .cloned()
+                        .map(RelValue::Text)
+                        .collect::<Vec<_>>();
+                    params.extend_from_slice(lead);
+                    params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
+                    crate::rel_exec(tx, &sql, params)?;
+                }
+                return Ok(());
+            }
+        }
+    }
     let chunk_size = bind_chunk_size(1, lead.len() + 2);
     for chunk in ids.chunks(chunk_size) {
         let ph = vec!["?"; chunk.len()].join(",");
@@ -2385,6 +2435,14 @@ pub fn reap_terminal_items_sql(
     exec_items_in(
         tx,
         "DELETE FROM fireweed_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        &[],
+        &t,
+        &q,
+        &id_strs,
+    )?;
+    exec_items_in(
+        tx,
+        "DELETE FROM fireweed_item_payloads WHERE tenant_id=? AND queue_id=? AND item_id IN",
         &[],
         &t,
         &q,
@@ -3432,27 +3490,54 @@ fn apply_packed_claims_sql(
             all_ids.push(*id);
         }
     }
-    const ROW_BINDS: usize = 6;
-    let extra = 2;
-    let mut pending_moved = 0usize;
-    for chunk in rows.chunks(bind_chunk_size(ROW_BINDS, extra)) {
-        let values = vec!["(?,?,?,?,?,?)"; chunk.len()].join(",");
-        let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + extra);
-        for (item_id, hash, exp, worker, now_n, seq) in chunk {
-            params.extend([
-                RelValue::Text(item_id.clone()),
-                RelValue::Blob(hash.clone()),
-                RelValue::Integer(*exp),
-                worker.clone(),
-                RelValue::Integer(*now_n),
-                RelValue::Integer(*seq),
-            ]);
+    let pending_moved = if tx.prefer_point_updates() {
+        let mut changed = 0;
+        for (claim, seq, now) in &mutating {
+            let ids = claim
+                .item_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let worker = claim
+                .worker_id
+                .as_ref()
+                .map(|w| RelValue::Text(w.as_str().to_string()))
+                .unwrap_or(RelValue::Null);
+            changed += lease_pending_ids_sql(
+                tx,
+                &t,
+                &q,
+                &ids,
+                &lease_hash(&claim.lease_token),
+                ts_nanos(claim.lease_expires_at),
+                &worker,
+                ts_nanos(*now),
+                *seq as i64,
+            )?;
         }
-        params.extend([RelValue::Text(t.clone()), RelValue::Text(q.clone())]);
-        pending_moved += crate::rel_exec(
-            tx,
-            &format!(
-                "WITH incoming(item_id,hash,exp,worker,now_n,seq) AS (VALUES {values}) \
+        changed
+    } else {
+        const ROW_BINDS: usize = 6;
+        let extra = 2;
+        let mut pending_moved = 0usize;
+        for chunk in rows.chunks(bind_chunk_size(ROW_BINDS, extra)) {
+            let values = vec!["(?,?,?,?,?,?)"; chunk.len()].join(",");
+            let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + extra);
+            for (item_id, hash, exp, worker, now_n, seq) in chunk {
+                params.extend([
+                    RelValue::Text(item_id.clone()),
+                    RelValue::Blob(hash.clone()),
+                    RelValue::Integer(*exp),
+                    worker.clone(),
+                    RelValue::Integer(*now_n),
+                    RelValue::Integer(*seq),
+                ]);
+            }
+            params.extend([RelValue::Text(t.clone()), RelValue::Text(q.clone())]);
+            pending_moved += crate::rel_exec(
+                tx,
+                &format!(
+                    "WITH incoming(item_id,hash,exp,worker,now_n,seq) AS (VALUES {values}) \
                  UPDATE fireweed_items SET \
                    lifecycle_state='Leased', lease_token_hash=incoming.hash, \
                    lease_expires_at=incoming.exp, worker_id=incoming.worker, \
@@ -3462,10 +3547,12 @@ fn apply_packed_claims_sql(
                  WHERE tenant_id=? AND queue_id=? \
                    AND fireweed_items.item_id=incoming.item_id \
                    AND lifecycle_state='Pending' AND superseded=0"
-            ),
-            params,
-        )?;
-    }
+                ),
+                params,
+            )?;
+        }
+        pending_moved
+    };
     if authority_first && pending_moved != named {
         return Err(authority_first_short_move(pending_moved, named));
     }
@@ -3492,6 +3579,38 @@ fn lease_pending_ids_sql(
     now_n: i64,
     seq: i64,
 ) -> EngineResult<usize> {
+    if tx.prefer_point_updates() {
+        let mut changed = 0;
+        for chunk in ids.chunks(bind_chunk_size(1, 7)) {
+            let values = vec!["(?)"; chunk.len()].join(",");
+            let sql = format!(
+                "WITH incoming(item_id) AS (VALUES {values}) \
+                UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?, \
+                lease_expires_at=?, worker_id=?, retry_count=retry_count+1, item_version=item_version+1, \
+                updated_at=?, last_command_sequence=? \
+                WHERE rowid IN (SELECT i.rowid FROM incoming \
+                    CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+                    ON i.tenant_id=? AND i.queue_id=? AND i.item_id=incoming.item_id) \
+                AND lifecycle_state='Pending' AND superseded=0"
+            );
+            let mut params = chunk
+                .iter()
+                .cloned()
+                .map(RelValue::Text)
+                .collect::<Vec<_>>();
+            params.extend([
+                RelValue::Blob(hash.to_vec()),
+                exp.into(),
+                worker.clone(),
+                now_n.into(),
+                seq.into(),
+                tenant.into(),
+                queue.into(),
+            ]);
+            changed += crate::rel_exec(tx, &sql, params)?;
+        }
+        return Ok(changed);
+    }
     let mut pending_moved = 0usize;
     let extra = 7;
     for chunk in ids.chunks(bind_chunk_size(1, extra)) {
@@ -4035,6 +4154,45 @@ fn try_apply_operation_shaped_api001_batch(
             Ok::<_, EngineError>(values)
         })
         .collect::<EngineResult<Vec<_>>>()?;
+    if tx.prefer_point_updates() && !grouped_schedule {
+        let index = match shape.address {
+            Api001UpdateAddress::ItemId => "sqlite_autoindex_fireweed_items_1",
+            Api001UpdateAddress::ClientItemKey => "fireweed_items_active_key",
+        };
+        let assignments = replacement_columns
+            .iter()
+            .map(|c| format!("{c}=?"))
+            .chain([
+                "item_version=item_version+1".into(),
+                "updated_at=?".into(),
+                "last_command_sequence=?".into(),
+            ])
+            .collect::<Vec<_>>()
+            .join(",");
+        // Equality on every index key is essential: an index hint with IN still
+        // scans the queue prefix in Turso. Keep all points in this transaction.
+        let sql = format!(
+            "UPDATE fireweed_items INDEXED BY {index} SET {assignments} \
+            WHERE tenant_id=? AND queue_id=? AND {address_column}=? \
+            AND superseded=0 AND lifecycle_state='Pending' AND fenced=0"
+        );
+        for (update, values) in updates.iter().zip(&replacement_values) {
+            let mut params = values.clone();
+            params.extend([
+                now_n.into(),
+                (seq as i64).into(),
+                tenant.clone().into(),
+                queue.clone().into(),
+                target(update).into(),
+            ]);
+            crate::rel_exec(tx, &sql, params)?;
+        }
+        if shape.priority || shape.not_before {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+        }
+        write_shaped_payloads(tx, shard, updates, shape)?;
+        return Ok(true);
+    }
     let uniform_values = replacement_values
         .first()
         .filter(|first| replacement_values.iter().all(|values| values == *first));
@@ -4390,7 +4548,7 @@ fn apply_update_fields_batch_sql(
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = if need_payload {
             format!(
-                "SELECT item_id,fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata,\
+                "SELECT item_id,fields,lifecycle_state,priority,not_before,eligible_since,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,metadata,\
                         group_key,created_at,created_seq,item_version \
                  FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders}) \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0"
@@ -4848,7 +5006,7 @@ pub fn apply_command_sql(
             // (a divergence) we apply nothing rather than fault, mirroring the in-memory `debug_assert`.
             let current: Option<UpdateFieldsRow> = crate::query_optional(
                 tx,
-                "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata FROM fireweed_items \
+                "SELECT fields,lifecycle_state,priority,not_before,eligible_since,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,metadata FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
                 [
@@ -4930,7 +5088,7 @@ pub fn apply_command_sql(
                         RelValue::Text(q.to_string()),
                         c.item_id.to_string().into(),
                         fields_json.into(),
-                        payload.into(),
+                        RelValue::Null,
                         metadata_json.into(),
                         priority_json.into(),
                         priority_sort.clone().into(),
@@ -4940,6 +5098,7 @@ pub fn apply_command_sql(
                         (seq as i64).into(),
                     ],
                 )?;
+                upsert_item_payloads(tx, &t, &q, [(c.item_id.to_string(), payload)])?;
                 if let Some(gate_keys) = &c.set_gate_keys {
                     crate::rel_exec(
                         tx,
@@ -5511,15 +5670,31 @@ pub fn apply_command_sql(
             // One set-based read of every purged item (was one SELECT per item).
             for chunk in id_strs.chunks(SQLITE_BATCH) {
                 let ph = vec!["?"; chunk.len()].join(",");
-                let sql = format!(
-                    "SELECT item_id, group_key, client_item_key, lifecycle_state FROM fireweed_items \
-                     WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
-                );
-                let mut p: Vec<RelValue> =
-                    vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
-                for id in chunk {
-                    p.push(RelValue::Text(id.clone()));
-                }
+                let (sql, p) = if tx.prefer_point_updates() {
+                    let values = vec!["(?)"; chunk.len()].join(",");
+                    let sql = format!(
+                        "WITH incoming(item_id) AS (VALUES {values}) \
+                         SELECT i.item_id, i.group_key, i.client_item_key, i.lifecycle_state \
+                         FROM incoming CROSS JOIN fireweed_items i \
+                         INDEXED BY sqlite_autoindex_fireweed_items_1 \
+                         ON i.tenant_id=? AND i.queue_id=? AND i.item_id=incoming.item_id"
+                    );
+                    let mut p = chunk
+                        .iter()
+                        .cloned()
+                        .map(RelValue::Text)
+                        .collect::<Vec<_>>();
+                    p.extend([RelValue::Text(t.clone()), RelValue::Text(q.clone())]);
+                    (sql, p)
+                } else {
+                    let sql = format!(
+                        "SELECT item_id, group_key, client_item_key, lifecycle_state FROM fireweed_items \
+                         WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
+                    );
+                    let mut p = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
+                    p.extend(chunk.iter().cloned().map(RelValue::Text));
+                    (sql, p)
+                };
                 for r in crate::rel_query(tx, &sql, &p)? {
                     let item_id: String = r.get(0)?;
                     let gk: Option<String> = r.get(1)?;
@@ -5582,6 +5757,14 @@ pub fn apply_command_sql(
                 &id_strs,
             )?;
             // ADR-011: drop the purged items' typed secondary index rows.
+            exec_items_in(
+                tx,
+                "DELETE FROM fireweed_item_payloads WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                &[],
+                &t,
+                &q,
+                &id_strs,
+            )?;
             delete_typed_index_rows(tx, &t, &q, &id_strs)?;
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(shard.clone(), *id));
@@ -5782,11 +5965,7 @@ pub fn apply_command_sql(
                                 priority_sort.clone().into(),
                                 values.not_before.map(ts_nanos).into(),
                                 ts_nanos(values.eligible_since).into(),
-                                values
-                                    .payload
-                                    .as_ref()
-                                    .map(|payload| payload.to_vec())
-                                    .into(),
+                                RelValue::Null,
                                 fields_to_json(&values.fields)?.into(),
                                 metadata_to_json(&values.metadata)?.into(),
                                 values
@@ -5814,6 +5993,15 @@ pub fn apply_command_sql(
                         if changed != 1 {
                             return Err(EngineError::Conflict);
                         }
+                        upsert_item_payloads(
+                            tx,
+                            &t,
+                            &q,
+                            [(
+                                item_id.to_string(),
+                                values.payload.as_ref().map(|p| p.to_vec()),
+                            )],
+                        )?;
                         crate::rel_exec(
                             tx,
                             "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",

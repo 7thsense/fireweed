@@ -1,0 +1,10 @@
+{
+  "purpose": "Isolated Btrfs NOCOW control; same CLI/binary/workload. Flag set on empty root before run; inherited by both authoritative log and disposable projection. This is not the default storage configuration.",
+  "setup": [
+    "mkdir target/workflow-capacity/nocow-control",
+    "chattr +C target/workflow-capacity/nocow-control"
+  ],
+  "attributes": "---------------C------ target/workflow-capacity/nocow-control\n---------------C------ target/workflow-capacity/nocow-control/shard-0\n---------------C------ target/workflow-capacity/nocow-control/shard-0/log\n---------------C------ target/workflow-capacity/nocow-control/shard-0/projection.db\n---------------C------ target/workflow-capacity/nocow-control/shard-0/projection.db-wal\n",
+  "stderr": "",
+  "platform": "Linux-7.2.3-arch1-3-x86_64-with-glibc2.44"
+}

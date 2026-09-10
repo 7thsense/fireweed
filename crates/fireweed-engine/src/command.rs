@@ -1767,7 +1767,7 @@ mod serde_tests {
 
         assert_eq!(
             selection_fence_disposition(&terminal),
-            SelectionFenceDisposition::Bypass
+            SelectionFenceDisposition::Shared
         );
         assert_eq!(
             selection_fence_disposition(&mixed),
@@ -1779,7 +1779,7 @@ mod serde_tests {
         );
         assert_eq!(
             selection_fence_disposition_for_commands([&terminal, &mixed, &claim]),
-            SelectionFenceDisposition::Exclusive
+            SelectionFenceDisposition::Shared
         );
 
         for kind in [
@@ -1809,7 +1809,7 @@ mod serde_tests {
             });
             assert_eq!(
                 selection_fence_disposition(&cohort),
-                SelectionFenceDisposition::Bypass
+                SelectionFenceDisposition::Shared
             );
         }
     }
@@ -1843,7 +1843,7 @@ mod serde_tests {
 
         assert_eq!(
             selection_fence_disposition(&complete_only),
-            SelectionFenceDisposition::Bypass
+            SelectionFenceDisposition::Shared
         );
         assert_eq!(
             selection_fence_disposition(&complete_and_retry),

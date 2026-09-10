@@ -19,6 +19,7 @@ on:
       - crates/fireweed-relational/**
       - crates/fireweed-server/**
       - crates/fireweed-turso/**
+      - crates/fireweed-workload/**
       - .github/workflows/turso.yml
   push:
     branches:
@@ -34,6 +35,7 @@ on:
       - crates/fireweed-relational/**
       - crates/fireweed-server/**
       - crates/fireweed-turso/**
+      - crates/fireweed-workload/**
       - .github/workflows/turso.yml
   workflow_dispatch:
 
@@ -75,6 +77,9 @@ jobs:
 
       - name: fireweed-turso tests (local)
         run: cargo +1.97.1 test -p fireweed-turso --features local
+
+      - name: Public workflow correctness and log recovery
+        run: cargo +1.97.1 test -p fireweed-workload
 
       # Fireweed facade: 20-cell register Turso route leaves + composition matrix.
       - name: Fireweed 20-cell Turso route tests

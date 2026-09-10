@@ -10,21 +10,19 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
-    QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
+    QueueDefinition, QueueIndex, RequestId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncProjectionStore, BatchUpdateResponse, BatchUpdateSnapshotItem, ClaimCompatibility,
-    ClaimRef, ClaimUnit, ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition,
-    CreateQueueOutcome, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
-    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
-    PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget,
-    RequestOutcome, ResolvedItemMutationAction, RichClaimSelection, ScheduleUpdate,
-    TerminalEmissionMetrics, UpdateFieldsCommand,
+    AsyncProjectionStore, BatchUpdateSnapshotItem, ClaimCompatibility, ClaimRef, ClaimUnit,
+    ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome,
+    EngineError, EngineResult, FinalizeTarget, IdempotencyDecision, ItemView, LeaseView,
+    LiveItemView, PendingPage, PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey,
+    QueueMetrics, RenewTarget, RichClaimSelection, TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
     ClassSClaimedItem, RelRow, RelTx, RelValue, SQLITE_BIND_CAP, TokenOp, async_projection as sql,
-    elig_sort, entity_from_json, fields_from_json, fields_to_json, lease_hash, metadata_from_json,
-    metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos, ts_nanos_opt,
+    entity_from_json, fields_from_json, lease_hash, metadata_from_json, metadata_to_json, nanos_ts,
+    parse_priority, parse_state, ts_nanos,
 };
 use tokio::sync::Mutex;
 use turso::{Connection, Row, Value, transaction::TransactionBehavior};
@@ -42,8 +40,11 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
 
 /// Truncate only when the WAL is already large and no reader snapshot is live.
 /// `busy_timeout=0` makes TRUNCATE fail immediately if a Deferred reader holds
-/// the WAL; apply then continues and the next quiet apply retries. Autocheckpoint
-/// stays off so this never runs inside reader construction.
+/// the WAL; apply then continues and the next quiet apply retries.
+/// Turso 0.7.2 still auto-checkpoints at 1,000 frames: the accepted
+/// wal_autocheckpoint pragma does not configure that threshold. Explicit
+/// checkpoints additionally clear the pager cache and TRUNCATE syncs the WAL.
+/// Keep WAL history short: a 64 MiB threshold regressed public-API capacity.
 const WAL_TRUNCATE_MIN_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {
@@ -247,10 +248,11 @@ async fn query_value_rows(
     query: impl AsRef<str>,
     params: Vec<Value>,
 ) -> EngineResult<Vec<Vec<Value>>> {
-    let mut rows = connection
-        .query(query, params)
+    let mut statement = connection
+        .prepare_cached(query.as_ref())
         .await
         .map_err(outcome_read_error)?;
+    let mut rows = statement.query(params).await.map_err(outcome_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(outcome_read_error)? {
         let mut values = Vec::with_capacity(row.column_count());
@@ -430,19 +432,26 @@ async fn validation_rows_by_item(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let placeholders = (0..ids.len())
-        .map(|index| format!("?{}", index + 3))
+    let values = (0..ids.len())
+        .map(|i| format!("(?{})", i + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    let columns = columns
+        .split(',')
+        .map(|c| format!("i.{}", c.trim()))
         .collect::<Vec<_>>()
         .join(",");
     let query = format!(
-        "SELECT item_id,{columns} FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+        "WITH incoming(item_id) AS (VALUES {values}) SELECT i.item_id,{columns} \
+         FROM incoming CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+         ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id"
     );
     let mut params = Vec::with_capacity(ids.len() + 2);
     params.push(Value::Text(tenant.to_string()));
     params.push(Value::Text(queue.to_string()));
     params.extend(ids.iter().map(|id| Value::Text(id.to_string())));
-    let mut rows = connection.query(&query, params).await.map_err(storage)?;
+    let mut statement = connection.prepare_cached(&query).await.map_err(storage)?;
+    let mut rows = statement.query(params).await.map_err(storage)?;
     let mut by_item = HashMap::with_capacity(ids.len());
     while let Some(row) = rows.next().await.map_err(storage)? {
         let item_id = ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?;
@@ -1517,6 +1526,10 @@ struct ObservedTursoRel<'a> {
 }
 
 impl RelTx for ObservedTursoRel<'_> {
+    fn prefer_point_updates(&self) -> bool {
+        true
+    }
+
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
         let started = Instant::now();
         let result = self.inner.execute(sql, params);
@@ -1593,7 +1606,33 @@ async fn apply_owned(
     commands: Vec<CommandEnvelope>,
     enforce_live_epoch: bool,
 ) -> EngineResult<()> {
+    // Cancellation while queued must not start an apply. Once the writer is
+    // acquired, its owner must outlive the blocking relational SQL worker:
+    // dropping a caller's transaction while that worker runs can roll it back
+    // underneath later statements. Detaching this owned task only drops the
+    // response waiter; it retains both the writer and transaction to completion.
     let total_started = Instant::now();
+    let writer_wait_started = Instant::now();
+    let connection = writer.lock_owned().await;
+    let writer_wait_us = duration_us(writer_wait_started.elapsed());
+    // The facade also supports non-Tokio executors. Keep one fallback runtime
+    // alive so admitted applies survive their response waiters in that cell too.
+    let handle = tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("turso-owned-apply")
+                    .enable_all()
+                    .build()
+                    .expect("Turso owned apply runtime")
+            })
+            .handle()
+            .clone()
+    });
+    handle.spawn(async move {
+    let mut connection = connection;
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
     }
@@ -1611,9 +1650,6 @@ async fn apply_owned(
     *last_apply_statement_shape
         .lock()
         .expect("Turso apply statement-shape mutex poisoned") = None;
-    let writer_wait_started = Instant::now();
-    let mut connection = writer.lock().await;
-    let writer_wait_us = duration_us(writer_wait_started.elapsed());
     let mut grouped_shards = grouped_shards_slot
         .lock()
         .expect("Turso grouped-shard mutex poisoned")
@@ -1814,6 +1850,7 @@ async fn apply_owned(
         }
     }
     Ok(())
+    }).await.map_err(|error| storage(format!("Turso owned apply task failed: {error}")))?
 }
 
 /// Pre-position observation helper over a borrowed OutcomeReadAdmission connection
@@ -1931,17 +1968,18 @@ pub(crate) async fn server_update_snapshot_on(
                 .iter()
                 .map(|key| Value::Text(key.as_str().to_string())),
         );
-        let placeholders = (0..chunk.len())
-            .map(|offset| format!("?{}", offset + 3))
+        let values_sql = (0..chunk.len())
+            .map(|i| format!("(?{})", i + 3))
             .collect::<Vec<_>>()
             .join(",");
         let rows = query_value_rows(
             connection,
             format!(
-                "SELECT item_id,client_item_key,item_version,lifecycle_state,fenced \
-                         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
-                         AND client_item_key IN ({placeholders}) \
-                         AND lifecycle_state IN ('Pending','Leased') AND superseded=0"
+                "WITH incoming(client_item_key) AS (VALUES {values_sql}) \
+             SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.fenced \
+             FROM incoming CROSS JOIN fireweed_items i INDEXED BY fireweed_items_active_key \
+             ON i.tenant_id=?1 AND i.queue_id=?2 AND i.client_item_key=incoming.client_item_key \
+             WHERE i.superseded=0"
             ),
             params,
         )
@@ -1974,7 +2012,7 @@ pub(crate) async fn server_live_items_on(
         let rows = query_value_rows(
             connection,
             "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.group_key,i.not_before,i.retry_count,\
-                 COALESCE(p.payload, i.payload),i.fields \
+                 CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.fields \
                  FROM fireweed_items i \
                  LEFT JOIN fireweed_item_payloads p \
                    ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
@@ -2088,10 +2126,11 @@ async fn query_driver_value_rows(
     query: impl AsRef<str>,
     params: Vec<Value>,
 ) -> EngineResult<Vec<Vec<Value>>> {
-    let mut rows = connection
-        .query(query, params)
+    let mut statement = connection
+        .prepare_cached(query.as_ref())
         .await
         .map_err(driver_read_error)?;
+    let mut rows = statement.query(params).await.map_err(driver_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(driver_read_error)? {
         let mut values = Vec::with_capacity(row.column_count());
@@ -2284,10 +2323,10 @@ pub async fn select_and_materialize_item_claims_on(
     let mut carriers = Vec::with_capacity(max);
     let mut next_floor = None;
     if let Some(mut floor) = rowid_floor {
-        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
+        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,CASE WHEN p.item_id IS NULL THEN t.payload ELSE p.payload END,t.item_version,t.retry_count,t.priority,t.group_key,\
              t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.rowid \
              FROM (\
-               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,\
+               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,payload,\
                 not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
                FROM fireweed_items NOT INDEXED \
                WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
@@ -2344,18 +2383,22 @@ pub async fn select_and_materialize_item_claims_on(
         }
         next_floor = Some(floor);
     } else {
-        const ORDER_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
-             t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size \
+        const ORDER_SQL: &str = "SELECT t.item_id,t.client_item_key,CASE WHEN p.item_id IS NULL THEN t.payload ELSE p.payload END,t.item_version,t.retry_count,t.priority,t.group_key,\
+             t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.priority_sort,t.created_seq \
              FROM (\
-               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,\
-                not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size \
-               FROM fireweed_items \
+               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,payload,\
+                not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,priority_sort,created_seq \
+               FROM fireweed_items INDEXED BY fireweed_items_pending_order_idx \
                WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-               ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4\
+                AND priority_sort>=?4 AND (priority_sort>?4 OR created_seq>?5) \
+                AND cohort_size IS NULL AND eligible_since IS NOT NULL \
+                AND (not_before IS NULL OR not_before<=?6) \
+               ORDER BY priority_sort,created_seq LIMIT ?3\
              ) t \
              LEFT JOIN fireweed_item_payloads p \
-               ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id";
-        let mut offset: i64 = 0;
+               ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id ORDER BY t.priority_sort,t.created_seq";
+        let mut after_priority = Vec::<u8>::new();
+        let mut after_sequence = i64::MIN;
         let mut first_page = true;
         while ids.len() < max {
             let extra = if first_page {
@@ -2369,7 +2412,9 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Text(tenant.to_string()),
                 Value::Text(queue.to_string()),
                 Value::Integer(i64::try_from(fetch).map_err(storage)?),
-                Value::Integer(offset),
+                Value::Blob(after_priority.clone()),
+                Value::Integer(after_sequence),
+                Value::Integer(now_n),
             ];
             let mut rows = connection
                 .query(ORDER_SQL, params)
@@ -2378,6 +2423,9 @@ pub async fn select_and_materialize_item_claims_on(
             let mut page = 0usize;
             while let Some(row) = rows.next().await.map_err(driver_read_error)? {
                 page += 1;
+                after_priority = take_optional_blob(row.get_value(15).map_err(driver_read_error)?)?
+                    .ok_or_else(|| storage("claim priority_sort is NULL"))?;
+                after_sequence = take_integer(row.get_value(16).map_err(driver_read_error)?)?;
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
@@ -2395,7 +2443,6 @@ pub async fn select_and_materialize_item_claims_on(
             if page == 0 {
                 break;
             }
-            offset = offset.saturating_add(i64::try_from(page).map_err(storage)?);
         }
     }
     if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
@@ -2478,7 +2525,7 @@ async fn materialize_claimed_on(
         }
         params.extend(chunk.iter().map(|id| id.to_string().into()));
         let item_sql = format!(
-            "SELECT item_id,client_item_key,payload,item_version,retry_count,priority,group_key,\
+            "SELECT item_id,client_item_key,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,item_version,retry_count,priority,group_key,\
              not_before,fields,metadata,max_attempts,entity_document,index_fields \
              FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders}){due_clause}"
@@ -2752,6 +2799,61 @@ impl TursoRelational {
         server_update_snapshot_on(&connection, shard, keys).await
     }
 
+    pub async fn batch_update_replay(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: fireweed_core::BodyHash,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<fireweed_engine::BatchUpdateResponse>> {
+        let connection = self.reader.lock().await;
+        let rows = query_value_rows(&connection,
+            "SELECT request_fingerprint,response_payload FROM fireweed_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation='batch_update' AND request_id=?3 AND expires_at>?4",
+            vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), request_id.as_str().to_string().into(), ts_nanos(now).into()]).await?;
+        let Some(v) = rows.first() else {
+            return Ok(None);
+        };
+        if blob(&v[0])? != fingerprint.0.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        Ok(Some(serde_json::from_str(&text(&v[1])?).map_err(storage)?))
+    }
+
+    pub async fn server_update_snapshot_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        let connection = self.reader.lock().await;
+        let mut result = Vec::with_capacity(ids.len());
+        for id in ids {
+            let rows = query_value_rows(
+                &connection,
+                "SELECT item_id,client_item_key,item_version,lifecycle_state,fenced,superseded \
+                 FROM fireweed_items INDEXED BY sqlite_autoindex_fireweed_items_1 \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    id.to_string().into(),
+                ],
+            )
+            .await?;
+            if let Some(v) = rows.first() {
+                result.push(BatchUpdateSnapshotItem {
+                    item_id: *id,
+                    client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
+                    item_version: nonnegative_u64(integer(&v[2])?, "item_version")?,
+                    state: parse_state(&text(&v[3])?).map_err(storage)?,
+                    fenced: integer(&v[4])? != 0,
+                    superseded: integer(&v[5])? != 0,
+                });
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn server_live_items(
         &self,
         shard: &QueueKey,
@@ -2800,6 +2902,63 @@ impl AsyncProjectionStore for TursoRelational {
         _shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         std::future::ready(Ok(()))
+    }
+
+    fn replay_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<
+        Output = EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>>,
+    > + Send {
+        async move {
+            let connection = self.writer.lock().await;
+            let rows = query_value_rows(&connection,
+                "SELECT request_fingerprint,response_payload FROM fireweed_request_idempotency \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND operation='commit' AND request_id=?3 AND expires_at>?4",
+                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), request_id.as_str().to_string().into(), ts_nanos(now).into()]).await?;
+            let Some(v) = rows.first() else {
+                return Ok(None);
+            };
+            if blob(&v[0])? != fingerprint.to_be_bytes() {
+                return Err(EngineError::RequestIdConflict);
+            }
+            Ok(Some(serde_json::from_str(&text(&v[1])?).map_err(storage)?))
+        }
+    }
+
+    fn side_record(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        async move {
+            let connection = self.writer.lock().await;
+            let rows = query_value_rows(&connection,
+                "SELECT payload FROM fireweed_side_records WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
+                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), Value::Blob(key)]).await?;
+            rows.first()
+                .map(|v| blob(&v[0]).map(Bytes::from))
+                .transpose()
+        }
+    }
+
+    fn instance_fence(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send {
+        async move {
+            let connection = self.writer.lock().await;
+            let rows = query_value_rows(&connection,
+                "SELECT fence FROM fireweed_instance_fences WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), Value::Blob(key)]).await?;
+            rows.first()
+                .map(|v| nonnegative_u64(integer(&v[0])?, "instance fence"))
+                .transpose()
+        }
     }
 
     fn index_validate_push(
@@ -2851,6 +3010,9 @@ impl AsyncProjectionStore for TursoRelational {
                     }
                 }
 
+                // Keep ID and active-key existence checks as separate full-key
+                // seeks. A combined OR makes Turso scan the queue for every
+                // successor inserted by a workflow commit.
                 for chunk in items.chunks(PUSH_IDENTITY_CHECK_CHUNK) {
                     let mut params = vec![
                         Value::Text(tenant.clone()),
@@ -2868,8 +3030,11 @@ impl AsyncProjectionStore for TursoRelational {
                         &format!(
                             "WITH requested(item_id,client_item_key) AS (VALUES {}) \
                              SELECT 1 FROM requested r WHERE EXISTS (SELECT 1 FROM fireweed_items i \
-                               WHERE i.tenant_id=?1 AND i.queue_id=?2 AND \
-                               (i.item_id=r.item_id OR (i.client_item_key=r.client_item_key AND i.superseded=0))) \
+                               INDEXED BY sqlite_autoindex_fireweed_items_1 \
+                               WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=r.item_id) \
+                             OR EXISTS (SELECT 1 FROM fireweed_items i INDEXED BY fireweed_items_active_key \
+                               WHERE i.tenant_id=?1 AND i.queue_id=?2 \
+                               AND i.client_item_key=r.client_item_key AND i.superseded=0) \
                              OR EXISTS (SELECT 1 FROM fireweed_item_key_retention k \
                                WHERE k.tenant_id=?1 AND k.queue_id=?2 \
                                AND k.client_item_key=r.client_item_key AND k.expires_at>?3) LIMIT 1",
@@ -3638,7 +3803,7 @@ impl AsyncProjectionStore for TursoRelational {
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
                 let item_sql = format!(
                     "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document,index_fields \
+                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields \
                      FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 \
                      AND lifecycle_state IN ('Pending','Leased') \
@@ -3724,7 +3889,7 @@ impl AsyncProjectionStore for TursoRelational {
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
                 let item_sql = format!(
                     "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document,index_fields \
+                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields \
                      FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
                      AND item_id IN ({placeholders})"
@@ -4704,34 +4869,38 @@ mod deterministic_cancellation_tests {
         ));
 
         // Started cut: wait until apply owns the writer, then abort while a deliberately large transaction
-        // is being staged. The driver rolls back or finishes atomically; either outcome is replayable.
+        // is being staged. The owned apply must finish atomically after admission.
         let started_id = ItemId::new("500").unwrap();
         let (position, command, request_id, fingerprint) =
             replayable_push(&shard, started_id, 0, "started-cut", 512);
-        let started_store = Arc::clone(&store);
-        let started = tokio::spawn(async move {
-            AsyncProjectionStore::apply_live(started_store.as_ref(), vec![position], vec![command])
-                .await
-        });
-        while store.writer.try_lock().is_ok() {
-            tokio::task::yield_now().await;
-        }
-        started.abort();
-        let _ = started.await;
+        let mut started = Box::pin(AsyncProjectionStore::apply_live(
+            store.as_ref(),
+            vec![position],
+            vec![command],
+        ));
+        // Poll on this task until the owned apply has been spawned. Observing
+        // try_lock failure is insufficient: a queued task may own a reserved
+        // mutex permit without having resumed past lock_owned().
+        std::future::poll_fn(|cx| {
+            assert!(matches!(
+                std::future::Future::poll(started.as_mut(), cx),
+                std::task::Poll::Pending
+            ));
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(started);
+        // The response waiter can be gone while the owned apply still runs.
+        // Observe its settled result only after its writer guard is released.
+        drop(store.writer.lock().await);
         let state = AsyncProjectionStore::item_state(store.as_ref(), shard.clone(), started_id)
             .await
             .unwrap();
-        match state {
-            None => assert!(matches!(
-                replay(store.as_ref(), &shard, request_id, fingerprint).await,
-                IdempotencyDecision::Proceed
-            )),
-            Some(ItemState::Pending) => assert!(matches!(
-                replay(store.as_ref(), &shard, request_id, fingerprint).await,
-                IdempotencyDecision::Replay(_)
-            )),
-            other => panic!("unexpected started-cut state: {other:?}"),
-        }
+        assert_eq!(state, Some(ItemState::Pending));
+        assert!(matches!(
+            replay(store.as_ref(), &shard, request_id, fingerprint).await,
+            IdempotencyDecision::Replay(_)
+        ));
 
         let next = AsyncProjectionStore::recovery_high_water(store.as_ref(), shard.clone())
             .await
@@ -4749,11 +4918,13 @@ mod deterministic_cancellation_tests {
                 vec![command],
             )
             .await;
-            resolved_tx.send(()).unwrap();
+            resolved_tx.send(result).unwrap();
             future::pending::<()>().await;
-            result
         });
-        resolved_rx.await.unwrap();
+        resolved_rx
+            .await
+            .unwrap()
+            .expect("resolved apply must succeed before cancellation");
         resolved.abort();
         assert!(resolved.await.unwrap_err().is_cancelled());
         assert_eq!(
@@ -4894,8 +5065,10 @@ mod item_mutation_tests {
 
         let rows = store
             .query(
-                "SELECT lifecycle_state,item_version,payload,not_before,eligible_since \
-                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                "SELECT i.lifecycle_state,i.item_version,p.payload,i.not_before,i.eligible_since \
+                 FROM fireweed_items i LEFT JOIN fireweed_item_payloads p \
+                 ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+                 WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=?3",
                 vec![
                     Value::Text(shard.tenant_id.as_str().to_string()),
                     Value::Text(shard.queue_id.as_str().to_string()),

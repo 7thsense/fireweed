@@ -21,7 +21,9 @@ use crate::{KeyedQueueGate, QueueGateAcquire, QueueGateError, QueueGatePermit};
 pub const CLAIM_MAX_CALLERS: usize = 1_024;
 pub const CLAIM_MAX_DRIVERS: usize = 8;
 pub const CLAIM_GENERATION_MAX_REQUESTS: usize = 8;
-pub const GENERATION_MAX_ITEMS: usize = 800;
+// Admit the 1,000-row delivery batches used by the public queue API. The
+// independent byte budget still bounds materialization memory.
+pub const GENERATION_MAX_ITEMS: usize = 1_024;
 pub const GENERATION_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MUTATION_MAX_GENERATIONS_PER_QUEUE: usize = 2;
 pub const MUTATION_MAX_REQUESTS_PER_QUEUE: usize = 16;
@@ -51,7 +53,7 @@ pub const S3M_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
 pub const S3M_DERIVED_CLAIM_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
 /// S3m-derived fence-acquire wait. Floor 500 ms / cap 75 s; S5 activates this bound.
 pub const S3M_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3S_FENCE_ACQUIRE_CARRIED_CAP;
-/// S3m-derived pre-fence/drain/delta coverage and 800-item/4 MiB work wait. Floor 500 ms / cap 5 s.
+/// S3m-derived pre-fence/drain/delta coverage and bounded-item/4 MiB work wait. Floor 500 ms / cap 5 s.
 pub const S3M_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
 /// S5-activated fence-acquire wait. Same 75 s composition cap as S3m.
 pub const S5_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3M_DERIVED_FENCE_ACQUIRE_WAIT;
@@ -73,6 +75,8 @@ pub const SELECTION_FENCE_ACQUIRE_RESOURCE: &str = "selection fence acquire";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationGenerationKind {
     Push,
+    /// Pending-row content/order replacements require apply before later selection.
+    Rewrite,
     Update,
 }
 
@@ -141,7 +145,7 @@ pub fn mutation_generation_disposition(command: &QueueCommand) -> MutationGenera
             for update in &command.updates {
                 classify_update_fields(update);
             }
-            Compatible(MutationGenerationKind::Update)
+            Compatible(MutationGenerationKind::Rewrite)
         }
         QueueCommand::MutateItems(command) => {
             classify_mutate_items(command);
@@ -199,6 +203,10 @@ pub fn audited_append_admission_count(
             SelectionFenceDisposition::Shared | SelectionFenceDisposition::Exclusive => Some(1),
             SelectionFenceDisposition::Bypass => None,
         },
+        AppendAdmissionClass::SharedSelectionLive => match disposition {
+            SelectionFenceDisposition::Shared | SelectionFenceDisposition::Bypass => Some(1),
+            SelectionFenceDisposition::Exclusive => None,
+        },
         AppendAdmissionClass::Bypass => match disposition {
             SelectionFenceDisposition::Bypass => Some(0),
             SelectionFenceDisposition::Shared | SelectionFenceDisposition::Exclusive => None,
@@ -240,7 +248,9 @@ pub fn audited_mutation_sequencer_join(
             NotCandidateMutating => Some(false),
             Compatible(_) | Singleton => None,
         },
-        AppendAdmissionClass::KeyedPermitLive | AppendAdmissionClass::SelectionRequired => {
+        AppendAdmissionClass::KeyedPermitLive
+        | AppendAdmissionClass::SelectionRequired
+        | AppendAdmissionClass::SharedSelectionLive => {
             Some(matches!(disposition, Compatible(_) | Singleton))
         }
     }
@@ -2516,7 +2526,7 @@ mod tests {
                     updates: vec![update_fields(PayloadUpdate::Keep, ScheduleUpdate::Keep)],
                 }),
                 Shared,
-                Compatible(MutationGenerationKind::Update),
+                Compatible(MutationGenerationKind::Rewrite),
             ),
             (
                 QueueCommand::LeaseExpired(LeaseExpiredCommand {
@@ -2686,7 +2696,7 @@ mod tests {
                 QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
                     updates: Vec::new(),
                 }),
-                MutationGenerationKind::Update,
+                MutationGenerationKind::Rewrite,
             ),
             (claim(), MutationGenerationKind::Update),
             (
@@ -2788,7 +2798,7 @@ mod tests {
         );
         assert_eq!(
             mutation_generation_disposition_for_commands([&batch, &batch]),
-            MutationGenerationDisposition::Compatible(MutationGenerationKind::Update)
+            MutationGenerationDisposition::Compatible(MutationGenerationKind::Rewrite)
         );
         assert_eq!(
             mutation_generation_disposition_for_commands([&push, &batch]),
@@ -3212,7 +3222,7 @@ mod tests {
         let active = sequencer
             .start_generation(&"q")
             .expect("front generation elected");
-        assert_eq!(active.items(), GENERATION_MAX_ITEMS);
+        assert_eq!(active.items(), CLAIM_GENERATION_MAX_REQUESTS * 100);
         assert_eq!(active.response_bytes(), 8 * 1024);
         assert!(
             active

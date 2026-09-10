@@ -1,0 +1,57 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "primitives",
+    "--items",
+    "1000",
+    "--batch",
+    "1",
+    "--deadline-seconds",
+    "180",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/tmpnbht8pmr"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "shard-0/projection.db": {
+      "files": 1,
+      "bytes": 2605056,
+      "allocated_bytes": 2605056
+    },
+    "shard-0/projection.db-wal": {
+      "files": 1,
+      "bytes": 3114752,
+      "allocated_bytes": 3117056
+    },
+    "shard-0/log": {
+      "files": 9144,
+      "bytes": 3404331,
+      "allocated_bytes": 37453824
+    }
+  },
+  "source_diff_and_workload_sha256": "b45cab97dc7e00512738a9d4ce84b112309c0c67d1a4a9bfdc5b5dca81daa6a4",
+  "binary_sha256": "0ae5689d1e6abf6ce633bf06b78ae05e875a10ef4b2e475e2aae35ead89af70f",
+  "exit_code": 1,
+  "process_wall_s": 180.01333743299983,
+  "user_cpu_s": 8.630195,
+  "system_cpu_s": 25.918315,
+  "max_rss_kib": 36760,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 3110376,
+  "voluntary_context_switches": 285018,
+  "involuntary_context_switches": 18350,
+  "stdout": "",
+  "stderr": "phase_complete {\"end_s\":41.305648394,\"phase\":\"insert\",\"records\":1000,\"records_per_s\":24.335428749232086,\"settled_wall_s\":41.092351826,\"start_s\":0.213296568}\nfireweed: BatchUpdate with 1 item; the public write is batch-shaped \u2014 send a larger batch\nphase_complete {\"end_s\":76.298260676,\"phase\":\"enrich_by_key\",\"records\":1000,\"records_per_s\":28.577494002459627,\"settled_wall_s\":34.992571424,\"start_s\":41.305689252}\nphase_complete {\"end_s\":110.423623714,\"phase\":\"schedule_by_id\",\"records\":1000,\"records_per_s\":29.303745624879863,\"settled_wall_s\":34.125330352,\"start_s\":76.298293362}\nError: \"primitive capacity run timed out\"\n"
+}

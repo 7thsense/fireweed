@@ -1,0 +1,72 @@
+error[E0425]: cannot find function `open_sqlite` in crate `fireweed`
+   --> crates/fireweed/tests/p7n_non_s3_lifecycle_parity.rs:312:19
+    |
+312 |         fireweed::open_sqlite(
+    |                   ^^^^^^^^^^^ not found in `fireweed`
+
+error[E0425]: cannot find function `open_sqlite_relational` in crate `fireweed`
+   --> crates/fireweed/tests/p7n_non_s3_lifecycle_parity.rs:325:19
+    |
+325 |         fireweed::open_sqlite_relational(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^ not found in `fireweed`
+
+error[E0425]: cannot find function `open_objectlog_sqlite` in crate `fireweed`
+    --> crates/fireweed/tests/p7n_non_s3_lifecycle_parity.rs:361:19
+     |
+ 361 |           fireweed::open_objectlog_sqlite(cfg, Arc::new(SystemClock)).expect("open filesystem×sqlite")
+     |                     ^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates/fireweed/src/lib.rs:6544:1
+     |
+6544 | / pub fn open_objectlog(
+6545 | |     root: impl Into<std::path::PathBuf>,
+6546 | |     clock: Arc<dyn Clock>,
+6547 | | ) -> EngineResult<Fireweed> {
+error[E0425]: cannot find function `open_sqlite_relational` in crate `fireweed`
+   --> crates/fireweed/tests/p7n_non_s3_lifecycle_parity.rs:325:19
+    |
+325 |         fireweed::open_sqlite_relational(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^ not found in `fireweed`
+
+error[E0425]: cannot find function `open_objectlog_sqlite` in crate `fireweed`
+    --> crates/fireweed/tests/p7n_non_s3_lifecycle_parity.rs:361:19
+     |
+ 361 |           fireweed::open_objectlog_sqlite(cfg, Arc::new(SystemClock)).expect("open filesystem×sqlite")
+     |                     ^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates/fireweed/src/lib.rs:6544:1
+     |
+6544 | / pub fn open_objectlog(
+6545 | |     root: impl Into<std::path::PathBuf>,
+6546 | |     clock: Arc<dyn Clock>,
+6547 | | ) -> EngineResult<Fireweed> {
+     | |___________________________- similarly named function `open_objectlog` defined here
+     |
+note: found an item that was configured out
+    --> crates/fireweed/src/lib.rs:6905:8
+     |
+6904 | #[cfg(any())]
+error[E0425]: cannot find function `open_objectlog_sqlite` in crate `fireweed`
+    --> crates/fireweed/tests/p7n_non_s3_lifecycle_parity.rs:361:19
+     |
+ 361 |           fireweed::open_objectlog_sqlite(cfg, Arc::new(SystemClock)).expect("open filesystem×sqlite")
+     |                     ^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates/fireweed/src/lib.rs:6544:1
+     |
+6544 | / pub fn open_objectlog(
+6545 | |     root: impl Into<std::path::PathBuf>,
+6546 | |     clock: Arc<dyn Clock>,
+6547 | | ) -> EngineResult<Fireweed> {
+     | |___________________________- similarly named function `open_objectlog` defined here
+     |
+note: found an item that was configured out
+    --> crates/fireweed/src/lib.rs:6905:8
+     |
+6904 | #[cfg(any())]
+     |          -- the item is gated here
+6905 | pub fn open_objectlog_sqlite(
+     |        ^^^^^^^^^^^^^^^^^^^^^
+help: a function with a similar name exists
+     |
+ 361 -         fireweed::open_objectlog_sqlite(cfg, Arc::new(SystemClock)).expect("open filesystem×sqlite")

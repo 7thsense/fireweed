@@ -7,7 +7,7 @@ use crate::sql::async_projection as sql;
 use crate::{RelRow, RelTx, RelValue, lease_hash, query_optional, rel_exec, rel_query};
 
 /// Next due pending items with payloads. Gate anti-join is appended when the queue has blocked gates.
-pub const SELECT_CLASS_S_DUE: &str = "SELECT item_id, client_item_key, payload, item_version, \
+pub const SELECT_CLASS_S_DUE: &str = "SELECT item_id, client_item_key, CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END, item_version, \
      retry_count, priority, group_key, not_before, fields, metadata, max_attempts, \
      entity_document, index_fields \
      FROM fireweed_items \
@@ -415,7 +415,7 @@ mod tests {
             {
                 return Ok(Vec::new());
             }
-            if !sql.contains("SELECT item_id, client_item_key, payload, item_version") {
+            if !sql.starts_with("SELECT item_id, client_item_key, ") {
                 return Err(EngineError::Storage(format!("unexpected query: {sql}")));
             }
             let limit = match params.get(3) {

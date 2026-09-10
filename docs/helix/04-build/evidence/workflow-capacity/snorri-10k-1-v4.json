@@ -1,0 +1,85 @@
+{
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "snorri",
+    "--items",
+    "10000",
+    "--batch",
+    "100",
+    "--workers",
+    "2",
+    "--deadline-seconds",
+    "600",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/tmpm8dika_8"
+  ],
+  "head": "1c8a2c4ffef07f1469ad4e73048c9e74e87e4fb8",
+  "dirty": true,
+  "filesystem": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "storage": {
+    "shard-0/projection.db": {
+      "files": 1,
+      "bytes": 71856128,
+      "allocated_bytes": 71856128
+    },
+    "shard-0/projection.db-wal": {
+      "files": 1,
+      "bytes": 1429672,
+      "allocated_bytes": 1433600
+    },
+    "shard-0/log": {
+      "files": 1734,
+      "bytes": 59116407,
+      "allocated_bytes": 65056768
+    }
+  },
+  "source_diff_and_workload_sha256": "b45cab97dc7e00512738a9d4ce84b112309c0c67d1a4a9bfdc5b5dca81daa6a4",
+  "binary_sha256": "0ae5689d1e6abf6ce633bf06b78ae05e875a10ef4b2e475e2aae35ead89af70f",
+  "exit_code": 0,
+  "process_wall_s": 51.694385280999995,
+  "user_cpu_s": 42.668199,
+  "system_cpu_s": 9.818712,
+  "max_rss_kib": 161084,
+  "filesystem_input_blocks": 0,
+  "filesystem_output_blocks": 1254840,
+  "voluntary_context_switches": 83445,
+  "involuntary_context_switches": 4958,
+  "result": {
+    "batch": 100,
+    "cell": "filesystem--turso",
+    "completed_lifecycles_per_s": 193.5205677623009,
+    "dispatch": "shared-normal-claim",
+    "faults": true,
+    "items": 10000,
+    "payload_bytes": 1024,
+    "physical_shards": 1,
+    "profile": "Snorri",
+    "schema": "workflow-capacity/v2",
+    "settled_wall_s": 51.674090109,
+    "shards": [
+      {
+        "claims": 30527,
+        "complete": 29677,
+        "delivered": 9677,
+        "failed": 323,
+        "items": 10000,
+        "leased": 0,
+        "pending": 0,
+        "retries": 527,
+        "shard": 0
+      }
+    ],
+    "worker_pools_per_shard": 1,
+    "workers_per_pool": 2
+  }
+}

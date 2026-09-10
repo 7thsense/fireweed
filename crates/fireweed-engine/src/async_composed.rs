@@ -22,8 +22,7 @@ use crate::{
     OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
     QueueCommand, QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
     RequestOutcome, TaskOutcomeError, UpdateFieldsBatchCommand, compile_entity_schema,
-    plan_batch_update, plan_batch_update_pipelined, validate_claim_compatibility, validate_entity,
-    validate_gate_push,
+    plan_batch_update, validate_claim_compatibility, validate_entity, validate_gate_push,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,7 +370,10 @@ impl MutationGenerationWork {
     pub fn sequencer_key(&self) -> MutationSequencerKey {
         match self {
             Self::Push { .. } => MutationSequencerKey::Compatible(MutationGenerationKind::Push),
-            Self::BatchUpdate { .. } | Self::Claim { .. } | Self::Finalize { .. } => {
+            Self::BatchUpdate { .. } => {
+                MutationSequencerKey::Compatible(MutationGenerationKind::Rewrite)
+            }
+            Self::Claim { .. } | Self::Finalize { .. } => {
                 MutationSequencerKey::Compatible(MutationGenerationKind::Update)
             }
             Self::Singleton { id, .. } => MutationSequencerKey::Singleton(*id),
@@ -679,29 +681,12 @@ impl MutationGenerationOverlay {
             }
             return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);
         }
-        let plan_by_client_key = request.updates.iter().all(|update| {
-            update.expected_item_version.is_none()
-                && matches!(
-                    update.item_ref,
-                    crate::BatchUpdateItemRef::ClientItemKey(_)
-                        | crate::BatchUpdateItemRef::Both { .. }
-                )
-        });
-        let plan = if plan_by_client_key {
-            plan_batch_update_pipelined(
-                &snapshot.definition,
-                true,
-                request.updates.clone(),
-                Vec::new(),
-            )
-        } else {
-            plan_batch_update(
-                &snapshot.definition,
-                true,
-                request.updates.clone(),
-                self.batch_items.clone(),
-            )
-        };
+        let plan = plan_batch_update(
+            &snapshot.definition,
+            true,
+            request.updates.clone(),
+            self.batch_items.clone(),
+        );
         let accepted = plan
             .outcomes
             .iter()
@@ -732,11 +717,23 @@ impl MutationGenerationOverlay {
             .map(|(_, update)| update)
             .collect();
         let item_ids: Vec<_> = updates.iter().map(|update| update.item_id).collect();
+        let response = BatchUpdateResponse {
+            request_id: request.request_id.clone(),
+            results: plan.outcomes,
+        };
+        let response_payload = match serde_json::to_string(&response) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return MutationGenerationMemberOutcome::Rejected(EngineError::Storage(
+                    error.to_string(),
+                ));
+            }
+        };
         let envelope = CommandEnvelope {
             command_id,
             request_id: Some(request.request_id.clone()),
             request_fingerprint: Some(fingerprint.0),
-            request_outcome: None,
+            request_outcome: Some(crate::RequestOutcome::BatchUpdate { response_payload }),
             item_ids,
             command: QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
             checksum: CommandChecksum(0),
@@ -744,10 +741,7 @@ impl MutationGenerationOverlay {
         };
         MutationGenerationMemberOutcome::BatchUpdate {
             request: RawCommitRequest::new(shard.clone(), vec![envelope], expected_epoch),
-            response: BatchUpdateResponse {
-                request_id: request.request_id.clone(),
-                results: plan.outcomes,
-            },
+            response,
         }
     }
 

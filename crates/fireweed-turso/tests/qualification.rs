@@ -121,7 +121,7 @@ async fn apply_measured_batch(count: usize) -> fireweed_turso::TursoBatchUpdateS
     for index in [0, count - 1] {
         let item = store
             .query(
-                "SELECT item_version,fields,payload,metadata,priority,not_before,eligible_since \
+                "SELECT item_version,fields,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload,metadata,priority,not_before,eligible_since \
                  FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                 vec![
                     shard.tenant_id.as_str().to_string().into(),
@@ -300,7 +300,7 @@ async fn apply_operation_shaped_batch(
     for index in [0, count - 1] {
         let rows = store
             .query(
-                "SELECT item_version,lifecycle_state,payload,metadata,priority,not_before,eligible_since \
+                "SELECT item_version,lifecycle_state,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload,metadata,priority,not_before,eligible_since \
                  FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                 vec![
                     shard.tenant_id.as_str().to_string().into(),
@@ -388,8 +388,8 @@ async fn turso_batch_update_apply_is_operation_shaped() {
                 );
                 assert!(shape.read_statement_count <= 2, "shape={shape:?}");
                 assert!(
-                    shape.statement_count <= chunks + 6,
-                    "statement growth exceeded fixed overhead plus chunks: {shape:?}"
+                    shape.statement_count <= 2 * count + chunks + 6,
+                    "statement growth exceeded bounded point writes plus payload chunks: {shape:?}"
                 );
                 assert!(shape.max_bind_count <= 900, "shape={shape:?}");
                 assert_eq!(phase.row_read_us, 0, "live cursor seed was not reused");
@@ -888,7 +888,7 @@ async fn turso_batch_update_apply_preserves_conditional_fallbacks() {
 
     let changed = store
         .query(
-            "SELECT item_version,fields,payload,priority,not_before,eligible_since \
+            "SELECT item_version,fields,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload,priority,not_before,eligible_since \
              FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
             vec![
                 shard.tenant_id.as_str().to_string().into(),
@@ -930,7 +930,7 @@ async fn turso_batch_update_apply_preserves_conditional_fallbacks() {
     );
     let untouched = store
         .query(
-            "SELECT item_id,item_version,lifecycle_state,payload FROM fireweed_items \
+            "SELECT item_id,item_version,lifecycle_state,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) AS payload FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN (?3,?4,?5) ORDER BY item_id",
             vec![
                 shard.tenant_id.as_str().to_string().into(),

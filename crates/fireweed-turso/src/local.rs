@@ -3277,68 +3277,25 @@ async fn load_mutation_driver_snapshot(
         }
     };
     let mut client_keys = HashSet::new();
-    if !keys.is_empty() {
-        for chunk in keys.chunks(500) {
-            let placeholders = (0..chunk.len())
-                .map(|index| format!("?{}", index + 3))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut params = vec![
-                Value::Text(shard.tenant_id.as_str().to_string()),
-                Value::Text(shard.queue_id.as_str().to_string()),
-            ];
-            params.extend(
-                chunk
-                    .iter()
-                    .map(|key| Value::Text(key.as_str().to_string())),
-            );
-            let rows = collect_rows(
-                connection,
-                &format!(
-                    "SELECT client_item_key FROM fireweed_items \
-                     WHERE tenant_id=?1 AND queue_id=?2 \
-                     AND client_item_key IN ({placeholders}) \
-                     AND lifecycle_state IN ('Pending','Leased') AND superseded=0"
-                ),
-                params,
-            )
-            .await
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-            for row in rows {
-                if let Some(Value::Text(key)) = row.values.first() {
-                    client_keys.insert(key.clone());
-                }
-            }
-            let mut retention_params = vec![
-                Value::Text(shard.tenant_id.as_str().to_string()),
-                Value::Text(shard.queue_id.as_str().to_string()),
-                Value::Integer(ts_nanos(now)),
-            ];
-            retention_params.extend(
-                chunk
-                    .iter()
-                    .map(|key| Value::Text(key.as_str().to_string())),
-            );
-            let retention_placeholders = (0..chunk.len())
-                .map(|index| format!("?{}", index + 4))
-                .collect::<Vec<_>>()
-                .join(",");
-            let retained = collect_rows(
-                connection,
-                &format!(
-                    "SELECT client_item_key FROM fireweed_item_key_retention \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND expires_at>?3 \
-                     AND client_item_key IN ({retention_placeholders})"
-                ),
-                retention_params,
-            )
-            .await
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-            for row in retained {
-                if let Some(Value::Text(key)) = row.values.first() {
-                    client_keys.insert(key.clone());
-                }
-            }
+    for key in keys {
+        let params = vec![
+            Value::Text(shard.tenant_id.as_str().to_string()),
+            Value::Text(shard.queue_id.as_str().to_string()),
+            Value::Text(key.as_str().to_string()),
+            Value::Integer(ts_nanos(now)),
+        ];
+        let rows = collect_rows(
+            connection,
+            "SELECT client_item_key FROM fireweed_items INDEXED BY fireweed_items_active_key \
+             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND superseded=0 \
+             UNION ALL SELECT client_item_key FROM fireweed_item_key_retention \
+             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND expires_at>?4",
+            params,
+        )
+        .await
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        if !rows.is_empty() {
+            client_keys.insert(key.as_str().to_string());
         }
     }
     let batch_items =
@@ -3360,7 +3317,7 @@ async fn load_applied_identity(
     connection: &Connection,
     shard: &QueueKey,
     definition: QueueDefinition,
-    now: UtcTimestamp,
+    _now: UtcTimestamp,
 ) -> EngineResult<MutationDriverSnapshot> {
     let pause_rows = collect_rows(
         connection,
@@ -3381,41 +3338,9 @@ async fn load_applied_identity(
             )));
         }
     };
-    let key_rows = collect_rows(
-        connection,
-        "SELECT client_item_key FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 \
-         AND lifecycle_state IN ('Pending','Leased')",
-        vec![
-            Value::Text(shard.tenant_id.as_str().to_string()),
-            Value::Text(shard.queue_id.as_str().to_string()),
-        ],
-    )
-    .await
-    .map_err(|error| EngineError::Storage(error.to_string()))?;
-    let mut client_keys = HashSet::new();
-    for row in key_rows {
-        if let Some(Value::Text(key)) = row.values.first() {
-            client_keys.insert(key.clone());
-        }
-    }
-    let retained = collect_rows(
-        connection,
-        "SELECT client_item_key FROM fireweed_item_key_retention \
-         WHERE tenant_id=?1 AND queue_id=?2 AND expires_at>?3",
-        vec![
-            Value::Text(shard.tenant_id.as_str().to_string()),
-            Value::Text(shard.queue_id.as_str().to_string()),
-            Value::Integer(ts_nanos(now)),
-        ],
-    )
-    .await
-    .map_err(|error| EngineError::Storage(error.to_string()))?;
-    for row in retained {
-        if let Some(Value::Text(key)) = row.values.first() {
-            client_keys.insert(key.clone());
-        }
-    }
+    // Key membership is loaded per generation; reopening must not scan and
+    // retain the complete queue or its retention tombstones in process memory.
+    let client_keys = HashSet::new();
     Ok(MutationDriverSnapshot {
         definition,
         paused_drain_intake,
@@ -3434,7 +3359,8 @@ async fn collect_rows(
     sql: &str,
     params: Vec<Value>,
 ) -> Result<Vec<OwnedRow>> {
-    let mut rows = connection.query(sql, params).await?;
+    let mut statement = connection.prepare_cached(sql).await?;
+    let mut rows = statement.query(params).await?;
     let columns = rows.column_names();
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await? {

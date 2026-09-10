@@ -6,6 +6,12 @@ use crate::{RelRow, RelValue};
 
 /// One transactional SQL session. SQLite and Turso implement this; apply and query live here once.
 pub trait RelTx {
+    /// Turso 0.7 chooses queue-prefix scans for addressed UPDATE...FROM/IN.
+    /// Explicit indexed point updates bound work to the supplied targets.
+    fn prefer_point_updates(&self) -> bool {
+        false
+    }
+
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize>;
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>>;
 }
