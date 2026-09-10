@@ -856,8 +856,9 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 /// Briefly join a follow-up that invalidates the claimed leases before applying
 /// intermediate Leased rows. Disk-backed append can take hundreds of milliseconds
 /// under concurrent writes; an 80 ms window missed nearly every follow-up in the
-/// sustained workload. Coverage waiters bypass this bounded background delay.
-const CLAIM_COMPLETE_JOIN_MS: u64 = 500;
+/// sustained workload. A one-second cap covers most append latency under sustained
+/// disk pressure. Coverage waiters bypass this bounded background delay.
+const CLAIM_COMPLETE_JOIN_MS: u64 = 1_000;
 
 fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
     let mut claim = false;
@@ -1540,7 +1541,7 @@ mod tests {
         coordinator
             .wait_until_covers(&shard(), &pos(1), Duration::from_millis(200))
             .await
-            .expect("dependent read must bypass the 500 ms background join window");
+            .expect("dependent read must bypass the one-second background join window");
         assert_eq!(coordinator.apply_live_call_count(), 1);
     }
 
