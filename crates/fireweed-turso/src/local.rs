@@ -124,6 +124,10 @@ impl TursoConfig {
         self.busy_timeout
     }
 
+    pub(crate) fn reuses_checkpointed_wal(&self) -> bool {
+        self.rebuildable_io
+    }
+
     pub fn journal_mode(&self) -> JournalMode {
         self.journal_mode
     }

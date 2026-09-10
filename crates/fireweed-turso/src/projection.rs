@@ -3755,7 +3755,14 @@ impl AsyncProjectionStore for TursoRelational {
         let grouped_shards = self.grouped_shards.clone();
         let claim_scan_hints = self.claim_scan_hints.clone();
         let claim_scan_default_fifo = self.claim_scan_default_fifo.clone();
-        let wal_path = sqlite_wal_path(self.config().path());
+        // NORMAL checkpoint accounting permits native WAL restart/reuse.
+        // Forced truncation discards that reusable file and churns filesystem
+        // extents. Keep the bounded truncation workaround only for OFF mode.
+        let wal_path = if self.config().reuses_checkpointed_wal() {
+            None
+        } else {
+            sqlite_wal_path(self.config().path())
+        };
         let wal_min_bytes = self.wal_truncate_min_bytes;
         let busy_timeout = self.config().busy_timeout();
         async move {
@@ -3794,7 +3801,14 @@ impl AsyncProjectionStore for TursoRelational {
         let grouped_shards = self.grouped_shards.clone();
         let claim_scan_hints = self.claim_scan_hints.clone();
         let claim_scan_default_fifo = self.claim_scan_default_fifo.clone();
-        let wal_path = sqlite_wal_path(self.config().path());
+        // NORMAL checkpoint accounting permits native WAL restart/reuse.
+        // Forced truncation discards that reusable file and churns filesystem
+        // extents. Keep the bounded truncation workaround only for OFF mode.
+        let wal_path = if self.config().reuses_checkpointed_wal() {
+            None
+        } else {
+            sqlite_wal_path(self.config().path())
+        };
         let wal_min_bytes = self.wal_truncate_min_bytes;
         let busy_timeout = self.config().busy_timeout();
         async move {
