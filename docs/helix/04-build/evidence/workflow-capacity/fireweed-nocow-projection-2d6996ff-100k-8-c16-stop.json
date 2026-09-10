@@ -1,0 +1,5 @@
+{
+  "action": "SIGTERM benchmark child after six full cycles",
+  "reason": "Repeated cycle misses and no throughput benefit; stop unsuccessful candidate early. This is not a completed capacity qualification.",
+  "pid": 267485
+}

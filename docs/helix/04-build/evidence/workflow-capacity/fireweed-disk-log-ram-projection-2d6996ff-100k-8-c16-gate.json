@@ -1,0 +1,233 @@
+{
+  "passed": false,
+  "checks": [
+    {
+      "name": "successful_correctness_run",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "filesystem_log_and_turso",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "storage_evidence_present",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "physical_sharding",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "filesystem_on_disk",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "projection_filesystem_on_disk",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "no_external_io_override",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "original_row_workflow",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "faults_and_retention",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "at_least_three_cycles",
+      "passed": true,
+      "actual": 16,
+      "required": 3
+    },
+    {
+      "name": "million_complete_workflows",
+      "passed": true,
+      "actual": 1600000,
+      "required": 1000000
+    },
+    {
+      "name": "overall_workflows_per_s",
+      "passed": true,
+      "actual": 8175.759671783308,
+      "required": 5000
+    },
+    {
+      "name": "complete_cycle_reports",
+      "passed": true,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "cycle_0_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 9189.812975165294,
+      "required": 5000
+    },
+    {
+      "name": "cycle_1_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 8823.535709693077,
+      "required": 5000
+    },
+    {
+      "name": "cycle_2_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 9034.829469080001,
+      "required": 5000
+    },
+    {
+      "name": "cycle_3_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 8774.860303078856,
+      "required": 5000
+    },
+    {
+      "name": "cycle_4_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 9407.14759284744,
+      "required": 5000
+    },
+    {
+      "name": "cycle_5_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 8615.684139511177,
+      "required": 5000
+    },
+    {
+      "name": "cycle_6_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 6260.2481255629855,
+      "required": 5000
+    },
+    {
+      "name": "cycle_7_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 6567.265330203094,
+      "required": 5000
+    },
+    {
+      "name": "cycle_8_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 8252.604117213581,
+      "required": 5000
+    },
+    {
+      "name": "cycle_9_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 6214.55840796784,
+      "required": 5000
+    },
+    {
+      "name": "cycle_10_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 5831.14416107006,
+      "required": 5000
+    },
+    {
+      "name": "cycle_11_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 6908.559133905759,
+      "required": 5000
+    },
+    {
+      "name": "cycle_12_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 7848.124985777187,
+      "required": 5000
+    },
+    {
+      "name": "cycle_13_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 8489.738710696194,
+      "required": 5000
+    },
+    {
+      "name": "cycle_14_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 5411.48130194633,
+      "required": 5000
+    },
+    {
+      "name": "cycle_15_slowest_shard_equivalent_rate",
+      "passed": true,
+      "actual": 6600.576347607388,
+      "required": 5000
+    },
+    {
+      "name": "last_three_cycles_rss_stable",
+      "passed": true,
+      "actual": 0.005288450667507272,
+      "required": "<=10% range"
+    },
+    {
+      "name": "shard_0_projection_stable",
+      "passed": true,
+      "actual": 0.0,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_1_projection_stable",
+      "passed": true,
+      "actual": 0.0,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_2_projection_stable",
+      "passed": true,
+      "actual": 0.0,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_3_projection_stable",
+      "passed": true,
+      "actual": 0.0,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_4_projection_stable",
+      "passed": true,
+      "actual": 0.002353287248124669,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_5_projection_stable",
+      "passed": true,
+      "actual": 0.0004403992953612157,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_6_projection_stable",
+      "passed": true,
+      "actual": 0.0,
+      "required": "<=5% range"
+    },
+    {
+      "name": "shard_7_projection_stable",
+      "passed": true,
+      "actual": 0.0,
+      "required": "<=5% range"
+    }
+  ]
+}

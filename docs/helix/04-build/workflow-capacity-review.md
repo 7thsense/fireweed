@@ -348,3 +348,32 @@ NOCOW also disables file data checksums and compression, so this is a storage
 tradeoff for a rebuildable projection, not an equivalent filesystem setting.
 [Btrfs documentation](https://btrfs.readthedocs.io/en/stable/Administration.html).
 The disk-backed qualification thresholds remain unchanged.
+
+
+The sustained disk-log/RAM-projection control on the `2d6996ff` binary completed
+1.6 million original-row workflows in 195.9 seconds: **8,176 workflows/sec**.
+All 16 cycles exceeded the 5k slowest-shard-equivalent threshold; the lowest was
+5,411/sec. Exact outcomes, retries and purge checks passed. Last-three-cycle RSS
+variation was 0.53%; measured main database sizes varied by at most 0.24% per
+shard. Final RAM filesystem projection DB/WAL allocation was 272.2 MiB across
+all eight shards. This final allocation is not a peak or per-cycle tmpfs memory
+measurement, and RSS does not include all filesystem memory.
+
+The unchanged disk-backed gate rejects this run solely for its RAM projection
+filesystem. It is useful isolation evidence: the original-row API and disk log
+can sustain the target once concurrent projection writes leave the shared SSD.
+It does not establish the same result for disk projections or qualify the final
+deployment. No RAM storage default was introduced.
+[Full sustained control](evidence/workflow-capacity/fireweed-disk-log-ram-projection-2d6996ff-100k-8-c16.json.gz),
+[separate gate evaluation](evidence/workflow-capacity/fireweed-disk-log-ram-projection-2d6996ff-100k-8-c16-gate.json).
+
+
+The NOCOW disk-projection control was stopped after seven complete aggregate cycles
+because it repeatedly missed the target and showed no advantage. Recent shard
+cycles took approximately 38–46 seconds; both DB and WAL files were verified to
+have inherited `C`. The child received SIGTERM, and the runner preserved its
+nonzero exit, full cycle prefix, storage attributes and failed qualification.
+There is no completed-run throughput claim for this interrupted candidate, and
+no NOCOW production default was introduced.
+[Interrupted NOCOW control](evidence/workflow-capacity/fireweed-nocow-projection-2d6996ff-100k-8-c16.json.gz),
+[stop reason](evidence/workflow-capacity/fireweed-nocow-projection-2d6996ff-100k-8-c16-stop.json).
