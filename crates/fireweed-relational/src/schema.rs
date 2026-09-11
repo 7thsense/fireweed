@@ -155,6 +155,9 @@ CREATE TABLE IF NOT EXISTS fireweed_request_idempotency (
 );
 CREATE INDEX IF NOT EXISTS fireweed_request_idempotency_expiry_idx
     ON fireweed_request_idempotency (expires_at);
+-- Queue-scoped bounded collection must not scan expired receipts of idle neighbors.
+CREATE INDEX IF NOT EXISTS fireweed_request_idempotency_queue_expiry_idx
+    ON fireweed_request_idempotency (tenant_id, queue_id, expires_at);
 -- Reverse lookup for renewing retained ClaimByQuery responses.  Keeping this normalized edge avoids
 -- parsing or scanning the queue's complete replay history on every lease renewal.
 CREATE TABLE IF NOT EXISTS fireweed_claim_replay_items (

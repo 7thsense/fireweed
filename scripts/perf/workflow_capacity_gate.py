@@ -121,8 +121,10 @@ def qualify(report, campaign_target=10_000):
                             and c.get("retries") == retries and c.get("claims") == 3*n+retries
                             and c.get("handler_rows") == [n,n,n+retries]
                             and len(c.get("max_handler_batch", [])) == 3
-                            and all(0 < b <= limit for b,limit in zip(c.get("max_handler_batch", []),[500,200,500]))
-                            and 0 <= c.get("due_to_claim_max_us", float("inf")) <= 60_000_000 and c.get("pending") == 0 and c.get("leased") == 0)
+                            and all(0 < b <= limit for b,limit in zip(c.get("max_handler_batch", []),[500,200,500])) and c.get("pending") == 0 and c.get("leased") == 0)
+                        delay = c.get("due_to_claim_max_us", float("inf"))
+                        check(f"s{shard_index}_c{campaign_index}_cycle{cycle}_due_to_claim",
+                              math.isfinite(delay) and 0 <= delay <= 60_000_000, delay, "<=60000000 us")
                         wall = c.get("wall_s", 0)
                         valid_wall = isinstance(wall, (int,float)) and math.isfinite(wall) and wall > 0
                         equivalents.append(n/wall*len(rows) if valid_wall else 0)

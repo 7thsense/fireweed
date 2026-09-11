@@ -2217,3 +2217,36 @@ async fn active_lease_reopen_uses_durable_hash_for_renew_validation() {
         "lease cleartext is recovered from fireweed_lease_bearers"
     );
 }
+
+#[tokio::test]
+async fn new_requests_collect_expired_unique_receipts_with_bounded_queue_scope() {
+    let def=definition();let shard=QueueKey::new(def.tenant_id.clone(),def.queue_id.clone());
+    let turso=TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso,def).await.unwrap();
+    for i in 0..72 {
+        let queue=if i==71 {"foreign"} else {shard.queue_id.as_str()};
+        let expiry=if i==70 {200_000_000_000i64} else {100_000_000_000i64};
+        turso.execute("INSERT INTO fireweed_request_idempotency \
+            (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,command_positions,expires_at,created_at) \
+            VALUES (?1,?2,'claim_by_query',?3,?4,'{}','[]',?5,0)",
+            vec![shard.tenant_id.as_str().into(),queue.into(),format!("old-{i:03}").into(),Value::Blob(vec![1]),expiry.into()]).await.unwrap();
+        turso.execute("INSERT INTO fireweed_claim_replay_items (tenant_id,queue_id,request_id,item_id) VALUES (?1,?2,?3,?4)",
+            vec![shard.tenant_id.as_str().into(),queue.into(),format!("old-{i:03}").into(),format!("item-{i}").into()]).await.unwrap();
+    }
+    for sequence in 0..2u64 {
+        let id=ItemId::mint(1,1,(sequence+1) as u32);
+        let mut push=envelope(&format!("new-{sequence}"),QueueCommand::Push(PushCommand{items:vec![indexed_item(id,&format!("new-{sequence}"),"x@example.com")]}),vec![id],100);
+        push.request_id=Some(RequestId::new(format!("fresh-{sequence}")).unwrap());
+        push.request_fingerprint=Some(sequence+1);
+        push.request_outcome=Some(RequestOutcome::Push{item_ids:vec![id]});
+        AsyncProjectionStore::apply_live(&turso,vec![CommandPosition::new(shard.clone(),1,sequence)],vec![push]).await.unwrap();
+        let count=turso.query("SELECT COUNT(*) FROM fireweed_request_idempotency",vec![]).await.unwrap();
+        assert_eq!(count[0].values[0],Value::Integer(if sequence==0 {9}else{4}),"expired unique receipts must be collected, at most 64 per new receipt");
+        let edges=turso.query("SELECT COUNT(*) FROM fireweed_claim_replay_items",vec![]).await.unwrap();
+        assert_eq!(edges[0].values[0],Value::Integer(if sequence==0 {8}else{2}),"expired reverse edges must not leak");
+    }
+    let retained=turso.query("SELECT queue_id,request_id FROM fireweed_request_idempotency WHERE operation='claim_by_query' ORDER BY request_id",vec![]).await.unwrap();
+    assert_eq!(retained.len(),2);
+    assert_eq!(retained[0].values[1],Value::Text("old-070".into()),"unexpired/lease-extended receipt survives");
+    assert_eq!(retained[1].values[0],Value::Text("foreign".into()),"other queue is untouched");
+}

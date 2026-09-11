@@ -54,6 +54,42 @@ fn command_positions_json(position: &CommandPosition) -> EngineResult<String> {
         .map_err(|error| EngineError::Storage(error.to_string()))
 }
 
+/// Opportunistic bounded cleanup uses the same expiry boundary as request replay.
+/// Run inside the apply transaction, before inserting a fresh receipt. Queue expiry
+/// index avoids scanning the queue's live receipt population when nothing has expired.
+fn collect_expired_request_rows(
+    tx: &impl RelTx, shard: &QueueKey, now: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let rows = crate::rel_query(tx,
+        "SELECT rowid,operation,request_id FROM fireweed_request_idempotency \
+         INDEXED BY fireweed_request_idempotency_queue_expiry_idx \
+         WHERE expires_at<=?1 AND tenant_id=?2 AND queue_id=?3 ORDER BY expires_at,rowid LIMIT 64",
+        [RelValue::Integer(ts_nanos(now)),RelValue::Text(t.clone()),RelValue::Text(q.clone())])?;
+    if rows.is_empty() { return Ok(()); }
+    let mut rowids = Vec::with_capacity(rows.len());
+    let mut claims = Vec::new();
+    for row in rows {
+        rowids.push(RelValue::Integer(row.get::<i64>(0)?));
+        if row.get::<String>(1)? == IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY {
+            claims.push(RelValue::Text(row.get::<String>(2)?));
+        }
+    }
+    if !claims.is_empty() {
+        let values = vec!["(?)";claims.len()].join(",");
+        let mut params = claims;
+        params.extend([RelValue::Text(t),RelValue::Text(q)]);
+        crate::rel_exec(tx,&format!("WITH expired(request_id) AS (VALUES {values}) \
+            DELETE FROM fireweed_claim_replay_items WHERE rowid IN ( \
+            SELECT c.rowid FROM expired CROSS JOIN fireweed_claim_replay_items c \
+            INDEXED BY sqlite_autoindex_fireweed_claim_replay_items_1 \
+            ON c.tenant_id=? AND c.queue_id=? AND c.request_id=expired.request_id)"),params)?;
+    }
+    let placeholders = vec!["?";rowids.len()].join(",");
+    crate::rel_exec(tx,&format!("DELETE FROM fireweed_request_idempotency WHERE rowid IN ({placeholders})"),rowids)?;
+    Ok(())
+}
+
 fn persist_request_row(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -66,6 +102,7 @@ fn persist_request_row(
     expires_at: i64,
     extend_only: bool,
 ) -> EngineResult<()> {
+    collect_expired_request_rows(tx, shard, created_at)?;
     let (t, q) = parts(shard);
     let conflict = if extend_only {
         "ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \

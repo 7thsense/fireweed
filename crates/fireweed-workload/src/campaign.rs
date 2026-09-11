@@ -95,7 +95,7 @@ async fn workers(
         } else {
             counts.terminal.load(Ordering::SeqCst) < target
         } {
-            let rows = retry(deadline, || fw.claim(q, cfg.batch.min(500), 3_600_000)).await?;
+            let rows = retry(deadline, || fw.claim(q, cfg.batch, 3_600_000)).await?;
             if rows.is_empty() {
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 continue;
@@ -114,6 +114,12 @@ async fn workers(
                     return Err("early claim".into());
                 }
             }
+            // Handler transport limits are independent of the bounded storage batch.
+            // Finish all chunks from this claim, then publish their per-row guarded results together.
+            let mut entries = Vec::with_capacity(rows.len());
+            let mut terminal = 0;
+            let mut retried = 0;
+            let mut prepared = 0;
             for stage in 0..3 {
                 let selected: Vec<_> = rows
                     .iter()
@@ -133,9 +139,6 @@ async fn workers(
                             Ordering::SeqCst,
                         );
                     }
-                    let mut entries = Vec::with_capacity(chunk.len());
-                    let mut terminal = 0;
-                    let mut retried = 0;
                     for row in chunk {
                         let id = recipient(row);
                         let mut patch = ItemPatch::default();
@@ -197,36 +200,37 @@ async fn workers(
                             patch,
                         });
                     }
-                    let request = ItemMutationRequest {
-                        request_id: RequestId::new(format!(
-                            "c{cycle}-t{now}-p{preparing}-w{worker}-g{generation}"
-                        ))
-                        .unwrap(),
-                        evaluated_at: ts(now),
-                        dry_run: false,
-                        returning: ItemMutationReturning::Identity,
-                        gate_changes: vec![],
-                        operation: ItemMutationOperation::Addressed { entries },
-                    };
-                    generation += 1;
-                    let response = retry(deadline, || fw.mutate_items(q, request.clone())).await?;
-                    if response.results.len() != chunk.len()
-                        || response
-                            .results
-                            .iter()
-                            .any(|r| !matches!(r.outcome, ItemMutationOutcome::Updated { .. }))
-                    {
-                        return Err("missing/rejected campaign mutation result".into());
-                    }
                     counts.handler_rows[stage].fetch_add(chunk.len(), Ordering::SeqCst);
                     counts.handler_batches[stage].fetch_add(1, Ordering::SeqCst);
                     if stage < 2 {
-                        counts.prepared.fetch_add(chunk.len(), Ordering::SeqCst);
+                        prepared += chunk.len();
                     }
-                    counts.terminal.fetch_add(terminal, Ordering::SeqCst);
-                    counts.retries.fetch_add(retried, Ordering::SeqCst);
                 }
             }
+            let request = ItemMutationRequest {
+                request_id: RequestId::new(format!(
+                    "c{cycle}-t{now}-p{preparing}-w{worker}-g{generation}"
+                ))
+                .unwrap(),
+                evaluated_at: ts(now),
+                dry_run: false,
+                returning: ItemMutationReturning::Identity,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed { entries },
+            };
+            generation += 1;
+            let response = retry(deadline, || fw.mutate_items(q, request.clone())).await?;
+            if response.results.len() != rows.len()
+                || response
+                    .results
+                    .iter()
+                    .any(|r| !matches!(r.outcome, ItemMutationOutcome::Updated { .. }))
+            {
+                return Err("missing/rejected campaign mutation result".into());
+            }
+            counts.prepared.fetch_add(prepared, Ordering::SeqCst);
+            counts.terminal.fetch_add(terminal, Ordering::SeqCst);
+            counts.retries.fetch_add(retried, Ordering::SeqCst);
         }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     }))

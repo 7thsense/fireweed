@@ -138,3 +138,28 @@ request receipts using their existing expiry semantics. The relational path
 currently replaces expired receipts only when the same request ID returns.
 The campaign's unique cycle IDs exposed retention growth hidden by key reuse.
 No performance improvement is claimed until measured.
+
+
+## First correction candidate
+
+Handler limits remain 500/200/500. A worker now claims up to the public 1,000-row
+limit, processes bounded handler chunks, and publishes the resulting guarded
+patches in one mutation batch. This reduces durable command/receipt overhead and
+allows more claim/update pairs to share projection application. It does not
+combine recipients or skip their lifecycle transitions. All five campaign/read
+correctness tests pass after the batching change.
+
+The relational apply path now opportunistically collects up to 64 expired unique
+request receipts before persisting a new receipt. It uses the same inclusive
+expiry boundary as request replay, a queue-scoped expiry index, and deletes
+associated claim-replay edges through bounded primary-key lookups. Unexpired
+receipts and other queues are preserved. This is projection housekeeping; log
+retention and durability are unchanged. The new native regression failed before
+cleanup (73 receipts retained versus nine expected after the bounded sweep) and
+passed afterward. The complete local relational suite passed 22 tests; six
+Python gate/monitor tests passed. Release campaign validation and new capacity
+measurement remain pending.
+
+[Regression before](../helix/04-build/evidence/workflow-capacity/campaign-receipt-gc-red.log.gz),
+[regression after](../helix/04-build/evidence/workflow-capacity/campaign-receipt-gc-green.log.gz),
+[relational suite](../helix/04-build/evidence/workflow-capacity/campaign-receipt-gc-suite.log.gz).
