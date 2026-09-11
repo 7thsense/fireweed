@@ -30,7 +30,7 @@ exclude = ["vendor/turso_core", "vendor/turso", "vendor/turso_sdk_kit", "vendor/
 resolver = "3"
 
 [workspace.package]
-version = "0.31.25"
+version = "0.31.26"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
