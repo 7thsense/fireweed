@@ -494,6 +494,50 @@ where
         )
     }
 
+    /// Reuse acknowledged commands still owned by the bounded apply queue.
+    /// Only a complete tail of at most sixteen disjoint authoritative claims is
+    /// returned. Missing/applied entries, other commands and epoch changes fall
+    /// back to the caller's authoritative-log read or coverage barrier.
+    pub async fn retained_claim_tail(
+        &self,
+        applied: &CommandPosition,
+        target: &CommandPosition,
+    ) -> EngineResult<Option<Vec<fireweed_engine::ClaimCommand>>> {
+        self.ensure_healthy(&target.queue)?;
+        if applied.queue != target.queue
+            || applied.backend_epoch != target.backend_epoch
+            || !matches!(target.sequence.checked_sub(applied.sequence), Some(1..=16))
+        {
+            return Ok(None);
+        }
+        let state = self.inner.state.lock().await;
+        let mut entries = Vec::new();
+        for entry in &state.entries {
+            let ApplyEntry::Ready(batch) = entry else {
+                continue;
+            };
+            if batch.shard != target.queue {
+                continue;
+            }
+            for (position, envelope) in batch.positions.iter().zip(&batch.commands) {
+                if position.backend_epoch != target.backend_epoch
+                    || position.sequence <= applied.sequence
+                    || position.sequence > target.sequence
+                {
+                    continue;
+                }
+                if !matches!(&envelope.command, QueueCommand::Claim(claim) if claim.authority_first)
+                    || entries.len() == 16
+                {
+                    return Ok(None);
+                }
+                entries.push((position.clone(), envelope.clone()));
+            }
+        }
+        entries.sort_by_key(|(position, _)| position.sequence);
+        Ok(claim_only_tail(applied, target, entries))
+    }
+
     /// Reject projection-dependent work synchronously after poison latches for `shard`.
     pub fn ensure_healthy(&self, shard: &QueueKey) -> EngineResult<()> {
         let poison_registry = self.inner.poisoned.read().map_err(|_| {
@@ -1065,6 +1109,39 @@ fn ready_contiguous_follow(prev_last: &CommandPosition, next_first: &CommandPosi
             || prev_last.sequence.checked_add(1) == Some(next_first.sequence))
 }
 
+/// Accept only a complete, contiguous tail of disjoint authoritative claims.
+/// Anything else retains the normal projection-coverage barrier.
+pub fn claim_only_tail(
+    applied: &CommandPosition,
+    target: &CommandPosition,
+    entries: Vec<(CommandPosition, CommandEnvelope)>,
+) -> Option<Vec<fireweed_engine::ClaimCommand>> {
+    if applied.backend_epoch != target.backend_epoch || applied.queue != target.queue {
+        return None;
+    }
+    let mut sequence = applied.sequence;
+    let mut seen = HashSet::new();
+    let mut claims = Vec::new();
+    for (position, envelope) in entries {
+        sequence = sequence.checked_add(1)?;
+        if position.queue != target.queue
+            || position.backend_epoch != target.backend_epoch
+            || position.sequence != sequence
+            || sequence > target.sequence
+        {
+            return None;
+        }
+        let QueueCommand::Claim(claim) = envelope.command else {
+            return None;
+        };
+        if !claim.authority_first || claim.item_ids.iter().any(|id| !seen.insert(*id)) {
+            return None;
+        }
+        claims.push(claim);
+    }
+    (sequence == target.sequence && !claims.is_empty()).then_some(claims)
+}
+
 fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
     let mut best: Option<(usize, ApplyBatch)> = None;
     for (index, entry) in state.entries.iter().enumerate() {
@@ -1089,8 +1166,11 @@ fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
         let better = match &best {
             None => true,
             Some((_, other)) => {
-                other.shard != batch.shard
-                    || first
+                // Preserve the first runnable queue in admission order. Within
+                // that queue choose its earliest log position, even if readiness
+                // notifications arrived out of order.
+                other.shard == batch.shard
+                    && first
                         < other
                             .positions
                             .first()
@@ -1422,6 +1502,180 @@ mod tests {
         state.entries.push_back(ready(2, 2));
         state.entries.push_back(ready(3, 3));
         assert_eq!(generation_ids(&state), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn retained_claim_tail_requires_complete_bounded_authority() {
+        let coordinator = coordinator();
+        coordinator.pause();
+        let first_id = ItemId::mint(1, 0, 1);
+        let mut batches = Vec::new();
+        for sequence in 1..=2 {
+            let mut envelope = pause_env("retained");
+            envelope.command = QueueCommand::Claim(
+                fireweed_engine::ClaimCommand::new(
+                    vec![ItemId::mint(1, 0, sequence as u32)],
+                    fireweed_core::LeaseToken::new(format!("token-{sequence}")).unwrap(),
+                    UtcTimestamp::new(30, 0).unwrap(),
+                    None,
+                )
+                .with_authority_first(),
+            );
+            batches.push(ApplyBatch {
+                id: sequence,
+                shard: shard(),
+                positions: vec![pos(sequence)],
+                commands: vec![envelope],
+                command_count: 1,
+                debt_bytes: 0,
+                enqueued_at: Instant::now(),
+            });
+        }
+        {
+            let mut state = coordinator.inner.state.lock().await;
+            // Ready entries may arrive out of order; other queues are irrelevant.
+            state
+                .entries
+                .push_back(ApplyEntry::Ready(batches[1].clone()));
+            state
+                .entries
+                .push_back(ready_on(shard_named("foreign"), 9, 1, 1, 1, 0));
+            state
+                .entries
+                .push_back(ApplyEntry::Ready(batches[0].clone()));
+        }
+        let tail = coordinator
+            .retained_claim_tail(&pos(0), &pos(2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].item_ids, vec![first_id]);
+        for target in [
+            pos(3),
+            pos(17),
+            CommandPosition::new(shard(), 2, 2),
+            pos_on(shard_named("foreign"), 2),
+        ] {
+            assert!(
+                coordinator
+                    .retained_claim_tail(&pos(0), &target)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for bad in 0..4 {
+            let mut changed = batches.clone();
+            match bad {
+                0 => {
+                    changed.remove(0);
+                } // missing acknowledged prefix
+                1 => {
+                    changed[1].commands[0].command = QueueCommand::PauseQueue(Default::default());
+                }
+                2 | 3 => {
+                    let QueueCommand::Claim(claim) = &mut changed[1].commands[0].command else {
+                        unreachable!()
+                    };
+                    if bad == 2 {
+                        claim.item_ids = vec![first_id];
+                    } else {
+                        claim.authority_first = false;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            coordinator.inner.state.lock().await.entries =
+                changed.into_iter().map(ApplyEntry::Ready).collect();
+            assert!(
+                coordinator
+                    .retained_claim_tail(&pos(0), &pos(2))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "invalid tail {bad}"
+            );
+        }
+        coordinator
+            .latch_poison(shard(), "test poison".into())
+            .await;
+        assert!(
+            coordinator
+                .retained_claim_tail(&pos(0), &pos(2))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn neighboring_ready_work_does_not_hide_a_claim_followup() {
+        let mut state = CoordinatorState::default();
+        let mut claim = pause_env("waiting-claim");
+        claim.command = QueueCommand::Claim(fireweed_engine::ClaimCommand::new(
+            vec![],
+            fireweed_core::LeaseToken::new("token").unwrap(),
+            UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        ));
+        let entry = |id, sequence, command| {
+            ApplyEntry::Ready(ApplyBatch {
+                id,
+                shard: shard(),
+                positions: vec![pos(sequence)],
+                commands: vec![command],
+                command_count: 1,
+                debt_bytes: 0,
+                enqueued_at: Instant::now(),
+            })
+        };
+        state.entries.push_back(entry(1, 1, claim));
+        let waiting = next_coalesced_generation(&state).unwrap();
+        assert!(generation_is_claim_without_complete(&waiting));
+        state
+            .entries
+            .push_back(ready_on(shard_named("neighbor"), 2, 1, 1, 1, 0));
+        let mut complete = pause_env("followup");
+        complete.command =
+            QueueCommand::Finalize(fireweed_engine::FinalizeCommand { outcomes: vec![] });
+        state.entries.push_back(entry(3, 2, complete));
+        let refreshed = next_coalesced_generation(&state).unwrap();
+        assert_eq!(
+            refreshed.entry_ids,
+            vec![1, 3],
+            "a neighbor must not mask the awaited followup"
+        );
+        assert!(!generation_is_claim_without_complete(&refreshed));
+    }
+
+    #[test]
+    fn ready_queues_keep_fifo_turns_under_replenishment() {
+        let mut state = CoordinatorState::default();
+        let first = shard();
+        let second = shard_named("second");
+        state
+            .entries
+            .push_back(ready_on(first.clone(), 1, 1, 1, 0, 0));
+        state
+            .entries
+            .push_back(ready_on(second.clone(), 2, 1, 1, 0, 0));
+        let (index, batch) = next_runnable(&state).unwrap();
+        assert_eq!(
+            batch.shard, first,
+            "later queues must not overtake ready work"
+        );
+        state.entries.remove(index);
+        state
+            .shards
+            .entry(first.clone())
+            .or_default()
+            .applied_high_water = Some(pos_on(first.clone(), 1));
+        state.entries.push_back(ready_on(first, 3, 2, 1, 0, 0));
+        let (_, batch) = next_runnable(&state).unwrap();
+        assert_eq!(
+            batch.shard, second,
+            "a replenished queue must wait its turn"
+        );
     }
 
     #[test]

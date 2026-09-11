@@ -12,11 +12,11 @@ mod async_projection_apply;
 pub mod commit_surface;
 pub mod compose_log;
 mod log_engine_store;
-mod traced_blob_store;
 pub mod maintenance;
 pub mod object_store_observability;
 mod port_surface;
 mod reclaim_tick;
+mod traced_blob_store;
 pub use reclaim_tick::{
     EXPIRED_LEASE_SCAN_LIMIT, RECLAIM_RETRY_BACKOFF_MS, RECLAIM_RETRY_QUEUE_CAPACITY,
     RECLAIM_SATURATED_KEY_DEADLINE, ReclaimRetryMetrics, ReclaimTickOutcome, tick_owned_reclaim,
@@ -32,6 +32,7 @@ pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlo
 #[doc(hidden)]
 pub use async_projection_apply::{
     AsyncProjectionApplyCoordinator, AsyncProjectionApplyReservation, AsyncProjectionApplySnapshot,
+    claim_only_tail,
 };
 pub use commit_surface::{
     CommitIdempotency, PreparedCommitTransition, durability_for_strict,

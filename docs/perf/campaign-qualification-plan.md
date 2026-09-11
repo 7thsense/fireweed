@@ -503,3 +503,55 @@ with four scalar aggregates. Exact empty/mixed lifecycle counts, superseded-row
 exclusion, tenant/queue isolation and terminal totals passed. All six public
 campaign tests passed with the aggregate query. Red/green and campaign logs are
 archived as `campaign-metrics-aggregate-*.log.gz`; release measurement follows.
+
+
+## Aggregate-count screens; correct apply queue fairness
+
+Clean `91f15186` passed 38 native and six campaign release tests. Uninstrumented
+one-cycle million-resident screens, 32 stores and two loaders/campaign:
+
+| Workers/campaign | Recipients/sec | CPU-ms/recipient | Process wall | Worst progress p95 |
+|---|---:|---:|---:|---:|
+| 4 | 8,651.08 | 1.409 | 115.75 s | 4.179 s |
+| 2 | 9,628.81 | 1.287 | 104.08 s | 2.463 s |
+
+Neither screen qualifies; three-cycle stability is unmeasured for this candidate.
+The four-worker result does not demonstrate an improvement from the aggregate
+query. Two workers improved this screen but still missed both rate and reporting
+latency. Keep reviewing the aggregate's cost instead of assuming removal of a
+sorter necessarily improves the whole workload. Full three-cycle best remains
+5,663/sec. Raw screens and release tests are archived under `campaign-91f15186-*`.
+
+Further source review found a real fairness defect: `next_runnable` replaced an
+already selected runnable queue whenever it encountered a different later queue.
+It therefore preferred later admissions across queues, contrary to its FIFO
+comment. The new regression fails against that selector and checks both initial
+order and a queue replenishing while another waits. Selection now preserves the
+first runnable queue; within that queue it still chooses the earliest eligible
+log position. Existing bounded coalescing and gap/poison/reservation rules remain.
+
+A separate bounded optimization reuses claim commands already retained by the
+apply coordinator after their authoritative append. Mutation planning previously
+reread this same tail from the log. Only a complete, contiguous, same-epoch tail
+of at most sixteen disjoint authoritative claims is reusable. Missing entries,
+non-claim commands, repeated IDs, old claim semantics or epoch changes retain the
+existing log-read/coverage fallback. No new durability authority, workflow entity
+or persistent side record is introduced. The existing validator is shared by
+retained and fetched tails. Optional apply tracing records hit/miss and elapsed
+time without request IDs or row data.
+
+Twenty-six coordinator tests pass, including retained-tail bounds, completeness,
+isolation, classification, duplicate-ID rejection and poison handling. The real
+composed-backend lease/version test additionally compares the retained tail with
+the authoritative log. Public campaign and release validation/measurement follow;
+no performance gain is claimed for these changes yet.
+
+The selector defect also affected join refresh: after A's claim started waiting,
+newer ready work in B hid A's already-arrived follow-up from the refresh. A second
+regression failed with the old selector (selected entry 2 instead of claim and
+follow-up entries 1 and 3), then passed with FIFO selection. This establishes the
+mechanism, not a measured rate improvement. Twenty-seven coordinator tests, the
+real composed lease/version/claim-tail test, and all six public campaign tests
+passed on the corrected implementation in development mode. The candidate is
+ready for release validation and an instrumented join comparison followed by
+uninstrumented sustained qualification.

@@ -58,7 +58,7 @@ use fireweed_turso::{TursoConfig, TursoRelational, materialize_grouped_cohort_cl
 #[cfg(feature = "objectlog")]
 use fireweed_objectlog::{
     AsyncProjectionApplyCoordinator, CommitIdempotency, ObjectLogEngineStore,
-    ObjectLogTaskDispatcher, PackedAppendError, PackedAppendOutcome,
+    ObjectLogTaskDispatcher, PackedAppendError, PackedAppendOutcome, claim_only_tail,
     finish_prepared_commit_transition, map_submit_error, new_commit_idempotency,
     prepare_commit_transition,
 };
@@ -1479,10 +1479,15 @@ where
     }
 
     async fn committed_retained_items(
-        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
         let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
-        self.projection.server_retained_items_committed(shard, after, limit).await
+        self.projection
+            .server_retained_items_committed(shard, after, limit)
+            .await
     }
 
     async fn committed_live_items(
@@ -3911,10 +3916,15 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn committed_retained_items(
-        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
         let _permit = self.acquire_outcome_read(shard).await?;
-        self.projection.server_retained_items_committed(shard, after, limit).await
+        self.projection
+            .server_retained_items_committed(shard, after, limit)
+            .await
     }
 
     async fn committed_live_items(
@@ -4911,40 +4921,6 @@ impl<L: AsyncLogStore + 'static> AtomicTursoBackend<L> {
     }
 }
 
-/// Accept only a complete, contiguous tail of disjoint authoritative claims.
-/// Anything else retains the normal projection-coverage barrier.
-#[cfg(feature = "objectlog")]
-fn claim_only_tail(
-    applied: &CommandPosition,
-    target: &CommandPosition,
-    entries: Vec<(CommandPosition, CommandEnvelope)>,
-) -> Option<Vec<fireweed_engine::ClaimCommand>> {
-    if applied.backend_epoch != target.backend_epoch || applied.queue != target.queue {
-        return None;
-    }
-    let mut sequence = applied.sequence;
-    let mut seen = HashSet::new();
-    let mut claims = Vec::new();
-    for (position, envelope) in entries {
-        sequence = sequence.checked_add(1)?;
-        if position.queue != target.queue
-            || position.backend_epoch != target.backend_epoch
-            || position.sequence != sequence
-            || sequence > target.sequence
-        {
-            return None;
-        }
-        let QueueCommand::Claim(claim) = envelope.command else {
-            return None;
-        };
-        if !claim.authority_first || claim.item_ids.iter().any(|id| !seen.insert(*id)) {
-            return None;
-        }
-        claims.push(claim);
-    }
-    (sequence == target.sequence && !claims.is_empty()).then_some(claims)
-}
-
 #[cfg(feature = "objectlog")]
 impl DerivedObjectLogTursoBackend {
     async fn dispatch_item_mutation(
@@ -5063,16 +5039,30 @@ impl DerivedObjectLogTursoBackend {
                                     p.backend_epoch == target.backend_epoch
                                         && target.sequence.saturating_sub(p.sequence) <= 16
                                 }) {
-                                    let page = AsyncLogStore::read_from(
-                                        log.as_ref(),
-                                        shard.clone(),
-                                        Some(applied.clone()),
-                                        16,
-                                    )
-                                    .await?;
-                                    pending_claims =
+                                    let tail_started = std::time::Instant::now();
+                                    let retained =
+                                        coordinator.retained_claim_tail(applied, &target).await?;
+                                    let retained_hit = retained.is_some();
+                                    pending_claims = if let Some(claims) = retained {
+                                        claims
+                                    } else {
+                                        let page = AsyncLogStore::read_from(
+                                            log.as_ref(),
+                                            shard.clone(),
+                                            Some(applied.clone()),
+                                            16,
+                                        )
+                                        .await?;
                                         claim_only_tail(applied, &target, page.entries)
-                                            .unwrap_or_default();
+                                            .unwrap_or_default()
+                                    };
+                                    if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
+                                        eprintln!(
+                                            "claim_tail retained={retained_hit} commands={} us={}",
+                                            pending_claims.len(),
+                                            tail_started.elapsed().as_micros()
+                                        );
+                                    }
                                 }
                                 if pending_claims.is_empty() {
                                     coordinator
@@ -5797,6 +5787,15 @@ mod s3c_activation {
             .unwrap();
             let tail =
                 claim_only_tail(&applied, &target, page.entries.clone()).expect("claim-only tail");
+            let retained = coordinator
+                .retained_claim_tail(&applied, &target)
+                .await
+                .unwrap()
+                .expect("acknowledged claims are retained before apply");
+            assert_eq!(
+                serde_json::to_value(&retained).unwrap(),
+                serde_json::to_value(&tail).unwrap()
+            );
             let mut invalid = page.entries.clone();
             invalid[0].0.sequence += 1;
             assert!(
