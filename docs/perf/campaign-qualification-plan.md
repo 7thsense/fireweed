@@ -397,3 +397,52 @@ Schema `campaign-capacity/v3` adds purge-batch occupancy and explicitly records
 the existing one-hour lease/request-retention durations and 7,200-second cycle
 clock step. These durations are unchanged. The gate checks declared temporal
 assumptions and exact purge batch counts in addition to the earlier requirements.
+
+
+## Payload-read/purge candidate screening and next query change
+
+Clean `385d9335` passed all six release campaign/read tests. Single-cycle,
+one-million-resident metadata screens kept total workers (256) and loaders (128)
+constant; these are **not sustained qualification**:
+
+| Physical stores | Recipients/sec | Process wall | CPU-ms/recipient | Peak RSS GiB | Worst progress p95 |
+|---|---:|---:|---:|---:|---:|
+| 32 | 8,671.81 | 115.46 s | 1.363 | 9.50 | 3.380 s |
+| 64 | 8,523.98 | 117.63 s | 1.341 | 12.00 | 3.666 s |
+
+The 32-store slowest-campaign phase maxima were load 11.55 s, preparation
+43.51 s, delivery 38.02 s and purge 19.71 s. At 64 stores they were 27.03,
+41.35, 37.88 and 7.46 s respectively; maxima are not additive. More stores did
+not improve throughput and increased memory. Neither screen met rate or progress
+latency targets, and neither establishes last-three-cycle storage stability.
+The two production changes were measured together; this is not isolated causal
+attribution of their individual gains.
+
+[32-store screen](../helix/04-build/evidence/workflow-capacity/campaign-385d9335-screen32.json.gz),
+[64-store screen](../helix/04-build/evidence/workflow-capacity/campaign-385d9335-screen64.json.gz),
+[release validation](../helix/04-build/evidence/workflow-capacity/campaign-385d9335-release-tests.log.gz).
+
+The next candidate replaces the pending priority index with one that also stores
+not-before, eligibility and cohort scalars. The priority query first selects a
+bounded list of eligible IDs using index columns, then seeks full rows and
+payloads by their complete keys. It preserves priority/FIFO tiebreaks, future
+eligibility, exclusions and payload materialization. It does not change the test
+clock to avoid future-priority backlog, remove a workflow transition, or add a
+second pending-order index. Existing projections drop the superseded index and
+create the replacement on migration.
+
+Turso's EXPLAIN QUERY PLAN labels covered range seeks merely USING INDEX. The
+regression therefore inspects actual VM column reads in the bounded candidate
+coroutine, plus full-key materialization seeks. A lazy unused table cursor can
+still be opened because the partial predicate's columns are not stored; its
+DeferredSeek only records intent and no candidate body column is read. Extra
+constant lifecycle/superseded index columns were tried during development and
+removed as unnecessary. Complete-workflow measurements must still justify the
+wider index's write cost. Target achievement is still pending.
+
+Development validation: six public campaign tests and 22 local relational tests
+passed, including schema/reopen checks. The native suite passed 35 tests; one
+existing debug timing gate failed (first read 111,375 us versus 90,000 us). The
+new bytecode regression passed. Release validation must resolve the timing check
+before claiming this candidate qualified. Logs are retained as
+`campaign-covering-{native,local,campaign}-tests.log.gz` in the evidence directory.

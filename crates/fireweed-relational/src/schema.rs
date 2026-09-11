@@ -71,10 +71,14 @@ DROP INDEX IF EXISTS fireweed_items_lifecycle_counts_idx;
 -- duplicated that order and made every Complete rewrite three Pending B-trees.
 DROP INDEX IF EXISTS fireweed_items_group_due_idx;
 DROP INDEX IF EXISTS fireweed_items_active_scope_idx;
-CREATE INDEX IF NOT EXISTS fireweed_items_pending_order_idx
-    ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq, item_id)
+-- Eligibility is covered so future-dated pending work does not require a hot-row
+-- lookup for every candidate skipped by a priority claim.
+DROP INDEX IF EXISTS fireweed_items_pending_order_idx;
+CREATE INDEX IF NOT EXISTS fireweed_items_pending_eligible_order_idx
+    ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq, item_id,
+                      not_before, eligible_since, cohort_size)
     WHERE lifecycle_state = 'Pending' AND superseded = 0;
--- Group-head reseek after Claim/Complete/schedule. pending_order_idx has no
+-- Group-head reseek after Claim/Complete/schedule. pending_eligible_order_idx has no
 -- group_key, so interleaved groups walked O(G) pending rows per rehead.
 CREATE INDEX IF NOT EXISTS fireweed_items_pending_group_nonnull_idx
     ON fireweed_items (tenant_id, queue_id, group_key, priority_sort, created_seq, item_id)

@@ -735,7 +735,7 @@ async fn turso_indexed_schedule_rewrite_profile() {
     let pending = apply_schedule(&store, &shard, &ids, CHUNK * 2, 3, "pending-only").await;
     store
         .execute(
-            "DROP INDEX IF EXISTS fireweed_items_pending_order_idx",
+            "DROP INDEX IF EXISTS fireweed_items_pending_eligible_order_idx",
             vec![],
         )
         .await

@@ -2057,9 +2057,14 @@ pub(crate) async fn server_update_snapshot_on(
 }
 
 pub(crate) async fn server_retained_items_on(
-    connection: &Connection, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+    connection: &Connection,
+    shard: &QueueKey,
+    after: Option<ItemId>,
+    limit: usize,
 ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
-    if !(1..=1000).contains(&limit) { return Err(EngineError::Invalid("retained page size must be 1..1000")); }
+    if !(1..=1000).contains(&limit) {
+        return Err(EngineError::Invalid("retained page size must be 1..1000"));
+    }
     let rows = query_value_rows(connection,
         "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.not_before,i.retry_count,\
          CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.metadata \
@@ -2069,17 +2074,21 @@ pub(crate) async fn server_retained_items_on(
          ORDER BY i.item_id LIMIT ?4",
         vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(),
              after.map(|id| id.to_string()).unwrap_or_default().into(), (limit as i64).into()]).await?;
-    rows.into_iter().map(|v| Ok(fireweed_engine::RetainedItemView {
-        item_id: ItemId::new(text(&v[0])?).map_err(storage)?,
-        client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
-        item_version: nonnegative_u64(integer(&v[2])?, "item_version")?,
-        lifecycle_state: parse_state(&text(&v[3])?).map_err(storage)?,
-        priority: parse_priority(optional_text(&v[4])?)?,
-        not_before: optional_integer(&v[5])?.map(nanos_ts),
-        attempt_count: nonnegative_u32(integer(&v[6])?, "retry_count")?,
-        payload: optional_blob(&v[7])?.map(Bytes::from),
-        metadata: metadata_from_json(text(&v[8])?)?,
-    })).collect()
+    rows.into_iter()
+        .map(|v| {
+            Ok(fireweed_engine::RetainedItemView {
+                item_id: ItemId::new(text(&v[0])?).map_err(storage)?,
+                client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
+                item_version: nonnegative_u64(integer(&v[2])?, "item_version")?,
+                lifecycle_state: parse_state(&text(&v[3])?).map_err(storage)?,
+                priority: parse_priority(optional_text(&v[4])?)?,
+                not_before: optional_integer(&v[5])?.map(nanos_ts),
+                attempt_count: nonnegative_u32(integer(&v[6])?, "retry_count")?,
+                payload: optional_blob(&v[7])?.map(Bytes::from),
+                metadata: metadata_from_json(text(&v[8])?)?,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn server_live_items_on(
@@ -2335,9 +2344,8 @@ pub async fn select_item_claim_ids_on(
         return Ok(chosen);
     }
     let mut offset: i64 = 0;
-    // Match `fireweed_items_pending_order_idx` exactly so ORDER BY can be
-    // index-only. Eligibility scalars that are not in the index are applied
-    // after primary-key body load, never by reading payload.
+    // Match the pending index's leading order keys. Generic gated selection
+    // retains its downstream eligibility checks without ordering by payload.
     let query = if gated {
         "SELECT item_id FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
@@ -2379,12 +2387,27 @@ pub async fn select_item_claim_ids_on(
     Ok(chosen)
 }
 
-/// Next due item-Claim rows with bodies, in schedule order.
-///
-/// One LIMIT query. ORDER BY is indexed `priority_sort,created_seq` or FIFO
-/// `rowid` — never payload. Payload is projected from the chosen rows only.
-/// Residual eligibility (not_before, eligible_since, cohort_size) is applied
-/// in-process so those predicates cannot force a table sort.
+// Scan only index entries for eligibility, then materialize selected IDs. The
+// CROSS JOIN keeps the bounded candidate list outside full-row primary-key seeks.
+const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.item_version,i.retry_count,i.priority,i.group_key,\
+     i.not_before,i.fields,i.metadata,i.max_attempts,i.entity_document,i.index_fields,i.eligible_since,i.cohort_size,t.priority_sort,t.created_seq \
+     FROM (\
+       SELECT item_id,priority_sort,created_seq \
+       FROM fireweed_items INDEXED BY fireweed_items_pending_eligible_order_idx \
+       WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+        AND priority_sort>=?4 AND (priority_sort>?4 OR created_seq>?5) \
+        AND cohort_size IS NULL AND eligible_since IS NOT NULL \
+        AND (not_before IS NULL OR not_before<=?6) \
+       ORDER BY priority_sort,created_seq LIMIT ?3\
+     ) t \
+     CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
+       ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=t.item_id \
+     LEFT JOIN fireweed_item_payloads p \
+       ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id ORDER BY t.priority_sort,t.created_seq";
+
+/// Next due item-Claim rows with bodies in indexed priority or FIFO order.
+/// Priority scans filter eligibility before bounded full-row/payload loading;
+/// FIFO scans retain their rowid cursor and check residual eligibility in-process.
 pub async fn select_and_materialize_item_claims_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -2471,20 +2494,6 @@ pub async fn select_and_materialize_item_claims_on(
         }
         next_floor = Some(floor);
     } else {
-        const ORDER_SQL: &str = "SELECT t.item_id,t.client_item_key,CASE WHEN p.item_id IS NULL THEN t.payload ELSE p.payload END,t.item_version,t.retry_count,t.priority,t.group_key,\
-             t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.priority_sort,t.created_seq \
-             FROM (\
-               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,payload,\
-                not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,priority_sort,created_seq \
-               FROM fireweed_items INDEXED BY fireweed_items_pending_order_idx \
-               WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-                AND priority_sort>=?4 AND (priority_sort>?4 OR created_seq>?5) \
-                AND cohort_size IS NULL AND eligible_since IS NOT NULL \
-                AND (not_before IS NULL OR not_before<=?6) \
-               ORDER BY priority_sort,created_seq LIMIT ?3\
-             ) t \
-             LEFT JOIN fireweed_item_payloads p \
-               ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id ORDER BY t.priority_sort,t.created_seq";
         let mut after_priority = Vec::<u8>::new();
         let mut after_sequence = i64::MIN;
         let mut first_page = true;
@@ -2505,7 +2514,7 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Integer(now_n),
             ];
             let mut rows = connection
-                .query(ORDER_SQL, params)
+                .query(ORDERED_ITEM_CLAIM_SQL, params)
                 .await
                 .map_err(driver_read_error)?;
             let mut page = 0usize;
@@ -5814,6 +5823,89 @@ mod addressed_query_tests {
                         && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
                 ),
                 "{details:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordered_claim_query_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn eligibility_is_covered_before_full_key_materialization() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {}", ORDERED_ITEM_CLAIM_SQL),
+                vec![
+                    "tenant".into(),
+                    "queue".into(),
+                    1000_i64.into(),
+                    Value::Blob(Vec::new()),
+                    i64::MIN.into(),
+                    1000_i64.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        let program = store
+            .query(
+                format!("EXPLAIN {}", ORDERED_ITEM_CLAIM_SQL),
+                vec![
+                    "tenant".into(),
+                    "queue".into(),
+                    1000_i64.into(),
+                    Value::Blob(Vec::new()),
+                    i64::MIN.into(),
+                    1000_i64.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        // Turso's EQP labels seeks "USING INDEX" even when all reads are
+        // covered. Its unused table cursor/DeferredSeek is lazy: assert that
+        // the candidate coroutine actually reads every column from the index.
+        let candidate: Vec<_> = program
+            .iter()
+            .take_while(|row| text(&row.values[1]).unwrap() != "EndCoroutine")
+            .collect();
+        assert!(
+            candidate.len() < program.len(),
+            "missing bounded candidate coroutine"
+        );
+        for row in &candidate {
+            if text(&row.values[1]).unwrap() == "Column" {
+                assert!(
+                    text(&row.values[7])
+                        .unwrap()
+                        .contains("fireweed_items_pending_eligible_order_idx."),
+                    "candidate scan reads item bodies: {row:?}"
+                );
+            }
+        }
+        for column in ["not_before", "eligible_since", "cohort_size"] {
+            assert!(
+                program
+                    .iter()
+                    .any(|row| text(&row.values[1]).unwrap() == "Column"
+                        && text(&row.values[7]).unwrap().ends_with(&format!(
+                            "fireweed_items_pending_eligible_order_idx.{column}"
+                        ))),
+                "eligibility column must come from the index: {column}"
+            );
+        }
+        for table in ["i", "p"] {
+            assert!(
+                details.iter().any(
+                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
+                ),
+                "materialization must seek selected IDs: {details:?}"
             );
         }
     }
