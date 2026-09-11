@@ -88,36 +88,44 @@ async fn retained_pages_include_terminal_metadata_and_isolate_queues() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn campaign_windows_reporting_and_discovered_retention() {
-    let root = tempfile::tempdir().unwrap();
-    let report = campaign::run(
-        Config {
-            items: 448,
-            shards: 2,
-            workers: 2,
-            load_workers: 2,
-            batch: 37,
-            cycles: 2,
-            recycle: true,
-            deadline: std::time::Duration::from_secs(120),
-            ..Default::default()
-        },
-        root.path(),
-    )
-    .await
-    .unwrap();
-    let mut verified = 0;
-    for shard in report["shards"].as_array().unwrap() {
-        for campaign in shard["campaigns"].as_array().unwrap() {
-            for cycle in campaign["cycles"].as_array().unwrap() {
-                let n = cycle["items"].as_u64().unwrap();
-                assert_eq!(cycle["verified"], n);
-                assert_eq!(cycle["purged"], n);
-                assert!(cycle["progress_reads"].as_u64().unwrap() > 0);
-                verified += n;
+    for campaign_metadata_only in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let report = campaign::run(
+            Config {
+                items: 448,
+                campaign_metadata_only,
+                shards: 2,
+                workers: 2,
+                load_workers: 2,
+                batch: 37,
+                cycles: 2,
+                recycle: true,
+                deadline: std::time::Duration::from_secs(120),
+                ..Default::default()
+            },
+            root.path(),
+        )
+        .await
+        .unwrap();
+        let mut verified = 0;
+        for shard in report["shards"].as_array().unwrap() {
+            for campaign in shard["campaigns"].as_array().unwrap() {
+                for cycle in campaign["cycles"].as_array().unwrap() {
+                    let n = cycle["items"].as_u64().unwrap();
+                    assert_eq!(cycle["verified"], n);
+                    assert_eq!(cycle["purged"], n);
+                    assert_eq!(
+                        cycle["payload_replacements"],
+                        if campaign_metadata_only { 0 } else { 2 * n }
+                    );
+                    assert!(cycle["initial_payload_bytes"].as_u64().unwrap() >= n * 896);
+                    assert!(cycle["progress_reads"].as_u64().unwrap() > 0);
+                    verified += n;
+                }
             }
         }
+        assert_eq!(verified, 896);
     }
-    assert_eq!(verified, 896);
 }
 
 #[test]
@@ -129,6 +137,8 @@ fn campaign_acknowledged_child() {
         campaign::run(
             Config {
                 items: 112,
+                campaign_metadata_only: std::env::var("FIREWEED_CAMPAIGN_METADATA").as_deref()
+                    == Ok("1"),
                 shards: 1,
                 workers: 2,
                 batch: 37,
@@ -157,62 +167,83 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_campaign_reports_rebuild_from_log_only() {
-    let original = tempfile::tempdir().unwrap();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "campaign_acknowledged_child", "--nocapture"])
-        .env("FIREWEED_CAMPAIGN_CHILD", original.path())
-        .output()
-        .unwrap();
-    assert!(
-        status.status.success(),
-        "{}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-    let rebuilt = tempfile::tempdir().unwrap();
-    copy_tree(
-        &original.path().join("shard-0/log"),
-        &rebuilt.path().join("log"),
-    );
-    let fw = open_store(rebuilt.path(), false, TestClock::at(2000)).unwrap();
-    let mut seen = std::collections::BTreeSet::new();
-    for campaign in 0..2 {
-        let q = create_queue(&fw, &format!("campaign-{campaign}"))
-            .await
+    for campaign_metadata_only in [false, true] {
+        let original = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "campaign_acknowledged_child", "--nocapture"])
+            .env("FIREWEED_CAMPAIGN_CHILD", original.path())
+            .env(
+                "FIREWEED_CAMPAIGN_METADATA",
+                if campaign_metadata_only { "1" } else { "0" },
+            )
+            .output()
             .unwrap();
-        let m = fw.metrics(&q).await.unwrap();
-        assert_eq!(m.complete + m.failed, 56);
-        let rows = fw.retained_items(&q, None, 1000).await.unwrap();
-        assert_eq!(rows.len(), 56);
-        for row in rows {
-            let doc: serde_json::Value =
-                serde_json::from_slice(row.payload.as_ref().unwrap()).unwrap();
-            let id = doc["id"].as_u64().unwrap();
-            assert!(seen.insert(id));
-            assert_eq!(doc["campaign"], campaign);
-            assert_eq!(doc["scheduled_at"], 1000 + 60 * ((id / 7) % 4));
-            assert_eq!(
-                row.lifecycle_state,
-                if id % 31 == 0 {
-                    ItemState::Failed
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let rebuilt = tempfile::tempdir().unwrap();
+        copy_tree(
+            &original.path().join("shard-0/log"),
+            &rebuilt.path().join("log"),
+        );
+        let fw = open_store(rebuilt.path(), false, TestClock::at(2000)).unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for campaign in 0..2 {
+            let q = create_queue(&fw, &format!("campaign-{campaign}"))
+                .await
+                .unwrap();
+            let m = fw.metrics(&q).await.unwrap();
+            assert_eq!(m.complete + m.failed, 56);
+            let rows = fw.retained_items(&q, None, 1000).await.unwrap();
+            assert_eq!(rows.len(), 56);
+            for row in rows {
+                let doc: serde_json::Value =
+                    serde_json::from_slice(row.payload.as_ref().unwrap()).unwrap();
+                let id = doc["id"].as_u64().unwrap();
+                assert!(seen.insert(id));
+                assert_eq!(doc["campaign"], campaign);
+                let enriched = if campaign_metadata_only {
+                    serde_json::to_value(&row.metadata).unwrap()
                 } else {
-                    ItemState::Complete
+                    doc.clone()
+                };
+                let first = 1000 + 60 * ((id / 7) % 4);
+                assert_eq!(enriched["scheduled_at"], first);
+                assert_eq!(
+                    enriched["top_times"],
+                    serde_json::json!([first + 600, first, first + 300])
+                );
+                assert_eq!(enriched["color"], ["red", "blue", "green"][id as usize % 3]);
+                assert_eq!(enriched["score"], id % 101);
+                if campaign_metadata_only {
+                    assert_eq!(doc.as_object().unwrap().len(), 3);
                 }
-            );
-            assert_eq!(
-                row.metadata.get("outcome"),
-                Some(&MetadataValue::String(
-                    if id % 31 == 0 { "failed" } else { "accepted" }.into()
-                ))
-            );
-            assert_eq!(
-                row.metadata.get("provider_id"),
-                Some(&MetadataValue::String(format!("provider-{id}")))
-            );
-            assert_eq!(row.attempt_count, 3 + u32::from(id % 19 == 0));
-            assert_eq!(row.not_before, Some(ts(1000 + 60 * ((id / 7) % 4) as i64)));
+                assert_eq!(
+                    row.lifecycle_state,
+                    if id % 31 == 0 {
+                        ItemState::Failed
+                    } else {
+                        ItemState::Complete
+                    }
+                );
+                assert_eq!(
+                    row.metadata.get("outcome"),
+                    Some(&MetadataValue::String(
+                        if id % 31 == 0 { "failed" } else { "accepted" }.into()
+                    ))
+                );
+                assert_eq!(
+                    row.metadata.get("provider_id"),
+                    Some(&MetadataValue::String(format!("provider-{id}")))
+                );
+                assert_eq!(row.attempt_count, 3 + u32::from(id % 19 == 0));
+                assert_eq!(row.not_before, Some(ts(1000 + 60 * ((id / 7) % 4) as i64)));
+            }
         }
+        assert_eq!(seen.len(), 112);
     }
-    assert_eq!(seen.len(), 112);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -221,6 +252,7 @@ async fn campaign_chunks_obey_distinct_handler_limits() {
     let report = campaign::run(
         Config {
             items: 2240,
+            campaign_metadata_only: true,
             shards: 1,
             workers: 2,
             load_workers: 2,

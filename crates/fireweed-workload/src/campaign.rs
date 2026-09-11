@@ -62,9 +62,57 @@ fn prepare_payload(row: &ClaimedItem, stage: usize, base: i64) -> Result<(Bytes,
     Ok((Bytes::from(serde_json::to_vec(&document)?), priority))
 }
 
+fn prepare_metadata(row: &ClaimedItem, stage: usize, base: i64) -> Result<(Metadata, i64)> {
+    let id = recipient(row);
+    let mut metadata = row.metadata.clone();
+    metadata.insert("stage", MetadataValue::String((stage + 1).to_string()));
+    let priority;
+    if stage == 0 {
+        let document: Value = serde_json::from_slice(row.payload.as_ref().ok_or("missing body")?)?;
+        if document["id"].as_u64() != Some(id as u64) {
+            return Err("payload/metadata recipient mismatch".into());
+        }
+        let first = base + 60 * ((id / 7) % WINDOWS) as i64;
+        metadata.insert(
+            "top_times",
+            MetadataValue::Array(
+                [first + 600, first, first + 300]
+                    .into_iter()
+                    .map(MetadataValue::Integer)
+                    .collect(),
+            ),
+        );
+        metadata.insert(
+            "color",
+            MetadataValue::String(["red", "blue", "green"][id % 3].into()),
+        );
+        metadata.insert("score", MetadataValue::Integer((id % 101) as i64));
+        priority = id as i64;
+    } else {
+        let Some(MetadataValue::Array(times)) = metadata.get("top_times") else {
+            return Err("missing persisted top times".into());
+        };
+        priority = times
+            .iter()
+            .map(|value| match value {
+                MetadataValue::Integer(value) => Ok(*value),
+                _ => Err("invalid top time"),
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .min()
+            .ok_or("empty top times")?;
+        metadata.insert("scheduled_at", MetadataValue::Integer(priority));
+    }
+    Ok((metadata, priority))
+}
+
 #[derive(Default)]
 struct Counts {
     prepared: AtomicUsize,
+    initial_payload_bytes: AtomicU64,
+    payload_replacements: AtomicUsize,
+    payload_replacement_bytes: AtomicU64,
     terminal: AtomicUsize,
     retries: AtomicUsize,
     claims: AtomicUsize,
@@ -152,10 +200,21 @@ async fn workers(
                         let id = recipient(row);
                         let mut patch = ItemPatch::default();
                         if stage < 2 {
-                            let (body, priority) = prepare_payload(row, stage, base)?;
-                            patch.payload = BatchUpdateValue::Replace(Some(body));
-                            patch.metadata =
-                                BatchUpdateValue::Replace(meta(stage + 1, id, campaign));
+                            let priority = if cfg.campaign_metadata_only {
+                                let (metadata, priority) = prepare_metadata(row, stage, base)?;
+                                patch.metadata = BatchUpdateValue::Replace(metadata);
+                                priority
+                            } else {
+                                let (body, priority) = prepare_payload(row, stage, base)?;
+                                counts.payload_replacements.fetch_add(1, Ordering::Relaxed);
+                                counts
+                                    .payload_replacement_bytes
+                                    .fetch_add(body.len() as u64, Ordering::Relaxed);
+                                patch.payload = BatchUpdateValue::Replace(Some(body));
+                                patch.metadata =
+                                    BatchUpdateValue::Replace(meta(stage + 1, id, campaign));
+                                priority
+                            };
                             patch.priority =
                                 BatchUpdateValue::Replace(Some(PriorityValue::Int64(priority)));
                             patch.not_before = BatchUpdateValue::Replace(Some(ts(if stage == 0 {
@@ -165,10 +224,18 @@ async fn workers(
                             })));
                             patch.lifecycle = LifecyclePatch::SetPending;
                         } else {
-                            let doc: Value = serde_json::from_slice(
-                                row.payload.as_ref().ok_or("missing scheduled payload")?,
-                            )?;
-                            if doc["scheduled_at"].as_i64().ok_or("missing schedule")? > now {
+                            let scheduled = if cfg.campaign_metadata_only {
+                                match row.metadata.get("scheduled_at") {
+                                    Some(MetadataValue::Integer(value)) => *value,
+                                    _ => return Err("missing stored schedule".into()),
+                                }
+                            } else {
+                                let doc: Value = serde_json::from_slice(
+                                    row.payload.as_ref().ok_or("missing scheduled payload")?,
+                                )?;
+                                doc["scheduled_at"].as_i64().ok_or("missing schedule")?
+                            };
+                            if scheduled > now {
                                 return Err("early provider delivery".into());
                             }
                             let mut tracking = row.metadata.clone();
@@ -276,11 +343,16 @@ async fn verify_rows(
                 return Err("missing/duplicate/foreign campaign identity".into());
             }
             let first = base + 60 * ((id / 7) % 4) as i64;
+            let enriched = if cfg.campaign_metadata_only {
+                serde_json::to_value(&row.metadata)?
+            } else {
+                doc.clone()
+            };
             if doc["campaign"] != campaign
-                || doc["color"] != ["red", "blue", "green"][id % 3]
-                || doc["score"] != id % 101
-                || doc["top_times"] != json!([first + 600, first, first + 300])
-                || doc["scheduled_at"] != first
+                || enriched["color"] != ["red", "blue", "green"][id % 3]
+                || enriched["score"] != id % 101
+                || enriched["top_times"] != json!([first + 600, first, first + 300])
+                || enriched["scheduled_at"] != first
                 || row.priority != Some(PriorityValue::Int64(first))
                 || row.not_before != Some(ts(first))
             {
@@ -288,7 +360,9 @@ async fn verify_rows(
             }
             let original: Value =
                 serde_json::from_slice(&initial_body(id, campaign, cfg.payload_bytes))?;
-            if doc["padding"] != original["padding"] {
+            if doc["padding"] != original["padding"]
+                || (cfg.campaign_metadata_only && doc != original)
+            {
                 return Err("original attributes lost".into());
             }
             let failed = cfg.faults && id % 31 == 0;
@@ -385,12 +459,13 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                         let execute = async {
                             let phase = Instant::now();
                             futures::stream::iter(0..ids.len().div_ceil(cfg.batch)).map(|batch_index| {
-                                let ids = &ids; let cfg = &cfg; let fw = &fw; let q = &q;
+                                let ids = &ids; let cfg = &cfg; let fw = &fw; let q = &q; let counts = &counts;
                                 async move {
                                 let chunk = &ids[batch_index*cfg.batch..((batch_index+1)*cfg.batch).min(ids.len())];
                                 let rows: Vec<_> = chunk.iter().map(|id| NewItem { client_item_key: Some(key(*id)),
                                     priority: Some(PriorityValue::Int64(*id as i64)), not_before: Some(ts(1)),
                                     metadata: meta(0, *id, campaign), payload: Some(initial_body(*id, campaign, cfg.payload_bytes)), ..Default::default() }).collect();
+                                counts.initial_payload_bytes.fetch_add(rows.iter().map(|row| row.payload.as_ref().map_or(0, |body| body.len() as u64)).sum::<u64>(), Ordering::Relaxed);
                                 let accepted = retry(deadline, || fw.push_batch(&q, rows.clone())).await?;
                                 if accepted.len() != chunk.len() { return Err("missing push identities".into()); }
                                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
@@ -439,6 +514,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({"cycle":cycle,"items":ids.len(),"verified":verified,"delivered":verified-failed,"failed":failed,"purged":purged,
                                 "pending":0,"leased":0,"load_s":load_s,"prepare_s":prepare_s,"delivery_s":delivery_s,"verify_s":verify_s,"purge_s":phase.elapsed().as_secs_f64(),
                                 "wall_s":cycle_start.elapsed().as_secs_f64(),"retries":counts.retries.load(Ordering::SeqCst),"claims":counts.claims.load(Ordering::SeqCst),
+                                "initial_payload_bytes":counts.initial_payload_bytes.load(Ordering::Relaxed),"payload_replacements":counts.payload_replacements.load(Ordering::Relaxed),"payload_replacement_bytes":counts.payload_replacement_bytes.load(Ordering::Relaxed),
                                 "claim_batches":counts.claim_batches.load(Ordering::Relaxed),"mutation_batches":counts.mutation_batches.load(Ordering::Relaxed),
                                 "max_claim_batch":counts.max_claim_batch.load(Ordering::Relaxed),"empty_claims":counts.empty_claims.load(Ordering::Relaxed),
                                 "due_to_claim_max_us":counts.due_to_claim_max_us.load(Ordering::SeqCst),"max_handler_batch":counts.max_handler_batch.each_ref().map(|v|v.load(Ordering::SeqCst)),
@@ -465,7 +541,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
     }
     reports.sort_by_key(|s| s["shard"].as_u64());
     Ok(
-        json!({"schema":"campaign-capacity/v1","cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
+        json!({"schema":"campaign-capacity/v2","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
         "physical_shards":cfg.shards,"workers_per_campaign":cfg.workers,"load_workers_per_campaign":cfg.load_workers,"campaigns":CAMPAIGNS,"batch":cfg.batch,"stage_limits":[500,200,500],"faults":cfg.faults,"includes_purge":cfg.recycle,
         "payload_bytes":cfg.payload_bytes,"scheduled_windows":WINDOWS,"resident_backlog":cfg.items,"progress_interval_ms":1000,
         "completed_lifecycles_per_s":(cfg.items*cfg.cycles) as f64/started.elapsed().as_secs_f64(),"settled_wall_s":started.elapsed().as_secs_f64(),"shards":reports}),

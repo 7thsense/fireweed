@@ -266,3 +266,73 @@ qualification are still required before claiming an improvement.
 
 All five public campaign/read tests also passed with queue-scoped waiters and
 the rejected lifecycle index removed. Release validation and capacity are next.
+
+
+## Queue-scoped waiter result and hardware observations
+
+Clean `861619a9` completed its first cycle in **188.55 seconds**, with worst
+progress p95 **1.731 seconds**. It was stopped by SIGTERM in cycle two after the
+first-cycle rate failed. Queue-scoped waiting alone has not demonstrated an
+improvement over the 175.61-second best initial cycle. It remains a candidate
+whose benefit must be checked with the next application-level optimization.
+
+All five public campaign release tests and 24 coordinator release tests passed.
+A broader object-log release run passed 66 tests and failed two live S3 tests
+because `FIREWEED_S3_TEST_ENDPOINT` was unset. Docker socket access was denied;
+those live S3 checks remain unverified. This qualification uses filesystem logs.
+
+A 266.92-second host-wide NVMe observation around the partial run recorded
+10.87 GiB written, **41.71 MiB/sec**, approximately 1,025 completed writes/sec,
+82.72 ms mean write request time and 15.60 ms mean flush request time. Recorded
+busy time was about 90% of the interval; weighted in-flight time averaged 85.
+These include host activity and start/stop margins. They are not process-exclusive
+or NAND measurements, nor proof of a fixed sequential bandwidth limit. The
+observed queueing motivates reducing write amplification. CPU frequency and
+available temperature readings are retained in the per-second raw trace.
+
+Sector counts use 512-byte units; accumulated request time can exceed elapsed
+time when requests overlap. See the kernel's [block statistics definitions](https://docs.kernel.org/block/stat.html)
+and [I/O accounting caveats](https://docs.kernel.org/admin-guide/iostats.html).
+
+[Stopped workload](../helix/04-build/evidence/workflow-capacity/campaign-861619a9-queue-join-aborted.json.gz),
+[device summary](../helix/04-build/evidence/workflow-capacity/campaign-861619a9-device-analysis.json.gz),
+[device samples](../helix/04-build/evidence/workflow-capacity/campaign-861619a9-device.jsonl.gz),
+[monitor source](../helix/04-build/evidence/workflow-capacity/campaign-device-monitor.py.gz),
+[broader release run](../helix/04-build/evidence/workflow-capacity/campaign-861619a9-release-with-s3-environment-failures.log.gz).
+
+## Explicit metadata enrichment variant and revised byte budget
+
+The initial fixture unnecessarily rewrote the whole payload twice to persist a
+few enrichment attributes. The original-row workflow does not require that
+representation. The reviewed legacy scheduled-action persistence updates status,
+message and completion columns; Cayce scheduling returns structured decision
+attributes. A prospective Fireweed integration can keep input/profile payloads
+and use the existing structured row metadata for enrichment. This is a mapping
+choice, not a claim that today's Snorri adapter already implements it.
+
+`--campaign-metadata` explicitly selects that variant. Top-time candidates are a
+stored typed array; scheduling reads it and persists the selected time. Color,
+score, stage and delivery disposition remain on the same original row. The body
+and its varied padding are retained unchanged. The payload-rewrite variant stays
+available without that flag and remains independently tested. Neither uses side
+workflow entities, changes handler limits, skips a lifecycle transition, omits
+reporting, weakens log durability, or reduces resident population.
+
+Both variants still require approximately **8.105 logical row operations per
+recipient**, plus three full retained exports and progress queries. The byte
+budget differs: the payload-rewrite variant writes three body versions; metadata
+enrichment writes one original body plus changing metadata. Nominal 1 KiB bodies
+alone therefore imply about 9.8 MiB/sec at 10k or 12.2 MiB/sec at 12.5k before
+metadata, log encoding, indexes, WAL and checkpoint amplification. The exact
+initial/replacement body byte totals are now measured rather than inferred from
+`--payload-bytes` (which reserves padding space for enrichment).
+
+Schema `campaign-capacity/v2` records `enrichment_storage`, exact initial body
+bytes, replacement counts/bytes, and storage-batch occupancy. Qualification
+requires a declared representation, nominal payload size >=1 KiB, the appropriate
+replacement count (zero or 2N), and the same outcomes, 10k/12.5k rates, fairness,
+reporting, residency and storage gates. Results must always identify the variant;
+a metadata pass must not be reported as a payload-rewrite pass. All five campaign
+suite tests passed, now exercising both representations in retained/disposition
+verification and log-only recovery; six gate/monitor tests passed. Performance of
+the metadata variant remains unmeasured.

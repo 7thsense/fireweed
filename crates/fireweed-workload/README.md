@@ -177,13 +177,20 @@ Fireweed adapter still references the retired SQLite opening API; this work does
 not migrate that adapter. Recycling behavior deferred in Cayce is not asserted
 as implemented here.
 
-## Representative campaign qualification (new baseline pending)
+## Representative campaign qualification
 
 `--profile campaign --recycle --cycles 3 --items 1000000 --batch 1000 --shards 32
 --workers 4 --load-workers 2` loads one million resident rows, with two campaign
 queues per physical store. Workers are per campaign (eight total per store in
 this preset). Enrichment and delivery handler batches are capped at 500;
-scheduling at 200. The load batch is independent and may reach 1,000.
+scheduling at 200. Claim/mutation batches are independent and may reach 1,000.
+
+Add `--campaign-metadata` to persist top times and enrichment attributes in the
+original row's structured metadata while retaining the original payload. Without
+that flag the stress variant rewrites the payload twice. Both are independently
+checked, including log-only recovery. Schema `campaign-capacity/v2` identifies
+the representation and records actual initial/replacement payload bytes; a pass
+for one variant is not a pass for the other. All qualification floors are the same.
 
 Every row is enriched with candidate times, color and score; scheduling consumes
 those stored candidates. All rows are scheduled in the future before four due

@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--recycle" => config.recycle = true,
+            "--campaign-metadata" => config.campaign_metadata_only = true,
             "--cycles" => config.cycles = args.next().ok_or("missing cycles")?.parse()?,
             "--items" => config.items = args.next().ok_or("missing items")?.parse()?,
             "--batch" => config.batch = args.next().ok_or("missing batch")?.parse()?,
@@ -61,7 +62,7 @@ async fn main() -> Result<()> {
                     Some("snorri") => Profile::Snorri,
                     _ => {
                         return Err(
-                            "profile must be primitives, retention, bulk, mutable, or snorri"
+                            "profile must be campaign, primitives, retention, bulk, mutable, or snorri"
                                 .into(),
                         );
                     }
@@ -69,12 +70,15 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--payload-bytes N] [--deadline-seconds N] [--campaign-metadata] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument {arg}").into()),
         }
+    }
+    if config.campaign_metadata_only && !campaign {
+        return Err("--campaign-metadata requires --profile campaign".into());
     }
     let temporary = tempfile::tempdir()?;
     let root = root.as_deref().unwrap_or(temporary.path());

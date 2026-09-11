@@ -81,12 +81,14 @@ class QualificationTests(unittest.TestCase):
                 n=len(ids); retries=sum(i%19==0 for i in ids); failed=sum(i%31==0 for i in ids)
                 row={"items":n,"verified":n,"purged":n,"failed":failed,"delivered":n-failed,
                     "pending":0,"leased":0,"retries":retries,"claims":3*n+retries,
+                    "initial_payload_bytes":n*1024,"payload_replacements":2*n,"payload_replacement_bytes":2*n*1100,
+                    "claim_batches":(3*n+retries+999)//1000,"mutation_batches":(3*n+retries+999)//1000,"max_claim_batch":1000,
                     "handler_rows":[n,n,n+retries],"max_handler_batch":[500,200,500],
                     "due_to_claim_max_us":1_000_000,"wall_s":70,"progress_reads":70,"progress_p95_s":0.1,
                     "process_rss_kib":1000,"projection_bytes":1000,"projection_wal_bytes":2000}
                 campaigns.append({"campaign":campaign,"cycles":[copy.deepcopy(row) for _ in range(3)]})
             shards.append({"shard":shard,"campaigns":campaigns})
-        report["result"]={"schema":"campaign-capacity/v1","cell":"filesystem--turso","physical_shards":2,
+        report["result"]={"schema":"campaign-capacity/v2","enrichment_storage":"payload","payload_bytes":1024,"batch":1000,"cell":"filesystem--turso","physical_shards":2,
             "campaigns":2,"cycles":3,"items":1_000_000,"resident_backlog":1_000_000,
             "scheduled_windows":4,"stage_limits":[500,200,500],"faults":True,"includes_purge":True,
             "progress_interval_ms":1000,"completed_lifecycles_per_s":11000,"shards":shards}
@@ -96,8 +98,18 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(qualify(report,12500)["passed"])
         for key,value in [("verified",0),("purged",0),("retries",0),("claims",0),("failed",0),
                           ("progress_reads",0),("progress_p95_s",2.0),("max_handler_batch",[500,500,500]),
-                          ("due_to_claim_max_us",61_000_000)]:
+                          ("due_to_claim_max_us",61_000_000),("payload_replacements",0),
+                          ("payload_replacement_bytes",0),("initial_payload_bytes",0),("mutation_batches",0)]:
             broken=copy.deepcopy(report);broken["result"]["shards"][0]["campaigns"][0]["cycles"][0][key]=value
+            self.assertFalse(qualify(broken)["passed"],key)
+        metadata=copy.deepcopy(report);metadata["result"]["enrichment_storage"]="row_metadata"
+        for shard in metadata["result"]["shards"]:
+            for campaign in shard["campaigns"]:
+                for row in campaign["cycles"]:
+                    row["payload_replacements"]=0;row["payload_replacement_bytes"]=0
+        self.assertTrue(qualify(metadata,12500)["passed"])
+        for key,value in [("enrichment_storage","unknown"),("payload_bytes",128),("schema","campaign-capacity/v1")]:
+            broken=copy.deepcopy(metadata);broken["result"][key]=value
             self.assertFalse(qualify(broken)["passed"],key)
         broken=copy.deepcopy(report);broken["result"]["resident_backlog"]=500_000
         self.assertFalse(qualify(broken)["passed"])

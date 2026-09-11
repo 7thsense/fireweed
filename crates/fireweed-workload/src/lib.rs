@@ -39,6 +39,8 @@ pub struct Config {
     pub projection_root: Option<std::path::PathBuf>,
     pub faults: bool,
     pub payload_bytes: usize,
+    /// Persist enrichment attributes in row metadata, retaining the original payload.
+    pub campaign_metadata_only: bool,
     pub deadline: Duration,
 }
 
@@ -58,6 +60,7 @@ impl Default for Config {
             projection_root: None,
             faults: true,
             payload_bytes: 1024,
+            campaign_metadata_only: false,
             deadline: Duration::from_secs(120),
         }
     }
