@@ -18,6 +18,7 @@ path = "src/bin/fireweed-service.rs"
 # ReclaimDriver task so leases reclaim without client traffic (TD-007 §3). Everything else depends only
 # inward; this depends on all the adapters.
 [dependencies]
+mimalloc = "0.1.52"
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-resp = { path = "../fireweed-resp" }

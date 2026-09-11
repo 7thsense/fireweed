@@ -1,0 +1,10 @@
+{
+  "diagnostic_only": true,
+  "source": "8a580e83",
+  "binary_sha256": "adedb811bb592cba903f2c3390edbcfc9faddc630dd782d0fcc21f1426bbfc99",
+  "command": "target/release/fireweed-workload --root target/workflow-capacity/profile-9500-baseline --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 16 --workers 8 --load-workers 4 --recycle --cycles 3 --deadline-seconds 1200",
+  "profiler": "perf_event_open software CPU clock, inherited child threads, 199 Hz on each of 16 logical CPUs, userspace IP only; no stacks or kernel samples",
+  "samples": 337538,
+  "lost": 0,
+  "symbolization": "ELF program-header file offset to virtual-address mapping for executable; libc function labels from local objdump disassembly. Nearest symbol attribution, with normal sampling/inlining limitations."
+}

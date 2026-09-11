@@ -1,3 +1,7 @@
+// Allocation policy belongs to the executable; library embedders choose their own.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use fireweed_workload::{Config, Profile, Result};
 use std::time::Duration;
 

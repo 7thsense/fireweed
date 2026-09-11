@@ -6,6 +6,10 @@
 //! via [`start`]. All env-NAME knowledge lives in `Config::from_env` (the `env-config` feature of the
 //! library); the library's `Config` + `start`/`start_with_ownership` carry no environment dependency.
 
+// Allocation policy belongs to the executable; library embedders choose their own.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

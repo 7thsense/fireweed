@@ -31,6 +31,12 @@ at most 10% and each projection's size by at most 5%. Both gates require physica
 sharding and disk-backed storage and reject external I/O overrides. These are
 measured stability checks; retain the raw cycle reports for longer-run analysis.
 
+The workload and service executables select mimalloc as their global allocator.
+Library embedding does not select a global allocator; an embedding application
+controls that process-wide policy. Include allocator selection when reproducing
+capacity results. This changes allocation cost, not log durability or queue API
+semantics.
+
 ```sh
 scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 16 --workers 8 --deadline-seconds 900
 scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 16 --workers 8 --load-workers 4 --recycle --cycles 6 --deadline-seconds 1200
