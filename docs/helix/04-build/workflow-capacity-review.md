@@ -2,7 +2,26 @@
 
 Date: 2026-09-10. Exact measurement snapshots are recorded in the linked artifacts.
 
-**The targets pass repeated qualification on clean build `b0f89563`.** The final
+## Current qualification: within five percent of 10,000 workflows/sec
+
+The stricter follow-up goal **passes on clean source `a73b067f`**. Two fresh
+three-million-lifecycle runs achieved **12,125 and 11,810 complete workflows/sec**;
+the worst cycle's slowest-shard equivalent rates were **9,839 and 10,036/sec**,
+above the 9,500/sec floor. Both million-row primitive repetitions passed the
+unchanged 10,000/sec insertion and update gates. All correctness, fairness,
+retention, RSS/projection stability, and sampled WAL checks passed.
+
+The final preset uses 32 shards and eight workers per shard, executable-owned
+mimalloc, portable thin LTO, and corrected native checkpoint retries after
+partial backfill. Maximum sampled shard WAL was below 260 MiB in both runs.
+See the [follow-up investigation and raw evidence](../../perf/workflow-9500-iteration.md)
+for exact provenance, tests, rejected candidates, and reproduction commands.
+The same original row is enriched, delivered, and purged; log durability remains
+enabled. Snorri migration is a separate integration task.
+
+## Historical qualification before the stricter follow-up goal
+
+**The earlier targets passed repeated qualification on clean build `b0f89563`.** The final
 configuration uses 16 independent filesystem-log/Turso shards, 4 KiB projection
 pages, effective checkpoint control, and repaired page-cache accounting. All four
 qualification reports use the same binary and pass every acceptance check.

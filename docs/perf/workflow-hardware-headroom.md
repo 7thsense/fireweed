@@ -1,11 +1,112 @@
 # Workflow capacity versus hardware cost
 
+## Current result: the stricter target is achieved
+
+2026-09-10 follow-up, clean source `a73b067f`. The new changes are local and
+unreleased; the earlier v0.31.26 release candidate below is a historical baseline.
+The [full investigation and qualification evidence](workflow-9500-iteration.md)
+records two passing three-million-lifecycle runs and two passing million-row
+primitive runs on the same binary.
+
+| Measured quantity | Repetition 1 | Repetition 2 |
+|---|---:|---:|
+| Complete original-row workflows/sec | 12,125 | 11,810 |
+| Worst cycle, slowest-shard equivalent workflows/sec | 9,839 | 10,036 |
+| Inserts/sec | 67,738 | 67,311 |
+| Key updates/sec | 97,186 | 77,121 |
+| ID updates/sec | 70,739 | 61,756 |
+| CPU time/lifecycle | 1.154 ms | 1.235 ms |
+| Average logical CPUs occupied | 13.98 | 14.58 |
+| Process-accounted output/lifecycle | 15,008 bytes | 15,018 bytes |
+| Process-accounted output rate | 173.4 MiB/s | 169.1 MiB/s |
+| Peak RSS | 8.67 GiB | 8.52 GiB |
+| Maximum sampled shard WAL | 259.0 MiB | 259.6 MiB |
+
+The workload passes the new **9,500/sec overall and every-cycle floor**, with
+exact outcomes, retries, purge, and storage/memory stability. Compared with the
+7,873–8,029/sec baseline, average workflow throughput improved about **47–54%**.
+CPU cost fell roughly **14–20%**, while CPU utilization increased. These are
+combined measured improvements, not an isolated attribution of every gain.
+
+Hardware is unchanged: Ryzen 7 4800H, eight physical cores/16 logical CPUs,
+62 GiB RAM, one Kingston NVMe under encrypted Btrfs with zstd:3. The preset now
+uses 32 independent physical log/projection shards sharing that device, eight
+workers per shard, four loaders, batches of 1,000 and purge batches of 8,000.
+Qualified data is on disk. All measurements use the public API and deterministic
+compressible 1 KiB enrichment bodies, with log durability enabled.
+
+## Updated napkin arithmetic
+
+A lifecycle entails approximately `8 + 2/19 = 8.1053` logical row operations:
+insert, three claim/mutation pairs, purge, and occasional retry. Thus the new
+11.8–12.1k workflows/sec represents about **95.7–98.3k logical operations/sec**.
+Fusion means these are not counts of physical SQL statements or disk writes.
+The original target of 10k inserts or individually addressed updates/sec was
+reasonable; bounded batching exceeds it by a large margin. It is not equivalent
+to 10k serial, separately synced requests/sec.
+
+At **1.154–1.235 CPU-ms/lifecycle**, 10k workflows/sec needs **11.54–12.35
+CPU-seconds/sec**. A simplistic 16-logical-CPU constant-cost division yields
+**13.0–13.9k workflows/sec**, only about **10–14%** above the corresponding
+measured average. This is an optimistic accounting comparison, not a measured
+hardware ceiling: SMT shares physical execution resources, and CPU cost changes
+with concurrency, cache behavior, frequency, and waiting. 20k workflows/sec
+would require **23.1–24.7 CPU-seconds/sec** at this cost, exceeding that budget.
+Substantially higher rates on this host require reducing per-lifecycle work,
+not just adding shards or workers.
+
+Three approximately 1 KiB body versions per lifecycle require **29.3 MiB/sec**
+at 10k workflows/sec before log encoding, indexes, WAL, checkpoint and metadata
+costs. Measured process-accounted output is about **15 KB/lifecycle**, or
+143 MiB/sec at 10k/sec. This is not device or NAND traffic: compression,
+coalescing, and filesystem accounting prevent that inference. Four approximate
+sync calls per durable append group (segment and manifest file/directory syncs)
+remain enabled. Batching amortizes those syncs across many independent rows.
+
+## What was worth fixing, and what remains
+
+The baseline CPU profile placed roughly one quarter of user-space samples in
+allocation/freeing paths. Executable-owned mimalloc materially reduced CPU cost.
+Thirty-two shards improved working-set behavior; doubling workers per shard
+from eight to sixteen made the corrected candidate slower. Portable thin LTO
+and one codegen unit then provided enough repeated rate margin, at a cost of
+several minutes of additional build/link time.
+
+A separate correctness/performance issue appeared during repetition: after a
+partial checkpoint, subtracting backfilled frames postponed retry for another
+full WAL budget. Retrying against total retained frames corrected observed WAL
+growth without raising the budget or changing reader safety. The new real-reader
+regression failed before the change and passed afterward. The sampled footprint
+is a finite-run bound, not a hard cap against arbitrarily long reader snapshots.
+
+There may be modest additional headroom, but the data does not justify promising
+another order of magnitude. The next useful performance investigation would
+profile allocation callers, copies/encoding, and SQL interpreter/B-tree work
+on this final build, together with device latency and durable batch occupancy.
+The old profile did not identify cache reconciliation as a leading standalone
+symbol, so speculative cache rewrites are lower priority. Current average CPU
+occupancy already reaches 14–14.6 logical CPUs; another worker increase has no
+measured support. More physical cores or independent devices deserve separate
+measurements rather than a linear-scaling assumption.
+
+For Snorri adoption, keep allocator and root Cargo release-profile choices in
+the embedding executable. The representative public API already achieves the
+basic performance goal without auxiliary workflow entities. Separately qualify
+Snorri's actual payload distributions, resident population, indexes, network/
+remote-log path, and latency requirements before extending this result to them.
+No Snorri migration or interface change was made here.
+
+## Historical v0.31.26 baseline analysis
+
+The remaining analysis records the earlier state and proposed experiments.
+Its 8k rate and next-step recommendations are superseded by the results above.
+
 2026-09-10. Release candidate: v0.31.26, source `9230efbc`. The version-only
 release change preserves production implementation `b0f89563`, measured twice
 with each qualification workload. Full evidence and experimental history are in
 the [capacity review](../helix/04-build/workflow-capacity-review.md).
 
-## Assessment
+### Assessment
 
 The original 10,000 inserts/sec and 10,000 individually addressed updates/sec
 targets were reasonable and are exceeded. The system sustains approximately
@@ -19,7 +120,7 @@ cost per lifecycle at the same available resource budget.
 These are bounded batches of independent row mutations. They do not imply the
 same throughput for one outstanding, separately durable request per row.
 
-## Measured resource budget
+### Measured resource budget
 
 The host reports an AMD Ryzen 7 4800H, eight physical cores / 16 logical CPUs,
 about 62 GiB RAM, and a Kingston OM8PCP3512F-AB NVMe. Qualified data lived on
@@ -49,7 +150,7 @@ The workload's own timed windows give 7,873 and 8,029 lifecycles/sec; dividing
 by whole-process time, including startup/shutdown, gives 7,864 and 8,020/sec.
 Neither calculation excludes projection settlement from the workflow.
 
-### CPU arithmetic
+#### CPU arithmetic
 
 One lifecycle entails insert + three claims + three mutations + purge, with
 one extra claim/mutation pair for approximately 1/19 of recipients:
@@ -74,7 +175,7 @@ CPU cost merits profiling the native engine and application before concentrating
 only on filesystem tuning. Peak RSS is far below host RAM capacity; that does
 not establish that cache misses or memory bandwidth are insignificant.
 
-### Durability and bytes
+#### Durability and bytes
 
 At 1 KiB per insert, 10,000 inserts/sec is only 9.77 MiB/sec of body data.
 At 1,000 rows per batch, it is ten batch requests/sec. A local-log append group
@@ -100,7 +201,7 @@ two final runs. Sync latency and small dependent writes can dominate without
 approaching advertised sequential throughput. A precise final CPU-versus-device
 split still needs simultaneous device latency, queue depth, sync, and CPU samples.
 
-## Where to spend the next optimization effort
+### Where to spend the next optimization effort
 
 1. **Measure and reduce the remaining cache reconciliation cost.** The repaired
    engine counts evictable pages once per WAL commit. That removes the prior

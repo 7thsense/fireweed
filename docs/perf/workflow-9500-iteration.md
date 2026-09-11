@@ -7,6 +7,63 @@ update gates remain at 10,000/sec. Durability, correctness, fairness, recovery,
 retention, and sampled storage bounds are unchanged. The previous 7.9–8.0k
 qualification is a baseline, not a pass against this new target.
 
+## Qualified result
+
+**Achieved on clean source `a73b067f`: all four fresh qualification reports
+pass.** Two serial workflow runs each recycled 500,000 original rows through
+six cycles (three million complete lifecycles per run). Two serial primitive
+runs each operated on one million resident rows. All four used binary SHA-256
+`0dd7e7c584b4ea3a744b01ea65dddf26717ea208b5c39899499b1afc4169a25a`.
+
+| Public API measurement | Repetition 1 | Repetition 2 | Gate |
+|---|---:|---:|---:|
+| Complete workflows/sec | 12,125 | 11,810 | 9,500 |
+| Slowest shard's equivalent rate, worst cycle | 9,839 | 10,036 | 9,500 |
+| Inserts/sec | 67,738 | 67,311 | 10,000 |
+| Enrichment updates by key/sec | 97,186 | 77,121 | 10,000 |
+| Scheduling updates by ID/sec | 70,739 | 61,756 | 10,000 |
+| Maximum sampled shard WAL | 259.0 MiB | 259.6 MiB | 512 MiB |
+| Peak process RSS | 8.67 GiB | 8.52 GiB | Last-three-cycle range ≤10% |
+
+Exact outcomes, retries, original-row payloads, purge, per-cycle fairness,
+last-three-cycle projection/RSS stability, and WAL sampling all passed. This
+is finite-run qualification on the local filesystem log and Turso, not a
+multi-day soak or a claim about remote-log/network service latency. Payloads
+are deterministic, compressible 1 KiB bodies. Row operations are individually
+addressed within bounded API batches; this does not promise the same rate for
+one separately durable request outstanding at a time.
+
+The retained configuration is 32 physical log/projection shards on the same
+SSD, eight workers per shard, four loaders, batch 1,000, purge batch 8,000,
+4 KiB projection pages, and the unchanged 64,000-frame checkpoint budget.
+Executable-owned mimalloc, portable thin LTO with one codegen unit, and the
+native partial-checkpoint retry correction provide the additional improvement.
+The original row remains the workflow entity and the log remains the sole
+durability authority. No side workflow records or Snorri interface migration
+were introduced. Embedders choose their own allocator and root Cargo profile.
+
+Validation: **106 public/adapter release tests passed, one existing ignored**;
+**77 native WAL tests passed**; **four Python gate/monitor tests passed**.
+The new partial-backfill regression failed before the fix and passed afterward.
+The failed candidates below remain part of the evidence rather than being
+replaced by successful runs.
+
+Reproduce from the qualified source with a new output directory:
+
+```sh
+bash scripts/perf/qualify-workflow-capacity.sh /tmp/fireweed-capacity-repeat
+```
+
+- [Workflow 1](../helix/04-build/evidence/workflow-capacity/fireweed-9500-a73b067f-workflow-1.json.gz)
+- [Workflow 2](../helix/04-build/evidence/workflow-capacity/fireweed-9500-a73b067f-workflow-2.json.gz)
+- [Primitives 1](../helix/04-build/evidence/workflow-capacity/fireweed-9500-a73b067f-primitives-1.json.gz)
+- [Primitives 2](../helix/04-build/evidence/workflow-capacity/fireweed-9500-a73b067f-primitives-2.json.gz)
+- [Qualification log](../helix/04-build/evidence/workflow-capacity/fireweed-9500-a73b067f-qualification.log.gz)
+
+The sections below record the chronological investigation, including hypotheses
+that later measurements rejected. The current hardware comparison is in
+[hardware headroom](workflow-hardware-headroom.md).
+
 ## Baseline CPU profile
 
 An isolated 500,000-recipient, three-cycle, 16-shard run on source `8a580e83`
