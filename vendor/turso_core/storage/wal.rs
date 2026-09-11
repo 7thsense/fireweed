@@ -4801,8 +4801,12 @@ impl WalFile {
                     let mut to_checkpoint = self
                         .coordination
                         .iter_latest_frames(oc_min_frame, oc_max_frame);
-                    // sort by frame_id for read locality
-                    to_checkpoint.sort_unstable_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
+                    // Order by destination page before forming bounded write
+                    // batches. Frame order scatters reused database pages across
+                    // batches, turning adjacent destinations into thousands of
+                    // small writes. WAL reads can still use the pager/OS cache;
+                    // each page retains its selected latest safe frame.
+                    to_checkpoint.sort_unstable();
                     {
                         let mut oc = self.ongoing_checkpoint.write();
                         oc.pages_to_checkpoint = to_checkpoint;

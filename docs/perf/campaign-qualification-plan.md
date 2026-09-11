@@ -17,8 +17,10 @@ purge + occasional retry claim/mutation = approximately 8.105 operations/recipie
 10k recipients/sec therefore means about 81k logical row operations/sec; 12.5k
 means about 101k. Projection fusion can combine operations. Public reporting
 reads, retained-state verification, and retention discovery are additional work
-and must be measured, not assumed free. Three 1 KiB body versions represent
+and must be measured, not assumed free. In the payload-rewrite stress variant, three nominal 1 KiB body versions represent
 29.3 MiB/sec at 10k and 36.6 MiB/sec at 12.5k before encoding/index/WAL overhead.
+The primary metadata-enrichment variant retains the body; its measured initial
+body size and logical log budget are recorded in the hardware-cost document.
 Batch size and residency are independent of throughput and fixed in each report.
 
 ## Implementation sequence
@@ -608,3 +610,50 @@ All six public campaign tests passed with explicit primary-key counting, includi
 large storage batches, both enrichment modes, retained reporting, payload Keep
 semantics and log-only recovery (37.66 s in development mode). Release validation
 and clean sustained measurement are next; no rate or stability gate is waived.
+
+## Counter candidate: failed sustained run; checkpoint destination locality
+
+Clean `88c14a08` passed all six public campaign release tests (14.72 s).
+Its uninstrumented million-resident, three-cycle run used batch 1,000 and two
+workers/campaign. Cycle zero completed in a worst-campaign 96.044 s (about
+10,412 equivalent recipients/sec), but progress p95 reached 1.552 s. During cycle
+one, only 43 of 64 campaign completion reports arrived before an ambiguous
+object-log produce timeout ended the run at 322.061 s. The reported cycle-one
+maxima included 222.607 s wall, 59.059 s load and 67.371 s purge. Those are partial
+cycle maxima, not a completed-cycle rate. There is **no overall throughput result**
+and no qualifying pass. The complete failed attempt charged 2,500.975 CPU seconds
+and 28.206 GB of process output. Raw reports and partial summaries are archived
+under `campaign-88c14a08-*`. Counters have not solved the sustained-performance
+problem; the best complete run remains 5,663/sec.
+
+Source review ruled out duplicate bodies in claim replay receipts: they contain
+item IDs and lease metadata. Checkpoint ordering exposes a separate concrete
+problem. Turso selected latest safe frames in WAL-frame order, then built bounded
+512-page destination-write batches. Reused database pages adjacent on disk can
+therefore fall into different batches and become separate writes. The candidate
+orders the same selected frames by destination page before batching. Safe-frame
+selection, locks, sync publication, limits and log authority are unchanged.
+
+A native integration regression updates 2,048 existing rows/pages in interleaved
+order and observes actual database-storage write calls. The old ordering issued
+1,973 calls for 2,048 pages; destination ordering issued eight. It then truncates
+the WAL, reopens and checks identities and newest values independently. The test
+covers both a large pager cache and a reduced cache requiring WAL reads. This is
+an I/O-call reduction, not a claimed throughput multiplier or reduction in bytes.
+The checked-in vendor patch was regenerated against the checksum-verified
+published crate and its complete patch round-trip verified.
+
+Thirty-nine of forty native unit tests passed in the first broader run; a 90 ms
+reader latency assertion took 111 ms while public-test compilation ran alongside
+it. That timing check is being repeated serially without changing its deadline.
+All six public campaign tests passed (36.57 s development mode). Broader native
+checkpoint/concurrency/recovery checks and clean release measurement follow.
+
+The serial debug reader check also took 109 ms. Restoring the original checkpoint
+ordering as an isolated control reproduced the failure at 107 ms. The ordering
+change therefore does not explain this debug timing failure; the 90 ms deadline
+is preserved and will be checked in release mode. With destination ordering
+restored, all 38 selected native integration tests passed: cached/WAL-read
+checkpoint locality and reopen, checkpoint policy and pinned readers, concurrent
+writers, cancellation, differential projection histories, lifecycle operations
+and recovery. The full vendor patch still round-trips from the published crate.

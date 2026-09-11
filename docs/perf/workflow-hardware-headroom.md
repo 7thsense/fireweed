@@ -104,6 +104,24 @@ backlog scans for work proportional to the ordinary addressed mutations. Its CPU
 write and sustained-throughput effects still require measurement; the napkin
 budget must include this maintenance rather than treating counters as free.
 
+### Checkpoint write locality
+
+The counter candidate `88c14a08` stopped during its second cycle with an ambiguous
+log-produce timeout. It has no completed qualification rate. Its first cycle was
+96.0 s; the partial second-cycle reports reached 222.6 s, with load up to 59.1 s
+and purge up to 67.4 s. Eliminating reporting scans has not resolved sustained
+writeback stalls.
+
+A native checkpoint regression identifies an avoidable request cost. Updating
+2,048 existing 4 KiB pages in interleaved order produced 1,973 destination writes
+when checkpoint batches followed WAL-frame order. Ordering the same latest-safe
+frames by destination page produced eight writes. Both paths write the same
+8 MiB of page contents; the optimization changes locality and request count,
+not the logical byte budget. The test also checks persisted values after WAL
+truncation and reopen. Neither the call-count ratio nor the memory-I/O test is a
+hardware throughput multiplier. Its effect on real device traffic, CPU cost and
+three-cycle campaign rates remains to be measured.
+
 ## Historical all-due saturation qualification (2026-09-10)
 
 The following measurements apply to the earlier, lighter fixture and retain its

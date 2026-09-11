@@ -10,8 +10,8 @@ The backport implements setting and querying `PRAGMA wal_autocheckpoint` for the
 main database's ordinary native WAL on each connection. Its default remains 1,000 frames, and each connection owns
 its limit. Zero (including a negative input normalized to zero) disables automatic
 checkpoints; explicit and shutdown checkpoints remain available. Unsupported WAL
-implementations fail explicitly when configuration is requested. Native writes,
-locks, synchronization, checkpoint backfill and WAL restart are unchanged.
+implementations fail explicitly when configuration is requested. Native lock, synchronization, safe-frame backfill and WAL restart semantics are
+preserved. The destination-write ordering optimization is described below.
 
 The automatic trigger counts total retained WAL frames, including already
 backfilled frames, and fires at or above the configured limit. Subtracting
@@ -40,3 +40,14 @@ the entire cache repeatedly despite having clean pages available. Recounting
 once per commit preserves the existing spill decision and eviction safety
 checks. The fallback count stops once the required number of pages is found.
 A native cache regression test covers dirty-to-clean commit reconciliation.
+
+Checkpoint batches now consume latest-safe frames in destination page order.
+Previously, sorting by WAL frame number scattered adjacent database pages across
+512-page batches, preventing vectored writes when updating a reused database.
+A native integration regression updates 2,048 existing pages in interleaved order:
+the old path issued 1,973 destination writes; page ordering issued eight. The test
+checks both a large pager cache and forced WAL reads, then truncates the WAL,
+reopens and independently verifies every persisted value by count and checksum.
+This favors destination write locality over WAL read locality; performance on
+cold storage beyond the tested working set is not established. Safe frame
+selection, bounded batch sizes, reader guards and sync publication are unchanged.

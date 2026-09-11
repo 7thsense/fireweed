@@ -115,10 +115,11 @@
                      commit_info.prepared_frames.clear();
 --- a/storage/wal.rs
 +++ b/storage/wal.rs
-@@ -727,6 +727,18 @@
+@@ -726,6 +726,18 @@
+     /// Complete append of frames by updating shared wal state. Before this
      /// all changes were stored locally.
      fn finish_append_frames_commit(&self) -> Result<()>;
- 
++
 +    /// Automatic checkpoint limit in WAL frames, when supported by this WAL.
 +    fn auto_checkpoint_threshold(&self) -> Option<usize> {
 +        None
@@ -130,10 +131,9 @@
 +            "this WAL does not support configuring automatic checkpoints".into(),
 +        ))
 +    }
-+
+ 
      fn should_checkpoint(&self) -> bool;
      fn checkpoint(&self, pager: &Pager, mode: CheckpointMode)
-         -> Result<IOResult<CheckpointResult>>;
 @@ -2662,7 +2674,7 @@
      write_lock_held: AtomicBool,
  
@@ -179,7 +179,22 @@
              buffer_pool,
              checkpoint_seq: AtomicU32::new(0),
              syncing: Arc::new(AtomicBool::new(false)),
-@@ -9286,6 +9313,66 @@
+@@ -4774,8 +4801,12 @@
+                     let mut to_checkpoint = self
+                         .coordination
+                         .iter_latest_frames(oc_min_frame, oc_max_frame);
+-                    // sort by frame_id for read locality
+-                    to_checkpoint.sort_unstable_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
++                    // Order by destination page before forming bounded write
++                    // batches. Frame order scatters reused database pages across
++                    // batches, turning adjacent destinations into thousands of
++                    // small writes. WAL reads can still use the pager/OS cache;
++                    // each page retains its selected latest safe frame.
++                    to_checkpoint.sort_unstable();
+                     {
+                         let mut oc = self.ongoing_checkpoint.write();
+                         oc.pages_to_checkpoint = to_checkpoint;
+@@ -9286,6 +9317,66 @@
      }
  
      #[test]
