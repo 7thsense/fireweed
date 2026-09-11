@@ -38,8 +38,8 @@ capacity results. This changes allocation cost, not log durability or queue API
 semantics.
 
 ```sh
-scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 16 --workers 8 --deadline-seconds 900
-scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 16 --workers 8 --load-workers 4 --recycle --cycles 6 --deadline-seconds 1200
+scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 32 --workers 8 --deadline-seconds 900
+scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 32 --workers 8 --load-workers 4 --recycle --cycles 6 --deadline-seconds 1200
 ```
 
 The repeat-qualified configuration is 16 physical shards with eight workers per

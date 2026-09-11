@@ -59,3 +59,31 @@ workers and four loaders per shard and the same workload, batching, and gates.
 It tests smaller per-shard working sets and write coalescing on the shared SSD.
 
 [Complete first trial report](../helix/04-build/evidence/workflow-capacity/fireweed-9500-mimalloc-16-c6-a.json.gz).
+
+## Thirty-two shards: first complete pass
+
+The otherwise unchanged 32-shard trial completed three million lifecycles at
+**11,311/sec**, passing every throughput, correctness, and storage check. Its
+slowest-shard equivalent cycle rates were 11,047, 9,916, 10,300, 9,881, 9,867,
+and **9,561/sec**. That narrow final-cycle margin requires fresh repetitions.
+
+CPU cost was 1.243 CPU-ms/lifecycle, higher than the 16-shard allocator trial,
+but process-accounted output fell from 47.03 to **41.93 GiB**. Peak RSS was
+8.53 GiB. This supports improved write coalescing and more CPU concurrency as
+the benefit of additional physical stores on this shared device; it does not
+imply extra physical disk bandwidth.
+
+The repeat qualification preset now selects 32 shards for both workflows and
+primitives. Two fresh complete preset repetitions remain necessary before
+declaring the new target achieved.
+
+[Complete 32-shard trial report](../helix/04-build/evidence/workflow-capacity/fireweed-9500-mimalloc-32-c6-a.json.gz).
+
+Before the fresh repetitions, `cargo test --locked --release -p fireweed-workload
+-- --test-threads=1` passed all 24 public tests, including four log-only recovery
+cases. `cargo check --locked --release -p fireweed-server --bin fireweed-service`
+also passed. Allocator/runtime environment overrides were absent. The existing
+Python gate/monitor suite passed all four tests with the tightened rate gate.
+
+[Public tests](../helix/04-build/evidence/workflow-capacity/fireweed-9500-mimalloc-tests.log.gz),
+[service check](../helix/04-build/evidence/workflow-capacity/fireweed-9500-service-check.log.gz).

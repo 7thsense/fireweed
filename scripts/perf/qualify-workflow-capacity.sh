@@ -19,14 +19,14 @@ for attempt in 1 2; do
   printf 'Workflow qualification %s/2\n' "$attempt" >&2
   if ! python3 scripts/perf/workflow-capacity.py \
     --profile mutable --items 500000 --batch 1000 --purge-batch 8000 \
-    --shards 16 --workers 8 --load-workers 4 --recycle --cycles 6 \
+    --shards 32 --workers 8 --load-workers 4 --recycle --cycles 6 \
     --deadline-seconds 1200 --qualify \
     > "$qualification_output/workflow-$attempt.json"; then
     qualification_failed=1
   fi
   printf 'Primitive qualification %s/2\n' "$attempt" >&2
   if ! python3 scripts/perf/workflow-capacity.py \
-    --profile primitives --items 1000000 --batch 1000 --shards 16 \
+    --profile primitives --items 1000000 --batch 1000 --shards 32 \
     --workers 8 --deadline-seconds 900 --qualify \
     > "$qualification_output/primitives-$attempt.json"; then
     qualification_failed=1
