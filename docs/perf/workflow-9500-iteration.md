@@ -42,3 +42,20 @@ Raw samples, memory mappings, and cycle stderr are retained beside those files.
 Instruction-pointer sampling is statistical self-time evidence, not an exact
 allocation count or attribution of allocations to callers. The libc labels were
 resolved from local disassembly rather than misleading nearest exported symbols.
+
+## First allocator trial: useful improvement, target still unmet
+
+The uninstrumented 16-shard, six-cycle trial on `969dda9c` completed all three
+million lifecycles at **9,085/sec**. CPU cost fell to **1.042 CPU-ms/lifecycle**
+from the earlier uninstrumented 1.425–1.437 ms, approximately a 27% reduction.
+Process-accounted output remained approximately 47.03 GiB. Correctness, RSS,
+projection size, and sampled WAL checks passed. The new rate gate failed:
+overall throughput was below 9,500/sec, and cycles 1–5 had slowest-shard
+equivalent rates of 8,076, 8,070, 7,706, 7,271, and 7,670/sec.
+
+This demonstrates an allocator improvement without establishing steady target
+capacity. The next trial changes physical shards from 16 to 32, retaining eight
+workers and four loaders per shard and the same workload, batching, and gates.
+It tests smaller per-shard working sets and write coalescing on the shared SSD.
+
+[Complete first trial report](../helix/04-build/evidence/workflow-capacity/fireweed-9500-mimalloc-16-c6-a.json.gz).
