@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS fireweed_item_payloads (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
     ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
+-- Progress polling reads only this narrow index, without fetching each item body
+-- or building a temporary grouping tree while a resident campaign is running.
+CREATE INDEX IF NOT EXISTS fireweed_items_lifecycle_counts_idx
+    ON fireweed_items (tenant_id, queue_id, lifecycle_state) WHERE superseded = 0;
 -- One pending FIFO index for Claim and peek. group_due and active_scope
 -- duplicated that order and made every Complete rewrite three Pending B-trees.
 DROP INDEX IF EXISTS fireweed_items_group_due_idx;

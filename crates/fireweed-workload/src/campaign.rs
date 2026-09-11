@@ -68,6 +68,10 @@ struct Counts {
     terminal: AtomicUsize,
     retries: AtomicUsize,
     claims: AtomicUsize,
+    claim_batches: AtomicUsize,
+    mutation_batches: AtomicUsize,
+    max_claim_batch: AtomicUsize,
+    empty_claims: AtomicUsize,
     handler_rows: [AtomicUsize; 3],
     handler_batches: [AtomicUsize; 3],
     max_handler_batch: [AtomicUsize; 3],
@@ -97,10 +101,15 @@ async fn workers(
         } {
             let rows = retry(deadline, || fw.claim(q, cfg.batch, 3_600_000)).await?;
             if rows.is_empty() {
+                counts.empty_claims.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 continue;
             }
             counts.claims.fetch_add(rows.len(), Ordering::SeqCst);
+            counts.claim_batches.fetch_add(1, Ordering::Relaxed);
+            counts
+                .max_claim_batch
+                .fetch_max(rows.len(), Ordering::Relaxed);
             // Claim order, not handler completion order, is the queue's guarantee.
             let mut previous = i64::MIN;
             for row in &rows {
@@ -229,6 +238,7 @@ async fn workers(
                 return Err("missing/rejected campaign mutation result".into());
             }
             counts.prepared.fetch_add(prepared, Ordering::SeqCst);
+            counts.mutation_batches.fetch_add(1, Ordering::Relaxed);
             counts.terminal.fetch_add(terminal, Ordering::SeqCst);
             counts.retries.fetch_add(retried, Ordering::SeqCst);
         }
@@ -296,6 +306,8 @@ async fn verify_rows(
                         ))
                     || row.metadata.get("provider_id")
                         != Some(&MetadataValue::String(format!("provider-{id}")))
+                    || row.metadata.get("completed_at")
+                        != Some(&MetadataValue::String(first.to_string()))
                     || row.attempt_count != (3 + retries) as u32
                 {
                     return Err(format!("persisted disposition mismatch for {id}: {row:?}").into());
@@ -427,6 +439,8 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({"cycle":cycle,"items":ids.len(),"verified":verified,"delivered":verified-failed,"failed":failed,"purged":purged,
                                 "pending":0,"leased":0,"load_s":load_s,"prepare_s":prepare_s,"delivery_s":delivery_s,"verify_s":verify_s,"purge_s":phase.elapsed().as_secs_f64(),
                                 "wall_s":cycle_start.elapsed().as_secs_f64(),"retries":counts.retries.load(Ordering::SeqCst),"claims":counts.claims.load(Ordering::SeqCst),
+                                "claim_batches":counts.claim_batches.load(Ordering::Relaxed),"mutation_batches":counts.mutation_batches.load(Ordering::Relaxed),
+                                "max_claim_batch":counts.max_claim_batch.load(Ordering::Relaxed),"empty_claims":counts.empty_claims.load(Ordering::Relaxed),
                                 "due_to_claim_max_us":counts.due_to_claim_max_us.load(Ordering::SeqCst),"max_handler_batch":counts.max_handler_batch.each_ref().map(|v|v.load(Ordering::SeqCst)),
                                 "handler_rows":counts.handler_rows.each_ref().map(|v|v.load(Ordering::SeqCst)),"handler_batches":counts.handler_batches.each_ref().map(|v|v.load(Ordering::SeqCst)),
                                 "process_rss_kib":process_rss_kib(),"projection_bytes":std::fs::metadata(projection_root.join("projection.db")).ok().map(|s|s.len()),

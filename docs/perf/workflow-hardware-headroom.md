@@ -1,5 +1,9 @@
 # Workflow capacity versus hardware cost
 
+> 2026-09-11: These are historical results for the lighter saturation workload.
+> The stricter campaign workload is currently below target; see the
+> [campaign plan, updated math and measurements](campaign-qualification-plan.md).
+
 ## Current result: the stricter target is achieved
 
 2026-09-10 follow-up, clean source `a73b067f`. The new changes are local and

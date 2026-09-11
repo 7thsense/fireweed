@@ -2134,7 +2134,8 @@ pub(crate) async fn server_metrics_on(
 ) -> EngineResult<QueueMetrics> {
     let rows = query_value_rows(
         connection,
-        "SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+        "SELECT lifecycle_state,COUNT(*) FROM fireweed_items INDEXED BY fireweed_items_lifecycle_counts_idx \
+             WHERE tenant_id=?1 AND queue_id=?2 \
              AND superseded=0 GROUP BY lifecycle_state",
         vec![
             shard.tenant_id.as_str().to_string().into(),

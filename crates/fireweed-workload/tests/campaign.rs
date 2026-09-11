@@ -242,5 +242,8 @@ async fn campaign_chunks_obey_distinct_handler_limits() {
             assert!(cycle["max_handler_batch"][stage].as_u64().unwrap() <= limit);
         }
         assert!(cycle["handler_batches"][1].as_u64().unwrap() >= 6);
+        assert_eq!(cycle["claim_batches"], cycle["mutation_batches"]);
+        assert!(cycle["max_claim_batch"].as_u64().unwrap() <= 1000);
+        assert!(cycle["max_claim_batch"].as_u64().unwrap() > 500);
     }
 }

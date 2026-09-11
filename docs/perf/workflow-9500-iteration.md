@@ -1,5 +1,9 @@
 # Within five percent of 10,000 complete workflows/sec
 
+> 2026-09-11: These are historical results for the lighter saturation workload.
+> The stricter campaign workload is currently below target; see the
+> [campaign plan, updated math and measurements](campaign-qualification-plan.md).
+
 The 2026-09-10 follow-up target is at least **9,500 complete workflows/sec**.
 The acceptance gate now requires that rate overall and in every physical shard's
 fair share in every cycle. Primitive insertion and both individually addressed
