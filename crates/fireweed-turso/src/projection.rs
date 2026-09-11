@@ -2137,31 +2137,37 @@ pub(crate) async fn server_live_items_on(
     Ok(result)
 }
 
+// Four scalar aggregates avoid sorting the resident backlog on every progress
+// poll. No additional lifecycle index is maintained on the write path.
+const LIFECYCLE_METRICS_SQL: &str = "SELECT COALESCE(SUM(lifecycle_state='Pending'),0),\
+            COALESCE(SUM(lifecycle_state='Leased'),0),\
+            COALESCE(SUM(lifecycle_state='Complete'),0),\
+            COALESCE(SUM(lifecycle_state='Failed'),0) \
+     FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0";
+
 pub(crate) async fn server_metrics_on(
     connection: &Connection,
     shard: &QueueKey,
 ) -> EngineResult<QueueMetrics> {
     let rows = query_value_rows(
         connection,
-        "SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND superseded=0 GROUP BY lifecycle_state",
+        LIFECYCLE_METRICS_SQL,
         vec![
             shard.tenant_id.as_str().to_string().into(),
             shard.queue_id.as_str().to_string().into(),
         ],
     )
     .await?;
-    let mut metrics = QueueMetrics::default();
-    for values in rows {
-        let count = nonnegative_u64(integer(&values[1])?, "lifecycle count")?;
-        match text(&values[0])?.as_str() {
-            "Pending" => metrics.pending = count,
-            "Leased" => metrics.leased = count,
-            "Complete" => metrics.complete = count,
-            "Failed" => metrics.failed = count,
-            _ => {}
-        }
-    }
+    let values = rows
+        .first()
+        .ok_or_else(|| storage("missing lifecycle aggregate"))?;
+    let mut metrics = QueueMetrics {
+        pending: nonnegative_u64(integer(&values[0])?, "pending count")?,
+        leased: nonnegative_u64(integer(&values[1])?, "leased count")?,
+        complete: nonnegative_u64(integer(&values[2])?, "complete count")?,
+        failed: nonnegative_u64(integer(&values[3])?, "failed count")?,
+        ..QueueMetrics::default()
+    };
     metrics.resident_terminal_count = metrics.complete.saturating_add(metrics.failed);
     Ok(metrics)
 }
@@ -5908,5 +5914,96 @@ mod ordered_claim_query_tests {
                 "materialization must seek selected IDs: {details:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod metrics_query_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_counts_do_not_sort_resident_rows() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {}", LIFECYCLE_METRICS_SQL),
+                vec!["tenant".into(), "queue".into()],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        assert!(
+            !details
+                .iter()
+                .any(|line| line.contains("SORTER") || line.contains("TEMP B-TREE")),
+            "four counts must not sort resident rows: {details:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_counts_handle_empty_terminal_and_superseded_rows() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let shard = QueueKey::new(
+            fireweed_core::TenantId::new("tenant").unwrap(),
+            fireweed_core::QueueId::new("queue").unwrap(),
+        );
+        let empty = store.server_metrics(&shard).await.unwrap();
+        assert_eq!(
+            (
+                empty.pending,
+                empty.leased,
+                empty.complete,
+                empty.failed,
+                empty.resident_terminal_count
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        for (state, count) in [
+            ("Pending", 2),
+            ("Leased", 3),
+            ("Complete", 4),
+            ("Failed", 5),
+        ] {
+            for (tenant, queue, superseded) in [
+                ("tenant", "queue", 0),
+                ("foreign", "queue", 0),
+                ("tenant", "foreign", 0),
+                ("tenant", "queue", 1),
+            ] {
+                for n in 0..count {
+                    let id = format!("{state}-{superseded}-{n}");
+                    store
+                        .execute(
+                            "INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,\
+                         lifecycle_state,priority_sort,item_version,last_command_sequence,\
+                         created_at,updated_at,max_attempts,created_seq,superseded) \
+                         VALUES(?1,?2,?3,?3,?4,X'00',1,1,1,1,5,1,?5)",
+                            vec![
+                                tenant.into(),
+                                queue.into(),
+                                id.into(),
+                                state.into(),
+                                Value::Integer(superseded),
+                            ],
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        let metrics = store.server_metrics(&shard).await.unwrap();
+        assert_eq!(
+            (
+                metrics.pending,
+                metrics.leased,
+                metrics.complete,
+                metrics.failed,
+                metrics.resident_terminal_count
+            ),
+            (2, 3, 4, 5, 9)
+        );
     }
 }

@@ -446,3 +446,60 @@ existing debug timing gate failed (first read 111,375 us versus 90,000 us). The
 new bytecode regression passed. Release validation must resolve the timing check
 before claiming this candidate qualified. Logs are retained as
 `campaign-covering-{native,local,campaign}-tests.log.gz` in the evidence directory.
+
+
+## Covering-index full run and concurrency diagnostic
+
+Clean `85b5554e` passed 36 native release tests and all six campaign release
+tests; the earlier debug read-timing failure did not recur in release. Its full
+one-million-resident, three-cycle metadata run completed at **5,663.00/sec**
+(process wall 529.89 s). All independent outcomes, due latency, RSS stability and
+sampled WAL budgets passed. Rate, 172 progress checks and six projection-size
+stability checks failed. The goal remains unmet.
+
+| Slowest campaign phase | Cycle 1 | Cycle 2 | Cycle 3 |
+|---|---:|---:|---:|
+| Whole cycle seconds | 109.96 | 199.78 | 216.87 |
+| Load seconds | 6.93 | 46.23 | 39.97 |
+| Preparation/export seconds | 44.46 | 48.60 | 50.56 |
+| Delivery seconds | 37.71 | 38.03 | 60.98 |
+| Purge seconds | 16.19 | 66.44 | 64.13 |
+| Progress p95 seconds | 4.766 | 2.557 | 1.761 |
+
+Phase maxima are not additive. CPU cost was 1.515 CPU-ms/recipient, peak RSS
+10.81 GiB, process-accounted output 15,148.52 bytes/recipient, and logical retained
+log files 1,823.45 bytes/recipient. The device monitor added per-process CPU time.
+Its sampled active-process interval (521.47 s, missing startup/tail margins)
+observed host-wide 17.67 GiB written, 82.76 ms mean write-request latency and 87.9%
+busy time. These are not process-exclusive writes or a raw/NAND throughput cap.
+During a processing interval CPU occupancy reached about 15 logical CPUs; during
+a retention interval it fell to 2.3 while device busy time approached 96%. There
+are both CPU work and writeback/queueing costs to reduce.
+
+A subsequent one-cycle **instrumented diagnostic**, same source/binary and 32
+stores but one worker/campaign, measured 6,728.05/sec (148.78 s process wall),
+1.321 CPU-ms/recipient, 7.28 GiB peak RSS and worst progress p95 0.801 s. It is not
+qualification or an uninstrumented A/B result. The trace recorded 2,951 join
+windows, 293 that grew during the wait, 1,856 ending with a coverage waiter, and
+798 apply groups containing both claim and other commands out of 6,783 groups.
+Reduced concurrency improved progress latency but did not achieve throughput.
+The native claim API already returns empty results without appending an empty
+Claim command; changing empty-command join handling would not help this fixture.
+
+[Full result](../helix/04-build/evidence/workflow-capacity/campaign-85b5554e-covering.json.gz),
+[device trace](../helix/04-build/evidence/workflow-capacity/campaign-85b5554e-device.jsonl.gz),
+[one-worker diagnostic](../helix/04-build/evidence/workflow-capacity/campaign-85b5554e-worker1-diagnostic.json.gz).
+Release logs and monitor source are archived beside these artifacts.
+
+Next: replace lifecycle GROUP BY sorting with a single-pass four-count aggregate,
+verify exact counts/isolation/empty queues and the absence of a sorter, then
+measure without adding a metrics index. Shorter reads may also reduce checkpoint
+pinning, but that benefit must be measured. Continue investigating projection
+write pressure and bounded coordination waits rather than increasing concurrency
+or weakening durability, reporting, residency or rate gates.
+
+The no-sort regression failed against the original GROUP BY query and passed
+with four scalar aggregates. Exact empty/mixed lifecycle counts, superseded-row
+exclusion, tenant/queue isolation and terminal totals passed. All six public
+campaign tests passed with the aggregate query. Red/green and campaign logs are
+archived as `campaign-metrics-aggregate-*.log.gz`; release measurement follows.

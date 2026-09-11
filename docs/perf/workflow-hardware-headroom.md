@@ -1,10 +1,92 @@
 # Workflow capacity versus hardware cost
 
-> 2026-09-11: These are historical results for the lighter saturation workload.
-> The stricter campaign workload is currently below target; see the
-> [campaign plan, updated math and measurements](campaign-qualification-plan.md).
+## Current campaign result: both targets remain unmet
 
-## Current result: the stricter target is achieved
+2026-09-11. The representative workload now loads a million original rows,
+persists top-time and other enrichment metadata, schedules four future windows,
+delivers bounded chunks with retries/failures, polls progress, verifies every
+final disposition, and discovers retained rows for purge through the public API.
+There are two campaigns per physical store. Input bodies contain varied bytes;
+metadata enrichment retains each original body instead of replacing it twice.
+A separate payload-rewrite stress variant remains tested and explicitly labeled.
+
+The best complete three-cycle measurement so far is **5,663 recipients/sec** on
+clean `85b5554e`, not the 11.8–12.1k measured by the historical lighter all-due
+saturation test. All independent outcomes passed, but rate, progress latency and
+six projection-size stability checks failed. RSS and sampled WAL checks passed.
+The fixed objectives remain **10,000 complete recipients/sec**, then **12,500/sec**
+(+25%), with repeated qualification and 10k primitive floors. No new campaign
+candidate is qualified yet. See the [plan and full evidence](campaign-qualification-plan.md).
+
+| Complete campaign measurement | Value |
+|---|---:|
+| Resident recipients / completed cycles | 1,000,000 / 3 |
+| Physical stores / campaigns per store | 32 / 2 |
+| Workers / loaders per campaign | 4 / 2 |
+| Storage batch / purge batch | 1,000 / 8,000 |
+| Enrichment / scheduling / delivery handler limits | 500 / 200 / 500 |
+| Process wall | 529.89 s |
+| Average complete recipients/sec | 5,663.00 |
+| Slowest-campaign equivalent cycle rates | 9,094 / 5,005 / 4,611 |
+| CPU time/recipient | 1.515 ms |
+| Average charged logical CPU occupancy | 8.58 |
+| Peak RSS | 10.81 GiB |
+| Process-accounted output/recipient | 15,148.52 bytes |
+| Logical retained log bytes/recipient | 1,823.45 bytes |
+
+### Napkin math aligned with this workload
+
+A complete recipient still entails approximately `8 + 2/19 = 8.1053` logical row
+operations: insertion, three claim/mutation pairs, purge, and retry claim/mutation
+for every nineteenth recipient. Thus 10k completed recipients/sec means about
+**81k logical row operations/sec**, and 12.5k means **101k/sec**, not 10k SQL
+statements or separately synced requests. Bounded storage batching amortizes log
+syncs; provider/handler chunk limits remain independently enforced.
+
+There are also **three full retained-row exports per cycle** (scheduled-state
+verification, final disposition, retention discovery), plus 1 Hz lifecycle
+progress polling per campaign. These reads and all processing/settlement/purge
+are timed. Virtual-clock jumps remove intentional calendar waiting only.
+Network/provider latency and actual model inference are stubbed. The current
+fixture does not establish delayed retry backoff, overlapping campaign intake,
+continuous enrichment-stage aggregate reporting or legacy atomic callback groups.
+
+Exact initial bodies average **934.89 bytes** despite the nominal 1 KiB fixture
+setting. Metadata enrichment writes that body once; the logical retained log
+contains approximately **1,823 bytes/recipient**, including metadata and command
+encoding. Holding that encoding cost constant implies **17.4 MiB/s** of logical
+log data at 10k or **21.7 MiB/s** at 12.5k. These are logical file bytes, not device
+or NAND writes. Process-accounted output implies about **144.5 / 180.6 MiB/s** at
+the two targets at current amplification; it likewise is not device traffic.
+
+At the measured **1.515 CPU-ms/recipient**, 10k needs **15.15 CPU-s/s** and 12.5k
+needs **18.93 CPU-s/s**. This eight-core/16-thread host therefore needs a lower
+per-recipient CPU cost for the stretch target even under an optimistic 16-thread
+accounting model—at least about **15.5% less**, before accounting for SMT sharing
+and idle/stalled time. Dividing 16 by today's cost is not a hardware ceiling:
+frequency, cache behavior, concurrency and implementation cost can all change.
+The measured 8.58 average CPU occupancy also leaves substantial waiting to address.
+
+The device trace's sampled active-process interval observed host-wide 17.67 GiB
+written in 521.47 s, mean write-request latency 82.76 ms and busy time 87.9%.
+It misses startup/tail margins and includes other host activity, so it cannot
+provide exact per-recipient physical amplification. Processing intervals reached
+about 15 logical CPUs; a retention interval used only 2.3 while the device was
+about 96% busy. That is evidence of phase-dependent CPU and writeback/queueing
+costs, not proof of a sequential bandwidth or fundamental hardware limit.
+Counter units and overlapping request-time accounting follow the
+[Linux block statistics documentation](https://docs.kernel.org/block/stat.html).
+
+The original primitive goals remain plausible and were exceeded historically.
+They cannot certify this richer workflow, and current data does not prove the
+campaign targets strictly impossible. Further work targets unnecessary query
+sorting, projection write pressure and coordination waiting. Current primitive
+qualification and repeated campaign passes are still required on a final build.
+
+## Historical all-due saturation qualification (2026-09-10)
+
+The following measurements apply to the earlier, lighter fixture and retain its
+original 9,500/sec qualification floor. They do not certify the campaign above.
 
 2026-09-10 follow-up, clean source `a73b067f`. The new changes are local and
 unreleased; the earlier v0.31.26 release candidate below is a historical baseline.
