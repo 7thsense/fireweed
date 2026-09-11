@@ -115,11 +115,10 @@
                      commit_info.prepared_frames.clear();
 --- a/storage/wal.rs
 +++ b/storage/wal.rs
-@@ -726,6 +726,18 @@
-     /// Complete append of frames by updating shared wal state. Before this
+@@ -727,6 +727,18 @@
      /// all changes were stored locally.
      fn finish_append_frames_commit(&self) -> Result<()>;
-+
+ 
 +    /// Automatic checkpoint limit in WAL frames, when supported by this WAL.
 +    fn auto_checkpoint_threshold(&self) -> Option<usize> {
 +        None
@@ -131,9 +130,10 @@
 +            "this WAL does not support configuring automatic checkpoints".into(),
 +        ))
 +    }
- 
++
      fn should_checkpoint(&self) -> bool;
      fn checkpoint(&self, pager: &Pager, mode: CheckpointMode)
+         -> Result<IOResult<CheckpointResult>>;
 @@ -2662,7 +2674,7 @@
      write_lock_held: AtomicBool,
  
@@ -143,7 +143,7 @@
      /// This is the index to the read_lock in WalFileShared that we are holding. This lock contains
      /// the max frame for this connection.
      max_frame_read_lock_index: AtomicUsize,
-@@ -3848,10 +3860,20 @@
+@@ -3848,10 +3860,25 @@
          Ok(())
      }
  
@@ -161,11 +161,16 @@
 +        let threshold = self.checkpoint_threshold.load(Ordering::SeqCst);
          let snapshot = self.load_coordination_snapshot();
 -        snapshot.max_frame as usize > self.checkpoint_threshold + snapshot.nbackfills as usize
-+        threshold > 0 && snapshot.max_frame.saturating_sub(snapshot.nbackfills) > threshold as u64
++        // The budget applies to the retained WAL, not only unbackfilled frames.
++        // A reader may force a partial checkpoint. Subtracting nbackfills then
++        // postpones the next attempt for another full budget, allowing the WAL
++        // to grow by repeated budgets even after that reader has finished.
++        // Keep attempting passive checkpoints until a writer can restart it.
++        threshold > 0 && snapshot.max_frame >= threshold as u64
      }
  
      #[instrument(skip_all, level = Level::DEBUG)]
-@@ -4617,7 +4639,7 @@
+@@ -4617,7 +4644,7 @@
                  pages_to_checkpoint: Vec::new(),
                  inflight_reads: Vec::with_capacity(MAX_INFLIGHT_READS),
              }),
@@ -174,6 +179,73 @@
              buffer_pool,
              checkpoint_seq: AtomicU32::new(0),
              syncing: Arc::new(AtomicBool::new(false)),
+@@ -9286,6 +9313,66 @@
+     }
+ 
+     #[test]
++    fn test_auto_checkpoint_retries_after_partial_backfill() {
++        let (db, path) = get_database();
++        let writer = db.connect().unwrap();
++        let reader = db.connect().unwrap();
++        writer
++            .execute("create table test(id integer primary key, value text)")
++            .unwrap();
++        bulk_inserts(&writer, 15, 2);
++
++        reader.execute("begin").unwrap();
++        assert_eq!(count_test_table(&reader), 30);
++        bulk_inserts(&writer, 15, 2);
++        assert_eq!(count_test_table(&reader), 30, "reader snapshot is retained");
++
++        let pager = writer.pager.load();
++        let wal = pager.wal.as_ref().unwrap();
++        let max_frame = wal.get_max_frame_in_wal();
++        let threshold = (max_frame - 1) as usize;
++        wal.set_auto_checkpoint_threshold(threshold).unwrap();
++        assert!(wal.should_checkpoint());
++        let partial = run_checkpoint_until_done(
++            &pager,
++            CheckpointMode::Passive {
++                upper_bound_inclusive: None,
++            },
++        );
++        assert!(partial.wal_total_backfilled > 0);
++        assert!(partial.wal_total_backfilled < partial.wal_max_frame);
++        assert!(partial.wal_max_frame - partial.wal_total_backfilled < threshold as u64);
++        assert!(
++            wal.should_checkpoint(),
++            "partial backfill must not reset the automatic checkpoint budget while the WAL remains large"
++        );
++        assert_eq!(
++            count_test_table(&reader),
++            30,
++            "checkpoint preserves reader contents"
++        );
++        reader.execute("commit").unwrap();
++
++        // The next ordinary commit must finish backfill without waiting for
++        // another threshold's worth of frames to accumulate.
++        bulk_inserts(&writer, 1, 1);
++        {
++            let shared = db.shared_wal.read();
++            assert_eq!(
++                shared.metadata.nbackfills.load(Ordering::SeqCst),
++                shared.metadata.max_frame.load(Ordering::SeqCst),
++                "automatic checkpoint catches up after the reader releases its snapshot"
++            );
++        }
++        // A subsequent writer can now restart the WAL and keep it small.
++        bulk_inserts(&writer, 1, 1);
++        assert!(wal.get_max_frame_in_wal() < threshold as u64);
++        assert!(!wal.should_checkpoint());
++        assert_eq!(count_test_table(&reader), 62);
++        std::fs::remove_dir_all(path).unwrap();
++    }
++
++    #[test]
+     fn test_wal_restart_blocks_readers() {
+         let (db, _) = get_database();
+         let conn1 = db.connect().unwrap();
 --- a/translate/pragma.rs
 +++ b/translate/pragma.rs
 @@ -34,6 +34,9 @@

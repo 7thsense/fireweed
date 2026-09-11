@@ -13,6 +13,16 @@ checkpoints; explicit and shutdown checkpoints remain available. Unsupported WAL
 implementations fail explicitly when configuration is requested. Native writes,
 locks, synchronization, checkpoint backfill and WAL restart are unchanged.
 
+The automatic trigger counts total retained WAL frames, including already
+backfilled frames, and fires at or above the configured limit. Subtracting
+backfilled frames lets a reader-forced partial checkpoint defer its retry for
+another full budget while the WAL keeps growing. Retrying passive checkpoints
+after subsequent commits lets a released reader's remaining frames be backfilled
+and the next writer restart the WAL. This follows the documented
+[SQLite auto-checkpoint trigger](https://www.sqlite.org/c3ref/wal_autocheckpoint.html).
+The native regression holds a real reader snapshot through partial backfill,
+checks its contents, and verifies automatic catch-up and restart after release.
+
 The SQL handler and pragma-list entry are implemented in the core translator to
 avoid also forking the parser's public enum. Table-valued pragma syntax is not
 added by this patch. Changing the limit invalidates prepared pragma readbacks.

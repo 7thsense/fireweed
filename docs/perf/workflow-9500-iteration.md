@@ -87,3 +87,47 @@ Python gate/monitor suite passed all four tests with the tightened rate gate.
 
 [Public tests](../helix/04-build/evidence/workflow-capacity/fireweed-9500-mimalloc-tests.log.gz),
 [service check](../helix/04-build/evidence/workflow-capacity/fireweed-9500-service-check.log.gz).
+
+## Fresh repetitions exposed retained-WAL growth
+
+Both fresh workflow runs at `949f3fc6` failed full qualification. Run 1 averaged
+11,932/sec and its slowest cycle reached 9,501/sec, but one shard's sampled WAL
+peaked at 513.6 MiB. Run 2 averaged 11,079/sec, with a 9,434/sec slowest cycle
+and a **770.7 MiB** WAL peak. Both million-row primitive runs passed. These
+reports are retained; the rate and 512 MiB WAL gates were not relaxed.
+
+- [Workflow 1](../helix/04-build/evidence/workflow-capacity/fireweed-9500-949f3fc6-workflow-1.json.gz)
+- [Workflow 2](../helix/04-build/evidence/workflow-capacity/fireweed-9500-949f3fc6-workflow-2.json.gz)
+- [Primitives 1](../helix/04-build/evidence/workflow-capacity/fireweed-9500-949f3fc6-primitives-1.json.gz)
+- [Primitives 2](../helix/04-build/evidence/workflow-capacity/fireweed-9500-949f3fc6-primitives-2.json.gz)
+
+The native trigger compared `max_frame - nbackfills` with the threshold. A reader
+can force a partial passive checkpoint, advancing `nbackfills` while preventing
+WAL restart. That subtraction postpones the next attempt until another full
+budget of frames accumulates, even if the reader has since released its snapshot.
+Repeated partial checkpoints therefore allow growth by multiple budget windows.
+
+The candidate correction compares **total retained frames** with the unchanged
+64,000-frame threshold. Subsequent commits keep attempting passive checkpoints
+until a writer can restart the WAL. This matches the documented
+[SQLite auto-checkpoint trigger](https://www.sqlite.org/c3ref/wal_autocheckpoint.html).
+Backfill safety, reader snapshot protection, restart locking, and sync behavior
+are unchanged. It does not make the sampled footprint budget an engine-enforced
+cap against arbitrarily long external read transactions.
+
+A native regression holds a real reader snapshot, performs partial backfill,
+checks the reader still sees its original rows, then releases it and verifies
+that ordinary commits finish backfill and restart the WAL. It failed at the
+retry assertion before the correction and passed afterward. The complete native
+WAL suite then passed **77 tests**. Public API tests and fresh capacity runs are
+required before qualifying this candidate.
+
+[Regression before](../helix/04-build/evidence/workflow-capacity/fireweed-9500-checkpoint-regression-red.log.gz),
+[regression after](../helix/04-build/evidence/workflow-capacity/fireweed-9500-checkpoint-regression-green.log.gz),
+[native WAL tests](../helix/04-build/evidence/workflow-capacity/fireweed-9500-wal-tests.log.gz).
+
+The corrected trigger also passed the combined Fireweed Turso adapter and public
+workload release suite: **106 passed, one existing ignored**. Command:
+`cargo test --locked --release -p fireweed-workload -p fireweed-turso --features
+fireweed-turso/local -- --test-threads=1`.
+[Public/adapter validation](../helix/04-build/evidence/workflow-capacity/fireweed-9500-checkpoint-public-tests.log.gz).
