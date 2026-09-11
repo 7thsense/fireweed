@@ -2,125 +2,105 @@
 
 ## Current campaign result: both targets remain unmet
 
-2026-09-11. The representative workload now loads a million original rows,
+2026-09-11. The representative workload loads one million original rows,
 persists top-time and other enrichment metadata, schedules four future windows,
 delivers bounded chunks with retries/failures, polls progress, verifies every
 final disposition, and discovers retained rows for purge through the public API.
-There are two campaigns per physical store. Input bodies contain varied bytes;
-metadata enrichment retains each original body instead of replacing it twice.
-A separate payload-rewrite stress variant remains tested and explicitly labeled.
+There are two campaigns per physical store. Metadata enrichment retains varied
+input bodies; a separate payload-rewrite stress variant remains tested.
 
-The best complete three-cycle measurement so far is **5,663 recipients/sec** on
-clean `85b5554e`, not the 11.8–12.1k measured by the historical lighter all-due
-saturation test. All independent outcomes passed, but rate, progress latency and
-six projection-size stability checks failed. RSS and sampled WAL checks passed.
-The fixed objectives remain **10,000 complete recipients/sec**, then **12,500/sec**
-(+25%), with repeated qualification and 10k primitive floors. No new campaign
-candidate is qualified yet. See the [plan and full evidence](campaign-qualification-plan.md).
+The best complete three-cycle measurement is now **7,470 recipients/sec** on
+clean `440a60fd`, up from 5,663 on `85b5554e`. This comparison includes code and
+concurrency changes, not an isolated attribution to one optimization. Independent
+outcomes, due times, RSS and sampled WAL passed. Overall/late-cycle rates,
+64 progress checks and 17 projection-size stability checks failed. The objectives
+remain **10,000 complete recipients/sec**, then **12,500/sec** (+25%), with
+repeated qualification and 10k primitive floors. No campaign candidate is qualified.
+See the [plan and full evidence](campaign-qualification-plan.md).
 
 | Complete campaign measurement | Value |
 |---|---:|
 | Resident recipients / completed cycles | 1,000,000 / 3 |
 | Physical stores / campaigns per store | 32 / 2 |
-| Workers / loaders per campaign | 4 / 2 |
+| Workers / loaders per campaign | 2 / 2 |
 | Storage batch / purge batch | 1,000 / 8,000 |
 | Enrichment / scheduling / delivery handler limits | 500 / 200 / 500 |
-| Process wall | 529.89 s |
-| Average complete recipients/sec | 5,663.00 |
-| Slowest-campaign equivalent cycle rates | 9,094 / 5,005 / 4,611 |
-| CPU time/recipient | 1.515 ms |
-| Average charged logical CPU occupancy | 8.58 |
-| Peak RSS | 10.81 GiB |
-| Process-accounted output/recipient | 15,148.52 bytes |
-| Logical retained log bytes/recipient | 1,823.45 bytes |
+| Process wall | 401.80 s |
+| Average complete recipients/sec | 7,470.33 |
+| Worst campaign wall, cycles 0 / 1 / 2 | 96.15 / 131.97 / 169.66 s |
+| CPU time/recipient | 1.263 ms |
+| Average charged logical CPU occupancy | 9.43 |
+| Peak RSS | 9.78 GiB |
+| Process-accounted output/recipient | 13,367.79 bytes |
+| Logical retained log bytes/recipient | 1,823.51 bytes |
 
 ### Napkin math aligned with this workload
 
-A complete recipient still entails approximately `8 + 2/19 = 8.1053` logical row
+A complete recipient entails approximately `8 + 2/19 = 8.1053` logical row
 operations: insertion, three claim/mutation pairs, purge, and retry claim/mutation
-for every nineteenth recipient. Thus 10k completed recipients/sec means about
-**81k logical row operations/sec**, and 12.5k means **101k/sec**, not 10k SQL
-statements or separately synced requests. Bounded storage batching amortizes log
-syncs; provider/handler chunk limits remain independently enforced.
+for every nineteenth recipient. Thus 10k recipients/sec means about **81k logical
+row operations/sec**; 12.5k means **101k/sec**. These are not separately synced SQL
+statements. Storage batching amortizes log syncs, and projection fusion can
+combine transitions. Handler/provider chunk limits remain independently enforced.
 
-There are also **three full retained-row exports per cycle** (scheduled-state
-verification, final disposition, retention discovery), plus 1 Hz lifecycle
-progress polling per campaign. These reads and all processing/settlement/purge
-are timed. Virtual-clock jumps remove intentional calendar waiting only.
-Network/provider latency and actual model inference are stubbed. The current
-fixture does not establish delayed retry backoff, overlapping campaign intake,
-continuous enrichment-stage aggregate reporting or legacy atomic callback groups.
+Three full retained-row exports per cycle cover scheduled-state verification,
+final disposition and retention discovery. Progress is polled at 1 Hz/campaign.
+Reads, processing, settlement and purge are timed. Virtual-clock jumps remove
+intentional calendar waiting only. Provider/model latency is stubbed. The fixture
+does not establish delayed retry backoff, overlapping campaign intake, continuous
+enrichment-stage aggregate reporting or legacy atomic callback groups.
 
-Exact initial bodies average **934.89 bytes** despite the nominal 1 KiB fixture
-setting. Metadata enrichment writes that body once; the logical retained log
-contains approximately **1,823 bytes/recipient**, including metadata and command
-encoding. Holding that encoding cost constant implies **17.4 MiB/s** of logical
-log data at 10k or **21.7 MiB/s** at 12.5k. These are logical file bytes, not device
-or NAND writes. Process-accounted output implies about **144.5 / 180.6 MiB/s** at
-the two targets at current amplification; it likewise is not device traffic.
+Actual initial bodies average **934.89 bytes**, despite the nominal 1 KiB fixture
+setting. The metadata variant writes the body once. Its retained log averages
+**1,824 bytes/recipient**, including encoding and commands: about **17.4 / 21.7
+MiB/s** at the 10k / 12.5k targets. Process-accounted output implies approximately
+**127.5 / 159.4 MiB/s** at current amplification. Neither measure is physical NAND
+traffic. The payload-rewrite variant has a different, larger byte budget.
 
-At the measured **1.515 CPU-ms/recipient**, 10k needs **15.15 CPU-s/s** and 12.5k
-needs **18.93 CPU-s/s**. This eight-core/16-thread host therefore needs a lower
-per-recipient CPU cost for the stretch target even under an optimistic 16-thread
-accounting model—at least about **15.5% less**, before accounting for SMT sharing
-and idle/stalled time. Dividing 16 by today's cost is not a hardware ceiling:
-frequency, cache behavior, concurrency and implementation cost can all change.
-The measured 8.58 average CPU occupancy also leaves substantial waiting to address.
+At **1.263 CPU-ms/recipient**, 10k needs **12.63 CPU-s/s**, and 12.5k needs
+**15.79 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
+accounting model, but with very little margin. This host has eight physical cores;
+SMT sharing, frequency, cache behavior and waiting prevent treating that arithmetic
+as guaranteed capacity. Compared with the observed 9.43 average occupancy,
+removing waiting remains essential. Further CPU reduction also creates margin.
+These figures do not establish a fundamental hardware ceiling or impossibility.
 
-The device trace's sampled active-process interval observed host-wide 17.67 GiB
-written in 521.47 s, mean write-request latency 82.76 ms and busy time 87.9%.
-It misses startup/tail margins and includes other host activity, so it cannot
-provide exact per-recipient physical amplification. Processing intervals reached
-about 15 logical CPUs; a retention interval used only 2.3 while the device was
-about 96% busy. That is evidence of phase-dependent CPU and writeback/queueing
-costs, not proof of a sequential bandwidth or fundamental hardware limit.
+### Reporting and checkpoint costs
+
+Public lifecycle metrics now read four counters on the existing queue metadata
+row. The projection transaction maintains them from actual before/after item
+states, with migration and replay coverage. Ordinary addressed commands use
+bounded primary-key reads; cohort/supersession commands conservatively scan.
+The measured CPU cost includes this maintenance. Progress still waits for
+committed coverage, so constant-time SQL alone does not guarantee low latency.
+
+Checkpointing now orders latest-safe frames by destination page before forming
+512-page write batches. In a native test updating 2,048 existing 4 KiB pages in
+interleaved order, destination writes fell from 1,973 calls to eight. Both paths
+write the same 8 MiB; this is a locality/call-count result, not a throughput
+multiplier. Cached-page and WAL-read cases verify newest values after truncating
+the WAL and reopening. Safe-frame selection and sync semantics are preserved.
+
+The complete campaign's sampled active interval observed host-wide **13.70 GiB**
+written in **392.58 s**, mean write-request latency **55.95 ms**, and **88.0%** busy
+time. Sampling omits startup/tail margins and includes other host activity;
+these are not exact per-recipient physical amplification measurements. Load grew
+from 7.07 s in cycle zero to 37.48 / 44.34 s. Purge maxima were 11.93 / 15.96 /
+33.04 s. Phase maxima are not additive. Later-cycle write waiting remains visible.
 Counter units and overlapping request-time accounting follow the
 [Linux block statistics documentation](https://docs.kernel.org/block/stat.html).
 
-The original primitive goals remain plausible and were exceeded historically.
-They cannot certify this richer workflow, and current data does not prove the
-campaign targets strictly impossible. Further work targets unnecessary query
-sorting, projection write pressure and coordination waiting. Current primitive
+A same-binary filesystem control disabled copy-on-write only for a new disk
+projection directory; the durable log retained its normal path/protocol. It had
+no complete campaign reports after **175.28 s** and was stopped with SIGTERM.
+Charged CPU averaged only 5.21 logical CPUs. Its preserved nonzero result is not
+a throughput measurement, and no NOCOW default was introduced. This control also
+loses filesystem compression/checksums and is not equivalent storage behavior.
+
+The next candidate lets another queue apply ready work while a claim waits for
+its handler follow-up, keeping each queue's ordered prefix and bounded join
+window. Its throughput and latency effects remain unmeasured. Current primitive
 qualification and repeated campaign passes are still required on a final build.
-
-### Reporting work and the next cost reduction
-
-The `82d3adcb` batch-500 three-cycle run reached only 4,968/sec; the earlier
-10,557/sec screen used instrumentation and one cycle and is not a passing result.
-The sustained baseline and fixed targets above therefore remain unchanged.
-
-At one million resident rows across 64 campaigns, polling each campaign once per
-second can examine roughly one million item rows per second to produce four
-lifecycle counts. At 10k recipients/sec that is about 100 extra reporting row
-visits per recipient while the backlog remains resident, in addition to the
-three required full exports. The backlog shrinks during retention, so this is a
-resident-phase estimate, not an exact run total or a CPU measurement.
-
-The next candidate maintains counts on existing queue metadata. Public reporting
-then reads one queue row. Exact before/after accounting adds bounded primary-key
-row reads to apply generations; fusion can reduce their number, while cohort and
-supersession operations retain a conservative scan fallback. This trades repeated
-backlog scans for work proportional to the ordinary addressed mutations. Its CPU,
-write and sustained-throughput effects still require measurement; the napkin
-budget must include this maintenance rather than treating counters as free.
-
-### Checkpoint write locality
-
-The counter candidate `88c14a08` stopped during its second cycle with an ambiguous
-log-produce timeout. It has no completed qualification rate. Its first cycle was
-96.0 s; the partial second-cycle reports reached 222.6 s, with load up to 59.1 s
-and purge up to 67.4 s. Eliminating reporting scans has not resolved sustained
-writeback stalls.
-
-A native checkpoint regression identifies an avoidable request cost. Updating
-2,048 existing 4 KiB pages in interleaved order produced 1,973 destination writes
-when checkpoint batches followed WAL-frame order. Ordering the same latest-safe
-frames by destination page produced eight writes. Both paths write the same
-8 MiB of page contents; the optimization changes locality and request count,
-not the logical byte budget. The test also checks persisted values after WAL
-truncation and reopen. Neither the call-count ratio nor the memory-I/O test is a
-hardware throughput multiplier. Its effect on real device traffic, CPU cost and
-three-cycle campaign rates remains to be measured.
 
 ## Historical all-due saturation qualification (2026-09-10)
 

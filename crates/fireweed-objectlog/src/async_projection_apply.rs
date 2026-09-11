@@ -742,10 +742,55 @@ where
     }
 }
 
+struct ClaimJoinWindow {
+    started: Instant,
+    commands_before: usize,
+}
+
+enum WorkerSelection {
+    Ready(ApplyGeneration),
+    WaitUntil(Instant),
+    Idle,
+}
+
+fn select_worker_generation(
+    state: &CoordinatorState,
+    joins: &mut HashMap<u64, ClaimJoinWindow>,
+    now: Instant,
+    has_waiter: impl Fn(&QueueKey) -> bool,
+) -> WorkerSelection {
+    // Join windows belong to the first retained entry, not notifications. New
+    // work in any queue cannot restart the deadline and starve an old claim.
+    joins.retain(|id, _| state.entries.iter().any(|entry| entry.id() == *id));
+    let mut deferred = HashSet::new();
+    let mut earliest = None;
+    loop {
+        let Some(generation) = next_coalesced_generation_excluding(state, &deferred) else {
+            return earliest.map_or(WorkerSelection::Idle, WorkerSelection::WaitUntil);
+        };
+        if generation_is_claim_without_complete(&generation) {
+            let window = joins
+                .entry(generation.entry_ids[0])
+                .or_insert(ClaimJoinWindow {
+                    started: now,
+                    commands_before: generation.commands.len(),
+                });
+            let deadline = window.started + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
+            if now < deadline && !has_waiter(&generation.shard) {
+                earliest = Some(earliest.map_or(deadline, |prior: Instant| prior.min(deadline)));
+                deferred.insert(generation.shard.clone());
+                continue;
+            }
+        }
+        return WorkerSelection::Ready(generation);
+    }
+}
+
 async fn run_worker<P>(inner: Arc<CoordinatorInner<P>>)
 where
     P: AsyncProjectionStore + 'static,
 {
+    let mut joins = HashMap::new();
     loop {
         if inner.paused.load(Ordering::Acquire) {
             inner.worker_running.store(false, Ordering::Release);
@@ -759,64 +804,54 @@ where
             }
             return;
         }
-        let next = {
-            let state = inner.state.lock().await;
-            next_coalesced_generation(&state)
-        };
-        let Some(mut generation) = next else {
-            inner.worker_running.store(false, Ordering::Release);
-            let has_work = {
+        let generation = {
+            // Arm before inspecting readiness: notify_waiters does not retain a
+            // permit for a future created after the notification.
+            let changed = inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let selection = {
                 let state = inner.state.lock().await;
-                next_coalesced_generation(&state).is_some()
+                select_worker_generation(&state, &mut joins, Instant::now(), |queue| {
+                    queue_has_coverage_waiter(&inner, queue)
+                })
             };
-            if !inner.paused.load(Ordering::Acquire)
-                && has_work
-                && inner
-                    .worker_running
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                continue;
-            }
-            return;
-        };
-
-        if generation_is_claim_without_complete(&generation) {
-            let joined_at = Instant::now();
-            let before = generation.commands.len();
-            let deadline = joined_at + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
-            while generation_is_claim_without_complete(&generation)
-                && !queue_has_coverage_waiter(&inner, &generation.shard)
-            {
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    break;
-                };
-                if remaining.is_zero() {
-                    break;
-                }
-                tokio::select! {
-                    _ = inner.changed.notified() => {}
-                    _ = tokio::time::sleep(remaining) => {}
-                }
-                let state = inner.state.lock().await;
-                let Some(again) = next_coalesced_generation(&state) else {
+            match selection {
+                WorkerSelection::Ready(generation) => generation,
+                WorkerSelection::WaitUntil(deadline) => {
+                    tokio::select! {
+                        _ = changed => {}
+                        _ = tokio::time::sleep_until(deadline.into()) => {}
+                    }
                     continue;
-                };
-                if again
-                    .entry_ids
-                    .iter()
-                    .any(|id| generation.entry_ids.contains(id))
-                {
-                    generation = again;
+                }
+                WorkerSelection::Idle => {
+                    inner.worker_running.store(false, Ordering::Release);
+                    let has_work = {
+                        let state = inner.state.lock().await;
+                        next_runnable(&state).is_some()
+                    };
+                    if !inner.paused.load(Ordering::Acquire)
+                        && has_work
+                        && inner
+                            .worker_running
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    {
+                        continue;
+                    }
+                    return;
                 }
             }
+        };
+        if let Some(window) = joins.remove(&generation.entry_ids[0]) {
             if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
                 eprintln!(
                     "apply_join us={} before={} after={} queue_waiter={}",
-                    joined_at.elapsed().as_micros(),
-                    before,
+                    window.started.elapsed().as_micros(),
+                    window.commands_before,
                     generation.commands.len(),
-                    queue_has_coverage_waiter(&inner, &generation.shard)
+                    queue_has_coverage_waiter(&inner, &generation.shard),
                 );
             }
         }
@@ -983,14 +1018,22 @@ fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
     claim && !complete
 }
 
+#[cfg(test)]
 fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration> {
-    let (_, first) = next_runnable(state)?;
+    next_coalesced_generation_excluding(state, &HashSet::new())
+}
+
+fn next_coalesced_generation_excluding(
+    state: &CoordinatorState,
+    excluded: &HashSet<QueueKey>,
+) -> Option<ApplyGeneration> {
+    let (_, first) = next_runnable_excluding(state, excluded)?;
     let Some(mut last) = first.positions.last().cloned() else {
         return None;
     };
-    let mut envelopes = generation_envelope_count(&first);
+    let mut envelopes = generation_envelope_count(first);
     let mut seen_items = HashSet::new();
-    insert_batch_item_ids(&mut seen_items, &first);
+    insert_batch_item_ids(&mut seen_items, first);
     let mut debt = first.debt_bytes;
     let mut generation = ApplyGeneration {
         shard: first.shard.clone(),
@@ -1142,10 +1185,20 @@ pub fn claim_only_tail(
     (sequence == target.sequence && !claims.is_empty()).then_some(claims)
 }
 
-fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
-    let mut best: Option<(usize, ApplyBatch)> = None;
+fn next_runnable(state: &CoordinatorState) -> Option<(usize, &ApplyBatch)> {
+    next_runnable_excluding(state, &HashSet::new())
+}
+
+fn next_runnable_excluding<'a>(
+    state: &'a CoordinatorState,
+    excluded: &HashSet<QueueKey>,
+) -> Option<(usize, &'a ApplyBatch)> {
+    let mut best: Option<(usize, &ApplyBatch)> = None;
     for (index, entry) in state.entries.iter().enumerate() {
         let shard = entry.shard();
+        if excluded.contains(shard) {
+            continue;
+        }
         if state
             .shards
             .get(shard)
@@ -1178,7 +1231,7 @@ fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
             }
         };
         if better {
-            best = Some((index, batch.clone()));
+            best = Some((index, batch));
         }
     }
     best
@@ -1937,6 +1990,172 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn waiting_claim(queue: QueueKey, id: u64) -> ApplyEntry {
+        let mut entry = ready_on(queue, id, 1, 1, 1, 0);
+        let ApplyEntry::Ready(batch) = &mut entry else {
+            unreachable!()
+        };
+        batch.commands[0].item_ids.clear();
+        batch.commands[0].command = QueueCommand::Claim(fireweed_engine::ClaimCommand::new(
+            vec![],
+            fireweed_core::LeaseToken::new("window-token").unwrap(),
+            UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        ));
+        entry
+    }
+
+    #[test]
+    fn claim_join_deadline_is_not_extended_by_ready_neighbors() {
+        let now = Instant::now();
+        let state = CoordinatorState {
+            entries: VecDeque::from([
+                waiting_claim(shard(), 1),
+                ready_on(shard_named("other"), 2, 1, 1, 1, 0),
+            ]),
+            ..Default::default()
+        };
+        let mut joins = HashMap::new();
+        for elapsed in [0, 100, CLAIM_COMPLETE_JOIN_MS - 1] {
+            let WorkerSelection::Ready(next) = select_worker_generation(
+                &state,
+                &mut joins,
+                now + Duration::from_millis(elapsed),
+                |_| false,
+            ) else {
+                panic!("ready neighbor")
+            };
+            assert_eq!(next.entry_ids, vec![2]);
+        }
+        let WorkerSelection::Ready(next) = select_worker_generation(
+            &state,
+            &mut joins,
+            now + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS),
+            |_| false,
+        ) else {
+            panic!("expired claim window")
+        };
+        assert_eq!(
+            next.entry_ids,
+            vec![1],
+            "an expired oldest claim regains its FIFO turn"
+        );
+    }
+
+    #[test]
+    fn independent_claim_windows_overlap_and_coverage_preempts_only_its_queue() {
+        let now = Instant::now();
+        let other = shard_named("other");
+        let mut state = CoordinatorState {
+            entries: VecDeque::from([waiting_claim(shard(), 1), waiting_claim(other.clone(), 2)]),
+            ..Default::default()
+        };
+        let mut joins = HashMap::new();
+        let WorkerSelection::WaitUntil(deadline) =
+            select_worker_generation(&state, &mut joins, now, |_| false)
+        else {
+            panic!("both handlers are pending")
+        };
+        assert_eq!(
+            deadline,
+            now + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS)
+        );
+        assert_eq!(joins.len(), 2);
+        let WorkerSelection::Ready(next) =
+            select_worker_generation(&state, &mut joins, now + Duration::from_millis(1), |q| {
+                q == &other
+            })
+        else {
+            panic!("neighbor's coverage")
+        };
+        assert_eq!(next.entry_ids, vec![2]);
+        let WorkerSelection::Ready(first) =
+            select_worker_generation(&state, &mut joins, deadline, |_| false)
+        else {
+            panic!("first deadline")
+        };
+        assert_eq!(first.entry_ids, vec![1]);
+        state.entries.pop_front();
+        let WorkerSelection::Ready(second) =
+            select_worker_generation(&state, &mut joins, deadline, |_| false)
+        else {
+            panic!("second window must already have elapsed")
+        };
+        assert_eq!(second.entry_ids, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn claim_join_does_not_block_ready_neighbor_or_force_claim_apply() {
+        let other = shard_named("other");
+        let mut projection = fireweed_projection::InMemoryProjection::new();
+        ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
+        let mut other_definition = qdef();
+        other_definition.queue_id = other.queue_id.clone();
+        ProjectionStore::ensure_shard(&mut projection, &other_definition).unwrap();
+        let coordinator = AsyncProjectionApplyCoordinator::new(
+            Arc::new(fireweed_projection::AsyncInMemoryProjection::new(
+                projection,
+            )),
+            AsyncProjectionSpec::new(32, 4096, 16, 30_000, 3).unwrap(),
+        )
+        .unwrap();
+        coordinator.pause();
+        let mut claim = pause_env("claim-waiting-for-handler");
+        claim.command = QueueCommand::Claim(fireweed_engine::ClaimCommand::new(
+            vec![],
+            fireweed_core::LeaseToken::new("waiting-token").unwrap(),
+            UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        ));
+        let reservation = coordinator
+            .reserve(shard(), &[claim.clone()])
+            .await
+            .unwrap();
+        coordinator
+            .enqueue_reserved(reservation, vec![pos(1)], vec![claim])
+            .await
+            .unwrap();
+        let neighbor = pause_env("neighbor-ready");
+        let reservation = coordinator
+            .reserve(other.clone(), &[neighbor.clone()])
+            .await
+            .unwrap();
+        coordinator
+            .enqueue_reserved(reservation, vec![pos_on(other.clone(), 1)], vec![neighbor])
+            .await
+            .unwrap();
+        coordinator.resume();
+        coordinator
+            .wait_until_covers(
+                &other,
+                &pos_on(other.clone(), 1),
+                Duration::from_millis(200),
+            )
+            .await
+            .expect("a ready neighbor must not wait for the other queue's 500 ms handler join");
+        assert!(
+            coordinator
+                .snapshot(&shard())
+                .await
+                .applied_high_water
+                .is_none(),
+            "serving the neighbor must retain the claim's opportunity to fuse"
+        );
+        let mut complete = pause_env("handler-completed");
+        complete.command =
+            QueueCommand::Finalize(fireweed_engine::FinalizeCommand { outcomes: vec![] });
+        let reservation = coordinator
+            .reserve(shard(), &[complete.clone()])
+            .await
+            .unwrap();
+        coordinator
+            .enqueue_reserved(reservation, vec![pos(2)], vec![complete])
+            .await
+            .unwrap();
+        coordinator.wait_for_catch_up(&shard()).await.unwrap();
+        assert_eq!(coordinator.apply_live_command_counts(), vec![1, 2]);
     }
 
     #[tokio::test]

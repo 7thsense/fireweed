@@ -2,7 +2,11 @@
 
 Date: 2026-09-10. Exact measurement snapshots are recorded in the linked artifacts.
 
-## Current qualification: within five percent of 10,000 workflows/sec
+> 2026-09-11: The richer million-resident campaign now measures 7,470 recipients/sec
+> over three cycles and has not qualified against its 10k/12.5k targets. The results
+> below describe the earlier saturation fixture. See the [current campaign plan](../../perf/campaign-qualification-plan.md).
+
+## Historical qualification: within five percent of 10,000 workflows/sec
 
 The stricter follow-up goal **passes on clean source `a73b067f`**. Two fresh
 three-million-lifecycle runs achieved **12,125 and 11,810 complete workflows/sec**;

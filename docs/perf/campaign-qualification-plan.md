@@ -657,3 +657,48 @@ restored, all 38 selected native integration tests passed: cached/WAL-read
 checkpoint locality and reopen, checkpoint policy and pinned readers, concurrent
 writers, cancellation, differential projection histories, lifecycle operations
 and recovery. The full vendor patch still round-trips from the published crate.
+
+## Destination-ordered checkpoint result and nonblocking join scheduling
+
+Clean `440a60fd` passed all 40 native unit tests and six public campaign tests in
+release mode, including the unchanged 90 ms reader check. The canonical CLI
+feature graph rebuilt without changes. The complete three-cycle campaign reached
+**7,470.33 recipients/sec**, 401.804 s wall, **1.26286 CPU-ms/recipient**, 9.43 mean
+charged CPUs, 9.78 GiB peak RSS, 13,367.79 process-output bytes/recipient and
+1,823.51 retained-log bytes/recipient. Worst campaign walls were 96.15 / 131.97 /
+169.66 s; load maxima 7.07 / 37.48 / 44.34 s and purge 11.93 / 15.96 / 33.04 s.
+These maxima are not additive. Outcomes, due times, RSS and sampled WAL passed;
+overall and late-cycle rates, 64 progress and 17 projection-stability checks failed.
+The best complete result improved about 32%, with about 17% lower CPU cost than
+`85b5554e`; that comparison includes multiple code/concurrency changes.
+
+The same-binary NOCOW projection control was stopped at 175.278 s with no complete
+campaign reports and 5.21 mean charged CPUs. Both DB and WAL inherited the recorded
+`C` attribute; the durable log kept its normal attributes. SIGTERM/nonzero exit,
+resource usage and filesystem evidence are preserved. No throughput claim or new
+filesystem default follows from this unfavorable control. Its temporary data was
+removed after measurement. Raw reports/device traces are `campaign-440a60fd-*`.
+
+A red coordinator regression then showed a ready neighbor missing a 200 ms
+coverage deadline because the shared apply worker spent up to 500 ms waiting
+for another queue's claim follow-up. The next implementation defers only that
+queue while selecting other runnable queues. Join windows are tracked by their
+first retained entry, never restarted by incoming notifications; independent
+windows overlap. Expired windows regain FIFO selection. Own-queue coverage still
+bypasses its window, while serving a neighbor does not prematurely apply the
+waiting claim. Each selected generation retains the existing contiguous-prefix,
+reservation, epoch, poison and bounded-coalescing checks.
+
+The worker arms notification before inspecting state and sleeps only when every
+runnable queue is deferred. Selection now borrows its first retained batch rather
+than cloning it and immediately cloning its commands again; idle-work detection
+also avoids constructing a throwaway generation. Thirty coordinator tests passed,
+including the red/green ready-neighbor case, fixed-deadline fairness, overlapping
+windows and queue-specific coverage preemption. All six public campaign tests
+passed (37.30 s development mode). The composed lease/version regression and
+clean release measurement follow. Neither performance objective is achieved yet.
+
+The composed acknowledged-claim-tail lease/version regression passed. The final
+review also scoped the armed notification to selection/waiting so it does not
+cause unrelated notification wakeups while a selected SQL apply is in flight.
+All thirty coordinator tests passed again after that scope adjustment.
