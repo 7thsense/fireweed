@@ -336,3 +336,64 @@ a metadata pass must not be reported as a payload-rewrite pass. All five campaig
 suite tests passed, now exercising both representations in retained/disposition
 verification and log-only recovery; six gate/monitor tests passed. Performance of
 the metadata variant remains unmeasured.
+
+
+## Complete metadata baseline: improvement, still not qualified
+
+Clean `930f5c15`, one million resident rows, three complete cycles, 32 stores,
+two campaigns/store, unchanged concurrency and handler limits: **4,900.59
+recipients/sec**. All independent persisted outcomes and projection-size stability
+checks passed. Throughput, 81 progress checks, 36 third-cycle due-latency checks,
+and RSS stability failed. This is a metadata-enrichment result, not a
+payload-rewrite result.
+
+| Slowest campaign phase | Cycle 1 | Cycle 2 | Cycle 3 |
+|---|---:|---:|---:|
+| Whole cycle seconds | 137.90 | 224.66 | 246.93 |
+| Load seconds | 7.01 | 33.27 | 40.89 |
+| Preparation plus scheduled export seconds | 48.58 | 52.38 | 57.43 |
+| Delivery seconds | 37.94 | 72.35 | 120.06 |
+| Purge seconds | 40.29 | 66.26 | 28.14 |
+| Progress p95 seconds | 2.630 | 1.321 | 1.120 |
+
+Phase maxima are not additive. Total process wall: 612.60 seconds. Charged CPU:
+**1.691 CPU-ms/recipient**, implying 16.91 CPU-s/s at 10k and 21.13 at 12.5k if
+cost stayed unchanged. The simplistic 16-thread division yields only about 9.46k;
+that is a current-cost comparison, not a theoretical limit. Lower cost and less
+waiting are still required. Average process CPU occupancy was about 8.28 logical
+CPUs. Peak RSS: 10.97 GiB. Process-accounted output: **41.31 GiB**, or
+**14,786.90 bytes/recipient**, down from 20,153.44 in the batched payload baseline.
+
+Exact initial body bytes totaled 2,804,666,670 (934.89/recipient); enrichment body
+replacements were zero. Retained log files totaled 5,470,852,468 logical bytes,
+or **1,823.62/recipient**, versus 3,662.96 for the batched payload baseline.
+The log contains more than body bytes: metadata, identities, guards and outcomes
+also matter. Log file size is not device write traffic. The device trace also
+includes start/stop and runner cleanup; do not divide its entire interval by the
+recipient count to claim exact workload-only write amplification.
+
+[Full run](../helix/04-build/evidence/workflow-capacity/campaign-930f5c15-metadata-baseline.json.gz),
+[device observations](../helix/04-build/evidence/workflow-capacity/campaign-930f5c15-device.jsonl.gz),
+[release tests](../helix/04-build/evidence/workflow-capacity/campaign-930f5c15-release-tests.log.gz).
+
+## Remove redundant planning reads and batch discovered retention
+
+The next native change omits the payload-table join only when every addressed
+patch retains its payload and the caller requests identity results. Payload
+replacement still reads the old body for equality/NoChange, and BeforeSnapshot
+still loads it. A public 128 KiB-body regression checks metadata-only updates,
+Keep/no-change, equal replacement/no-change, before-snapshot payloads and explicit
+body removal. Lease/version/predicate planning otherwise remains the same.
+
+The campaign had ignored the existing `--purge-batch` setting and issued one
+purge per 1,000-row discovery page. It now accumulates discovered IDs into a
+bounded batch (default 8,000; maximum 8,192). Read pages remain <=1,000 and no
+producer ID list drives retention. A non-page-aligned 1,025-row purge test checks
+the boundary and final partial batch. This reduces public/log calls, not the
+number of purged rows or retention checks. Six public campaign/read tests and
+six gate/monitor tests passed; release validation and measurement are next.
+
+Schema `campaign-capacity/v3` adds purge-batch occupancy and explicitly records
+the existing one-hour lease/request-retention durations and 7,200-second cycle
+clock step. These durations are unchanged. The gate checks declared temporal
+assumptions and exact purge batch counts in addition to the earlier requirements.

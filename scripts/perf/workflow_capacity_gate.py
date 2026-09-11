@@ -83,9 +83,13 @@ def qualify(report, campaign_target=10_000):
                     wal_sizes = [c.get("projection_wal_bytes") or 0 for c in shard["cycles"][-3:]]
                     wal_growth = (max(wal_sizes) / min(wal_sizes) - 1) if min(wal_sizes) > 0 else None
                     check(f"shard_{index}_projection_wal_stable", wal_growth is not None and wal_growth <= .10, wal_growth, "<=10% range")
-    elif result.get("schema") == "campaign-capacity/v2":
+    elif result.get("schema") == "campaign-capacity/v3":
         storage_mode = result.get("enrichment_storage")
         check("enrichment_storage_declared", storage_mode in ("row_metadata", "payload"))
+        check("temporal_retention_model", result.get("lease_ms") == 3_600_000
+              and result.get("request_id_retention_ms") == 3_600_000 and result.get("cycle_clock_step_s") == 7200)
+        purge_batch = result.get("purge_batch", 0)
+        check("bounded_retention_batch", isinstance(purge_batch, int) and 0 < purge_batch <= 8192)
         payload_bytes = result.get("payload_bytes", 0)
         check("representative_payload_size", isinstance(payload_bytes, int) and payload_bytes >= 1024)
         check("campaign_target", campaign_target in (10_000, 12_500), campaign_target, "10000 or 12500")
@@ -131,6 +135,8 @@ def qualify(report, campaign_target=10_000):
                             and c.get("payload_replacements") == (0 if storage_mode == "row_metadata" else 2*n)
                             and (c.get("payload_replacement_bytes") == 0 if storage_mode == "row_metadata"
                                  else c.get("payload_replacement_bytes", 0) >= 2*n*max(0, payload_bytes-128))
+                            and c.get("purge_batches", 0) == (n + max(1,purge_batch)-1)//max(1,purge_batch)
+                            and c.get("max_purge_batch", 0) == min(n,purge_batch)
                             and c.get("claim_batches", 0) == c.get("mutation_batches", -1)
                             and 0 < c.get("max_claim_batch", 0) <= result.get("batch", 0) <= 1000
                             and c.get("claim_batches", 0) * c.get("max_claim_batch", 0) >= 3*n+retries)

@@ -408,6 +408,7 @@ pub async fn run(cfg: Config, root: &Path) -> Result<Value> {
         || (!cfg.recycle && cfg.cycles != 1)
         || !(1..=1000).contains(&cfg.batch)
         || cfg.load_workers == 0
+        || !(1..=8192).contains(&cfg.purge_batch.unwrap_or(8000))
     {
         return Err(
             "campaign requires disk Turso, positive dimensions and at least two rows per shard"
@@ -502,16 +503,27 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             let phase = Instant::now();
                             // Retention discovers stored identities; no producer ID list drives purge.
                             let mut cursor = None; let mut purged = 0;
+                            let purge_batch = cfg.purge_batch.unwrap_or(8000);
+                            let mut purge_ids = Vec::with_capacity(purge_batch);
+                            let mut purge_batches = 0; let mut max_purge_batch = 0;
                             while cfg.recycle {
-                                let rows = retry(deadline, || fw.retained_items(&q,cursor,1000)).await?;
-                                if rows.is_empty() { break; }
-                                cursor = rows.last().map(|r|r.item_id);
-                                purged += retry(deadline, || fw.purge(&q,rows.iter().map(|r|r.item_id),false)).await?;
+                                let page_size = (purge_batch - purge_ids.len()).min(1000);
+                                let rows = retry(deadline, || fw.retained_items(&q,cursor,page_size)).await?;
+                                let ended = rows.is_empty();
+                                if let Some(row) = rows.last() { cursor = Some(row.item_id); }
+                                purge_ids.extend(rows.iter().map(|row| row.item_id));
+                                if !purge_ids.is_empty() && (ended || purge_ids.len() == purge_batch) {
+                                    purged += retry(deadline, || fw.purge(&q,purge_ids.iter().copied(),false)).await?;
+                                    purge_batches += 1; max_purge_batch = max_purge_batch.max(purge_ids.len());
+                                    purge_ids.clear();
+                                }
+                                if ended { break; }
                             }
                             let m = retry(deadline, || fw.metrics(&q)).await?;
                             if cfg.recycle && (purged != ids.len() as u64 || m.pending+m.leased+m.complete+m.failed != 0) { return Err("retention mismatch".into()); }
                             stop.store(true,Ordering::SeqCst);
                             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({"cycle":cycle,"items":ids.len(),"verified":verified,"delivered":verified-failed,"failed":failed,"purged":purged,
+                                "purge_batches":purge_batches,"max_purge_batch":max_purge_batch,
                                 "pending":0,"leased":0,"load_s":load_s,"prepare_s":prepare_s,"delivery_s":delivery_s,"verify_s":verify_s,"purge_s":phase.elapsed().as_secs_f64(),
                                 "wall_s":cycle_start.elapsed().as_secs_f64(),"retries":counts.retries.load(Ordering::SeqCst),"claims":counts.claims.load(Ordering::SeqCst),
                                 "initial_payload_bytes":counts.initial_payload_bytes.load(Ordering::Relaxed),"payload_replacements":counts.payload_replacements.load(Ordering::Relaxed),"payload_replacement_bytes":counts.payload_replacement_bytes.load(Ordering::Relaxed),
@@ -541,8 +553,9 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
     }
     reports.sort_by_key(|s| s["shard"].as_u64());
     Ok(
-        json!({"schema":"campaign-capacity/v2","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
+        json!({"schema":"campaign-capacity/v3","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
         "physical_shards":cfg.shards,"workers_per_campaign":cfg.workers,"load_workers_per_campaign":cfg.load_workers,"campaigns":CAMPAIGNS,"batch":cfg.batch,"stage_limits":[500,200,500],"faults":cfg.faults,"includes_purge":cfg.recycle,
+        "purge_batch":cfg.purge_batch.unwrap_or(8000),"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,
         "payload_bytes":cfg.payload_bytes,"scheduled_windows":WINDOWS,"resident_backlog":cfg.items,"progress_interval_ms":1000,
         "completed_lifecycles_per_s":(cfg.items*cfg.cycles) as f64/started.elapsed().as_secs_f64(),"settled_wall_s":started.elapsed().as_secs_f64(),"shards":reports}),
     )

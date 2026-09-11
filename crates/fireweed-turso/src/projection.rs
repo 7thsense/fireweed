@@ -2648,21 +2648,31 @@ async fn materialize_claimed_on(
 
 /// Resolve a bounded set of lease targets by full primary-key seeks. An item_id IN
 /// predicate lets Turso scan the whole queue and compare every row against the batch.
-fn addressed_item_rows_sql(count: usize) -> String {
+fn addressed_item_rows_sql(count: usize, with_payload: bool) -> String {
     let values = (0..count)
         .map(|i| format!("(?{})", i + 3))
         .collect::<Vec<_>>()
         .join(",");
+    let payload_sql = if with_payload {
+        "CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END"
+    } else {
+        "NULL"
+    };
+    let payload_join = if with_payload {
+        "LEFT JOIN fireweed_item_payloads p ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=i.item_id"
+    } else {
+        ""
+    };
     format!(
         "WITH incoming(item_id) AS (VALUES {values}) \
                  SELECT i.item_id,i.client_item_key,i.priority,i.not_before,i.eligible_since,i.group_key,i.cohort_size,\
-                 CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END,\
+                 {payload_sql},\
                  i.fields,i.metadata,i.index_fields,i.entity_document,i.lifecycle_state,i.item_version,\
                  i.retry_count,i.max_attempts,i.created_seq,b.lease_token,i.lease_expires_at,i.worker_id,\
                  i.fenced,i.superseded,i.terminal_at,i.terminal_command_epoch,i.last_command_sequence \
                  FROM incoming CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
                  ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id \
-                 LEFT JOIN fireweed_item_payloads p ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=i.item_id \
+                 {payload_join} \
                  LEFT JOIN fireweed_lease_bearers b INDEXED BY sqlite_autoindex_fireweed_lease_bearers_1 ON b.tenant_id=?1 AND b.queue_id=?2 AND b.item_id=i.item_id"
     )
 }
@@ -2957,6 +2967,13 @@ impl TursoRelational {
                 "addressed mutation batch exceeds 1000 items",
             ));
         }
+        // Keep + identity cannot observe or change the old blob. Preserve the
+        // full read for replacement equality/NoChange decisions and snapshots.
+        let with_payload = request.returning
+            == fireweed_engine::ItemMutationReturning::BeforeSnapshot
+            || entries.iter().any(|entry| {
+                !matches!(entry.patch.payload, fireweed_engine::BatchUpdateValue::Keep)
+            });
         let connection = self.reader.lock().await;
         let mut image = ProjectionData::from_image(
             definition,
@@ -2991,7 +3008,7 @@ impl TursoRelational {
             params.extend(chunk.iter().map(|id| id.to_string().into()));
             let rows = query_value_rows(
                 &connection,
-                addressed_item_rows_sql(chunk.len()),
+                addressed_item_rows_sql(chunk.len(), with_payload),
                 params.clone(),
             )
             .await?;
@@ -5775,7 +5792,7 @@ mod addressed_query_tests {
         let store = TursoRelational::in_memory().await.unwrap();
         let rows = store
             .query(
-                format!("EXPLAIN QUERY PLAN {}", addressed_item_rows_sql(3)),
+                format!("EXPLAIN QUERY PLAN {}", addressed_item_rows_sql(3, true)),
                 vec![
                     "tenant".into(),
                     "queue".into(),

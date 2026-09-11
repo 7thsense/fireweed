@@ -253,6 +253,7 @@ async fn campaign_chunks_obey_distinct_handler_limits() {
         Config {
             items: 2240,
             campaign_metadata_only: true,
+            purge_batch: Some(1025),
             shards: 1,
             workers: 2,
             load_workers: 2,
@@ -274,8 +275,131 @@ async fn campaign_chunks_obey_distinct_handler_limits() {
             assert!(cycle["max_handler_batch"][stage].as_u64().unwrap() <= limit);
         }
         assert!(cycle["handler_batches"][1].as_u64().unwrap() >= 6);
+        assert_eq!(cycle["purge_batches"], 2);
+        assert_eq!(cycle["max_purge_batch"], 1025);
         assert_eq!(cycle["claim_batches"], cycle["mutation_batches"]);
         assert!(cycle["max_claim_batch"].as_u64().unwrap() <= 1000);
         assert!(cycle["max_claim_batch"].as_u64().unwrap() > 500);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kept_payload_planning_preserves_no_change_and_before_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let fw = open_store(root.path(), false, TestClock::at(100)).unwrap();
+    let q = create_queue(&fw, "kept-body").await.unwrap();
+    let input = item(0, 0, 128 * 1024);
+    let body = input.payload.clone().unwrap();
+    let mut metadata = input.metadata.clone();
+    metadata.insert("color", MetadataValue::String("red".into()));
+    let id = fw.push_batch(&q, vec![input]).await.unwrap()[0];
+    let request = |name: &str, patch: ItemPatch, returning| ItemMutationRequest {
+        request_id: RequestId::new(name).unwrap(),
+        evaluated_at: ts(100),
+        dry_run: false,
+        returning,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed {
+            entries: vec![AddressedMutation {
+                item_id: id,
+                expected_item_version: None,
+                predicates: vec![],
+                lease_guard: LeaseGuard::RejectActive,
+                patch,
+            }],
+        },
+    };
+    let changed = fw
+        .mutate_items(
+            &q,
+            request(
+                "metadata",
+                ItemPatch {
+                    metadata: BatchUpdateValue::Replace(metadata),
+                    ..Default::default()
+                },
+                ItemMutationReturning::Identity,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        changed.results[0].outcome,
+        ItemMutationOutcome::Updated { .. }
+    ));
+    assert_eq!(
+        fw.retained_items(&q, None, 1).await.unwrap()[0]
+            .payload
+            .as_ref(),
+        Some(&body)
+    );
+    let no_change = fw
+        .mutate_items(
+            &q,
+            request(
+                "keep",
+                ItemPatch::default(),
+                ItemMutationReturning::Identity,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_change.results[0].outcome, ItemMutationOutcome::NoChange);
+    let equal = fw
+        .mutate_items(
+            &q,
+            request(
+                "equal",
+                ItemPatch {
+                    payload: BatchUpdateValue::Replace(Some(body.clone())),
+                    ..Default::default()
+                },
+                ItemMutationReturning::Identity,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(equal.results[0].outcome, ItemMutationOutcome::NoChange);
+    let snapshot = fw
+        .mutate_items(
+            &q,
+            request(
+                "snapshot",
+                ItemPatch::default(),
+                ItemMutationReturning::BeforeSnapshot,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.results[0]
+            .before
+            .as_ref()
+            .unwrap()
+            .payload
+            .as_ref(),
+        Some(&body)
+    );
+    let removed = fw
+        .mutate_items(
+            &q,
+            request(
+                "remove",
+                ItemPatch {
+                    payload: BatchUpdateValue::Replace(None),
+                    ..Default::default()
+                },
+                ItemMutationReturning::Identity,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        removed.results[0].outcome,
+        ItemMutationOutcome::Updated { .. }
+    ));
+    assert_eq!(
+        fw.retained_items(&q, None, 1).await.unwrap()[0].payload,
+        None
+    );
 }

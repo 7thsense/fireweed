@@ -188,7 +188,7 @@ scheduling at 200. Claim/mutation batches are independent and may reach 1,000.
 Add `--campaign-metadata` to persist top times and enrichment attributes in the
 original row's structured metadata while retaining the original payload. Without
 that flag the stress variant rewrites the payload twice. Both are independently
-checked, including log-only recovery. Schema `campaign-capacity/v2` identifies
+checked, including log-only recovery. Schema `campaign-capacity/v3` identifies
 the representation and records actual initial/replacement payload bytes; a pass
 for one variant is not a pass for the other. All qualification floors are the same.
 
@@ -208,6 +208,9 @@ purge. Each page is a committed view, not a multi-page snapshot under concurrent
 membership changes; final exports run over settled populations. The composed
 Turso cell implements it, other backends currently report `Unavailable`.
 Retention discovers row IDs through this API rather than using ingestion results.
+Discovery pages stay at most 1,000 rows; `--purge-batch` independently controls
+retention mutations (default 8,000, maximum 8,192). Reports include observed batch
+counts and sizes, plus lease/request-retention and logical-cycle durations.
 The recovery test exits a child and reconstructs final campaign reporting using
 only the filesystem log.
 
