@@ -235,3 +235,34 @@ regression prevents reintroducing a temporary grouping tree for lifecycle counts
 All 28 focused development tests passed for the index candidate (23 native
 relational, five public campaign/read), as did six Python gate/monitor tests.
 Release validation and uninstrumented measurement remain pending.
+
+
+## Reject the progress index; test cross-queue apply coupling
+
+Clean `ad6fb2d9` passed all 28 focused release tests. Its first complete million-row
+cycle took **201.06 seconds** (slowest campaign), versus 175.61 seconds for
+`e4830172`. Worst progress p95 was **1.715 seconds**, still failing. The run was
+intentionally terminated during cycle two, after the first-cycle rate already
+failed; exit -15 is the operator's SIGTERM, not an application crash. Partial-run
+resource totals cannot be divided by one million to claim per-recipient cost.
+The index experiment is rejected and its index is removed on reopen as well.
+No full three-cycle result or storage-stability claim is made for this candidate.
+
+A new regression demonstrates cross-queue coupling in the apply coordinator:
+an uncovered read for queue B bypasses queue A's bounded Claim/follow-up join,
+even though B's read does not depend on A. The original counter was global to the
+physical store. The candidate uses queue-scoped waiter registrations, removes
+them on cancellation/completion, and preserves same-queue read bypass, the
+500 ms maximum join window, FIFO runnable selection and all coverage checks.
+The regression failed before this change and all 24 coordinator tests passed
+afterward. Opt-in apply tracing now reports join time and envelope counts so the
+batching benefit can be measured. Public campaign validation and uninstrumented
+qualification are still required before claiming an improvement.
+
+[Stopped index run](../helix/04-build/evidence/workflow-capacity/campaign-ad6fb2d9-index-aborted.json.gz),
+[index release tests](../helix/04-build/evidence/workflow-capacity/campaign-ad6fb2d9-release-tests.log.gz),
+[queue-coupling regression before](../helix/04-build/evidence/workflow-capacity/campaign-queue-join-red.log.gz),
+[24 coordinator tests after](../helix/04-build/evidence/workflow-capacity/campaign-queue-join-green.log.gz).
+
+All five public campaign/read tests also passed with queue-scoped waiters and
+the rejected lifecycle index removed. Release validation and capacity are next.

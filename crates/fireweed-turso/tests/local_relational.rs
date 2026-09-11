@@ -2300,35 +2300,3 @@ async fn new_requests_collect_expired_unique_receipts_with_bounded_queue_scope()
         "other queue is untouched"
     );
 }
-
-
-#[tokio::test]
-async fn lifecycle_progress_query_avoids_grouping_sort() {
-    let turso = TursoRelational::in_memory().await.unwrap();
-    let plan = turso
-        .query(
-            "EXPLAIN QUERY PLAN SELECT lifecycle_state,COUNT(*) FROM fireweed_items \
-         INDEXED BY fireweed_items_lifecycle_counts_idx WHERE tenant_id=?1 AND queue_id=?2 \
-         AND superseded=0 GROUP BY lifecycle_state",
-            vec!["tenant".into(), "queue".into()],
-        )
-        .await
-        .unwrap();
-    let details: Vec<_> = plan
-        .iter()
-        .map(|row| match &row.values[3] {
-            turso::Value::Text(value) => value.as_str(),
-            value => panic!("unexpected plan detail: {value:?}"),
-        })
-        .collect();
-    assert!(
-        details
-            .iter()
-            .any(|line| line.contains("fireweed_items_lifecycle_counts_idx")),
-        "{details:?}"
-    );
-    assert!(
-        !details.iter().any(|line| line.contains("TEMP B-TREE")),
-        "{details:?}"
-    );
-}

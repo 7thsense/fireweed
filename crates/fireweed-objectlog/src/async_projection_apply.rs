@@ -77,7 +77,7 @@ where
     next_id: AtomicU64,
     paused: AtomicBool,
     worker_running: AtomicBool,
-    coverage_waiters: AtomicU64,
+    coverage_waiters: std::sync::Mutex<HashMap<QueueKey, u64>>,
     state: Mutex<CoordinatorState>,
     poisoned: std::sync::RwLock<HashMap<QueueKey, String>>,
     changed: Notify,
@@ -191,7 +191,7 @@ where
                 next_id: AtomicU64::new(1),
                 paused: AtomicBool::new(false),
                 worker_running: AtomicBool::new(false),
-                coverage_waiters: AtomicU64::new(0),
+                coverage_waiters: std::sync::Mutex::new(HashMap::new()),
                 state: Mutex::new(CoordinatorState::default()),
                 poisoned: std::sync::RwLock::new(HashMap::new()),
                 changed: Notify::new(),
@@ -557,14 +557,30 @@ where
         }
         // A dependent read needs Claim applied now. Waiting for a follow-up
         // cannot help when that Complete itself needs projection coverage first.
-        struct CoverageWaiter<'a>(&'a AtomicU64);
+        // A neighboring queue's read does not depend on this queue's Claim.
+        // Track cancellation-safe registrations per queue, retaining the bounded
+        // join window and FIFO selection between runnable queues.
+        struct CoverageWaiter<'a>(&'a std::sync::Mutex<HashMap<QueueKey, u64>>, QueueKey);
         impl Drop for CoverageWaiter<'_> {
             fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::AcqRel);
+                let mut waiters = self.0.lock().expect("coverage waiter mutex");
+                let count = waiters
+                    .get_mut(&self.1)
+                    .expect("registered coverage waiter");
+                *count -= 1;
+                if *count == 0 {
+                    waiters.remove(&self.1);
+                }
             }
         }
-        self.inner.coverage_waiters.fetch_add(1, Ordering::AcqRel);
-        let _coverage_waiter = CoverageWaiter(&self.inner.coverage_waiters);
+        *self
+            .inner
+            .coverage_waiters
+            .lock()
+            .expect("coverage waiter mutex")
+            .entry(shard.clone())
+            .or_default() += 1;
+        let _coverage_waiter = CoverageWaiter(&self.inner.coverage_waiters, shard.clone());
         self.inner.changed.notify_waiters();
         let started = Instant::now();
         loop {
@@ -722,9 +738,11 @@ where
         };
 
         if generation_is_claim_without_complete(&generation) {
-            let deadline = Instant::now() + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
+            let joined_at = Instant::now();
+            let before = generation.commands.len();
+            let deadline = joined_at + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
             while generation_is_claim_without_complete(&generation)
-                && inner.coverage_waiters.load(Ordering::Acquire) == 0
+                && !queue_has_coverage_waiter(&inner, &generation.shard)
             {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
@@ -747,6 +765,15 @@ where
                 {
                     generation = again;
                 }
+            }
+            if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
+                eprintln!(
+                    "apply_join us={} before={} after={} queue_waiter={}",
+                    joined_at.elapsed().as_micros(),
+                    before,
+                    generation.commands.len(),
+                    queue_has_coverage_waiter(&inner, &generation.shard)
+                );
             }
         }
 
@@ -869,6 +896,20 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 /// under concurrent writes; an 80 ms window missed nearly every follow-up in the
 /// sustained workload. Coverage waiters bypass this bounded background delay.
 const CLAIM_COMPLETE_JOIN_MS: u64 = 500;
+
+fn queue_has_coverage_waiter<P: AsyncProjectionStore + 'static>(
+    inner: &CoordinatorInner<P>,
+    shard: &QueueKey,
+) -> bool {
+    inner
+        .coverage_waiters
+        .lock()
+        .expect("coverage waiter mutex")
+        .get(shard)
+        .copied()
+        .unwrap_or(0)
+        != 0
+}
 
 fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
     let mut claim = false;
@@ -1577,6 +1618,71 @@ mod tests {
             .await
             .expect("dependent read must bypass the 500 ms background join window");
         assert_eq!(coordinator.apply_live_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn unrelated_queue_coverage_does_not_break_claim_followup_join() {
+        use std::future::Future;
+        use std::task::Poll;
+        let coordinator = coordinator();
+        coordinator.pause();
+        let mut claim = pause_env("claim-with-neighbor");
+        claim.command = QueueCommand::Claim(fireweed_engine::ClaimCommand::new(
+            vec![],
+            fireweed_core::LeaseToken::new("neighbor-token").unwrap(),
+            UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        ));
+        let reservation = coordinator
+            .reserve(shard(), &[claim.clone()])
+            .await
+            .unwrap();
+        coordinator
+            .enqueue_reserved(reservation, vec![pos(1)], vec![claim])
+            .await
+            .unwrap();
+        let other = shard_named("other");
+        let target = pos_on(other.clone(), 1);
+        let mut waiting =
+            Box::pin(coordinator.wait_until_covers(&other, &target, Duration::from_secs(5)));
+        // Poll once to register the uncovered neighbor before the worker resumes.
+        std::future::poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        coordinator.resume();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            coordinator.apply_live_call_count(),
+            0,
+            "another queue's uncovered read must not flush this queue's claim"
+        );
+        let mut complete = pause_env("complete-with-neighbor");
+        complete.command =
+            QueueCommand::Finalize(fireweed_engine::FinalizeCommand { outcomes: vec![] });
+        let reservation = coordinator
+            .reserve(shard(), &[complete.clone()])
+            .await
+            .unwrap();
+        coordinator
+            .enqueue_reserved(reservation, vec![pos(2)], vec![complete])
+            .await
+            .unwrap();
+        coordinator.wait_for_catch_up(&shard()).await.unwrap();
+        assert_eq!(
+            *coordinator.inner.apply_live_command_counts.lock().unwrap(),
+            vec![2]
+        );
+        drop(waiting); // cancellation must release the neighbor's coverage registration
+        assert!(
+            coordinator
+                .inner
+                .coverage_waiters
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
