@@ -729,12 +729,43 @@ async fn apply_turso(
     sequence: u64,
     command: CommandEnvelope,
 ) -> Result<(), fireweed_engine::EngineError> {
-    AsyncProjectionStore::apply_live(
+    let result = AsyncProjectionStore::apply_live(
         turso,
         vec![CommandPosition::new(shard.clone(), 4, sequence)],
         vec![command],
     )
-    .await
+    .await;
+    // Independent full-row oracle checks both successful transitions and
+    // rejected transactions across cohorts, supersession, retries and replay.
+    let rows = turso.query(
+        "SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 GROUP BY lifecycle_state",
+        vec![shard.tenant_id.as_str().into(), shard.queue_id.as_str().into()],
+    ).await.unwrap();
+    let metrics = turso.server_metrics(shard).await.unwrap();
+    let mut expected = [0u64; 4];
+    for row in rows {
+        let Value::Text(state) = &row.values[0] else {
+            panic!("state")
+        };
+        let Value::Integer(count) = row.values[1] else {
+            panic!("count")
+        };
+        let index = ["Pending", "Leased", "Complete", "Failed"]
+            .iter()
+            .position(|s| *s == state.as_str())
+            .unwrap();
+        expected[index] = count as u64;
+    }
+    assert_eq!(
+        [
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ],
+        expected
+    );
+    result
 }
 
 async fn group_summary_count(turso: &TursoRelational, group: &GroupKey) -> i64 {

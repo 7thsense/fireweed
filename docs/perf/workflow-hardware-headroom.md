@@ -83,6 +83,27 @@ campaign targets strictly impossible. Further work targets unnecessary query
 sorting, projection write pressure and coordination waiting. Current primitive
 qualification and repeated campaign passes are still required on a final build.
 
+### Reporting work and the next cost reduction
+
+The `82d3adcb` batch-500 three-cycle run reached only 4,968/sec; the earlier
+10,557/sec screen used instrumentation and one cycle and is not a passing result.
+The sustained baseline and fixed targets above therefore remain unchanged.
+
+At one million resident rows across 64 campaigns, polling each campaign once per
+second can examine roughly one million item rows per second to produce four
+lifecycle counts. At 10k recipients/sec that is about 100 extra reporting row
+visits per recipient while the backlog remains resident, in addition to the
+three required full exports. The backlog shrinks during retention, so this is a
+resident-phase estimate, not an exact run total or a CPU measurement.
+
+The next candidate maintains counts on existing queue metadata. Public reporting
+then reads one queue row. Exact before/after accounting adds bounded primary-key
+row reads to apply generations; fusion can reduce their number, while cohort and
+supersession operations retain a conservative scan fallback. This trades repeated
+backlog scans for work proportional to the ordinary addressed mutations. Its CPU,
+write and sustained-throughput effects still require measurement; the napkin
+budget must include this maintenance rather than treating counters as free.
+
 ## Historical all-due saturation qualification (2026-09-10)
 
 The following measurements apply to the earlier, lighter fixture and retain its

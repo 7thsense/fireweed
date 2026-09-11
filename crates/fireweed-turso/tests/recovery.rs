@@ -37,6 +37,16 @@ async fn reopen_and_genesis_replay_converge_to_the_same_cursor_and_state() {
         .await
         .unwrap();
     assert_state(&reopened, shard.clone(), id, Some(ItemState::Complete)).await;
+    let metrics = reopened.server_metrics(&shard).await.unwrap();
+    assert_eq!(
+        [
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ],
+        [0, 0, 1, 0]
+    );
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(&reopened, shard.clone())
             .await
@@ -58,6 +68,16 @@ async fn reopen_and_genesis_replay_converge_to_the_same_cursor_and_state() {
     .await
     .unwrap();
     assert_state(&replayed, shard.clone(), id, Some(ItemState::Complete)).await;
+    let metrics = replayed.server_metrics(&shard).await.unwrap();
+    assert_eq!(
+        [
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ],
+        [0, 0, 1, 0]
+    );
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(&replayed, shard.clone())
             .await
@@ -78,6 +98,16 @@ async fn reopen_and_genesis_replay_converge_to_the_same_cursor_and_state() {
     .await
     .unwrap();
     assert_state(&replayed, shard.clone(), id, Some(ItemState::Complete)).await;
+    let metrics = replayed.server_metrics(&shard).await.unwrap();
+    assert_eq!(
+        [
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ],
+        [0, 0, 1, 0]
+    );
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(&replayed, shard.clone())
             .await
@@ -137,6 +167,16 @@ async fn local_file_loss_rebuilds_exactly_from_authoritative_history() {
     .await
     .unwrap();
     assert_state(&rebuilt, shard.clone(), id, Some(ItemState::Complete)).await;
+    let metrics = rebuilt.server_metrics(&shard).await.unwrap();
+    assert_eq!(
+        [
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ],
+        [0, 0, 1, 0]
+    );
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(&rebuilt, shard.clone())
             .await
@@ -185,6 +225,16 @@ async fn snapshot_tail_recovery_skips_overlap_and_applies_only_the_contiguous_ta
     .await
     .unwrap();
     assert_state(&reopened, shard.clone(), id, Some(ItemState::Complete)).await;
+    let metrics = reopened.server_metrics(&shard).await.unwrap();
+    assert_eq!(
+        [
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ],
+        [0, 0, 1, 0]
+    );
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(&reopened, shard.clone())
             .await

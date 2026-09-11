@@ -7,6 +7,8 @@
 #[cfg(feature = "local")]
 mod local;
 #[cfg(feature = "local")]
+mod metrics;
+#[cfg(feature = "local")]
 mod projection;
 #[cfg(feature = "local")]
 mod rebuildable_io;

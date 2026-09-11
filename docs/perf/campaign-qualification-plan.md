@@ -555,3 +555,56 @@ real composed lease/version/claim-tail test, and all six public campaign tests
 passed on the corrected implementation in development mode. The candidate is
 ready for release validation and an instrumented join comparison followed by
 uninstrumented sustained qualification.
+
+## FIFO/tail measurements and maintained lifecycle counts
+
+Clean `82d3adcb` passed 27 release coordinator tests, the composed tail/lease
+regression, and six public campaign tests (also rerun under the canonical
+workload feature graph). Its one-cycle instrumented million-row screen reached
+10,556.86 recipients/sec at 1.251 CPU-ms/recipient, two workers/campaign,
+batch 1,000. All 1,980 observed claim-tail lookups reused retained authoritative
+commands. This is **not qualification**: one cycle, diagnostics enabled, progress
+p95 up to 2.127 s. Process output was 10,202 bytes/recipient, versus 10,677 in the
+prior comparable two-worker screen; comparing it with a full three-cycle run
+would confound duration and warm-state behavior.
+
+The subsequent uninstrumented three-cycle run used two workers and batch 500.
+It completed at **4,968.46 recipients/sec**, 603.98 s, 1.516 CPU-ms/recipient,
+7.53 mean charged CPUs, 7.95 GiB peak RSS and 15,530 process-output bytes/recipient.
+Worst campaign walls were 105.57 / 235.73 / 260.42 s. Load maxima rose from 8.62 s
+to 49.07 / 48.53 s; purge maxima were 9.23 / 65.99 / 21.76 s. These phase maxima
+are not additive. Rate, progress, third-cycle due latency and all 32 projection
+size stability gates failed. Smaller batches did not solve sustained performance.
+The best complete run remains 5,663/sec; neither fixed objective is achieved.
+Raw reports, summaries, diagnostic traces and host-wide device traces are archived
+under `campaign-82d3adcb-*`; device traces include startup/tail margins.
+
+The next candidate removes full resident-row scans from public lifecycle metrics.
+Four counters live on the existing `queues` metadata row. They are rebuildable
+projection data, not workflow entities or a new authority. Each projection apply
+transaction captures actual lifecycle counts before and after its addressed item
+changes and applies the delta in that same transaction. This handles fusion,
+replay no-ops, partial historical claims, rejected operations and rollback without
+reimplementing transition rules. Cohort/supersession commands conservatively use
+whole-queue before/after counts; lifecycle-neutral commands skip this work through
+an exhaustive command classification. Column constraints reject negative/noninteger
+counts. An atomic versioned migration backfills existing projections once.
+
+The first implementation exposed a planner trap: despite a target-first CROSS
+JOIN, Turso chose the active-key index using only tenant/queue, scanning the queue
+for each requested ID. The bounded-key regression failed with that exact plan.
+An explicit primary-key index selection makes all three key parts participate;
+the regression now passes. The obsolete slow campaign test process was stopped,
+and correctness tests are rerun with the corrected query. No throughput benefit
+is claimed until clean sustained measurements complete.
+
+Before the index correction, 39 native unit tests and 22 integration tests passed;
+a strengthened independent row-count oracle then passed all 22 lifecycle tests
+and three recovery tests, checking counters after success/rejection and after
+reopen, genesis rebuild and overlapping replay. Four focused counter/migration/
+query-plan tests passed after the correction. Public campaign validation follows.
+
+All six public campaign tests passed with explicit primary-key counting, including
+large storage batches, both enrichment modes, retained reporting, payload Keep
+semantics and log-only recovery (37.66 s in development mode). Release validation
+and clean sustained measurement are next; no rate or stability gate is waived.

@@ -1802,6 +1802,7 @@ async fn apply_owned(
             statement_shape: Some(statement_shape_for_hop),
             phases: rel_phases_for_hop,
         };
+        let metrics_delta = crate::metrics::MetricsDelta::capture(&rel, &positions, &commands)?;
         let applied = fireweed_relational::apply_committed_batch_sql_with_cursor_seeds(
             &rel,
             &queues,
@@ -1813,6 +1814,7 @@ async fn apply_owned(
             &commands,
             &cursor_seeds,
         )?;
+        metrics_delta.apply(&rel)?;
         Ok::<_, EngineError>((
             applied,
             grouped_shards,
@@ -2137,13 +2139,7 @@ pub(crate) async fn server_live_items_on(
     Ok(result)
 }
 
-// Four scalar aggregates avoid sorting the resident backlog on every progress
-// poll. No additional lifecycle index is maintained on the write path.
-const LIFECYCLE_METRICS_SQL: &str = "SELECT COALESCE(SUM(lifecycle_state='Pending'),0),\
-            COALESCE(SUM(lifecycle_state='Leased'),0),\
-            COALESCE(SUM(lifecycle_state='Complete'),0),\
-            COALESCE(SUM(lifecycle_state='Failed'),0) \
-     FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0";
+const LIFECYCLE_METRICS_SQL: &str = crate::metrics::READ_SQL;
 
 pub(crate) async fn server_metrics_on(
     connection: &Connection,
@@ -2158,9 +2154,9 @@ pub(crate) async fn server_metrics_on(
         ],
     )
     .await?;
-    let values = rows
-        .first()
-        .ok_or_else(|| storage("missing lifecycle aggregate"))?;
+    let Some(values) = rows.first() else {
+        return Ok(QueueMetrics::default());
+    };
     let mut metrics = QueueMetrics {
         pending: nonnegative_u64(integer(&values[0])?, "pending count")?,
         leased: nonnegative_u64(integer(&values[1])?, "leased count")?,
@@ -5922,7 +5918,7 @@ mod metrics_query_tests {
     use super::*;
 
     #[tokio::test]
-    async fn lifecycle_counts_do_not_sort_resident_rows() {
+    async fn lifecycle_counts_do_not_read_resident_rows() {
         let store = TursoRelational::in_memory().await.unwrap();
         let rows = store
             .query(
@@ -5936,10 +5932,10 @@ mod metrics_query_tests {
             .map(|row| text(&row.values[3]).unwrap())
             .collect();
         assert!(
-            !details
-                .iter()
-                .any(|line| line.contains("SORTER") || line.contains("TEMP B-TREE")),
-            "four counts must not sort resident rows: {details:?}"
+            !details.iter().any(|line| line.contains("fireweed_items")
+                || line.contains("SORTER")
+                || line.contains("TEMP B-TREE")),
+            "four counts must not read resident rows: {details:?}"
         );
     }
 
@@ -5961,6 +5957,19 @@ mod metrics_query_tests {
             ),
             (0, 0, 0, 0, 0)
         );
+        for (tenant, queue) in [
+            ("tenant", "queue"),
+            ("foreign", "queue"),
+            ("tenant", "foreign"),
+        ] {
+            store
+                .execute(
+                    "INSERT INTO queues(tenant,queue,definition) VALUES(?1,?2,'{}')",
+                    vec![tenant.into(), queue.into()],
+                )
+                .await
+                .unwrap();
+        }
         for (state, count) in [
             ("Pending", 2),
             ("Leased", 3),
@@ -5994,6 +6003,9 @@ mod metrics_query_tests {
                 }
             }
         }
+        // Raw SQL models a populated pre-counter projection; migration must
+        // backfill it exactly, including tenant/queue and supersession filters.
+        store.migrate().await.unwrap();
         let metrics = store.server_metrics(&shard).await.unwrap();
         assert_eq!(
             (
