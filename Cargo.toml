@@ -45,3 +45,9 @@ homepage = "https://github.com/7thsense/fireweed"
 # ADR-011 AC path-dep check (rg for path=.*axon etc.) does not false-positive on the git URL.
 axon-esf = { version = "0.3.2", git = """https://github.com/DocumentDrivenDX/\
 axon""", tag = "v0.3.2" }
+
+[profile.release]
+# Optimize across the facade/adapter/engine boundaries for shipped executables.
+# Keep a portable target CPU and the default unwind/error-checking policies.
+lto = "thin"
+codegen-units = 1

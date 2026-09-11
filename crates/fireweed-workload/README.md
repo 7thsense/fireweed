@@ -37,6 +37,11 @@ controls that process-wide policy. Include allocator selection when reproducing
 capacity results. This changes allocation cost, not log durability or queue API
 semantics.
 
+This workspace's release profile enables thin LTO and one codegen unit for
+portable optimization across crate boundaries. Cargo uses the embedding
+application's workspace profile, so library consumers must select comparable
+release settings in their own workspace when reproducing these measurements.
+
 ```sh
 scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000 --batch 1000 --shards 32 --workers 8 --deadline-seconds 900
 scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 32 --workers 8 --load-workers 4 --recycle --cycles 6 --deadline-seconds 1200

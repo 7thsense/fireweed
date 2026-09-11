@@ -131,3 +131,37 @@ workload release suite: **106 passed, one existing ignored**. Command:
 `cargo test --locked --release -p fireweed-workload -p fireweed-turso --features
 fireweed-turso/local -- --test-threads=1`.
 [Public/adapter validation](../helix/04-build/evidence/workflow-capacity/fireweed-9500-checkpoint-public-tests.log.gz).
+
+## Corrected checkpoint repetitions and remaining rate margin
+
+At `d76cae32`, the first fresh workflow repetition passed every gate at
+**11,789/sec**, with a 9,705/sec slowest cycle and 266.7 MiB sampled WAL peak.
+The second averaged **11,190/sec** and kept WAL to 266.0 MiB, but one cycle
+reached only **9,406/sec**. Both primitive repetitions passed. Thus the observed
+WAL growth is corrected, while repeated full throughput qualification remains
+unmet.
+
+- [Workflow 1](../helix/04-build/evidence/workflow-capacity/fireweed-9500-d76cae32-workflow-1.json.gz)
+- [Workflow 2](../helix/04-build/evidence/workflow-capacity/fireweed-9500-d76cae32-workflow-2.json.gz)
+- [Primitives 1](../helix/04-build/evidence/workflow-capacity/fireweed-9500-d76cae32-primitives-1.json.gz)
+- [Primitives 2](../helix/04-build/evidence/workflow-capacity/fireweed-9500-d76cae32-primitives-2.json.gz)
+
+A three-cycle timing diagnostic found 3.3 commands per durable append and 4,345
+logical row operations per projection batch on average. Most apply wall time
+was in the update stage (570 ms mean per batch), compared with 18 ms in commit.
+These are aggregate concurrent wall-time observations, not a CPU profile. The
+trace is diagnostic only and does not count toward qualification.
+[Batching trace](../helix/04-build/evidence/workflow-capacity/fireweed-9500-checkpoint-batching-trace.json.gz).
+
+Doubling workers per shard from eight to sixteen did not help: the six-cycle run
+averaged 10,395/sec, and cycles 2–5 missed the rate gate, with a minimum of
+8,939/sec. The preset retains eight workers.
+[Sixteen-worker trial](../helix/04-build/evidence/workflow-capacity/fireweed-9500-d76cae32-32-w16-c6-a.json.gz).
+
+The next candidate enables portable thin LTO and one codegen unit in the release
+profile to optimize across facade, adapter, and native engine boundaries. No
+host-specific target CPU, durability, or acceptance setting changes. Cargo's
+[profile documentation](https://doc.rust-lang.org/cargo/reference/profiles.html#lto)
+describes this whole-program optimization and the build-time tradeoff. Its
+performance benefit must be measured. Embedding applications own their root
+workspace's profile; a dependency cannot impose these flags on Snorri.
