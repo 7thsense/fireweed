@@ -91,3 +91,50 @@ due-to-claim maximum ≤60 seconds, at least 0.5 observed progress reads/second
 RSS range ≤10% and projection range ≤5%. First-rate target 10k, stretch 12.5k;
 32 stores, two campaigns/store, four workers/campaign, two loaders/campaign,
 1,000-row loading, 500/200/500 handler maxima, at least one million resident rows.
+
+
+## First measured baseline: target unmet
+
+Clean source `e27754ce`, one million resident recipients, three complete cycles,
+32 physical stores, two campaigns/store, four workers/campaign: **2,999 complete
+recipients/sec** overall (1,000.77 seconds process wall). The application exited
+successfully after independent retained-state checks; qualification rejected it.
+
+| Slowest campaign phase/window | Cycle 1 | Cycle 2 | Cycle 3 |
+|---|---:|---:|---:|
+| Whole cycle seconds | 198.64 | 330.15 | 468.99 |
+| Load seconds | 6.61 | 28.65 | 114.17 |
+| Preparation plus scheduled export seconds | 96.92 | 227.34 | 182.98 |
+| Delivery seconds | 74.37 | 46.52 | 138.28 |
+| Final disposition export seconds | 0.50 | 0.53 | 0.53 |
+| Purge seconds | 15.86 | 27.28 | 33.10 |
+| Progress p95 seconds | 0.970 | 0.257 | 0.136 |
+
+Phase maxima belong to potentially different campaigns and must not be summed.
+Equivalent per-campaign rates fell from 5,034 to 3,029 to 2,132/sec. Some cycle-3
+due-to-claim maxima exceeded the 60-second budget, reaching 65.27 seconds; the
+first gate labels this under its combined independent-outcomes check. Actual
+persisted payloads, terminal states, identities and retries passed verification.
+The gate diagnostic will separate latency from outcome reconciliation.
+
+Sampled WAL peak: 262.33 MiB. Peak RSS: 8.96 GiB. Last-three-cycle RSS passed;
+projection-size stability failed for every shard. Example shard 0 grew from
+65,638,400 to 68,444,160 to 89,333,760 bytes. Process-accounted output was
+57.41 GiB; this is not a device/NAND byte count. Charged CPU was 5,130.85 user +
+891.06 system seconds, **2.007 CPU-ms/recipient**, averaging about six logical
+CPUs across the whole run. At unchanged cost, 10k/sec would require 20.1 CPU-s/s,
+and 12.5k/sec 25.1 CPU-s/s. Both need cost reduction on this host; this measured
+cost is not a fundamental minimum. Low average utilization also leaves a
+scheduling/I/O opportunity that a pure CPU-bound estimate does not capture.
+
+The broader release suite passed **111 tests, one existing ignored** before
+measurement. Six Python qualification/monitor tests passed. Evidence:
+[baseline](../helix/04-build/evidence/workflow-capacity/campaign-e27754ce-baseline.json.gz),
+[release tests](../helix/04-build/evidence/workflow-capacity/campaign-e27754ce-release-tests.log.gz).
+
+Next changes: collect bounded handler results into one bounded public mutation
+per claim, independent of the 200/500 handler limits; reclaim expired unique
+request receipts using their existing expiry semantics. The relational path
+currently replaces expired receipts only when the same request ID returns.
+The campaign's unique cycle IDs exposed retention growth hidden by key reuse.
+No performance improvement is claimed until measured.
