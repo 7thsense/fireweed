@@ -25,7 +25,7 @@ Add `--qualify` to the Python runner to fail unless the targets are met. For
 `primitives`, it requires at least one million resident rows and 10k records/sec
 for insertion and both individually addressed update phases. For `mutable`, it
 requires at least one million completed workflows across at least three recycling
-cycles, deterministic faults, retention, and 5k workflows/sec overall and at every
+cycles, deterministic faults, retention, and 9.5k workflows/sec overall and at every
 shard's fair share in every cycle. Across the last three cycles, RSS must vary by
 at most 10% and each projection's size by at most 5%. Both gates require physical
 sharding and disk-backed storage and reject external I/O overrides. These are

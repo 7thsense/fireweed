@@ -24,7 +24,7 @@ if "--diagnostic-provenance" in args:
 if not args or args == ["--help"]:
     print("Build with cargo build -p fireweed-workload --release, then:\n"
           "scripts/perf/workflow-capacity.py --profile primitives --items 10000 --batch 100 --deadline-seconds 600\n"
-          "Add --qualify to enforce the million-row 10k insert/update or sustained 5k workflow gates.")
+          "Add --qualify to enforce the million-row 10k insert/update or sustained 9.5k workflow gates.")
     raise SystemExit(0)
 
 def git(*args):

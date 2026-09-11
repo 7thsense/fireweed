@@ -31,7 +31,7 @@ def qualify(report):
         count = result.get("items", 0) * cycles
         check("million_complete_workflows", count >= 1_000_000, count, 1_000_000)
         rate = result.get("completed_lifecycles_per_s", 0)
-        check("overall_workflows_per_s", rate >= 5_000, rate, 5_000)
+        check("overall_workflows_per_s", rate >= 9_500, rate, 9_500)
         shards = result.get("shards", [])
         check("complete_cycle_reports", bool(shards) and len(shards) == result.get("physical_shards") and all(len(s.get("cycles", [])) == cycles for s in shards))
         if shards and cycles >= 3 and all(len(s.get("cycles", [])) == cycles for s in shards):
@@ -55,7 +55,7 @@ def qualify(report):
             for index in range(cycles):
                 rows = [s["cycles"][index] for s in shards]
                 equivalent_rate = min(c["items"] / c["wall_s"] for c in rows) * len(shards)
-                check(f"cycle_{index}_slowest_shard_equivalent_rate", equivalent_rate >= 5_000, equivalent_rate, 5_000)
+                check(f"cycle_{index}_slowest_shard_equivalent_rate", equivalent_rate >= 9_500, equivalent_rate, 9_500)
             rss = [max(s["cycles"][i].get("process_rss_kib") or 0 for s in shards) for i in range(cycles - 3, cycles)]
             rss_growth = (max(rss) / min(rss) - 1) if min(rss) > 0 else None
             check("last_three_cycles_rss_stable", rss_growth is not None and rss_growth <= .10, rss_growth, "<=10% range")

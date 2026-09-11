@@ -30,11 +30,14 @@ class QualificationTests(unittest.TestCase):
         report["result"] = {"schema": "workflow-capacity/v4", "cell": "filesystem--turso",
                             "profile": "Mutable", "atomic_original_row_mutation": True,
                             "dispatch": "shared-normal-claim", "faults": True, "includes_purge": True,
-                            "cycles": 3, "items": 400_000, "physical_shards": 2, "completed_lifecycles_per_s": 6000,
+                            "cycles": 3, "items": 400_000, "physical_shards": 2, "completed_lifecycles_per_s": 9500,
                             "shards": [{"cycles": [{"items": 200_000, "wall_s": 30,
                                                       "process_rss_kib": 1000, "projection_bytes": 1000}
                                                      for _ in range(3)]} for _ in range(2)]}
         self.assertTrue(qualify(report)["passed"])
+        below_target = copy.deepcopy(report)
+        below_target["result"]["completed_lifecycles_per_s"] = 9499.99
+        self.assertFalse(qualify(below_target)["passed"])
         with_wal = copy.deepcopy(report)
         with_wal["result"]["schema"] = "workflow-capacity/v5"
         self.assertFalse(qualify(with_wal)["passed"], "v5 requires WAL evidence")
