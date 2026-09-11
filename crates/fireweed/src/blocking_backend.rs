@@ -727,6 +727,12 @@ impl<B: super::LibBackend + 'static> ProjectionRead for BlockingLibBackend<B> {
             move |i| async move { i.claimed_view(&q, &ids).await },
         )
     }
+    fn retained_items(
+        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> impl Future<Output = EngineResult<Vec<RetainedItemView>>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move { i.retained_items(&q, after, limit).await })
+    }
     fn live_items(
         &self,
         shard: &QueueKey,

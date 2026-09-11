@@ -47,10 +47,10 @@ scripts/perf/workflow-capacity.py --qualify --profile primitives --items 1000000
 scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --batch 1000 --purge-batch 8000 --shards 32 --workers 8 --load-workers 4 --recycle --cycles 6 --deadline-seconds 1200
 ```
 
-The repeat-qualified configuration is 16 physical shards with eight workers per
-shard. On the measured host it completed 7.9–8.0k full workflows/sec across two
-three-million-workflow runs; both million-row insert/update runs exceeded 10k/sec.
-See the [review and raw evidence](../../docs/helix/04-build/workflow-capacity-review.md).
+The historical all-due original-row profile qualified at 11.8–12.1k workflows/sec
+with 32 physical shards and eight workers per shard. It does not include the new
+campaign reporting and future-backlog workload. See the
+[review and raw evidence](../../docs/helix/04-build/workflow-capacity-review.md).
 Run the exact qualification pair twice with one command (the output directory
 must not exist):
 
@@ -176,3 +176,41 @@ input, lease/version, opaque state, lifecycle input, and fence boundary. Its
 Fireweed adapter still references the retired SQLite opening API; this work does
 not migrate that adapter. Recycling behavior deferred in Cayce is not asserted
 as implemented here.
+
+## Representative campaign qualification (new baseline pending)
+
+`--profile campaign --recycle --cycles 3 --items 1000000 --batch 1000 --shards 32
+--workers 4 --load-workers 2` loads one million resident rows, with two campaign
+queues per physical store. Workers are per campaign (eight total per store in
+this preset). Enrichment and delivery handler batches are capped at 500;
+scheduling at 200. The load batch is independent and may reach 1,000.
+
+Every row is enriched with candidate times, color and score; scheduling consumes
+those stored candidates. All rows are scheduled in the future before four due
+windows open. Real wall time includes load, preparation, verification, public
+progress reads, delivery, barriers, settlement and discovered retention. Logical
+time jumps add no calendar waiting. Payload padding varies deterministically,
+replacing the old repeated-byte body. Delivery retries are immediate in this
+profile; the test does not simulate external provider latency or delayed retry
+backoff. Queue counts are polled every second; phase boundaries and full retained
+exports independently verify scheduling and final dispositions. The observer
+checks lifecycle totals, not continuously aggregated enrichment-stage counts.
+
+`retained_items` is a bounded public item-ID page, including terminal rows until
+purge. Each page is a committed view, not a multi-page snapshot under concurrent
+membership changes; final exports run over settled populations. The composed
+Turso cell implements it, other backends currently report `Unavailable`.
+Retention discovers row IDs through this API rather than using ingestion results.
+The recovery test exits a child and reconstructs final campaign reporting using
+only the filesystem log.
+
+```sh
+cargo build --locked --release -p fireweed-workload
+python3 scripts/perf/workflow-capacity.py --qualify --profile campaign --recycle --cycles 3 --items 1000000 --batch 1000 --shards 32 --workers 4 --load-workers 2 --deadline-seconds 1800
+```
+
+The first target is 10k complete recipients/sec; `--stretch` enforces 12.5k.
+Both require exact independent dispositions, per-campaign fair-share throughput,
+maximum due-to-claim delay of 60s, progress p95 ≤1s, RSS/projection stability and
+sampled WAL ≤512 MiB/store. Historical schema v4/v5 reports and dirty source no
+longer qualify. See the [plan](../../docs/perf/campaign-qualification-plan.md).

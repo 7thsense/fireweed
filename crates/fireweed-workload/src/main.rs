@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
     let mut root = None;
     let mut primitives = false;
     let mut retention = false;
+    let mut campaign = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -43,6 +44,10 @@ async fn main() -> Result<()> {
             "--root" => root = Some(std::path::PathBuf::from(args.next().ok_or("missing root")?)),
             "--profile" => {
                 config.profile = match args.next().as_deref() {
+                    Some("campaign") => {
+                        campaign = true;
+                        Profile::Mutable
+                    }
                     Some("retention") => {
                         retention = true;
                         Profile::Bulk
@@ -64,7 +69,7 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--payload-bytes N] [--deadline-seconds N] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
@@ -84,7 +89,9 @@ async fn main() -> Result<()> {
             return Err("projection root must be empty; refusing to overwrite data".into());
         }
     }
-    let report = if retention {
+    let report = if campaign {
+        fireweed_workload::campaign::run(config, root).await?
+    } else if retention {
         fireweed_workload::retention::run(config, root).await?
     } else if primitives {
         fireweed_workload::primitives::run(config, root).await?

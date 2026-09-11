@@ -2056,6 +2056,32 @@ pub(crate) async fn server_update_snapshot_on(
     Ok(keys.iter().filter_map(|key| by_key.remove(key)).collect())
 }
 
+pub(crate) async fn server_retained_items_on(
+    connection: &Connection, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+    if !(1..=1000).contains(&limit) { return Err(EngineError::Invalid("retained page size must be 1..1000")); }
+    let rows = query_value_rows(connection,
+        "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.not_before,i.retry_count,\
+         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.metadata \
+         FROM fireweed_items i LEFT JOIN fireweed_item_payloads p \
+         ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id>?3 AND i.superseded=0 \
+         ORDER BY i.item_id LIMIT ?4",
+        vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(),
+             after.map(|id| id.to_string()).unwrap_or_default().into(), (limit as i64).into()]).await?;
+    rows.into_iter().map(|v| Ok(fireweed_engine::RetainedItemView {
+        item_id: ItemId::new(text(&v[0])?).map_err(storage)?,
+        client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
+        item_version: nonnegative_u64(integer(&v[2])?, "item_version")?,
+        lifecycle_state: parse_state(&text(&v[3])?).map_err(storage)?,
+        priority: parse_priority(optional_text(&v[4])?)?,
+        not_before: optional_integer(&v[5])?.map(nanos_ts),
+        attempt_count: nonnegative_u32(integer(&v[6])?, "retry_count")?,
+        payload: optional_blob(&v[7])?.map(Bytes::from),
+        metadata: metadata_from_json(text(&v[8])?)?,
+    })).collect()
+}
+
 pub(crate) async fn server_live_items_on(
     connection: &Connection,
     shard: &QueueKey,

@@ -14,8 +14,9 @@ from workflow_storage_monitor import WalMonitor
 repo = Path(__file__).resolve().parents[2]
 binary = repo / "target/release/fireweed-workload"
 args = sys.argv[1:]
-qualification_requested = "--qualify" in args
-args = [arg for arg in args if arg != "--qualify"]
+campaign_target = 12_500 if "--stretch" in args else 10_000
+qualification_requested = "--qualify" in args or "--stretch" in args
+args = [arg for arg in args if arg not in ("--qualify", "--stretch")]
 diagnostic_provenance = None
 if "--diagnostic-provenance" in args:
     index = args.index("--diagnostic-provenance")
@@ -145,7 +146,7 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         report["diagnostic_provenance"] = diagnostic_provenance
     if qualification_requested:
         from workflow_capacity_gate import qualify
-        report["qualification"] = qualify(report)
+        report["qualification"] = qualify(report, campaign_target=campaign_target)
     print(json.dumps(report, indent=2))
     if data_directory is not None:
         data_directory.cleanup()

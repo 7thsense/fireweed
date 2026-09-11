@@ -425,6 +425,20 @@ pub struct LiveItemView {
     pub fields: BTreeMap<String, Bytes>,
 }
 
+/// A retained original row, including terminal rows until purge. No lease bearer is exposed.
+#[derive(Debug, Clone)]
+pub struct RetainedItemView {
+    pub item_id: ItemId,
+    pub client_item_key: ClientItemKey,
+    pub item_version: u64,
+    pub lifecycle_state: ItemState,
+    pub priority: Option<PriorityValue>,
+    pub not_before: Option<UtcTimestamp>,
+    pub attempt_count: u32,
+    pub payload: Option<Bytes>,
+    pub metadata: Metadata,
+}
+
 /// A view of an in-flight (leased) item (RESP `XPENDING` / library read).
 #[derive(Debug, Clone)]
 pub struct LeaseView {
@@ -568,6 +582,14 @@ pub trait ProjectionRead: Send + Sync {
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send;
+
+    /// Bounded item-ID keyset page of non-superseded retained rows, including terminal rows.
+    /// Each page is a committed read, not a snapshot spanning later calls.
+    fn retained_items(
+        &self, _shard: &QueueKey, _after: Option<ItemId>, _limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<RetainedItemView>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
 
     /// Render live hot-storage items by client key, preserving input order. A missing, terminal, purged,
     /// or superseded item renders as `None`; leased items are still live and render normally.

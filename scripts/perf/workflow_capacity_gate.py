@@ -1,12 +1,19 @@
 """Performance acceptance for the original-row workload and component ladder."""
 
-def qualify(report):
+import math
+import re
+
+
+def qualify(report, campaign_target=10_000):
     result = report.get("result", {})
     checks = []
 
     def check(name, passed, actual=None, required=None):
         checks.append({"name": name, "passed": bool(passed), "actual": actual, "required": required})
 
+    check("clean_source", report.get("dirty") is False)
+    check("source_identity", bool(re.fullmatch(r"[0-9a-f]{40}", report.get("head", ""))))
+    check("binary_identity", bool(re.fullmatch(r"[0-9a-f]{64}", report.get("binary_sha256", ""))))
     check("successful_correctness_run", report.get("exit_code") == 0)
     check("filesystem_log_and_turso", result.get("cell") == "filesystem--turso")
     check("storage_evidence_present", bool(report.get("filesystem")))
@@ -22,8 +29,8 @@ def qualify(report):
         phases = {p["phase"]: p["records_per_s"] for p in result.get("aggregate_phases", [])}
         for name in ("insert", "enrich_by_key", "schedule_by_id"):
             rate = phases.get(name, 0)
-            check(name, rate >= 10_000, rate, 10_000)
-    elif result.get("schema") in ("workflow-capacity/v4", "workflow-capacity/v5", "workflow-capacity/v6"):
+            check(name, isinstance(rate, (int, float)) and math.isfinite(rate) and rate >= 10_000, rate, 10_000)
+    elif result.get("schema") == "workflow-capacity/v6":
         check("original_row_workflow", result.get("profile") == "Mutable" and result.get("atomic_original_row_mutation") is True and result.get("dispatch") == "shared-normal-claim")
         check("faults_and_retention", result.get("faults") is True and result.get("includes_purge") is True)
         cycles = result.get("cycles", 0)
@@ -31,7 +38,7 @@ def qualify(report):
         count = result.get("items", 0) * cycles
         check("million_complete_workflows", count >= 1_000_000, count, 1_000_000)
         rate = result.get("completed_lifecycles_per_s", 0)
-        check("overall_workflows_per_s", rate >= 9_500, rate, 9_500)
+        check("overall_workflows_per_s", isinstance(rate, (int, float)) and math.isfinite(rate) and rate >= 9_500, rate, 9_500)
         shards = result.get("shards", [])
         check("complete_cycle_reports", bool(shards) and len(shards) == result.get("physical_shards") and all(len(s.get("cycles", [])) == cycles for s in shards))
         if shards and cycles >= 3 and all(len(s.get("cycles", [])) == cycles for s in shards):
@@ -50,11 +57,20 @@ def qualify(report):
                     check(f"shard_{index}_wal_within_budget", sampled_peak > 0
                           and all(size > 0 for size in endpoints) and peak <= 512 * 1024 * 1024,
                           peak, "<=512 MiB, sampled and cycle endpoints")
+            for index in range(cycles):
+                rows = [s["cycles"][index] for s in shards]
+                check(f"cycle_{index}_outcomes_reconciled", sum(c.get("items", 0) for c in rows) == result.get("items")
+                      and all(c.get("items", 0) > 0 and c.get("pending") == 0 and c.get("leased") == 0
+                              and c.get("delivered", -1) >= 0 and c.get("failed", -1) >= 0
+                              and c.get("delivered", -1) + c.get("failed", -1) == c.get("items")
+                              and c.get("complete") == c.get("delivered")
+                              and isinstance(c.get("wall_s"), (int, float))
+                              and math.isfinite(c["wall_s"]) and c["wall_s"] > 0 for c in rows))
             # Each shard must sustain its fair share in every cycle, preventing
             # a fast shard or initial burst from hiding starvation or a slowdown.
             for index in range(cycles):
                 rows = [s["cycles"][index] for s in shards]
-                equivalent_rate = min(c["items"] / c["wall_s"] for c in rows) * len(shards)
+                equivalent_rate = min(c["items"] / c["wall_s"] if isinstance(c.get("wall_s"), (int, float)) and math.isfinite(c["wall_s"]) and c["wall_s"] > 0 else 0 for c in rows) * len(shards)
                 check(f"cycle_{index}_slowest_shard_equivalent_rate", equivalent_rate >= 9_500, equivalent_rate, 9_500)
             rss = [max(s["cycles"][i].get("process_rss_kib") or 0 for s in shards) for i in range(cycles - 3, cycles)]
             rss_growth = (max(rss) / min(rss) - 1) if min(rss) > 0 else None
@@ -67,6 +83,66 @@ def qualify(report):
                     wal_sizes = [c.get("projection_wal_bytes") or 0 for c in shard["cycles"][-3:]]
                     wal_growth = (max(wal_sizes) / min(wal_sizes) - 1) if min(wal_sizes) > 0 else None
                     check(f"shard_{index}_projection_wal_stable", wal_growth is not None and wal_growth <= .10, wal_growth, "<=10% range")
+    elif result.get("schema") == "campaign-capacity/v1":
+        check("campaign_target", campaign_target in (10_000, 12_500), campaign_target, "10000 or 12500")
+        check("campaign_shape", result.get("campaigns") == 2 and result.get("scheduled_windows") == 4
+              and result.get("stage_limits") == [500, 200, 500] and result.get("faults") is True
+              and result.get("includes_purge") is True and result.get("progress_interval_ms") == 1000)
+        check("million_resident_campaign_rows", result.get("resident_backlog", 0) >= 1_000_000
+              and result.get("resident_backlog") == result.get("items"))
+        cycles = result.get("cycles", 0)
+        shards = result.get("shards", [])
+        shape = (cycles >= 3 and len(shards) == result.get("physical_shards")
+                 and all(len(s.get("campaigns", [])) == 2 and all(len(c.get("cycles", [])) == cycles
+                         for c in s["campaigns"]) for s in shards))
+        check("complete_campaign_reports", shape)
+        rate = result.get("completed_lifecycles_per_s", 0)
+        check("overall_campaign_recipients_per_s", isinstance(rate, (int, float)) and math.isfinite(rate)
+              and rate >= campaign_target, rate, campaign_target)
+        observation = report.get("projection_wal_observation", {})
+        check("wal_sampling_valid", 0 < observation.get("interval_ms", 0) <= 100
+              and report.get("process_wall_s", 0) > 0
+              and observation.get("samples", 0) >= max(2, report.get("process_wall_s", 0) * 8)
+              and observation.get("errors") == [])
+        if shape:
+            for cycle in range(cycles):
+                rows = [c["cycles"][cycle] for s in shards for c in s["campaigns"]]
+                correct = sum(c.get("items", 0) for c in rows) == result.get("items")
+                equivalents = []
+                for shard_index, shard in enumerate(shards):
+                    for campaign_index, campaign in enumerate(shard["campaigns"]):
+                        c = campaign["cycles"][cycle]
+                        ids = range(shard_index + campaign_index * len(shards), result["items"], 2 * len(shards))
+                        n = len(ids)
+                        failed = sum(i % 31 == 0 for i in ids)
+                        retries = sum(i % 19 == 0 for i in ids)
+                        correct = correct and (c.get("items") == n and c.get("verified") == n and c.get("purged") == n
+                            and c.get("failed") == failed and c.get("delivered") == n - failed
+                            and c.get("retries") == retries and c.get("claims") == 3*n+retries
+                            and c.get("handler_rows") == [n,n,n+retries]
+                            and len(c.get("max_handler_batch", [])) == 3
+                            and all(0 < b <= limit for b,limit in zip(c.get("max_handler_batch", []),[500,200,500]))
+                            and 0 <= c.get("due_to_claim_max_us", float("inf")) <= 60_000_000 and c.get("pending") == 0 and c.get("leased") == 0)
+                        wall = c.get("wall_s", 0)
+                        valid_wall = isinstance(wall, (int,float)) and math.isfinite(wall) and wall > 0
+                        equivalents.append(n/wall*len(rows) if valid_wall else 0)
+                        latency = c.get("progress_p95_s", float("inf"))
+                        check(f"s{shard_index}_c{campaign_index}_cycle{cycle}_progress",
+                              valid_wall and c.get("progress_reads", 0) >= max(1, wall/2)
+                              and math.isfinite(latency) and latency <= 1.0, latency, "p95 <=1s; >=0.5 reads/s")
+                check(f"cycle_{cycle}_independent_outcomes", correct)
+                check(f"cycle_{cycle}_slowest_campaign_equivalent_rate", min(equivalents) >= campaign_target,
+                      min(equivalents), campaign_target)
+            rss = [max(c["cycles"][i].get("process_rss_kib") or 0 for s in shards for c in s["campaigns"])
+                   for i in range(cycles-3,cycles)]
+            check("rss_stable", min(rss)>0 and max(rss)/min(rss)<=1.10)
+            for index, shard in enumerate(shards):
+                endpoints = [c.get("projection_wal_bytes") or 0 for campaign in shard["campaigns"] for c in campaign["cycles"]]
+                peak = observation.get("peak_bytes", {}).get(f"shard-{index}", 0)
+                check(f"shard_{index}_wal_budget", peak>0 and max([peak,*endpoints]) <= 512*1024*1024)
+                sizes = [max(campaign["cycles"][i].get("projection_bytes") or 0 for campaign in shard["campaigns"])
+                         for i in range(cycles-3,cycles)]
+                check(f"shard_{index}_projection_stable", min(sizes)>0 and max(sizes)/min(sizes)<=1.05)
     else:
         check("supported_qualification_profile", False, result.get("schema"))
     return {"passed": all(c["passed"] for c in checks), "checks": checks}

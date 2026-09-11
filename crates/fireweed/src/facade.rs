@@ -171,6 +171,9 @@ trait FireweedDataPlane: Send + Sync {
         queue: &'a QueueKey,
         granularity: DiscoveryGranularity,
     ) -> FacadeFuture<'a, Vec<ActiveScope>>;
+    fn retained_items<'a>(
+        &'a self, queue: &'a QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> FacadeFuture<'a, Vec<RetainedItemView>>;
     fn live_item<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -818,6 +821,11 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     ) -> FacadeFuture<'a, Vec<ActiveScope>> {
         Box::pin(RuntimeCore::discover(self, queue, granularity))
     }
+    fn retained_items<'a>(
+        &'a self, queue: &'a QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> FacadeFuture<'a, Vec<RetainedItemView>> {
+        Box::pin(RuntimeCore::retained_items(self, queue, after, limit))
+    }
     fn live_item<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -1453,6 +1461,12 @@ impl Fireweed {
         granularity: DiscoveryGranularity,
     ) -> EngineResult<Vec<ActiveScope>> {
         self.inner.discover(queue, granularity).await
+    }
+    /// Bounded retained-row page; see the runtime method for consistency semantics.
+    pub async fn retained_items(
+        &self, queue: &QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> EngineResult<Vec<RetainedItemView>> {
+        self.inner.retained_items(queue, after, limit).await
     }
     pub async fn live_item(
         &self,

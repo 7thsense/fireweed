@@ -95,7 +95,7 @@ pub use fireweed_engine::{
     ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse,
     ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
     ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
-    LeaseGuard, LifecyclePatch, LiveItemView, OperationHandle, OperationId, OperatorAsyncAccept,
+    LeaseGuard, LifecyclePatch, LiveItemView, RetainedItemView, OperationHandle, OperationId, OperatorAsyncAccept,
     OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
     OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
     QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetryCountMode, ScheduleUpdate,
@@ -5152,6 +5152,21 @@ impl<B: LibBackend> RuntimeCore<B> {
         granularity: DiscoveryGranularity,
     ) -> EngineResult<Vec<ActiveScope>> {
         self.discover_active_scopes(queue, granularity).await
+    }
+
+    /// Read up to 1,000 retained original rows in ascending item-ID order, strictly
+    /// after `after`. Includes completed/failed rows until purge; excludes superseded
+    /// rows. Call `metrics` first when read-your-acknowledged-writes coverage is needed.
+    /// Pages are independently committed views: concurrent inserts/purges can change
+    /// membership. Use a settled population for a complete export. Unsupported backends
+    /// return `Unavailable`; existing live-only reads keep their semantics.
+    pub async fn retained_items(
+        &self, queue: &QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> EngineResult<Vec<RetainedItemView>> {
+        if !(1..=1000).contains(&limit) {
+            return Err(EngineError::Invalid("retained page size must be 1..1000"));
+        }
+        self.backend.retained_items(queue, after, limit).await
     }
 
     /// Read one live hot-storage item by caller-supplied key. Returns `None` once the item is complete,

@@ -212,7 +212,7 @@ pub use port::{
     ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse, ItemMutationResult,
     ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
     ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
-    LeaseGuard, LeaseView, LifecyclePatch, LiveItemView, LogRead,
+    LeaseGuard, LeaseView, LifecyclePatch, LiveItemView, RetainedItemView, LogRead,
     MAX_ORDERED_INDEPENDENT_PUSH_ITEMS, MaintenanceStopReason, MaintenanceSummary, PendingPage,
     PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushBatchOutcome,
     PushDisposition, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver,

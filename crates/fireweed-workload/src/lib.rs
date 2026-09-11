@@ -1,5 +1,6 @@
 //! Application-shaped workload. Only the public `fireweed` crate is a dependency:
 //! workers discover every stage from the queue, never from a harness work channel.
+pub mod campaign;
 pub mod primitives;
 pub mod retention;
 

@@ -1478,6 +1478,13 @@ where
             .await
     }
 
+    async fn committed_retained_items(
+        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        self.projection.server_retained_items_committed(shard, after, limit).await
+    }
+
     async fn committed_live_items(
         &self,
         shard: &QueueKey,
@@ -2606,6 +2613,11 @@ macro_rules! impl_turso_product_ports {
                     shard.clone(),
                     ids.to_vec(),
                 )
+            }
+            fn retained_items(
+                &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+            ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::RetainedItemView>>> + Send {
+                self.committed_retained_items(shard, after, limit)
             }
             fn live_items(
                 &self,
@@ -3896,6 +3908,13 @@ impl DerivedObjectLogTursoBackend {
         self.projection
             .server_pending_by_ids_committed(shard, ids)
             .await
+    }
+
+    async fn committed_retained_items(
+        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+        let _permit = self.acquire_outcome_read(shard).await?;
+        self.projection.server_retained_items_committed(shard, after, limit).await
     }
 
     async fn committed_live_items(

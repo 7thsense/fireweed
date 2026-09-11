@@ -949,6 +949,15 @@ impl TursoRelational {
         self.server_pending_by_ids_committed(shard, &ids).await
     }
 
+    pub async fn server_retained_items_committed(
+        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move { crate::projection::server_retained_items_on(connection, &shard, after, limit).await })
+        }).await
+    }
+
     pub async fn server_live_items_committed(
         &self,
         shard: &QueueKey,

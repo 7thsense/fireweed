@@ -5,7 +5,7 @@ from workflow_capacity_gate import qualify
 
 class QualificationTests(unittest.TestCase):
     def baseline(self):
-        return {"exit_code": 0, "filesystem": {"filesystems": [{"fstype": "btrfs"}]},
+        return {"dirty": False, "head": "a" * 40, "binary_sha256": "b" * 64, "exit_code": 0, "filesystem": {"filesystems": [{"fstype": "btrfs"}]},
                 "result": {"schema": "primitive-capacity/v1", "cell": "filesystem--turso",
                            "items": 1_000_000, "physical_shards": 8, "aggregate_phases": [
                                {"phase": phase, "records_per_s": 12_000} for phase in
@@ -25,47 +25,82 @@ class QualificationTests(unittest.TestCase):
             report.update(change)
             self.assertFalse(qualify(report)["passed"])
 
-    def test_workflow_average_cannot_hide_slow_cycle_or_memory_growth(self):
+    def workflow(self):
         report = self.baseline()
-        report["result"] = {"schema": "workflow-capacity/v4", "cell": "filesystem--turso",
-                            "profile": "Mutable", "atomic_original_row_mutation": True,
-                            "dispatch": "shared-normal-claim", "faults": True, "includes_purge": True,
-                            "cycles": 3, "items": 400_000, "physical_shards": 2, "completed_lifecycles_per_s": 9500,
-                            "shards": [{"cycles": [{"items": 200_000, "wall_s": 30,
-                                                      "process_rss_kib": 1000, "projection_bytes": 1000}
-                                                     for _ in range(3)]} for _ in range(2)]}
-        self.assertTrue(qualify(report)["passed"])
-        below_target = copy.deepcopy(report)
-        below_target["result"]["completed_lifecycles_per_s"] = 9499.99
-        self.assertFalse(qualify(below_target)["passed"])
-        with_wal = copy.deepcopy(report)
-        with_wal["result"]["schema"] = "workflow-capacity/v5"
-        self.assertFalse(qualify(with_wal)["passed"], "v5 requires WAL evidence")
-        for shard in with_wal["result"]["shards"]:
-            for cycle in shard["cycles"]:
-                cycle["projection_wal_bytes"] = 1000
-        self.assertTrue(qualify(with_wal)["passed"])
-        with_wal["result"]["shards"][0]["cycles"][2]["projection_wal_bytes"] = 2000
-        self.assertFalse(qualify(with_wal)["passed"], "stable DB size must not hide growing WAL")
-        bounded = copy.deepcopy(with_wal)
-        bounded["result"]["schema"] = "workflow-capacity/v6"
-        bounded["process_wall_s"] = 10
-        bounded["projection_wal_observation"] = {"interval_ms": 100, "samples": 100,
+        report["process_wall_s"] = 100
+        report["projection_wal_observation"] = {"interval_ms": 100, "samples": 1000,
             "errors": [], "peak_bytes": {"shard-0": 3000, "shard-1": 3000}}
-        self.assertTrue(qualify(bounded)["passed"], "bounded WAL growth/shrink is legitimate")
-        sparse = copy.deepcopy(bounded)
-        sparse["projection_wal_observation"]["samples"] = 2
-        self.assertFalse(qualify(sparse)["passed"], "sparse sampling cannot establish the footprint")
-        excessive = copy.deepcopy(bounded)
-        excessive["projection_wal_observation"]["peak_bytes"]["shard-0"] = 513 * 1024 * 1024
-        self.assertFalse(qualify(excessive)["passed"], "endpoints cannot hide an excessive sampled peak")
-        del bounded["projection_wal_observation"]["peak_bytes"]["shard-1"]
-        self.assertFalse(qualify(bounded)["passed"], "every shard requires sampling")
-        slow = copy.deepcopy(report)
-        slow["result"]["shards"][0]["cycles"][2]["wall_s"] = 100
-        self.assertFalse(qualify(slow)["passed"])
-        report["result"]["shards"][0]["cycles"][2]["process_rss_kib"] = 1200
-        self.assertFalse(qualify(report)["passed"])
+        report["result"] = {"schema": "workflow-capacity/v6", "cell": "filesystem--turso",
+            "profile": "Mutable", "atomic_original_row_mutation": True,
+            "dispatch": "shared-normal-claim", "faults": True, "includes_purge": True,
+            "cycles": 3, "items": 400_000, "physical_shards": 2, "completed_lifecycles_per_s": 9500,
+            "shards": [{"cycles": [{"items": 200_000, "wall_s": 30, "delivered": 190_000,
+                "failed": 10_000, "complete": 190_000, "pending": 0, "leased": 0,
+                "process_rss_kib": 1000, "projection_bytes": 1000, "projection_wal_bytes": 1000}
+                for _ in range(3)]} for _ in range(2)]}
+        return report
+
+    def test_workflow_rejects_contradictions_and_stale_provenance(self):
+        report = self.workflow()
+        self.assertTrue(qualify(report)["passed"])
+        for key, value in [("dirty", True), ("dirty", None), ("head", ""), ("binary_sha256", "")]:
+            broken = copy.deepcopy(report); broken[key] = value
+            self.assertFalse(qualify(broken)["passed"], key)
+        for key, value in [("pending", 1), ("leased", 1), ("delivered", 0), ("failed", 0),
+                           ("complete", 0), ("items", 1), ("wall_s", 0), ("wall_s", float("nan")),
+                           ("wall_s", 100), ("process_rss_kib", 2000), ("projection_bytes", 2000)]:
+            broken = copy.deepcopy(report); broken["result"]["shards"][0]["cycles"][2][key] = value
+            self.assertFalse(qualify(broken)["passed"], (key, value))
+        for rate in [9499.99, float("inf"), float("nan")]:
+            broken = copy.deepcopy(report); broken["result"]["completed_lifecycles_per_s"] = rate
+            self.assertFalse(qualify(broken)["passed"])
+        for schema in ["workflow-capacity/v4", "workflow-capacity/v5"]:
+            broken = copy.deepcopy(report); broken["result"]["schema"] = schema
+            self.assertFalse(qualify(broken)["passed"], schema)
+
+    def test_workflow_requires_sampled_wal_budget(self):
+        report = self.workflow()
+        for samples in [0, 2]:
+            broken = copy.deepcopy(report); broken["projection_wal_observation"]["samples"] = samples
+            self.assertFalse(qualify(broken)["passed"])
+        for peaks in [{"shard-0": 3000}, {"shard-0": 513 * 1024 * 1024, "shard-1": 3000}]:
+            broken = copy.deepcopy(report); broken["projection_wal_observation"]["peak_bytes"] = peaks
+            self.assertFalse(qualify(broken)["passed"])
+
+
+    def test_campaign_requires_independent_outcomes_residency_and_stretch_rate(self):
+        report = self.baseline()
+        report["process_wall_s"] = 210
+        report["projection_wal_observation"] = {"interval_ms":100,"samples":2100,"errors":[],
+            "peak_bytes":{"shard-0":3000,"shard-1":3000}}
+        shards=[]
+        for shard in range(2):
+            campaigns=[]
+            for campaign in range(2):
+                ids=range(shard+campaign*2,1_000_000,4)
+                n=len(ids); retries=sum(i%19==0 for i in ids); failed=sum(i%31==0 for i in ids)
+                row={"items":n,"verified":n,"purged":n,"failed":failed,"delivered":n-failed,
+                    "pending":0,"leased":0,"retries":retries,"claims":3*n+retries,
+                    "handler_rows":[n,n,n+retries],"max_handler_batch":[500,200,500],
+                    "due_to_claim_max_us":1_000_000,"wall_s":70,"progress_reads":70,"progress_p95_s":0.1,
+                    "process_rss_kib":1000,"projection_bytes":1000,"projection_wal_bytes":2000}
+                campaigns.append({"campaign":campaign,"cycles":[copy.deepcopy(row) for _ in range(3)]})
+            shards.append({"shard":shard,"campaigns":campaigns})
+        report["result"]={"schema":"campaign-capacity/v1","cell":"filesystem--turso","physical_shards":2,
+            "campaigns":2,"cycles":3,"items":1_000_000,"resident_backlog":1_000_000,
+            "scheduled_windows":4,"stage_limits":[500,200,500],"faults":True,"includes_purge":True,
+            "progress_interval_ms":1000,"completed_lifecycles_per_s":11000,"shards":shards}
+        self.assertTrue(qualify(report)["passed"])
+        self.assertFalse(qualify(report,12500)["passed"])
+        report["result"]["completed_lifecycles_per_s"]=13000
+        self.assertTrue(qualify(report,12500)["passed"])
+        for key,value in [("verified",0),("purged",0),("retries",0),("claims",0),("failed",0),
+                          ("progress_reads",0),("progress_p95_s",2.0),("max_handler_batch",[500,500,500]),
+                          ("due_to_claim_max_us",61_000_000)]:
+            broken=copy.deepcopy(report);broken["result"]["shards"][0]["campaigns"][0]["cycles"][0][key]=value
+            self.assertFalse(qualify(broken)["passed"],key)
+        broken=copy.deepcopy(report);broken["result"]["resident_backlog"]=500_000
+        self.assertFalse(qualify(broken)["passed"])
 
 
 if __name__ == "__main__":

@@ -61,3 +61,33 @@ application progress aggregation and a separate expected-results oracle. Actual
 ML/provider network performance and durable campaign archives remain application
 concerns; the test must account for the queue reads and mutations they require.
 No Snorri/Cayce implementation migration is part of this task.
+
+## Initial implementation and validation
+
+The first candidate implements a generic bounded `retained_items` read on the
+composed Turso cell, campaign CLI profile, retained-state oracle, discovered
+purge, future-window barriers, handler limits and live lifecycle-count polling.
+Five campaign/read tests pass, including terminal reporting rebuilt from log
+alone and full-sized handler chunk limits. Six Python qualification/monitor
+tests pass, including negative contradictory-outcome, provenance, residency,
+reporting-latency and stretch-target cases. Reports now require current schema.
+
+The new row-operation math still has approximately 8.105 state-changing logical
+operations per recipient, but also three full public retained-row reads per
+cycle: scheduled-state verification, final-disposition verification, and retention
+discovery. About 3N row reads plus 1 Hz lifecycle metrics per campaign are included
+in elapsed time. This is deliberately more work than the old saturation profile.
+The implementation's throughput has not yet been measured or qualified.
+
+The initial campaign fixture covers load-before-scheduled delivery, with two
+campaigns per store and four future windows. Immediate deterministic retries
+remain; delayed retry backoff, overlap-mode campaign acceptance and continuously
+aggregated enrichment-stage progress are not yet established by this profile.
+These limits must remain visible while completing the broader plan.
+
+Fixed before first capacity measurement: campaign progress query p95 ≤1 second,
+due-to-claim maximum ≤60 seconds, at least 0.5 observed progress reads/second
+(target polling interval 1 second), 512 MiB sampled WAL/store, last-three-cycle
+RSS range ≤10% and projection range ≤5%. First-rate target 10k, stretch 12.5k;
+32 stores, two campaigns/store, four workers/campaign, two loaders/campaign,
+1,000-row loading, 500/200/500 handler maxima, at least one million resident rows.
