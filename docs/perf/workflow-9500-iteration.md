@@ -165,3 +165,18 @@ host-specific target CPU, durability, or acceptance setting changes. Cargo's
 describes this whole-program optimization and the build-time tradeoff. Its
 performance benefit must be measured. Embedding applications own their root
 workspace's profile; a dependency cannot impose these flags on Snorri.
+
+## Portable LTO trial
+
+The first six-cycle trial at `40aebf1d` passed every gate at **12,262/sec**.
+Its slowest-shard equivalent cycle rate was **10,275/sec**, giving more margin
+than the earlier candidates. The sampled WAL peak was 263.4 MiB, peak RSS was
+8.50 GiB, and CPU cost was 1.171 CPU-ms/lifecycle. The initial optimized build
+took 5m 16s. The combined public/adapter release suite passed under these
+compiler settings: **106 passed, one existing ignored**. Fresh repeated
+capacity qualification follows this validation.
+
+[LTO trial](../helix/04-build/evidence/workflow-capacity/fireweed-9500-lto-32-c6-a.json.gz),
+[build log](../helix/04-build/evidence/workflow-capacity/fireweed-9500-lto-build.log.gz).
+
+[LTO public/adapter test log](../helix/04-build/evidence/workflow-capacity/fireweed-9500-lto-public-tests.log.gz).
