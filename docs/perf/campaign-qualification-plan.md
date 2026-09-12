@@ -1056,3 +1056,57 @@ or violate the WAL bound; the full unchanged gates determine acceptance.
 The actual-page-size configuration regression passes for new 4 KiB files,
 existing 2 KiB files and the unchanged standalone policy (0.29 s). Release
 correctness/recovery validation and capacity measurement follow on clean HEAD.
+
+
+## Wider checkpoint window and same-binary runtime control
+
+Clean `f99aa404`, executable
+`e5e061cb4a52d47c0537e827e2dfc67a1777f2827482679caadab1965aa925a5`,
+passed 42 native release tests (2.53 s), free-page history/reuse (0.37 s) and six
+public campaign tests (13.56 s). The 448 MiB candidate completed at 10,337.24/sec.
+A serial control used the same binary and all workload/storage settings, with
+`OBJECT_LOG_FLUSH_RUNTIME_THREADS=1` instead of the default eight per store. All
+75 local object-log tests passed under that setting (1.24 s). The control reached
+**10,850.17/sec**, the new best overall result. Neither run is qualified.
+
+| Measurement | Default runtime | One runtime worker/store |
+|---|---:|---:|
+| Complete recipients/sec | 10,337.24 | 10,850.17 |
+| Process wall s | 290.688 | 276.868 |
+| CPU-ms/recipient | 1.06627 | 1.03862 |
+| Process output bytes/recipient | 11,037.17 | 10,914.00 |
+| Peak RSS GiB | 10.620 | 10.301 |
+| Sampled host writes GiB | 9.3412 | 9.3824 |
+| Sampled device MiB/sec | 33.21 | 35.08 |
+| Maximum cycle walls s | 83.538 / 99.911 / 103.375 | 74.699 / 96.586 / 102.399 |
+| Maximum load s | 6.382 / 24.072 / 26.457 | 6.133 / 22.564 / 28.427 |
+| Maximum preparation s | 36.873 / 34.570 / 36.738 | 31.704 / 33.958 / 38.066 |
+| Maximum delivery s | 29.669 / 26.974 / 32.934 | 26.617 / 28.742 / 28.097 |
+| Maximum purge s | 6.317 / 12.852 / 6.680 | 6.178 / 10.366 / 7.260 |
+| Maximum progress p95 s | 1.784 / 1.426 / 1.300 | 1.950 / 1.257 / 1.435 |
+
+Both passed correctness, due-time, RSS and WAL gates. Both failed the final
+cycle's rate, 32 database stability checks and progress checks (84 default,
+90 control). The runtime control removes 224 configured async workers across
+32 stores while retaining eight in-flight flush slots and the same log durability.
+Its 5.0% rate gain is a single-pair observation, not a repeatable isolated effect.
+All 64 DB/WAL compression properties in each run read back zstd. Runtime-setting
+provenance is archived with the control; the runner now records it directly too.
+Artifacts use `fireweed-campaign-f99aa404-zstd-*` and `fireweed-campaign-f99aa404-rt1-*`.
+
+The preceding 250 MiB run helps interpret DB stability: all main DB files were
+4 KiB after cycle zero, while current data remained in WAL. After checkpointing,
+main files ranged 59.81–60.40 MB in cycle one and 59.96–60.57 MB in cycle two.
+The first size jump is initial file materialization, not evidence of unbounded
+growth. Keep the existing last-three-cycle stability gate and extend a promising
+candidate to six cycles to establish the plateau; all cycle rates still count.
+
+The next measurement adds phase attribution to the existing public progress
+observer. It records start/end phase (including transitions), latency and API
+attempt counts, while preserving the observer cadence, retry behavior and global
+p95 gate. This distinguishes load, preparation, delivery, final verification and
+retention stalls without implementation hooks or weaker read consistency. All
+six public campaign tests pass (36.71 s), including accounting for every observed
+read exactly once in the phase report. This reporting-only candidate should first
+run a one-cycle million-resident diagnostic to localize the failures; that short
+run cannot qualify either target.

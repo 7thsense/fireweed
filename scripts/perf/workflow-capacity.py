@@ -117,6 +117,9 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             "FIREWEED_SQL_TRACE", "FIREWEED_APPLY_TRACE", "FIREWEED_WORKLOAD_TIMING",
             "FIREWEED_LOG_TRACE", "FIREWEED_WORKLOAD_DEBUG", "LD_PRELOAD",
         ) if key in os.environ},
+        "runtime_configuration": {
+            "OBJECT_LOG_FLUSH_RUNTIME_THREADS": os.environ.get("OBJECT_LOG_FLUSH_RUNTIME_THREADS")
+        },
         "filesystem": mount,
         "storage": storage_usage(data_root),
         "projection_wal_observation": wal_observation,

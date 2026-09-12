@@ -1,13 +1,41 @@
 //! Campaign-shaped acceptance through the public API. No projection or log internals.
 use crate::*;
 use serde_json::{Value, json};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 const WINDOWS: usize = 4;
 const CAMPAIGNS: usize = 2;
 const ENRICH_LIMIT: usize = 500;
 const SCHEDULE_LIMIT: usize = 200;
 const DELIVERY_LIMIT: usize = 500;
+
+const PROGRESS_PHASES: [&str; 5] = ["load", "prepare", "delivery", "verify", "purge"];
+
+fn progress_by_phase(samples: Vec<(usize, usize, f64, usize)>) -> Value {
+    let mut phases = std::collections::BTreeMap::<String, Vec<(f64, usize)>>::new();
+    for (from, to, latency, attempts) in samples {
+        let label = if from == to {
+            PROGRESS_PHASES[from].to_string()
+        } else {
+            format!("{}->{}", PROGRESS_PHASES[from], PROGRESS_PHASES[to])
+        };
+        phases.entry(label).or_default().push((latency, attempts));
+    }
+    let mut report = serde_json::Map::new();
+    for (phase, mut reads) in phases {
+        reads.sort_by(|a, b| a.0.total_cmp(&b.0));
+        report.insert(
+            phase,
+            json!({
+                "reads": reads.len(), "attempts": reads.iter().map(|r| r.1).sum::<usize>(),
+                "max_attempts": reads.iter().map(|r| r.1).max().unwrap(),
+                "total_s": reads.iter().map(|r| r.0).sum::<f64>(),
+                "p95_s": reads[(reads.len()-1)*95/100].0, "max_s": reads.last().unwrap().0,
+            }),
+        );
+    }
+    Value::Object(report)
+}
 
 fn key(id: usize) -> ClientItemKey {
     ClientItemKey::new(format!("recipient-{id:012}")).unwrap()
@@ -447,15 +475,22 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                         let cycle_start = Instant::now();
                         let counts = Counts::default();
                         let stop = AtomicBool::new(false);
+                        let progress_phase = AtomicUsize::new(0);
                         let observe = async {
                             let mut latencies = Vec::new();
+                            let mut samples = Vec::new();
                             while !stop.load(Ordering::SeqCst) {
-                                let t = Instant::now(); let m = retry(deadline, || fw.metrics(&q)).await?;
+                                let from = progress_phase.load(Ordering::Relaxed);
+                                let mut attempts = 0;
+                                let t = Instant::now();
+                                let m = retry(deadline, || { attempts += 1; fw.metrics(&q) }).await?;
+                                let elapsed = t.elapsed().as_secs_f64();
+                                samples.push((from, progress_phase.load(Ordering::Relaxed), elapsed, attempts));
                                 if m.pending + m.leased + m.complete + m.failed > ids.len() as u64 { return Err("progress exceeds list size".into()); }
-                                latencies.push(t.elapsed().as_secs_f64());
+                                latencies.push(elapsed);
                                 tokio::time::sleep(Duration::from_millis(1000)).await;
                             }
-                            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(latencies)
+                            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((latencies, samples))
                         };
                         let execute = async {
                             let phase = Instant::now();
@@ -476,6 +511,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             if m.pending != ids.len() as u64 { return Err("resident load mismatch".into()); }
                             barrier.wait().await; // entire list is resident before any preparation starts
                             let phase = Instant::now();
+                            progress_phase.store(1, Ordering::Relaxed);
                             workers(&fw,&q,&cfg,&counts,campaign,cycle,ids.len(),true,base,base-60,deadline,Instant::now()).await?;
                             retry(deadline, || fw.metrics(&q)).await?;
                             verify_rows(&fw,&q,&ids,campaign,base,false,&cfg,deadline).await?;
@@ -483,6 +519,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             let prepare_s = phase.elapsed().as_secs_f64();
                             barrier.wait().await; // million scheduled rows, not cumulative completions
                             let phase = Instant::now();
+                            progress_phase.store(2, Ordering::Relaxed);
                             for window in 0..WINDOWS {
                                 if campaign == 0 { clock.set((base + window as i64 * 60) as u64); }
                                 barrier.wait().await;
@@ -495,12 +532,14 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             }
                             let delivery_s = phase.elapsed().as_secs_f64();
                             let phase = Instant::now();
+                            progress_phase.store(3, Ordering::Relaxed);
                             let (verified, failed) = verify_rows(&fw,&q,&ids,campaign,base,true,&cfg,deadline).await?;
                             let verify_s = phase.elapsed().as_secs_f64();
                             barrier.wait().await;
                             if campaign == 0 { clock.set((base + 600) as u64); }
                             barrier.wait().await;
                             let phase = Instant::now();
+                            progress_phase.store(4, Ordering::Relaxed);
                             // Retention discovers stored identities; no producer ID list drives purge.
                             let mut cursor = None; let mut purged = 0;
                             let purge_batch = cfg.purge_batch.unwrap_or(8000);
@@ -534,10 +573,11 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                                 "process_rss_kib":process_rss_kib(),"projection_bytes":std::fs::metadata(projection_root.join("projection.db")).ok().map(|s|s.len()),
                                 "projection_wal_bytes":std::fs::metadata(projection_root.join("projection.db-wal")).ok().map(|s|s.len())}))
                         };
-                        let (mut report, mut latencies) = tokio::try_join!(execute,observe)?;
+                        let (mut report, (mut latencies, samples)) = tokio::try_join!(execute,observe)?;
                         latencies.sort_by(f64::total_cmp);
                         report["progress_reads"] = json!(latencies.len());
                         report["progress_p95_s"] = json!(latencies[(latencies.len()-1)*95/100]);
+                        report["progress_by_phase"] = progress_by_phase(samples);
                         eprintln!("campaign_cycle_complete shard={shard} campaign={campaign} {report}");
                         cycles.push(report);
                     }

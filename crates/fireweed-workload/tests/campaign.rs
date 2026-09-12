@@ -119,7 +119,28 @@ async fn campaign_windows_reporting_and_discovered_retention() {
                         if campaign_metadata_only { 0 } else { 2 * n }
                     );
                     assert!(cycle["initial_payload_bytes"].as_u64().unwrap() >= n * 896);
-                    assert!(cycle["progress_reads"].as_u64().unwrap() > 0);
+                    let progress_reads = cycle["progress_reads"].as_u64().unwrap();
+                    assert!(progress_reads > 0);
+                    let phases = cycle["progress_by_phase"].as_object().unwrap();
+                    assert_eq!(
+                        phases
+                            .values()
+                            .map(|v| v["reads"].as_u64().unwrap())
+                            .sum::<u64>(),
+                        progress_reads
+                    );
+                    for (phase, values) in phases {
+                        assert!(phase.split("->").all(|p| {
+                            ["load", "prepare", "delivery", "verify", "purge"].contains(&p)
+                        }));
+                        assert!(
+                            values["attempts"].as_u64().unwrap()
+                                >= values["reads"].as_u64().unwrap()
+                        );
+                        assert!(
+                            values["max_s"].as_f64().unwrap() >= values["p95_s"].as_f64().unwrap()
+                        );
+                    }
                     verified += n;
                 }
             }
