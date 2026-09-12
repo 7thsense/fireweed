@@ -1011,3 +1011,48 @@ object-log tests, six public campaign tests (37.96 s) and four recovery tests
 traverses the value and propagates serialization errors. This removes temporary
 output and metadata trees, not validation or debt accounting. Release validation
 and a fresh full-capacity measurement are required before claiming a speedup.
+
+
+## Copy reduction: overall 10k crossed, qualification still fails
+
+Clean `3d2cb57e`, executable
+`9e07a58c4e90a851d2132f5785ae4188cd6217645075a3058cde0df70bb802e4`,
+passed 42 native release unit tests (2.77 s), free-page history/reuse (0.37 s)
+and six public campaign tests (14.58 s). The unchanged three-cycle million-resident
+explicit-zstd campaign completed at **10,109.38 recipients/sec** in 297.045 s.
+This is the first overall 10k pass for the representative campaign, **not a
+qualified target achievement**. Late-cycle rate, 65 progress and 32 database
+stability checks still fail. Correctness, due-time, RSS and WAL checks pass.
+
+| Measurement | Value |
+|---|---:|
+| Maximum cycle wall, seconds | 79.018 / 103.996 / 110.746 |
+| Maximum load, seconds | 9.978 / 30.266 / 30.404 |
+| Maximum preparation, seconds | 30.287 / 38.384 / 42.802 |
+| Maximum delivery, seconds | 30.628 / 27.932 / 28.985 |
+| Maximum purge, seconds | 7.208 / 6.843 / 8.105 |
+| Maximum progress p95, seconds | 1.457 / 1.136 / 1.440 |
+| CPU-ms/recipient | 1.04485 |
+| Process output bytes/recipient | 11,607.58 |
+| Peak RSS, GiB | 8.946 |
+| Sampled host writes, GiB | 10.5129 |
+| Sampled device MiB/sec / busy | 36.527 / 82.74% |
+
+CPU cost fell 6.1% from the preceding candidate and full-run throughput rose 8.5%
+in this pair. Device bandwidth also rose, so the rate gain is not an isolated CPU
+coefficient. All 64 DB/WAL files retained explicit zstd. The log remains the sole
+durability source and its bytes remain approximately 1,823.51 per recipient.
+Artifacts use the `fireweed-campaign-3d2cb57e-zstd-*` prefix.
+
+Next, retry the 448 MiB automatic checkpoint window on this corrected, explicitly
+compressed configuration, retaining the 512 MiB/store WAL gate. The previous
+448 MiB attempt was confounded by different free-page/compression behavior and
+failed before full measurement. This candidate changes only the byte threshold:
+114,688 frames at 4 KiB, 229,376 at 2 KiB. It retains NORMAL accounting, the
+log-backed sync adapter, and the standalone 1,000-frame policy. Coalescing may
+reduce intermediate main-database writes, but may also lengthen checkpoint pauses
+or violate the WAL bound; the full unchanged gates determine acceptance.
+
+The actual-page-size configuration regression passes for new 4 KiB files,
+existing 2 KiB files and the unchanged standalone policy (0.29 s). Release
+correctness/recovery validation and capacity measurement follow on clean HEAD.

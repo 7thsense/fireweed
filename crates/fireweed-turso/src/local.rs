@@ -3103,7 +3103,7 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
             "invalid projection page size {page_size}"
         )));
     }
-    Ok(64_000 * 4096 / page_size)
+    Ok(448 * 1024 * 1024 / page_size)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3531,7 +3531,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            64_000
+            114_688
         );
         let path = root.path().join("existing.db");
         {
@@ -3555,7 +3555,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            128_000
+            229_376
         );
         let standalone = TursoRelational::in_memory().await.unwrap();
         assert_eq!(

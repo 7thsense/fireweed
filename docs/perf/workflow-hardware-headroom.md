@@ -9,13 +9,13 @@ final disposition, and discovers retained rows for purge through the public API.
 There are two campaigns per physical store. Metadata enrichment retains varied
 input bodies; a separate payload-rewrite stress variant remains tested.
 
-The best complete three-cycle measurement is **9,564.67 recipients/sec** on
-clean `18e9aa33`, with explicit zstd on its private projection directory and
+The best complete three-cycle measurement is **10,109.38 recipients/sec** on
+clean `3d2cb57e`, with explicit zstd on its private projection directory and
 clearing obsolete bytes in already-dirty free pages. Correctness, due times,
-RSS and sampled WAL passed. Overall/late-cycle rates, 63 progress checks and
+RSS and sampled WAL passed. Late-cycle rates, 65 progress checks and
 32 projection-size stability checks failed. The objectives remain **10,000
 complete recipients/sec**, then **12,500/sec** (+25%), with repeated qualification
-and 10k primitive floors. No campaign candidate is qualified.
+and 10k primitive floors. Overall throughput now clears 10k, but no campaign candidate is qualified.
 See the [plan and full evidence](campaign-qualification-plan.md).
 
 | Complete campaign measurement | Value |
@@ -25,21 +25,21 @@ See the [plan and full evidence](campaign-qualification-plan.md).
 | Workers / loaders per campaign | 2 / 2 |
 | Storage batch / purge batch | 1,000 / 8,000 |
 | Enrichment / scheduling / delivery handler limits | 500 / 200 / 500 |
-| Process wall | 314.012 s |
-| Average complete recipients/sec | 9,564.67 |
-| Worst campaign wall, cycles 0 / 1 / 2 | 83.67 / 109.66 / 116.84 s |
-| CPU time/recipient | 1.14346 ms |
-| Average charged logical CPU occupancy | 10.924 |
-| Peak RSS | 10.486 GiB |
-| Process-accounted output/recipient | 12,574.92 bytes |
+| Process wall | 297.045 s |
+| Average complete recipients/sec | 10,109.38 |
+| Worst campaign wall, cycles 0 / 1 / 2 | 79.02 / 104.00 / 110.75 s |
+| CPU time/recipient | 1.04485 ms |
+| Average charged logical CPU occupancy | 10.552 |
+| Peak RSS | 8.946 GiB |
+| Process-accounted output/recipient | 11,607.58 bytes |
 | Logical retained log bytes/recipient | 1,823.51 bytes |
 
-Sampled host writes were 10.723 GiB, approximately **3,838 bytes/recipient**.
-At that observed cost, 10k needs **36.6 MiB/sec** and 12.5k needs **45.8 MiB/sec**.
-The run delivered 35.25 MiB/sec; the private sequential reference measured
-38.23 MiB/sec. That reference would support roughly 10.4k recipients/sec at this
-byte cost. Reaching 12.5k at the reference bandwidth needs about **16.5% fewer
-physical bytes/recipient**, or about **20% more bandwidth** at unchanged cost.
+Sampled host writes were 10.513 GiB, approximately **3,763 bytes/recipient**.
+At that observed cost, 10k needs **35.9 MiB/sec** and 12.5k needs **44.9 MiB/sec**.
+The run delivered 36.53 MiB/sec; the private sequential reference measured
+38.23 MiB/sec. That reference supports roughly 10.65k recipients/sec at this
+byte cost. Reaching 12.5k at the reference bandwidth needs about **15% fewer
+physical bytes/recipient**, or about **17% more bandwidth** at unchanged cost.
 These are host/filesystem measurements, not NAND write amplification or a proven
 hardware ceiling. Samples omit startup/tail and include other host traffic.
 
@@ -52,12 +52,13 @@ Fireweed does not set the property automatically. See the
 A 64-store control with the same total workers was slower and stopped after two
 cycles; adding shards alone has not resolved the remaining waits.
 
-The subsequent cross-queue flush candidate `e1ee74b2` completed at 9,313.74/sec,
+The preceding cross-queue flush candidate `e1ee74b2` completed at 9,313.74/sec,
 with 1.11226 CPU-ms/recipient and approximately 3,682 sampled host bytes/recipient.
 Its observed cost implies 11.12 / 13.90 CPU-seconds/sec and 35.1 / 43.9 MiB/sec
 at 10k / 12.5k. These lower costs did not translate into faster completion:
 delivered bandwidth was 32.92 MiB/sec and progress latency still failed. The
-9,564.67 result remains the best throughput; neither run is qualified.
+copying reduction subsequently raised the best result to 10,109.38/sec; none of
+these runs is qualified.
 
 ### Napkin math aligned with this workload
 
@@ -80,14 +81,14 @@ Actual initial bodies average **934.89 bytes**, despite the nominal 1 KiB fixtur
 setting. The metadata variant writes the body once. Its retained log averages
 **1,824 bytes/recipient**, including encoding and commands: about **17.4 / 21.7
 MiB/s** at the 10k / 12.5k targets. Process-accounted output implies approximately
-**119.9 / 149.9 MiB/s** at current amplification. Neither measure is physical NAND
+**110.7 / 138.4 MiB/s** at current amplification. Neither measure is physical NAND
 traffic. The payload-rewrite variant has a different, larger byte budget.
 
-At **1.14346 CPU-ms/recipient**, 10k needs **11.43 CPU-s/s**, and 12.5k needs
-**14.29 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
+At **1.04485 CPU-ms/recipient**, 10k needs **10.45 CPU-s/s**, and 12.5k needs
+**13.06 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
 accounting model, but with very little margin. This host has eight physical cores;
 SMT sharing, frequency, cache behavior and waiting prevent treating that arithmetic
-as guaranteed capacity. Compared with the observed 10.924 average occupancy,
+as guaranteed capacity. Compared with the observed 10.552 average occupancy,
 removing waiting remains essential. Further CPU reduction also creates margin.
 These figures do not establish a fundamental hardware ceiling or impossibility.
 
