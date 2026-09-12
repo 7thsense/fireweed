@@ -1453,3 +1453,28 @@ non-builtin modules; all eight mocked/helper-invocation tests pass. Its updated
 reviewed source and hash are in the maintenance document. The requested host
 approval is still pending. The component milestone is demonstrated with varied
 bodies, but the 10k and 12.5k complete-campaign objectives remain unmet.
+
+## Follow-up: unchanged-index shortcut review
+
+Source review at `67cc79a4` rejected a proposed shortcut before implementation:
+skipping the pending-index rewrite for a fused claim plus first enrichment.
+Although this stage preserves FIFO priority and `not_before=1`, returning the
+claimed row to Pending changes `eligible_since`. In cycle zero, ingestion stores
+1 and the mutation stores `max(not_before, evaluated_at)=940`. The covering
+pending index includes `eligible_since`, so its old and new keys differ.
+
+The relevant paths are `insert_item_specs` in relational `apply.rs`, mutation
+planning in projection `lib.rs`, and
+`fireweed_items_pending_eligible_order_idx` in relational `schema.rs`. Turso's
+`translate/update.rs::collect_indexes_to_update` selects indexes from assigned
+columns and partial-predicate dependencies; `translate/emitter/update.rs`
+evaluates old/new predicate membership and deletes/inserts the applicable keys.
+There is no general equal-key elimination there, but that observation alone
+does not establish redundant index I/O for this campaign stage. The next
+scheduling stage also changes priority and eligibility. Omitting these updates
+would change persisted semantics; no such optimization was made and no speedup
+is attributed to this review.
+
+No benchmark or host mutation ran during this follow-up. The prepared identical-
+binary storage control remains pending the previously requested root-device
+maintenance approval; elapsed time or automatic goal continuation is not consent.
