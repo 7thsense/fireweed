@@ -27,6 +27,10 @@ async fn main() -> Result<()> {
             "--purge-batch" => {
                 config.purge_batch = Some(args.next().ok_or("missing purge batch")?.parse()?)
             }
+            "--apply-debt-bytes" => {
+                config.apply_debt_bytes =
+                    Some(args.next().ok_or("missing apply debt bytes")?.parse()?)
+            }
             "--workers" => config.workers = args.next().ok_or("missing workers")?.parse()?,
             "--payload-bytes" => {
                 config.payload_bytes = args.next().ok_or("missing payload bytes")?.parse()?
@@ -70,7 +74,7 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--payload-bytes N] [--deadline-seconds N] [--campaign-metadata] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--apply-debt-bytes N (campaign)] [--payload-bytes N] [--deadline-seconds N] [--campaign-metadata] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
@@ -79,6 +83,9 @@ async fn main() -> Result<()> {
     }
     if config.campaign_metadata_only && !campaign {
         return Err("--campaign-metadata requires --profile campaign".into());
+    }
+    if config.apply_debt_bytes.is_some() && !campaign {
+        return Err("--apply-debt-bytes requires --profile campaign".into());
     }
     let temporary = tempfile::tempdir()?;
     let root = root.as_deref().unwrap_or(temporary.path());

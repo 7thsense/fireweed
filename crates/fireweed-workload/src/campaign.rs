@@ -436,6 +436,7 @@ pub async fn run(cfg: Config, root: &Path) -> Result<Value> {
         || (!cfg.recycle && cfg.cycles != 1)
         || !(1..=1000).contains(&cfg.batch)
         || cfg.load_workers == 0
+        || cfg.apply_debt_bytes == Some(0)
         || !(1..=8192).contains(&cfg.purge_batch.unwrap_or(8000))
     {
         return Err(
@@ -459,7 +460,9 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
         shards.spawn(async move {
             let clock = TestClock::at(100);
             let projection_root = cfg.projection_root.as_ref().map(|p| p.join(format!("shard-{shard}"))).unwrap_or(root.clone());
-            let fw = Arc::new(open_store_with_projection_root(&root, false, clock.clone(), &projection_root)?);
+            let mut policy = AsyncProjectionSpec::default();
+            if let Some(bytes) = cfg.apply_debt_bytes { policy.apply_debt_max_bytes = bytes; }
+            let fw = Arc::new(open_store_with_async_policy(&root, false, clock.clone(), &projection_root, policy)?);
             let campaign_results = futures::future::try_join_all((0..CAMPAIGNS).map(|campaign| {
                 let fw = fw.clone(); let clock = clock.clone(); let cfg = cfg.clone(); let barrier = barrier.clone(); let projection_root = projection_root.clone();
                 async move {
@@ -596,7 +599,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
         json!({"schema":"campaign-capacity/v3","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
         "physical_shards":cfg.shards,"workers_per_campaign":cfg.workers,"load_workers_per_campaign":cfg.load_workers,"campaigns":CAMPAIGNS,"batch":cfg.batch,"stage_limits":[500,200,500],"faults":cfg.faults,"includes_purge":cfg.recycle,
         "purge_batch":cfg.purge_batch.unwrap_or(8000),"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,
-        "payload_bytes":cfg.payload_bytes,"scheduled_windows":WINDOWS,"resident_backlog":cfg.items,"progress_interval_ms":1000,
+        "payload_bytes":cfg.payload_bytes,"scheduled_windows":WINDOWS,"resident_backlog":cfg.items,"progress_interval_ms":1000,"apply_debt_max_bytes":cfg.apply_debt_bytes.unwrap_or(AsyncProjectionSpec::default().apply_debt_max_bytes),
         "completed_lifecycles_per_s":(cfg.items*cfg.cycles) as f64/started.elapsed().as_secs_f64(),"settled_wall_s":started.elapsed().as_secs_f64(),"shards":reports}),
     )
 }

@@ -5,6 +5,13 @@ campaign qualification. Historical measurements remain valid for their declared
 workload and source. The source-preview v0.31.27 is committed locally; publication
 was blocked by GitHub credential scope.
 
+Current status (2026-09-12): best complete three-cycle result **10,850.17/sec**;
+neither target is qualified. The remaining failures are the last-cycle rate,
+progress latency and initial DB-file stability. Phase diagnostics identify the
+largest progress stalls during loading. The next experiment uses the existing
+async-debt policy to bound ingestion backlog, retaining 1,000-row storage batches.
+See the [current resource math](workflow-hardware-headroom.md) and the evidence below.
+
 ## Fixed objectives and units
 
 First qualify **10,000 completed campaign recipients/sec**, then **12,500/sec**
@@ -1110,3 +1117,56 @@ six public campaign tests pass (36.71 s), including accounting for every observe
 read exactly once in the phase report. This reporting-only candidate should first
 run a one-cycle million-resident diagnostic to localize the failures; that short
 run cannot qualify either target.
+
+
+## Phase diagnostics and bounded async-debt experiment
+
+Clean `3f297574`, executable
+`7a87884c4d7616b7e7d0ba4ccc769bbe3eb8684386bb52b00d42bf4634ca1679`,
+passed 42 native release tests (2.73 s), free-page history/reuse (0.38 s) and six
+public campaign tests (13.64 s). Two serial **one-cycle diagnostics** used one
+million resident recipients, explicit zstd, the 448 MiB checkpoint window and
+one log runtime worker/store. These short runs cannot qualify either target.
+
+| Diagnostic | Batch 1,000 | Batch 500 |
+|---|---:|---:|
+| Complete recipients/sec, one cycle only | 12,528.78 | 10,309.54 |
+| Process wall s | 80.104 | 97.241 |
+| Maximum campaign wall s | 78.456 | 95.710 |
+| CPU-ms/recipient | 1.00862 | 0.97407 |
+| Maximum preparation s | 34.289 | 48.300 |
+| Maximum global progress p95 s | 2.371 | 0.628 |
+| Mean load progress latency s | 1.676 | 0.128 |
+| Mean preparation progress latency s | 0.291 | 0.073 |
+| Mean delivery progress latency s | 0.158 | 0.070 |
+| Mean purge progress latency s | 0.570 | 0.531 |
+
+Batch 1,000 loading reads reached 8.025 seconds. Only four extra API attempts
+occurred among 234 loading reads; preparation and delivery reads never retried.
+Final verification progress reads were below a millisecond in that run. This
+points to projection coverage lag, rather than expensive metrics SQL or a retry
+storm. Batch 500 passed every campaign's existing progress check in its one cycle,
+but lost 17.7% throughput and substantially slowed preparation. It is not yet a
+sustained candidate. Phase summaries and all raw evidence use the
+`fireweed-campaign-3f297574-phase-b1000-*` and `...-b500-*` prefixes.
+
+The workload had used the generic `AsyncProjectionSpec::default()`: up to
+512 MiB unapplied encoded bytes per queue, 100,000 unapplied commands, queue depth
+1,024 and a 60-second oldest-unapplied admission threshold. Those are resource
+bounds, not a one-second projection visibility guarantee. Large accepted ingestion
+bursts can consequently leave linearizable progress reads waiting for a long tail.
+
+The CLI now exposes `--apply-debt-bytes` for campaign runs and records the chosen
+value. It forwards to the existing public async policy; library defaults and read
+consistency remain unchanged. The next diagnostic tests **2 MiB** at batch 1,000,
+with all work and other limits unchanged. The bound must fit individual encoded
+commands; this experiment is for the declared approximately 1 KiB record fixture,
+not an arbitrary large-payload recommendation. Before-position backpressure uses
+the existing public retry path and remains inside measured wall time.
+
+Six public campaign tests passed with a 2 MiB override (36.41 s). The existing
+two-mode, two-cycle test then passed with a tighter 96 KiB budget (12.78 s),
+verifying retained metadata, retries/dispositions, reporting and discovered purge.
+This checks the existing admission policy through the same public workflow API.
+
+All workload targets also pass `cargo check --locked -p fireweed-workload --all-targets`.

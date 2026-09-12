@@ -34,6 +34,8 @@ pub struct Config {
     pub load_workers: usize,
     /// Optional retention batch independent of handler batch size.
     pub purge_batch: Option<usize>,
+    /// Campaign-only public async policy override; None preserves library defaults.
+    pub apply_debt_bytes: Option<u64>,
     pub profile: Profile,
     pub memory: bool,
     pub projection_root: Option<std::path::PathBuf>,
@@ -55,6 +57,7 @@ impl Default for Config {
             workers: 1,
             load_workers: 1,
             purge_batch: None,
+            apply_debt_bytes: None,
             profile: Profile::Mutable,
             memory: false,
             projection_root: None,
@@ -108,6 +111,22 @@ pub fn open_store_with_projection_root(
     clock: Arc<dyn Clock>,
     projection_root: &Path,
 ) -> Result<Fireweed> {
+    open_store_with_async_policy(
+        root,
+        memory,
+        clock,
+        projection_root,
+        AsyncProjectionSpec::default(),
+    )
+}
+
+fn open_store_with_async_policy(
+    root: &Path,
+    memory: bool,
+    clock: Arc<dyn Clock>,
+    projection_root: &Path,
+    async_projection: AsyncProjectionSpec,
+) -> Result<Fireweed> {
     if memory {
         return Ok(open_memory(clock));
     }
@@ -124,7 +143,7 @@ pub fn open_store_with_projection_root(
             control_plane: None,
             authority: None,
             response_barrier: ResponseBarrier::AsyncProjection,
-            async_projection: Some(AsyncProjectionSpec::default()),
+            async_projection: Some(async_projection),
             sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {
                 target_bytes: 256 * 1024,

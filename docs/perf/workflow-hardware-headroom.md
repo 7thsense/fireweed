@@ -100,6 +100,17 @@ as guaranteed capacity. Compared with the observed 11.254 average occupancy,
 removing waiting remains essential. Further CPU reduction also creates margin.
 These figures do not establish a fundamental hardware ceiling or impossibility.
 
+### Progress latency and admission budget
+
+One-cycle phase diagnostics found loading progress reads averaging 1.68 seconds
+and reaching 8.02 seconds, while final verification reads were below a millisecond.
+Almost no retries occurred. The generic async policy permits up to 512 MiB of
+encoded unapplied work per queue; its 60-second age threshold is not a one-second
+visibility contract. The next experiment tightens this existing admission budget
+to 2 MiB for the fixed 1 KiB fixture, retaining 1,000-row storage batches. A
+500-row control passed progress checks but lost 17.7% one-cycle throughput.
+Neither short diagnostic is qualification, and no read-consistency gate changed.
+
 ### Reporting and checkpoint costs
 
 Public lifecycle metrics now read four counters on the existing queue metadata

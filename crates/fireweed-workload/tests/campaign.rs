@@ -92,6 +92,7 @@ async fn campaign_windows_reporting_and_discovered_retention() {
         let root = tempfile::tempdir().unwrap();
         let report = campaign::run(
             Config {
+                apply_debt_bytes: Some(96 * 1024),
                 items: 448,
                 campaign_metadata_only,
                 shards: 2,
@@ -107,6 +108,8 @@ async fn campaign_windows_reporting_and_discovered_retention() {
         )
         .await
         .unwrap();
+        assert_eq!(report["apply_debt_max_bytes"], 96 * 1024);
+
         let mut verified = 0;
         for shard in report["shards"].as_array().unwrap() {
             for campaign in shard["campaigns"].as_array().unwrap() {
