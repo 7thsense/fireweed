@@ -5,14 +5,13 @@ campaign qualification. Historical measurements remain valid for their declared
 workload and source. The source-preview v0.31.27 is committed locally; publication
 was blocked by GitHub credential scope.
 
-Current status (2026-09-12): the existing **mixed-sequence stress** fixture's best
-complete three-cycle result is **10,850.17/sec**, unqualified. A renewed source
-review found that it mixed FIFO ordinals with small timestamp values, unlike
-Snorri's availability-timestamp ordering. A new timestamp mode now models that
-workflow explicitly; its capacity baseline is pending. The old stress case and
-all historical evidence remain available. No throughput or correctness gate is
-relaxed, and results from the two priority models must not be conflated.
-See the [current resource math](workflow-hardware-headroom.md) and the evidence below.
+Current status (2026-09-12): the source-aligned availability-timestamp workload
+completed two six-cycle, million-resident baselines on `60c699e5`: **7,271.46/sec**
+with 500-row storage batches and **8,329.69/sec** with 1,000-row batches. Neither
+qualified. The latter passed correctness, due-time, RSS, database and WAL bounds,
+but failed throughput and 92 progress checks. The historical mixed-sequence stress
+fixture's 10,850.17/sec result remains separate and unqualified. No gate is relaxed.
+See the [current resource math](workflow-hardware-headroom.md) and evidence below.
 
 ## Fixed objectives and units
 
@@ -1233,3 +1232,50 @@ scheduled timestamp; the old stress values remain exact. Claims now reject a
 missing or wrong priority type instead of silently omitting their order check.
 Five qualification-gate tests also pass. Fresh release validation and separate
 million-resident timestamp diagnostics follow before any qualification claim.
+
+## Source-aligned sustained baselines: `60c699e5`
+
+Both clean serial runs use the same release binary
+`0a46d2c734c8cca5597e136e84204f13763068fe618bd077a12f26076f471c7f`,
+`--campaign-timestamp-priority`, one million resident recipients, six cycles,
+32 stores, two campaigns/store, two workers and two loaders/campaign, original
+bodies with metadata enrichment, 500/200/500 handler limits and 8,000-row purge.
+Each new private projection directory explicitly uses zstd; all 64 DB/WAL
+properties per run read back zstd. Log runtime workers/store are explicitly one.
+Checkpoint budget remains 448 MiB and async debt remains the default 512 MiB.
+Release validation passed: 42 native tests (2.68 s), free-page regression (0.37 s),
+workload ordering test and six public campaign tests (23.99 s).
+
+| Measurement | Batch 500 | Batch 1,000 |
+|---|---:|---:|
+| Complete recipients/sec | 7,271.46 | 8,329.69 |
+| Process wall, seconds | 825.587 | 720.774 |
+| CPU milliseconds/recipient | 1.05449 | 1.06787 |
+| Mean charged CPU occupancy | 7.664 | 8.889 |
+| Process output bytes/recipient | 13,141.82 | 12,336.45 |
+| Retained logical log bytes/recipient | 1,835.80 | 1,834.33 |
+| Peak RSS, GiB | 9.079 | 9.678 |
+| Sampled host writes, GiB | 26.877 | 22.871 |
+| Host write MiB/sec | 33.434 | 32.613 |
+| Device busy | 86.85% | 88.12% |
+| Mean write request milliseconds | 59.19 | 72.19 |
+| Worst campaign walls, cycles 0–5, seconds | 90.74 / 140.48 / 127.85 / 156.12 / 170.17 / 133.89 | 96.89 / 122.07 / 102.60 / 145.67 / 113.68 / 132.79 |
+| Maximum campaign progress p95, cycles 0–5, seconds | 1.169 / .357 / .495 / .456 / .474 / .410 | 1.407 / 1.313 / 1.432 / 1.422 / 1.372 / 1.615 |
+
+Both failed overall throughput and every cycle-rate gate after cycle zero.
+Batch 500 additionally failed five first-cycle progress checks and RSS stability;
+batch 1,000 failed 92 progress checks and passed RSS stability. Both passed
+independent outcomes, due-time and sampled WAL bounds. All 32 database-size
+stability gates passed: initial main-file materialization was followed by a
+plateau, unlike the misleading three-cycle startup comparison. Sampled device
+counters include other host traffic and omit startup/tail; they are not NAND
+write amplification. These are separate timestamp baselines, not speedups over
+historical mixed-priority runs. The 14.6% batch-size rate difference is a single
+serial comparison, not a repeatable qualification claim.
+
+Artifacts use `fireweed-campaign-60c699e5-timestamp-b{500,1000}-six-*` in the
+[evidence directory](../helix/04-build/evidence/workflow-capacity/), including raw
+runner reports, device samples, summaries, provenance and property readbacks.
+Next: eliminate command copies during deferred apply selection and metadata
+serialization; independently test 2 KiB new-file projection pages to reduce
+page-level write amplification. Keep existing-file compatibility and every gate.

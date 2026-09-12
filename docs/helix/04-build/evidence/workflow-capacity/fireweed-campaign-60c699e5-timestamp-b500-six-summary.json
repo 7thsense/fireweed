@@ -1,0 +1,150 @@
+{
+  "head": "60c699e5260635164438969d9729fdb870455546",
+  "binary_sha256": "0a46d2c734c8cca5597e136e84204f13763068fe618bd077a12f26076f471c7f",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 7271.458789816152,
+  "process_wall_s": 825.587154866982,
+  "cpu_ms_per_recipient": 1.0544886666666669,
+  "mean_cpu_occupancy": 7.663554311257896,
+  "output_bytes_per_recipient": 13141.818709333333,
+  "logical_log_bytes_per_recipient": 1835.799007,
+  "peak_rss_gib": 9.07912826538086,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 90.739607301,
+      "load_s": 7.642755727,
+      "prepare_s": 40.400801183,
+      "delivery_s": 34.062684943,
+      "verify_s": 0.533466987,
+      "purge_s": 6.143680894,
+      "progress_p95_s": 1.16855114,
+      "due_to_claim_max_us": 9610481
+    },
+    {
+      "wall_s": 140.475972184,
+      "load_s": 30.441654673,
+      "prepare_s": 41.545833732,
+      "delivery_s": 60.697252727,
+      "verify_s": 0.515589474,
+      "purge_s": 7.159376204,
+      "progress_p95_s": 0.357178942,
+      "due_to_claim_max_us": 31477595
+    },
+    {
+      "wall_s": 127.846792222,
+      "load_s": 32.110804847,
+      "prepare_s": 46.213660243,
+      "delivery_s": 42.223336563,
+      "verify_s": 0.582029152,
+      "purge_s": 6.573454742,
+      "progress_p95_s": 0.494948078,
+      "due_to_claim_max_us": 10646339
+    },
+    {
+      "wall_s": 156.116959829,
+      "load_s": 27.386127112,
+      "prepare_s": 84.760408925,
+      "delivery_s": 35.386967307,
+      "verify_s": 0.651210075,
+      "purge_s": 7.731125344,
+      "progress_p95_s": 0.455759852,
+      "due_to_claim_max_us": 9676596
+    },
+    {
+      "wall_s": 170.170526251,
+      "load_s": 29.389683875,
+      "prepare_s": 45.707337794,
+      "delivery_s": 84.884367582,
+      "verify_s": 0.609234439,
+      "purge_s": 9.298107191,
+      "progress_p95_s": 0.473794332,
+      "due_to_claim_max_us": 58236636
+    },
+    {
+      "wall_s": 133.887182589,
+      "load_s": 37.473029016,
+      "prepare_s": 56.316360966,
+      "delivery_s": 32.757377061,
+      "verify_s": 0.616521375,
+      "purge_s": 6.746169049,
+      "progress_p95_s": 0.409703123,
+      "due_to_claim_max_us": 9829809
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 7271.458789816152,
+      "required": 10000
+    },
+    {
+      "name": "s1_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.084208686,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s2_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.000100234,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s15_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.16855114,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.138158321,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.018010874,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7118.655129790933,
+      "required": 10000
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7821.862266700807,
+      "required": 10000
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6405.453969224949,
+      "required": 10000
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 5876.458291754994,
+      "required": 10000
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7468.974853774828,
+      "required": 10000
+    },
+    {
+      "name": "rss_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    }
+  ]
+}

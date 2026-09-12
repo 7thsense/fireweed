@@ -1,14 +1,49 @@
 # Workflow capacity versus hardware cost
 
-## Current stress result; timestamp-workflow baseline pending
+## Current timestamp-workflow measurements
 
-2026-09-12: a renewed source review found that the historical campaign fixture
-mixed FIFO ordinals with small scheduled-second values. Snorri instead uses
-availability timestamps and keeps unscheduled work ahead of scheduled work. The
-new `--campaign-timestamp-priority` mode models that ordering explicitly. Its
-capacity and byte-cost baseline is pending; the results below describe the
-retained `mixed_sequence_stress` fixture and must not be relabeled as timestamp
-workflow performance. All acceptance thresholds remain unchanged.
+2026-09-12. The source-aligned `availability_timestamp` workload now has two clean
+six-cycle baselines: **7,271.46/sec** at batch 500 and **8,329.69/sec** at batch
+1,000. Each processes six million complete lifecycles with a million resident
+recipients and every reporting, recovery-derived correctness and retention check.
+Neither qualifies. The larger batch passes storage/RSS stability and correctness,
+but fails throughput and 92 reporting checks. The smaller batch fails throughput,
+five reporting checks and RSS stability. Full configuration, validation and raw
+artifacts are in the [qualification plan](campaign-qualification-plan.md).
+
+| Storage batch | Recipients/sec | Sampled host bytes/recipient | Host MiB/s needed at 10k / 12.5k | CPU-s/s needed at 10k / 12.5k |
+|---|---:|---:|---:|---:|
+| 500 | 7,271.46 | 4,809.75 | 45.87 / 57.34 | 10.54 / 13.18 |
+| 1,000 | 8,329.69 | 4,092.98 | 39.03 / 48.79 | 10.68 / 13.35 |
+
+For batch 1,000, the earlier 38.23 MiB/s private sequential reference implies
+about 9.79k recipients/sec at the observed byte cost. Reaching 12.5k at that
+reference would require about 21.7% fewer host bytes/recipient, or 27.6% more
+bandwidth. This is a diagnostic arithmetic reference, not a proven device ceiling.
+The actual run averaged 32.61 MiB/s with 88.1% device busy time and 72.2 ms mean
+write-request latency. CPU demand is also substantial on eight physical cores:
+16 logical threads do not guarantee 16 independent cores of useful work.
+
+These runs retain about 1,834–1,836 logical log bytes/recipient. Batch 1,000
+accounts for 12,336 output bytes/recipient at process level; host writes average
+about 4,093 bytes/recipient after filesystem effects. These are three distinct
+measurements; none is NAND traffic. Host counters include other activity and
+omit startup/tail. All DB/WAL files read back the explicit zstd property.
+
+The operation budget remains `8 + 2/19 ≈ 8.1053` mutations/recipient plus three
+full retained-row reads and public progress polling. Thus 10k/12.5k complete
+recipients/sec means approximately 81k/101k logical row operations/sec, not
+10k/12.5k individual updates. Batching and fusion amortize this work; reporting
+and retention remain timed. Initial bodies average 934.89 bytes and are retained
+through metadata enrichment. No acceptance threshold has changed.
+
+## Historical mixed-priority stress measurements
+
+The older fixture mixed FIFO ordinals with small scheduled-second values;
+Snorri uses availability timestamps and keeps unscheduled work ahead of scheduled
+work. The figures below describe the retained `mixed_sequence_stress` fixture.
+They must not be relabeled as timestamp-workflow performance or used as its
+current CPU/byte coefficients.
 
 2026-09-11. The representative workload loads one million original rows,
 persists top-time and other enrichment metadata, schedules four future windows,
