@@ -1,0 +1,30 @@
+{
+  "sampled_active_s": 719.9098979840055,
+  "host_wide_not_process_attribution": true,
+  "host_written_gib": 22.704627990722656,
+  "host_write_mib_s": 32.29506793503837,
+  "host_read_gib": 0.002895355224609375,
+  "device_busy_percent": 86.58444643496883,
+  "mean_write_request_ms": 64.22467270215813,
+  "process_cpu_s": 6789.31,
+  "startup_tail_omitted": true,
+  "host_cpu_s_per_wall_s": {
+    "user": 8.442042562574999,
+    "nice": 0.0003889375611921659,
+    "system": 1.692739610071418,
+    "idle": 3.7884879866738475,
+    "iowait": 2.0960122985189527,
+    "irq": 0.0,
+    "softirq": 0.0043338756818555625,
+    "steal": 0.0
+  },
+  "host_busy_cpu_s_per_wall_s": 10.139504985889465,
+  "host_pressure_percent": {
+    "cpu_some": 34.22784541371517,
+    "cpu_full": 0.0,
+    "io_some": 28.506486516533418,
+    "io_full": 17.988933109914992,
+    "memory_some": 0.03189204658012647,
+    "memory_full": 0.02119362442817668
+  }
+}

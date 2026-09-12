@@ -3108,18 +3108,9 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
     // Only takes effect before a new database is initialized; existing files
-    // retain their page size. Smaller rebuildable pages bound the bytes rewritten
-    // for addressed hot-row changes; standalone files retain their 4 KiB default.
-    connection
-        .pragma_update(
-            "page_size",
-            if config.rebuildable_io {
-                "2048"
-            } else {
-                "4096"
-            },
-        )
-        .await?;
+    // retain their page size. The 2 KiB campaign candidate increased CPU cost
+    // without reducing sustained wall time; retain 4 KiB for new files.
+    connection.pragma_update("page_size", "4096").await?;
     // `journal_mode` produces a row. Turso's execute_batch rejects row-producing statements after applying
     // their side effect, so each pragma is deliberately driven through the row-aware API.
     connection
@@ -3535,13 +3526,13 @@ mod projection_checkpoint_config_tests {
         )
         .await
         .unwrap();
-        assert_eq!(new.wal_truncate_min_bytes, 2048 * 1024);
+        assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
         assert_eq!(
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            229_376
+            114_688
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));

@@ -179,9 +179,9 @@ as implemented here.
 
 ## Representative campaign qualification
 
-`--profile campaign --recycle --cycles 3 --items 1000000 --batch 1000 --shards 32
---workers 4 --load-workers 2` loads one million resident rows, with two campaign
-queues per physical store. Workers are per campaign (eight total per store in
+`--profile campaign --campaign-metadata --campaign-timestamp-priority --recycle
+--cycles 6 --items 1000000 --batch 1000 --shards 32 --workers 1 --load-workers 2` loads one million resident rows, with two campaign
+queues per physical store. Workers are per campaign (two total per store in
 this preset). Enrichment and delivery handler batches are capped at 500;
 scheduling at 200. Claim/mutation batches are independent and may reach 1,000.
 
@@ -191,6 +191,14 @@ that flag the stress variant rewrites the payload twice. Both are independently
 checked, including log-only recovery. Schema `campaign-capacity/v3` identifies
 the representation and records actual initial/replacement payload bytes; a pass
 for one variant is not a pass for the other. All qualification floors are the same.
+
+`--campaign-timestamp-priority` uses Snorri-style availability timestamps with
+monotonic FIFO ordinals before future windows. Without it, the old mixed-sequence
+priority stress case remains available. Reports distinguish `availability_timestamp`
+and `mixed_sequence_stress`; compare their results separately. Six cycles let the
+last-three-cycle stability checks observe the database after initial checkpoint
+materialization. The one-worker comparison passed all non-throughput gates on its recorded
+2 KiB-page revision. Current-source qualification remains pending.
 
 Every row is enriched with candidate times, color and score; scheduling consumes
 those stored candidates. All rows are scheduled in the future before four due
@@ -216,7 +224,11 @@ only the filesystem log.
 
 ```sh
 cargo build --locked --release -p fireweed-workload
-python3 scripts/perf/workflow-capacity.py --qualify --profile campaign --recycle --cycles 3 --items 1000000 --batch 1000 --shards 32 --workers 4 --load-workers 2 --deadline-seconds 1800
+mkdir -p target/workflow-capacity
+fireweed_projection_root=$(mktemp -d target/workflow-capacity/projections.XXXXXX)
+# The measured host uses Btrfs; this property applies only to the new directory.
+btrfs property set "$fireweed_projection_root" compression zstd
+OBJECT_LOG_FLUSH_RUNTIME_THREADS=1 python3 scripts/perf/workflow-capacity.py --qualify --profile campaign --campaign-metadata --campaign-timestamp-priority --recycle --cycles 6 --items 1000000 --batch 1000 --shards 32 --workers 1 --load-workers 2 --deadline-seconds 1800 --projection-root "$fireweed_projection_root"
 ```
 
 The first target is 10k complete recipients/sec; `--stretch` enforces 12.5k.
@@ -224,3 +236,25 @@ Both require exact independent dispositions, per-campaign fair-share throughput,
 maximum due-to-claim delay of 60s, progress p95 ≤1s, RSS/projection stability and
 sampled WAL ≤512 MiB/store. Historical schema v4/v5 reports and dirty source no
 longer qualify. See the [plan](../../docs/perf/campaign-qualification-plan.md).
+
+## Primitive payload controls
+
+Add `--primitive-varied-payload` to `--profile primitives` when checking component
+floors against the campaign's deterministic varied JSON body distribution. The
+first addressed update replaces that body with an enrichment revision; the second
+keeps it. This remains a component test using ingestion-returned addresses, with
+one final claim/complete pass, rather than the campaign's three claimed stages.
+Each primitive phase uses one sequential batch loop per store; workflow `--workers`
+and `--load-workers` do not change that component concurrency. The report records
+`phase_concurrency_per_store=1`.
+
+Reports label `payload_workload` as `campaign_varied` or `repeated_padding` and
+record actual initial and replacement byte totals. The old padded-body control
+remains reproducible without the flag. Its highly compressible bodies make its
+physical-byte costs unsuitable for the campaign napkin math. Final component
+qualification should include the varied-body mode; campaign CPU/write coefficients
+must still come from complete campaign runs.
+
+```sh
+OBJECT_LOG_FLUSH_RUNTIME_THREADS=1 python3 scripts/perf/workflow-capacity.py --qualify --profile primitives --primitive-varied-payload --items 1000000 --batch 1000 --shards 32 --deadline-seconds 900
+```

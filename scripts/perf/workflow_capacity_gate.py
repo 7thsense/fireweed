@@ -25,6 +25,17 @@ def qualify(report, campaign_target=10_000):
     check("no_external_io_override", not report.get("diagnostics", {}).get("LD_PRELOAD"))
     check("no_unqualified_diagnostic_override", "diagnostic_provenance" not in report)
     if result.get("schema") == "primitive-capacity/v1":
+        check("known_primitive_payload_workload", result.get("payload_workload", "repeated_padding") in ("repeated_padding", "campaign_varied"))
+        if result.get("payload_workload") == "campaign_varied":
+            size = result.get("payload_bytes", 0)
+            initial = result.get("initial_payload_bytes", 0)
+            replacement = result.get("payload_replacement_bytes", 0)
+            valid_size = isinstance(size, int) and size >= 1024
+            check("representative_component_payload_size", valid_size, size, ">=1024 nominal bytes")
+            check("component_payload_bytes", valid_size and isinstance(initial, int)
+                  and isinstance(replacement, int)
+                  and initial >= result.get("items", 0) * (size - 128)
+                  and replacement > initial)
         check("million_resident_rows", result.get("items", 0) >= 1_000_000, result.get("items"), 1_000_000)
         phases = {p["phase"]: p["records_per_s"] for p in result.get("aggregate_phases", [])}
         for name in ("insert", "enrich_by_key", "schedule_by_id"):

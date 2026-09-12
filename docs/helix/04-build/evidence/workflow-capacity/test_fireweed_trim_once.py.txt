@@ -1,0 +1,65 @@
+import contextlib
+import io
+import unittest
+import fireweed_trim_once as trim
+
+class Fake:
+    def __init__(self, flags=(), fail_trim=False, fail_enable=False):
+        self.flags = set(flags)
+        self.calls = []
+        self.fail_trim = fail_trim
+        self.fail_enable = fail_enable
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if argv[1] == 'status':
+            return ('/dev/mapper/root is active and is in use.\n'
+                    '  type: LUKS2\n  device: /dev/nvme0n1p2\n'
+                    '  mode: read/write\n  flags: ' + ' '.join(sorted(self.flags)) + '\n')
+        if argv[1] == 'refresh':
+            self.flags = {name for name, flag in trim.FLAGS.items() if flag in argv}
+            if '--allow-discards' in argv:
+                self.flags.add('discards')
+                if self.fail_enable:
+                    raise RuntimeError('ambiguous refresh failure')
+            return ''
+        if argv[0] == '/usr/bin/fstrim':
+            if self.fail_trim: raise RuntimeError('trim failure')
+            return '/: free filesystem extents trimmed\n'
+        raise AssertionError(argv)
+
+class MaintenanceTests(unittest.TestCase):
+    def perform(self, fake, apply=True):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return trim.perform(fake, apply)
+    def test_plan_is_read_only(self):
+        fake=Fake(['no_read_workqueue'])
+        self.perform(fake, False)
+        self.assertEqual(fake.calls, [[trim.CRYPT,'status','root']])
+    def test_restores_every_known_flag_without_persistence(self):
+        fake=Fake(trim.FLAGS)
+        plan=self.perform(fake)
+        self.assertEqual(fake.flags,set(trim.FLAGS))
+        self.assertNotIn('--persistent',sum(fake.calls,[]))
+        self.assertEqual(fake.calls[-2],plan['restore'])
+    def test_trim_failure_restores_original_flags(self):
+        fake=Fake(['same_cpu_crypt'],fail_trim=True)
+        with self.assertRaisesRegex(RuntimeError,'trim failure'):self.perform(fake)
+        self.assertEqual(fake.flags,{'same_cpu_crypt'})
+    def test_ambiguous_enable_failure_still_restores(self):
+        fake=Fake(['no_write_workqueue'],fail_enable=True)
+        with self.assertRaisesRegex(RuntimeError,'ambiguous'):self.perform(fake)
+        self.assertEqual(fake.flags,{'no_write_workqueue'})
+    def test_unknown_or_changed_policy_refuses_before_mutation(self):
+        for flags in [{'unknown'}, {'discards'}]:
+            fake=Fake(flags)
+            with self.assertRaises(RuntimeError):self.perform(fake)
+            self.assertEqual(len(fake.calls),1)
+    def test_failed_restoration_is_not_reported_as_success(self):
+        fake=Fake()
+        def broken_restore(argv):
+            if argv[1]=='refresh' and '--allow-discards' not in argv:
+                raise RuntimeError('restore failed')
+            return fake(argv)
+        with self.assertRaisesRegex(RuntimeError,'restore failed'):self.perform(broken_restore)
+
+if __name__=='__main__':unittest.main()

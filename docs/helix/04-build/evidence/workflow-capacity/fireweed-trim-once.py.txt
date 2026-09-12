@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Reviewed one-time host maintenance; no changes unless --apply is supplied."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+
+CRYPT = '/usr/bin/cryptsetup'
+FLAGS = {name: '--perf-' + name for name in (
+    'same_cpu_crypt', 'submit_from_crypt_cpus', 'no_read_workqueue',
+    'no_write_workqueue', 'high_priority')}
+
+def run(argv):
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f'{argv!r} failed ({result.returncode}): {result.stderr.strip()}')
+    return result.stdout
+
+def status(runner):
+    raw = runner([CRYPT, 'status', 'root'])
+    if ' is active' not in raw.splitlines()[0]:
+        raise RuntimeError('root mapping is not active')
+    fields = dict(line.strip().split(':', 1) for line in raw.splitlines()[1:] if ':' in line)
+    fields = {key: value.strip() for key, value in fields.items()}
+    if fields.get('type') not in ('LUKS1', 'LUKS2'):
+        raise RuntimeError('unexpected encryption type')
+    if fields.get('device') != '/dev/nvme0n1p2' or fields.get('mode') != 'read/write':
+        raise RuntimeError('unexpected root device or mode')
+    flags = set(fields.get('flags', '').split())
+    if flags - (FLAGS.keys() | {'discards'}):
+        raise RuntimeError('unknown activation flags: ' + repr(sorted(flags)))
+    return flags
+
+def perform(runner, apply=False):
+    before = status(runner)
+    if 'discards' in before:
+        raise RuntimeError('discard is already enabled; review the changed host state first')
+    preserved = [FLAGS[name] for name in sorted(before)]
+    enable = [CRYPT, 'refresh', *preserved, '--allow-discards', 'root']
+    restore = [CRYPT, 'refresh', *preserved, 'root']
+    plan = {'before_flags': sorted(before), 'enable': enable,
+            'trim': ['/usr/bin/fstrim', '--verbose', '/'], 'restore': restore,
+            'persistent_metadata_changes': False}
+    print(json.dumps({'plan': plan}), flush=True)
+    if not apply:
+        return plan
+    # Even a failed refresh can have an ambiguous effect: always restore once
+    # the mutating call has been attempted. Never print or request volume keys.
+    try:
+        runner(enable)
+        if status(runner) != before | {'discards'}:
+            raise RuntimeError('discard enablement did not preserve the original flags')
+        print(json.dumps({'trim_result': runner(plan['trim'])}), flush=True)
+    finally:
+        runner(restore)
+        if status(runner) != before:
+            raise RuntimeError('root activation flags were not restored; manual recovery required')
+        print(json.dumps({'restored_flags': sorted(before)}), flush=True)
+    return plan
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--apply', action='store_true')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error('root is required even for cryptsetup status; use an authorized admin terminal')
+    mount_device = run(['/usr/bin/findmnt', '-no', 'MAJ:MIN', '/']).strip()
+    mapping = Path('/sys/dev/block') / mount_device / 'dm/name'
+    if not mapping.exists() or mapping.read_text().strip() != 'root':
+        raise RuntimeError('the root filesystem is not on the expected encrypted mapping')
+    if run(['/usr/bin/findmnt', '-no', 'FSTYPE', '/']).strip() != 'btrfs':
+        raise RuntimeError('unexpected root filesystem')
+    if subprocess.run(['/usr/bin/pgrep', '-f', '^/home/erik/Projects/fireweed/target/release/fireweed-workload'], stdout=subprocess.DEVNULL).returncode != 1:
+        raise RuntimeError('stop the benchmark before maintenance')
+    perform(run, args.apply)
+
+if __name__ == '__main__':
+    main()

@@ -5,12 +5,15 @@ campaign qualification. Historical measurements remain valid for their declared
 workload and source. The source-preview v0.31.27 is committed locally; publication
 was blocked by GitHub credential scope.
 
-Current status (2026-09-12): the source-aligned availability-timestamp workload
-completed two six-cycle, million-resident baselines on `60c699e5`: **7,271.46/sec**
-with 500-row storage batches and **8,329.69/sec** with 1,000-row batches. Neither
-qualified. The latter passed correctness, due-time, RSS, database and WAL bounds,
-but failed throughput and 92 progress checks. The historical mixed-sequence stress
-fixture's 10,850.17/sec result remains separate and unqualified. No gate is relaxed.
+Current status (2026-09-12): the source-aligned timestamp workload's fastest
+six-cycle result remains **8,329.69/sec**, failing throughput and reporting.
+A one-worker control on `1fe89a44` achieved **7,911.78/sec** and passed every
+non-throughput gate, including all 384 campaign-cycle progress checks. Neither
+10k nor 12.5k is qualified. The 2 KiB default experiment did not improve sustained
+runtime and is being reverted to 4 KiB. A read-only hardware review found that
+the encrypted root device blocks TRIM and periodic fstrim is disabled. A controlled
+one-time maintenance comparison is prepared but awaits explicit host approval;
+its contribution to the storage bottleneck remains unproven.
 See the [current resource math](workflow-hardware-headroom.md) and evidence below.
 
 ## Fixed objectives and units
@@ -1314,3 +1317,93 @@ Six public campaign tests passed (59.42 s), plus four recovery tests (2.50 s).
 The configuration regression checks both existing page sizes, new-file settings
 and the unchanged standalone policy. Logs are archived as `fireweed-2k-pages-*`.
 Release validation and six-cycle capacity measurement follow on a clean revision.
+
+## Completed 2 KiB experiment and worker-count control: `1fe89a44`
+
+Both runs used binary `bb7ee7df61f0b3306bbe22fd8bfe696ab648522e295a6041773f80029ff9d080`,
+six million complete lifecycles, one million resident recipients, 32 stores and
+two campaigns/store, timestamp priorities, metadata enrichment, 1,000-row storage
+batches, two loaders/campaign and one log runtime worker/store. Actual DB headers
+confirmed 2,048-byte pages; all 64 DB/WAL properties per run read back zstd.
+
+| Measurement | Two workers/campaign | One worker/campaign |
+|---|---:|---:|
+| Complete recipients/sec | 8,306.86 | 7,911.78 |
+| Process wall, seconds | 722.606 | 758.574 |
+| CPU milliseconds/recipient | 1.13585 | 1.08231 |
+| Mean charged CPU occupancy | 9.431 | 8.561 |
+| Process output bytes/recipient | 12,031.18 | 12,490.13 |
+| Retained logical log bytes/recipient | 1,834.32 | 1,834.83 |
+| Peak RSS, GiB | 10.225 | 9.717 |
+| Sampled host writes, GiB | 22.705 | 26.226 |
+| Host write MiB/sec | 32.295 | 35.496 |
+| Device busy | 86.58% | 85.61% |
+| Mean write request milliseconds | 64.22 | 50.22 |
+| Worst campaign walls, cycles 0–5, seconds | 81.22 / 102.91 / 120.55 / 160.55 / 105.18 / 145.24 | 94.65 / 122.89 / 116.69 / 154.14 / 116.26 / 146.36 |
+| Max campaign progress p95, cycles 0–5, seconds | 2.077 / 1.388 / 1.301 / 1.338 / 1.398 / 1.426 | .985 / .667 / .931 / .614 / .827 / .676 |
+| Failed progress checks | 154 | 0 |
+
+Both failed overall and cycles 1–5 throughput. Both passed correctness, due-time,
+RSS, all database stability and WAL bounds. The one-worker control passed every
+non-throughput check. It reduced CPU cost about 4.7% and reporting latency, but
+increased host writes about 15.5%, and completed about 4.8% slower. This is one
+serial control, not repeated qualification. Raw artifacts use
+`fireweed-campaign-1fe89a44-timestamp-b1000-{,w1-}six*` in the evidence directory.
+
+Compared with the preceding 4 KiB two-worker baseline, the 2 KiB plus allocation
+candidate was 0.3% slower, used 6.4% more CPU/recipient and reduced host writes
+only 0.7%. The data do not justify that page-size default. Restore new files to
+4 KiB, keep both existing-file sizes supported and retain all eight free-page
+regression cases. The allocation refactor still avoids unnecessary copies, but
+its isolated throughput contribution has not been established.
+
+Release validation for `1fe89a44` passed 42 native tests (2.68 s), the expanded
+free-page regression (0.80 s), the ordering test and six campaign tests (24.15 s).
+
+## Primitive control and body-distribution alignment
+
+A clean million-row `1fe89a44` primitive run passed its component floors:
+103,948.61 inserts/sec, 107,199.60 key-addressed updates/sec and 91,641.77
+ID-addressed updates/sec. Claim/complete measured 25,784.24/sec and purge
+37,874.96/sec. Process wall was 76.53 s; phase windows overlap across independent
+stores and must not be added. It uses the older highly compressible repeated
+padding, one claim/complete pass and producer-returned addresses. These are valid
+component measurements, not canonical campaign throughput or byte coefficients.
+Artifacts are `fireweed-1fe89a44-primitives*`.
+
+`--primitive-varied-payload` now uses the campaign's deterministic varied JSON
+bodies and adds an enrichment revision on the first addressed update while
+preserving identity and padding; the second update keeps the body. The old padded
+control remains available. Reports explicitly label both models and count actual
+initial/replacement payload bytes. Component semantics remain deliberately distinct
+from the campaign's three claimed stages and primary metadata-keep mode. Final
+component floor validation should use the varied-body option as well.
+
+## Host discard hypothesis: approval pending
+
+Read-only checks found a Kingston OM8PCP3512F-AB NVMe with discard support, but its
+`root` encrypted mapping reports zero discard granularity/maximum. The root Btrfs
+mount has no discard option, and `fstrim.timer` is disabled/inactive. This means
+filesystem-free space is not automatically communicated through that mapping to
+the SSD. The kernel documents default discard blocking and allocation-information
+leakage when enabled; Kingston documents the role of TRIM in garbage collection.
+This is a plausible contributor to sustained write performance, not a measured
+causal explanation or a firmware diagnosis. See the
+[reviewed control procedure](storage-trim-control.md).
+
+A clean detached `1fe89a44` checkout and identical binary are frozen for a
+same-binary after-maintenance control. The helper preserves existing known flags,
+refuses unexpected state, temporarily allows discard, trims filesystem-free
+extents, and restores flags even on failure. Six mocked safety/control-flow tests
+pass. No root-device setting, trim operation, boot file or timer has been changed.
+Explicit approval was requested because this is a host encryption-policy choice,
+not an ordinary repository edit. Goal status remains active and unmet.
+
+The restored 4 KiB configuration regression passes (0.39 s), retaining checks for
+both existing page sizes. The new primitive body/order unit tests pass, and two
+CLI tests pass (2.85 s), crossing disk/memory with both body models and rejecting
+the flag outside the primitive profile. Six gate tests pass (7.98 s), including
+unknown body labels, undersized varied input and inconsistent byte totals. The
+primitive report also records its actual single sequential loop/store; generic
+workflow worker flags do not alter component-phase concurrency. Release validation
+and a million-row varied-body component measurement remain to be run.

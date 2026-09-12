@@ -1,0 +1,290 @@
+[
+  {
+    "path": "shard-0/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-0/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-1/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-1/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-10/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-10/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-11/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-11/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-12/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-12/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-13/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-13/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-14/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-14/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-15/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-15/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-16/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-16/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-17/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-17/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-18/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-18/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-19/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-19/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-2/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-2/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-20/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-20/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-21/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-21/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-22/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-22/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-23/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-23/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-24/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-24/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-25/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-25/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-26/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-26/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-27/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-27/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-28/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-28/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-29/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-29/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-3/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-3/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-30/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-30/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-31/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-31/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-4/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-4/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-5/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-5/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-6/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-6/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-7/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-7/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-8/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-8/projection.db-wal",
+    "compression": "compression=zstd\n"
+  },
+  {
+    "path": "shard-9/projection.db",
+    "compression": "compression=zstd\n",
+    "page_size": 2048
+  },
+  {
+    "path": "shard-9/projection.db-wal",
+    "compression": "compression=zstd\n"
+  }
+]

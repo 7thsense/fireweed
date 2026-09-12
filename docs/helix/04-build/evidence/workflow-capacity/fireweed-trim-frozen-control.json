@@ -1,0 +1,6 @@
+{
+  "root": "/home/erik/Projects/fireweed/target/perf-control-1fe89a44",
+  "head": "1fe89a44685bd72a76e0541f2ccd172ff879a59a",
+  "binary_sha256": "bb7ee7df61f0b3306bbe22fd8bfe696ab648522e295a6041773f80029ff9d080",
+  "purpose": "Same-binary before/after one-time host TRIM, pending approval; no maintenance performed."
+}

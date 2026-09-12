@@ -2,14 +2,17 @@
 
 ## Current timestamp-workflow measurements
 
-2026-09-12. The source-aligned `availability_timestamp` workload now has two clean
-six-cycle baselines: **7,271.46/sec** at batch 500 and **8,329.69/sec** at batch
-1,000. Each processes six million complete lifecycles with a million resident
-recipients and every reporting, recovery-derived correctness and retention check.
-Neither qualifies. The larger batch passes storage/RSS stability and correctness,
-but fails throughput and 92 reporting checks. The smaller batch fails throughput,
-five reporting checks and RSS stability. Full configuration, validation and raw
-artifacts are in the [qualification plan](campaign-qualification-plan.md).
+2026-09-12. The source-aligned timestamp workload's fastest six-cycle baseline is
+**8,329.69/sec**, failing throughput and reporting. A later one-worker control
+reached **7,911.78/sec** and passed every non-throughput gate, including all 384
+campaign-cycle reporting checks. The goals remain 10k and 12.5k complete
+recipients/sec; neither is qualified. Full configuration and raw evidence are in
+the [qualification plan](campaign-qualification-plan.md).
+
+The 2 KiB page experiment did not improve sustained runtime: 8,306.86/sec versus
+8,329.69/sec at 4 KiB, with 6.4% more CPU/recipient and only 0.7% fewer host writes.
+New projections return to 4 KiB; existing-file compatibility and smaller-page
+regressions remain. The table below retains the original 4 KiB baselines.
 
 | Storage batch | Recipients/sec | Sampled host bytes/recipient | Host MiB/s needed at 10k / 12.5k | CPU-s/s needed at 10k / 12.5k |
 |---|---:|---:|---:|---:|
@@ -36,6 +39,32 @@ recipients/sec means approximately 81k/101k logical row operations/sec, not
 10k/12.5k individual updates. Batching and fusion amortize this work; reporting
 and retention remain timed. Initial bodies average 934.89 bytes and are retained
 through metadata enrichment. No acceptance threshold has changed.
+
+### Reporting-safe worker control and host maintenance hypothesis
+
+The one-worker 2 KiB control costs 1.08231 CPU-ms/recipient and approximately
+4,693 host bytes/recipient. At 10k/12.5k this implies **10.82/13.53 CPU-s/s** and
+**44.76/55.95 MiB/s** of host writes. It averaged 35.50 MiB/s. Reducing workers
+fixed reporting latency but increased host writes 15.5%; this is a measured
+tradeoff, not a qualified deployment.
+
+All 32 DB/log pairs share one NVMe. Read-only checks found that the encrypted
+root mapping blocks discard/TRIM and periodic `fstrim` is disabled. That limits
+what can be concluded from the earlier 38.23 MiB/s sequential reference: it is a
+measurement of this media/configuration state, not an intrinsic device ceiling.
+The kernel documents discard blocking and its encryption-policy tradeoff;
+Kingston explains how TRIM assists reclamation. A causal performance comparison
+still requires the [reviewed one-time control](storage-trim-control.md), which
+awaits approval. No host maintenance has been performed.
+[Kernel dm-crypt documentation](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html),
+[Kingston garbage-collection discussion](https://www.kingston.com/en/blog/servers-and-data-centers/garbage-collection).
+
+The separate million-row primitive control passed at 103.95k inserts/sec,
+107.20k key updates/sec and 91.64k ID updates/sec. Those bodies use repetitive
+padding; their compression costs must not be used for the campaign. The new
+`--primitive-varied-payload` control shares the campaign body distribution and
+reports actual byte totals. It retains primitive semantics and a body replacement,
+so only a complete campaign run supplies the primary workflow's CPU/write budget.
 
 ## Historical mixed-priority stress measurements
 

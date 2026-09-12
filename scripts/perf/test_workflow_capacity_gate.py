@@ -17,6 +17,21 @@ class QualificationTests(unittest.TestCase):
         report["result"]["aggregate_phases"].pop()
         self.assertFalse(qualify(report)["passed"])
 
+    def test_primitive_payload_identity_is_explicit(self):
+        for label in ("repeated_padding", "campaign_varied"):
+            report = self.baseline()
+            report["result"].update(payload_workload=label, payload_bytes=1024,
+                                    initial_payload_bytes=935_000_000,
+                                    payload_replacement_bytes=960_000_000)
+            self.assertTrue(qualify(report)["passed"])
+        for field, value in [("payload_bytes", 1023), ("initial_payload_bytes", 100),
+                             ("payload_replacement_bytes", 935_000_000)]:
+            broken = copy.deepcopy(report)
+            broken["result"][field] = value
+            self.assertFalse(qualify(broken)["passed"], field)
+        report["result"]["payload_workload"] = "unidentified"
+        self.assertFalse(qualify(report)["passed"])
+
     def test_ram_and_io_override_cannot_qualify(self):
         for change in ({"projection_filesystem": {"filesystems": [{"fstype": "tmpfs"}]}},
                        {"diagnostic_provenance": {"dependency": "experimental engine"}},

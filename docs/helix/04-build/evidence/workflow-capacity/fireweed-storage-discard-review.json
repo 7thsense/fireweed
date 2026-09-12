@@ -1,0 +1,66 @@
+{
+  "observed_at_unix_s": 1789191231.3609002,
+  "read_only": true,
+  "commands": [
+    {
+      "command": [
+        "lsblk",
+        "-D",
+        "-o",
+        "NAME,TYPE,SIZE,DISC-GRAN,DISC-MAX,DISC-ZERO"
+      ],
+      "exit_code": 0,
+      "stdout": "NAME        TYPE    SIZE DISC-GRAN DISC-MAX DISC-ZERO\nsda         disk  931.5G      512B       2G         0\n\u251c\u2500sda1      part     16M      512B       2G         0\n\u251c\u2500sda2      part  930.1G      512B       2G         0\n\u251c\u2500sda3      part    686M      512B       2G         0\n\u251c\u2500sda4      part    178M      512B       2G         0\n\u2514\u2500sda5      part    531M      512B       2G         0\nzram0       disk   62.2G        4K       2T         0\nnvme0n1     disk  476.9G      512B       2T         0\n\u251c\u2500nvme0n1p1 part      2G      512B       2T         0\n\u2514\u2500nvme0n1p2 part  474.9G      512B       2T         0\n  \u2514\u2500root    crypt 474.9G        0B       0B         0\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "lsblk",
+        "-d",
+        "-o",
+        "NAME,MODEL,SIZE"
+      ],
+      "exit_code": 0,
+      "stdout": "NAME    MODEL                     SIZE\nsda     Samsung SSD 860 EVO 1TB 931.5G\nzram0                            62.2G\nnvme0n1 KINGSTON OM8PCP3512F-AB 476.9G\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "findmnt",
+        "-no",
+        "SOURCE,FSTYPE,OPTIONS",
+        "/"
+      ],
+      "exit_code": 0,
+      "stdout": "/dev/mapper/root[/@] btrfs rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=256,subvol=/@\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "systemctl",
+        "is-enabled",
+        "fstrim.timer"
+      ],
+      "exit_code": 1,
+      "stdout": "disabled\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "systemctl",
+        "is-active",
+        "fstrim.timer"
+      ],
+      "exit_code": 3,
+      "stdout": "inactive\n",
+      "stderr": ""
+    }
+  ],
+  "cryptsetup_refresh_manual_sha256": "84a58cb6930db698efddcba22f919175ced721054f67557fdea7b426ba74f05d",
+  "cryptsetup_refresh_description_roff": ".SH \"DESCRIPTION\"\n.sp\nRefreshes parameters of active mapping <name>.\n.sp\nUpdate parameters of active device <name> without the need to deactivate the device (and unmount the filesystem).\nCurrently, it supports parameter refresh on the following devices: LUKS1, LUKS2 (including authenticated encryption), plain crypt and loop\\-AES.\n.sp\nMandatory parameters are identical to those of an open action for the respective device type.\n.sp\nYou may change the following parameters on all devices \\-\\-perf\\-same_cpu_crypt, \\-\\-perf\\-submit_from_crypt_cpus, \\-\\-perf\\-no_read_workqueue, \\-\\-perf\\-no_write_workqueue and \\-\\-allow\\-discards.\n.sp\nRefreshing the device without any optional parameter will refresh the device with the default setting (respective to device type).\n.sp\n\\fBLUKS2 only:\\fP\n.sp\nThe \\-\\-integrity\\-no\\-journal parameter affects only LUKS2 devices with the underlying dm\\-integrity device.\n.sp\nAdding option \\-\\-persistent stores any combination of device parameters above in LUKS2 metadata (only after successful refresh operation).\n.sp\nThe \\-\\-disable\\-keyring parameter refreshes a device with the volume key passed in the dm\\-crypt driver.\n.sp\n\\fB<options>\\fP can be [\\-\\-allow\\-discards, \\-\\-perf\\-same_cpu_crypt, \\-\\-perf\\-submit_from_crypt_cpus, \\-\\-perf\\-no_read_workqueue, \\-\\-perf\\-no_write_workqueue, \\-\\-header, \\-\\-disable\\-keyring, \\-\\-disable\\-locks, \\-\\-persistent, \\-\\-integrity\\-no\\-journal].\n",
+  "sources": [
+    "https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html",
+    "https://www.kingston.com/en/blog/servers-and-data-centers/garbage-collection"
+  ],
+  "interpretation": "The encrypted root mapping does not expose discard support and periodic fstrim is disabled. This can impede SSD reclamation of filesystem free space; contribution to this benchmark slowdown is unproven pending a controlled maintenance comparison."
+}

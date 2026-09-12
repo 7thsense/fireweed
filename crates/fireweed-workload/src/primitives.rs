@@ -2,6 +2,20 @@
 //! workflow test; its update addresses deliberately come from the load response.
 use crate::*;
 
+fn component_body(id: usize, stage: usize, cfg: &Config) -> Bytes {
+    if !cfg.primitive_varied_payload {
+        return body(id, stage, cfg.payload_bytes);
+    }
+    let original = crate::campaign::initial_body(id, 0, cfg.payload_bytes);
+    if stage == 0 {
+        return original;
+    }
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&original).expect("generated JSON body");
+    document["primitive_enrichment"] = serde_json::json!(stage);
+    Bytes::from(serde_json::to_vec(&document).expect("generated enriched body"))
+}
+
 pub async fn run(cfg: Config, root: &Path) -> Result<serde_json::Value> {
     tokio::time::timeout(cfg.deadline, run_inner(cfg, root))
         .await
@@ -25,9 +39,14 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
             let q = create_queue(&fw, "primitives").await?;
             let recipients: Vec<_> = (shard..cfg.items).step_by(cfg.shards).collect();
             let mut ids = vec![]; let mut phases = vec![];
+            let mut initial_payload_bytes = 0u64;
+            let mut payload_replacement_bytes = 0u64;
             let phase = Instant::now();
             for chunk in recipients.chunks(cfg.batch) {
-                let rows = chunk.iter().map(|id| item(*id, 0, cfg.payload_bytes)).collect::<Vec<_>>();
+                let rows = chunk.iter().map(|id| {
+                    item_with_payload(*id, 0, component_body(*id, 0, &cfg))
+                }).collect::<Vec<_>>();
+                initial_payload_bytes += rows.iter().map(|row| row.payload.as_ref().map_or(0, |body| body.len()) as u64).sum::<u64>();
                 ids.extend(retry(deadline, || fw.push_batch(&q, rows.clone())).await?);
             }
             let m = retry(deadline, || fw.metrics(&q)).await?;
@@ -39,19 +58,25 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 // to avoid granting the implementation an insertion-order shortcut.
                 let order: Vec<_> = if stage == 1 { (0..ids.len()).collect() } else { (0..ids.len()).rev().collect() };
                 for (batch, chunk) in order.chunks(cfg.batch).enumerate() {
-                    let updates = chunk.iter().map(|offset| {
+                    let updates: Vec<BatchUpdateEntry> = chunk.iter().map(|offset| {
                         let recipient = recipients[*offset];
                         BatchUpdateEntry {
                             item_ref: if stage == 1 { BatchUpdateItemRef::ClientItemKey(ClientItemKey::new(format!("r-{recipient:09}-s0")).unwrap()) }
                                 else { BatchUpdateItemRef::ItemId(ids[*offset]) },
                             expected_item_version: None,
-                            payload: if stage == 1 { BatchUpdateValue::Replace(Some(body(recipient, 2, cfg.payload_bytes))) } else { BatchUpdateValue::Keep },
+                            payload: if stage == 1 { BatchUpdateValue::Replace(Some(component_body(recipient, 2, &cfg))) } else { BatchUpdateValue::Keep },
                             metadata: BatchUpdateValue::Replace(metadata(stage, recipient)),
                             priority: if stage == 2 { BatchUpdateValue::Replace(PriorityValue::Int64(due(recipient))) } else { BatchUpdateValue::Keep },
                             not_before: if stage == 2 { BatchUpdateValue::Replace(Some(ts(due(recipient)))) } else { BatchUpdateValue::Keep },
                             fields: BatchUpdateValue::Keep, gate_keys: BatchUpdateValue::Keep,
                         }
                     }).collect();
+                    if stage == 1 {
+                        payload_replacement_bytes += updates.iter().map(|entry: &BatchUpdateEntry| match &entry.payload {
+                            BatchUpdateValue::Replace(Some(body)) => body.len() as u64,
+                            _ => 0,
+                        }).sum::<u64>();
+                    }
                     let request = BatchUpdateRequest { request_id: RequestId::new(format!("stage-{stage}-{batch}")).unwrap(), updates };
                     let response = retry(deadline, || fw.batch_update(&q, request.clone())).await?;
                     if response.results.len() != chunk.len() || response.results.iter().any(|r| !matches!(r, BatchUpdateOutcome::Updated { .. })) {
@@ -69,7 +94,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 for row in &rows {
                     let id = recipient(row);
                     if !consumed.insert(id) { return Err("duplicate delivery".into()); }
-                    if row.payload != Some(body(id, 2, cfg.payload_bytes)) { return Err(format!("payload mismatch for {id}").into()); }
+                    if row.payload != Some(component_body(id, 2, &cfg)) { return Err(format!("payload mismatch for {id}").into()); }
                     if due(id) < last_priority { return Err(format!("delivery priority inversion at recipient {id}: due={}, returned={:?}, preceding={last_priority}, delivered={}, batch={:?}", due(id), row.priority, consumed.len(), rows.iter().map(|r| (recipient(r), r.priority.clone())).collect::<Vec<_>>()).into()); }
                     last_priority = due(id);
                 }
@@ -87,7 +112,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
             let m = retry(deadline, || fw.metrics(&q)).await?;
             if m.complete + m.pending + m.leased + m.failed != 0 { return Err("retention left queue rows".into()); }
             phases.push(phase_report("purge", recipients.len(), phase, started));
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({"shard": shard, "items": recipients.len(), "phases": phases}))
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({"shard": shard, "items": recipients.len(), "phases": phases, "initial_payload_bytes": initial_payload_bytes, "payload_replacement_bytes": payload_replacement_bytes}))
         });
     }
     let mut reports = vec![];
@@ -110,7 +135,10 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
     }
     Ok(
         serde_json::json!({"schema": "primitive-capacity/v1", "items": cfg.items, "physical_shards": cfg.shards,
-        "batch": cfg.batch, "payload_bytes": cfg.payload_bytes,
+        "batch": cfg.batch, "payload_bytes": cfg.payload_bytes, "phase_concurrency_per_store": 1,
+        "payload_workload": if cfg.primitive_varied_payload { "campaign_varied" } else { "repeated_padding" },
+        "initial_payload_bytes": reports.iter().map(|r| r["initial_payload_bytes"].as_u64().unwrap()).sum::<u64>(),
+        "payload_replacement_bytes": reports.iter().map(|r| r["payload_replacement_bytes"].as_u64().unwrap()).sum::<u64>(),
         "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
         "settled_wall_s": started.elapsed().as_secs_f64(), "aggregate_phases": aggregate_phases, "shards": reports}),
     )
@@ -124,4 +152,50 @@ fn phase_report(name: &str, records: usize, phase: Instant, started: Instant) ->
         "records_per_s": records as f64 / wall.as_secs_f64()});
     eprintln!("phase_complete {report}");
     report
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    #[test]
+    fn varied_replacement_preserves_identity_and_varied_content() {
+        let cfg = Config {
+            primitive_varied_payload: true,
+            ..Config::default()
+        };
+        let mut previous = None;
+        for id in [0, 17, 999_999] {
+            let initial: serde_json::Value =
+                serde_json::from_slice(&component_body(id, 0, &cfg)).unwrap();
+            assert_eq!(initial["id"], id);
+            assert_eq!(initial["campaign"], 0);
+            let padding = initial["padding"].as_str().unwrap();
+            assert_eq!(padding.len(), 896);
+            assert!(
+                padding
+                    .bytes()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    >= 20
+            );
+            assert_ne!(previous.as_deref(), Some(padding));
+            previous = Some(padding.to_owned());
+            let mut enriched: serde_json::Value =
+                serde_json::from_slice(&component_body(id, 2, &cfg)).unwrap();
+            assert_eq!(
+                enriched
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("primitive_enrichment"),
+                Some(serde_json::json!(2))
+            );
+            assert_eq!(enriched, initial);
+        }
+        let legacy = Config::default();
+        assert_eq!(
+            component_body(17, 2, &legacy),
+            body(17, 2, legacy.payload_bytes)
+        );
+    }
 }

@@ -76,7 +76,7 @@ fn meta(stage: usize, id: usize, campaign: usize) -> Metadata {
     m.insert("campaign", MetadataValue::String(campaign.to_string()));
     m
 }
-fn initial_body(id: usize, campaign: usize, size: usize) -> Bytes {
+pub(crate) fn initial_body(id: usize, campaign: usize, size: usize) -> Bytes {
     // Deterministic varied bytes, rather than a repeated-byte compression shortcut.
     let mut seed = id as u64 + 1;
     let padding: String = (0..size.saturating_sub(128))

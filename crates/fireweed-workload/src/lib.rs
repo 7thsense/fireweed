@@ -41,6 +41,8 @@ pub struct Config {
     pub projection_root: Option<std::path::PathBuf>,
     pub faults: bool,
     pub payload_bytes: usize,
+    /// Primitive component control using the campaign's varied JSON bodies.
+    pub primitive_varied_payload: bool,
     /// Persist enrichment attributes in row metadata, retaining the original payload.
     pub campaign_metadata_only: bool,
     /// Use Snorri-style timestamp priorities; false retains mixed-unit stress.
@@ -65,6 +67,7 @@ impl Default for Config {
             projection_root: None,
             faults: true,
             payload_bytes: 1024,
+            primitive_varied_payload: false,
             campaign_metadata_only: false,
             campaign_timestamp_priority: false,
             deadline: Duration::from_secs(120),
@@ -219,6 +222,10 @@ pub fn body(id: usize, stage: usize, size: usize) -> Bytes {
     Bytes::from(bytes)
 }
 pub fn item(id: usize, stage: usize, size: usize) -> NewItem {
+    item_with_payload(id, stage, body(id, stage, size))
+}
+
+pub(crate) fn item_with_payload(id: usize, stage: usize, payload: Bytes) -> NewItem {
     NewItem {
         client_item_key: Some(ClientItemKey::new(format!("r-{id:09}-s{stage}")).unwrap()),
         priority: Some(PriorityValue::Int64(if stage == 2 {
@@ -228,7 +235,7 @@ pub fn item(id: usize, stage: usize, size: usize) -> NewItem {
         })),
         not_before: Some(ts(if stage == 2 { due(id) } else { 1 })),
         metadata: metadata(stage, id),
-        payload: Some(body(id, stage, size)),
+        payload: Some(payload),
         ..Default::default()
     }
 }

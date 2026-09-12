@@ -1,0 +1,1038 @@
+{
+  "head": "1fe89a44685bd72a76e0541f2ccd172ff879a59a",
+  "binary_sha256": "bb7ee7df61f0b3306bbe22fd8bfe696ab648522e295a6041773f80029ff9d080",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 8306.857596352802,
+  "process_wall_s": 722.6060115979926,
+  "cpu_ms_per_recipient": 1.1358517951666667,
+  "mean_cpu_occupancy": 9.431295424637916,
+  "output_bytes_per_recipient": 12031.177386666666,
+  "logical_log_bytes_per_recipient": 1834.3248816666667,
+  "peak_rss_gib": 10.225105285644531,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 81.220532467,
+      "load_s": 6.581347542,
+      "prepare_s": 33.020517095,
+      "delivery_s": 31.275740132,
+      "verify_s": 0.575029052,
+      "purge_s": 6.4361509980000005,
+      "progress_p95_s": 2.077084844,
+      "due_to_claim_max_us": 7765840
+    },
+    {
+      "wall_s": 102.910274969,
+      "load_s": 24.87170031,
+      "prepare_s": 34.26847174,
+      "delivery_s": 29.734593888,
+      "verify_s": 0.654698246,
+      "purge_s": 13.58429852,
+      "progress_p95_s": 1.388330938,
+      "due_to_claim_max_us": 8185578
+    },
+    {
+      "wall_s": 120.545957896,
+      "load_s": 36.529812336,
+      "prepare_s": 43.315182118,
+      "delivery_s": 32.533414187,
+      "verify_s": 0.619960012,
+      "purge_s": 7.737508223,
+      "progress_p95_s": 1.301166559,
+      "due_to_claim_max_us": 8243852
+    },
+    {
+      "wall_s": 160.547458982,
+      "load_s": 30.586281806,
+      "prepare_s": 46.284680291,
+      "delivery_s": 76.522426406,
+      "verify_s": 0.564870464,
+      "purge_s": 6.53164014,
+      "progress_p95_s": 1.337785458,
+      "due_to_claim_max_us": 41267112
+    },
+    {
+      "wall_s": 105.183026743,
+      "load_s": 27.095445221,
+      "prepare_s": 40.644075465,
+      "delivery_s": 29.532741318,
+      "verify_s": 0.651826859,
+      "purge_s": 6.983866154,
+      "progress_p95_s": 1.397747207,
+      "due_to_claim_max_us": 7490128
+    },
+    {
+      "wall_s": 145.242637418,
+      "load_s": 26.512733861,
+      "prepare_s": 54.283922067,
+      "delivery_s": 55.828461166,
+      "verify_s": 0.590851659,
+      "purge_s": 7.76019138,
+      "progress_p95_s": 1.426250965,
+      "due_to_claim_max_us": 24890281
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 8306.857596352802,
+      "required": 10000
+    },
+    {
+      "name": "s0_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.537621803,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s1_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.565799686,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s2_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.1879414050000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s3_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.007501359,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s3_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.570732019,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s4_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.089519348,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s4_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.183432597,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s6_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.030852924,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s6_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.226926614,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.146658389,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.357485289,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s8_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.113561865,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s8_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.258016293,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.5593140540000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.395898346,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s10_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.070585657,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.020606357,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.173795753,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.4292864650000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s13_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.004300554,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s13_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.193216315,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s14_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.249439445,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s14_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.484979976,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s15_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.081224104,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s16_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.8455215520000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.1674104220000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.5050140349999999,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s18_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.174122336,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s18_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.409929245,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s19_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.234118067,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s19_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.247602173,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s20_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.271868252,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s20_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.396548859,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s21_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.694609298,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s22_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.218576477,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s23_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.207744638,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s24_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.06702272,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s24_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.384353204,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.240284725,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.682301615,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.083953822,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.203079237,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s27_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.202799588,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s27_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.546108275,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c1_cycle0_progress",
+      "passed": false,
+      "actual": 2.077084844,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.07691609,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s30_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.987877005,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.4339767270000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s0_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.084567114,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s1_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.182538479,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s2_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.109509338,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s2_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.107698468,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s4_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.123809968,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.126536752,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.121181665,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s8_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.038341561,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.388330938,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.009755313,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s10_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.017859186,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.20283675,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.384695436,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.020980299,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.169719065,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s14_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.264610388,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s14_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.117122217,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s15_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.17496087,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s16_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.102055138,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.144718591,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s20_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.1599722909999999,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s20_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.309105668,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s21_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.248857106,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s22_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.048487554,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s23_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.350298312,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s23_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.086794242,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s24_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.049111946,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.239521983,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.116473943,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.270449904,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s27_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.0246246,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c0_cycle1_progress",
+      "passed": false,
+      "actual": 1.154210717,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.284408865,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s30_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.306706862,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.092061403,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9717.202682640127,
+      "required": 10000
+    },
+    {
+      "name": "s1_c0_cycle2_progress",
+      "passed": false,
+      "actual": 1.293542711,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s2_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.045408701,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s3_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.196865031,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s6_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.241220905,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s8_c0_cycle2_progress",
+      "passed": false,
+      "actual": 1.077892009,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c0_cycle2_progress",
+      "passed": false,
+      "actual": 1.041907645,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.301166559,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.136237576,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.233983146,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s14_c0_cycle2_progress",
+      "passed": false,
+      "actual": 1.099157318,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s15_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.240227395,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s22_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.288878785,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.011669277,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.085642969,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c0_cycle2_progress",
+      "passed": false,
+      "actual": 1.096428578,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.224239027,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c0_cycle2_progress",
+      "passed": false,
+      "actual": 1.170284585,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8295.591303548656,
+      "required": 10000
+    },
+    {
+      "name": "s8_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.092289375,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.039326906,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.106989534,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.095245802,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s27_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.143319171,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s30_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.005559336,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.337785458,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6228.6878057167905,
+      "required": 10000
+    },
+    {
+      "name": "s0_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.064463615,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s6_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.017087842,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.191635395,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s8_c0_cycle4_progress",
+      "passed": false,
+      "actual": 1.326955487,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s8_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.131750182,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c0_cycle4_progress",
+      "passed": false,
+      "actual": 1.182700561,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s10_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.114665392,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s13_c0_cycle4_progress",
+      "passed": false,
+      "actual": 1.135668457,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s13_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.06192102,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s14_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.083479559,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s15_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.209200354,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s16_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.122022766,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.079240504,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s18_c0_cycle4_progress",
+      "passed": false,
+      "actual": 1.1525838959999999,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s18_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.109840513,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s19_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.018967363,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s20_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.244175501,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s21_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.17951338,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s22_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.015270241,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s23_c0_cycle4_progress",
+      "passed": false,
+      "actual": 1.092814527,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s23_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.162135695,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s24_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.062956747,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.115242182,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s27_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.397747207,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.069809643,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c0_cycle4_progress",
+      "passed": false,
+      "actual": 1.219518066,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s30_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.061599082,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.021284874,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9507.237345844402,
+      "required": 10000
+    },
+    {
+      "name": "s0_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.312438328,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s1_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.034216581,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s3_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.3570139399999999,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s4_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.135931581,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.00171553,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s10_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.086242495,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.3334456270000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.081754944,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s13_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.039432248,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.096962253,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.219757245,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s20_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.000728046,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s21_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.067542194,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s23_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.426250965,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.034525927,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.057164223,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s28_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.211167496,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s30_c1_cycle5_progress",
+      "passed": false,
+      "actual": 1.002199206,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.066263038,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6885.0305790169405,
+      "required": 10000
+    }
+  ]
+}

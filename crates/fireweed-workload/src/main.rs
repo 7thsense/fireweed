@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--recycle" => config.recycle = true,
+            "--primitive-varied-payload" => config.primitive_varied_payload = true,
             "--campaign-metadata" => config.campaign_metadata_only = true,
             "--campaign-timestamp-priority" => config.campaign_timestamp_priority = true,
             "--cycles" => config.cycles = args.next().ok_or("missing cycles")?.parse()?,
@@ -75,12 +76,15 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--apply-debt-bytes N (campaign)] [--payload-bytes N] [--deadline-seconds N] [--campaign-metadata] [--campaign-timestamp-priority] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--apply-debt-bytes N (campaign)] [--payload-bytes N] [--deadline-seconds N] [--primitive-varied-payload] [--campaign-metadata] [--campaign-timestamp-priority] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument {arg}").into()),
         }
+    }
+    if config.primitive_varied_payload && !primitives {
+        return Err("--primitive-varied-payload requires --profile primitives".into());
     }
     if config.campaign_metadata_only && !campaign {
         return Err("--campaign-metadata requires --profile campaign".into());
