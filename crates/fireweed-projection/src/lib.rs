@@ -2632,7 +2632,6 @@ impl ProjectionData {
                             let old = self
                                 .items
                                 .get(&mutation.item_id)
-                                .cloned()
                                 .ok_or(EngineError::NotFound)?;
                             let old_index_keys = self.record_index_keys(
                                 &old.fields,
@@ -2646,16 +2645,24 @@ impl ProjectionData {
                                 self.eligible
                                     .remove(EligibilityIndex::token(&old, &self.priority_model));
                             }
-                            let lease_ends = old.state == ItemState::Leased
+                            // Only retain the old lifecycle/index bookkeeping across
+                            // mutation. Copying the payload, metadata, and entity here
+                            // serves no purpose; the resolved command owns the new values.
+                            let old_state = old.state;
+                            let old_superseded = old.superseded;
+                            let old_gate_keys = old.gate_keys.clone();
+                            let old_lease_is_cohort = old.lease_is_cohort;
+                            let old_lease_expires_at = old.lease_expires_at;
+                            let old_lease_token = old.lease_token.clone();
+                            let lease_ends = old_state == ItemState::Leased
                                 && (values.invalidate_lease || values.state != ItemState::Leased);
                             if lease_ends {
                                 self.leased_ids.remove(&mutation.item_id);
-                                if !old.lease_is_cohort
-                                    && let Some(expires) = old.lease_expires_at
+                                if !old_lease_is_cohort && let Some(expires) = old_lease_expires_at
                                 {
                                     self.remove_ordinary_lease(expires, &mutation.item_id);
                                 }
-                                if let Some(token) = old.lease_token.as_ref()
+                                if let Some(token) = old_lease_token.as_ref()
                                     && let Some(ids) = self.leased_by_consumer.get_mut(token)
                                 {
                                     ids.remove(&mutation.item_id);
@@ -2715,7 +2722,7 @@ impl ProjectionData {
                                 .collect::<Vec<_>>();
                             self.index_remove_keys(mutation.item_id, &removed);
                             self.index_insert_keys(mutation.item_id, &added);
-                            if old.state == ItemState::Pending && !old.superseded {
+                            if old_state == ItemState::Pending && !old_superseded {
                                 self.claim_index_remove_keys(mutation.item_id, &old_index_keys);
                             }
                             if values.state == ItemState::Pending {
@@ -2723,11 +2730,11 @@ impl ProjectionData {
                             }
                             self.replace_gate_memberships(
                                 mutation.item_id,
-                                &old.gate_keys,
+                                &old_gate_keys,
                                 &values.gate_keys,
                             );
-                            if old.state != values.state {
-                                self.metrics_transition(old.state, values.state);
+                            if old_state != values.state {
+                                self.metrics_transition(old_state, values.state);
                             }
                             let record = self
                                 .items
@@ -3207,6 +3214,43 @@ impl ProjectionData {
         &self,
         request: &ItemMutationRequest,
     ) -> EngineResult<ItemMutationPlan> {
+        let plan = self.plan_item_mutation_unvalidated(request)?;
+        if request.dry_run {
+            return Ok(plan);
+        }
+        self.clone().validate_item_mutation_plan(plan)
+    }
+
+    /// Plan against a disposable projection image, retaining the same pre-append
+    /// apply validation without cloning the entire image for scratch space.
+    pub fn plan_item_mutation_owned(
+        self,
+        request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
+        let plan = self.plan_item_mutation_unvalidated(request)?;
+        if request.dry_run {
+            return Ok(plan);
+        }
+        self.validate_item_mutation_plan(plan)
+    }
+
+    fn validate_item_mutation_plan(
+        mut self,
+        plan: ItemMutationPlan,
+    ) -> EngineResult<ItemMutationPlan> {
+        let ItemMutationPlan { response, command } = plan;
+        let command = QueueCommand::MutateItems(command);
+        self.apply_command(&command)?;
+        let QueueCommand::MutateItems(command) = command else {
+            unreachable!()
+        };
+        Ok(ItemMutationPlan { response, command })
+    }
+
+    fn plan_item_mutation_unvalidated(
+        &self,
+        request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
         let mut results = Vec::new();
         let mut commands = Vec::new();
         let mut selectors = match &request.operation {
@@ -3388,12 +3432,6 @@ impl ProjectionData {
             items: commands,
             gate_changes: request.gate_changes.clone(),
         };
-        // Apply to a private image before append. This proves the resolved command cannot fail halfway
-        // through the serving projection after the log has accepted it.
-        if !request.dry_run {
-            let mut scratch = self.clone();
-            scratch.apply_command(&QueueCommand::MutateItems(command.clone()))?;
-        }
         Ok(ItemMutationPlan {
             response: ItemMutationResponse {
                 request_id: request.request_id.clone(),
@@ -5592,6 +5630,91 @@ mod tests {
             entity_document: None,
         }
     }
+    #[test]
+    fn disposable_mutation_planner_matches_borrowed_validation() {
+        use fireweed_core::RequestId;
+        use fireweed_engine::{AddressedMutation, BatchUpdateValue};
+        let definition = qdef_with_emit_change_records(false);
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![rich_push_item("1", "one", 1)],
+            }))
+            .unwrap();
+        let original = serde_json::to_value(projection.to_image(None)).unwrap();
+        let mut metadata = Metadata::new();
+        metadata.insert("top_times", MetadataValue::String("09:00,10:00".into()));
+        for dry_run in [false, true] {
+            for returning in [
+                ItemMutationReturning::Identity,
+                ItemMutationReturning::BeforeSnapshot,
+            ] {
+                for lifecycle in [
+                    LifecyclePatch::Keep,
+                    LifecyclePatch::SetComplete,
+                    LifecyclePatch::Purge,
+                ] {
+                    let request = ItemMutationRequest {
+                        request_id: RequestId::new("owned-equivalence").unwrap(),
+                        evaluated_at: ts(10),
+                        dry_run,
+                        returning,
+                        gate_changes: vec![],
+                        operation: ItemMutationOperation::Addressed {
+                            entries: vec![
+                                AddressedMutation {
+                                    item_id: iid("1"),
+                                    expected_item_version: Some(1),
+                                    predicates: vec![],
+                                    lease_guard: LeaseGuard::RejectActive,
+                                    patch: ItemPatch {
+                                        lifecycle,
+                                        metadata: BatchUpdateValue::Replace(metadata.clone()),
+                                        ..Default::default()
+                                    },
+                                },
+                                AddressedMutation {
+                                    item_id: iid("2"),
+                                    expected_item_version: None,
+                                    predicates: vec![],
+                                    lease_guard: LeaseGuard::RejectActive,
+                                    patch: ItemPatch::default(),
+                                },
+                            ],
+                        },
+                    };
+                    let borrowed = projection.plan_item_mutation(&request).unwrap();
+                    let owned = projection
+                        .clone()
+                        .plan_item_mutation_owned(&request)
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&borrowed.response).unwrap(),
+                        serde_json::to_value(&owned.response).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&borrowed.command).unwrap(),
+                        serde_json::to_value(&owned.command).unwrap()
+                    );
+                    assert!(matches!(
+                        owned.response.results[1].outcome,
+                        ItemMutationOutcome::NotFound
+                    ));
+                    assert_eq!(
+                        serde_json::to_value(projection.to_image(None)).unwrap(),
+                        original
+                    );
+                }
+            }
+        }
+    }
+
     fn rich_push_item(id: &str, key: &str, priority: i64) -> PushItem {
         let mut fields = BTreeMap::new();
         fields.insert("color".to_string(), Bytes::from_static(b"red"));

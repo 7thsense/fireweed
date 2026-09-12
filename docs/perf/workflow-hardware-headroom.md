@@ -9,11 +9,11 @@ final disposition, and discovers retained rows for purge through the public API.
 There are two campaigns per physical store. Metadata enrichment retains varied
 input bodies; a separate payload-rewrite stress variant remains tested.
 
-The best complete three-cycle measurement is now **7,470 recipients/sec** on
-clean `440a60fd`, up from 5,663 on `85b5554e`. This comparison includes code and
-concurrency changes, not an isolated attribution to one optimization. Independent
+The best complete three-cycle measurement is now **7,719 recipients/sec** on
+clean `386d79f7`, up from 7,470 on `440a60fd`. This comparison measures the full run; it does not isolate
+individual scheduling and allocation effects. Independent
 outcomes, due times, RSS and sampled WAL passed. Overall/late-cycle rates,
-64 progress checks and 17 projection-size stability checks failed. The objectives
+61 progress checks and 32 projection-size stability checks failed. The objectives
 remain **10,000 complete recipients/sec**, then **12,500/sec** (+25%), with
 repeated qualification and 10k primitive floors. No campaign candidate is qualified.
 See the [plan and full evidence](campaign-qualification-plan.md).
@@ -25,13 +25,13 @@ See the [plan and full evidence](campaign-qualification-plan.md).
 | Workers / loaders per campaign | 2 / 2 |
 | Storage batch / purge batch | 1,000 / 8,000 |
 | Enrichment / scheduling / delivery handler limits | 500 / 200 / 500 |
-| Process wall | 401.80 s |
-| Average complete recipients/sec | 7,470.33 |
-| Worst campaign wall, cycles 0 / 1 / 2 | 96.15 / 131.97 / 169.66 s |
-| CPU time/recipient | 1.263 ms |
-| Average charged logical CPU occupancy | 9.43 |
-| Peak RSS | 9.78 GiB |
-| Process-accounted output/recipient | 13,367.79 bytes |
+| Process wall | 388.99 s |
+| Average complete recipients/sec | 7,718.50 |
+| Worst campaign wall, cycles 0 / 1 / 2 | 97.80 / 139.08 / 148.89 s |
+| CPU time/recipient | 1.217 ms |
+| Average charged logical CPU occupancy | 9.39 |
+| Peak RSS | 9.71 GiB |
+| Process-accounted output/recipient | 12,863.20 bytes |
 | Logical retained log bytes/recipient | 1,823.51 bytes |
 
 ### Napkin math aligned with this workload
@@ -54,14 +54,14 @@ Actual initial bodies average **934.89 bytes**, despite the nominal 1 KiB fixtur
 setting. The metadata variant writes the body once. Its retained log averages
 **1,824 bytes/recipient**, including encoding and commands: about **17.4 / 21.7
 MiB/s** at the 10k / 12.5k targets. Process-accounted output implies approximately
-**127.5 / 159.4 MiB/s** at current amplification. Neither measure is physical NAND
+**122.7 / 153.3 MiB/s** at current amplification. Neither measure is physical NAND
 traffic. The payload-rewrite variant has a different, larger byte budget.
 
-At **1.263 CPU-ms/recipient**, 10k needs **12.63 CPU-s/s**, and 12.5k needs
-**15.79 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
+At **1.217 CPU-ms/recipient**, 10k needs **12.17 CPU-s/s**, and 12.5k needs
+**15.21 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
 accounting model, but with very little margin. This host has eight physical cores;
 SMT sharing, frequency, cache behavior and waiting prevent treating that arithmetic
-as guaranteed capacity. Compared with the observed 9.43 average occupancy,
+as guaranteed capacity. Compared with the observed 9.39 average occupancy,
 removing waiting remains essential. Further CPU reduction also creates margin.
 These figures do not establish a fundamental hardware ceiling or impossibility.
 
@@ -81,7 +81,7 @@ write the same 8 MiB; this is a locality/call-count result, not a throughput
 multiplier. Cached-page and WAL-read cases verify newest values after truncating
 the WAL and reopening. Safe-frame selection and sync semantics are preserved.
 
-The complete campaign's sampled active interval observed host-wide **13.70 GiB**
+The preceding `440a60fd` campaign's sampled active interval observed host-wide **13.70 GiB**
 written in **392.58 s**, mean write-request latency **55.95 ms**, and **88.0%** busy
 time. Sampling omits startup/tail margins and includes other host activity;
 these are not exact per-recipient physical amplification measurements. Load grew
@@ -97,10 +97,21 @@ Charged CPU averaged only 5.21 logical CPUs. Its preserved nonzero result is not
 a throughput measurement, and no NOCOW default was introduced. This control also
 loses filesystem compression/checksums and is not equivalent storage behavior.
 
-The next candidate lets another queue apply ready work while a claim waits for
+The current candidate lets another queue apply ready work while a claim waits for
 its handler follow-up, keeping each queue's ordered prefix and bounded join
-window. Its throughput and latency effects remain unmeasured. Current primitive
-qualification and repeated campaign passes are still required on a final build.
+window. Its complete-run gain was 3.3%, with 3.6% lower CPU cost. Current load maxima
+were 6.57 / 48.16 / 41.56 s and purge maxima 11.31 / 14.59 / 25.12 s; these phase
+maxima are not additive. Both performance objectives remain unmet.
+
+A separate one-cycle diagnostic on the same binary collected 205,265 user-IP
+samples at 199 Hz with zero samples lost. Allocation, copying and metadata cloning
+were prominent: the top allocator routine accounted for 8.46%, two memcpy routines
+7.88%, and the metadata-map clone routine 2.01%, excluding their callees. This is
+sampling evidence, not exact allocation attribution. The next candidate removes
+redundant command/request copies and reuses a disposable projection image for the
+same pre-append mutation validation. No log format, authority or API semantics
+change. Current primitive qualification and repeated campaign passes are still
+required on a final build.
 
 ## Historical all-due saturation qualification (2026-09-10)
 

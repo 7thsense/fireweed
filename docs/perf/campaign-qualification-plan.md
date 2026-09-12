@@ -702,3 +702,35 @@ The composed acknowledged-claim-tail lease/version regression passed. The final
 review also scoped the armed notification to selection/waiting so it does not
 cause unrelated notification wakeups while a selected SQL apply is in flight.
 All thirty coordinator tests passed again after that scope adjustment.
+
+## Ready-queue scheduling result and allocation review
+
+Clean `386d79f7` passed all six public campaign tests in release mode. The complete
+million-resident, three-cycle run reached **7,718.50 recipients/sec**, 388.995 s
+wall, **1.21699 CPU-ms/recipient**, 9.39 mean charged CPUs, 9.71 GiB peak RSS,
+12,863.20 process-output bytes/recipient and 1,823.51 retained-log bytes/recipient.
+Worst campaign walls were 97.80 / 139.08 / 148.89 s. Correctness, due times, RSS
+and sampled WAL passed; overall/late-cycle rates, 61 progress checks and all 32
+projection-size stability checks failed. The gain over `440a60fd` was 3.3%, with
+3.6% lower CPU cost. Neither target is achieved. Raw report, summary, device samples
+and release tests are archived as `campaign-386d79f7-*`.
+
+A separate one-cycle CPU diagnostic on that same binary used 199 Hz inherited
+user-IP sampling and apply tracing. It completed with 205,265 samples and zero
+lost; it is not qualification. Provenance, workload output, traces, samples, maps,
+executable symbols, sampler source and symbolization script are preserved.
+Allocator/copy functions and metadata-map cloning were prominent. Review found
+redundant deep copies in addressed-request grouping, projection-worker handoff,
+mutation scratch validation and old-row bookkeeping. The next candidate replaces
+these with Arc ownership, moved commands, a consumed temporary projection image,
+and only the old lifecycle/gate/lease fields required for bookkeeping. Both
+planner entry points retain the same pre-append apply validation; the borrowed
+planner still preserves its input. No command format or durability change.
+
+Validation passed: six public campaign tests (37.90 s), 32 projection tests
+including owned/borrowed planner equivalence across dry runs, return modes,
+metadata changes, completion, purge and missing rows; 30 coordinator tests,
+including apply failure/retry; and the composed unapplied-claim lease/version
+guard regression (0.54 s). Release validation and clean capacity measurements
+follow. Repository-wide formatting check still reports pre-existing formatting
+in unrelated files; changed Rust files were formatted without unrelated edits.

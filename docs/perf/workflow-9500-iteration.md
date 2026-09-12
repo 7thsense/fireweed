@@ -1,7 +1,7 @@
 # Within five percent of 10,000 complete workflows/sec
 
 > 2026-09-11: These are historical results for the lighter saturation workload.
-> The richer three-cycle campaign currently measures 7,470 recipients/sec and is below its 10k/12.5k targets; see the
+> The richer three-cycle campaign currently measures 7,719 recipients/sec and is below its 10k/12.5k targets; see the
 > [campaign plan, updated math and measurements](campaign-qualification-plan.md).
 
 The 2026-09-10 follow-up target is at least **9,500 complete workflows/sec**.

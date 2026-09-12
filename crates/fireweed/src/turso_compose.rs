@@ -4970,13 +4970,7 @@ impl DerivedObjectLogTursoBackend {
         let mut addressed = HashSet::new();
         let mut request_ids = HashSet::new();
         for work in generation.requests() {
-            let MutationGenerationWork::ItemMutation {
-                id,
-                request,
-                expected_epoch,
-                ..
-            } = work.as_ref()
-            else {
+            let MutationGenerationWork::ItemMutation { request, .. } = work.as_ref() else {
                 return Err(EngineError::Invalid("mixed addressed generation"));
             };
             let fireweed_engine::ItemMutationOperation::Addressed { entries } = &request.operation
@@ -4994,7 +4988,7 @@ impl DerivedObjectLogTursoBackend {
             }
             addressed.extend(entries.iter().map(|entry| entry.item_id));
             request_ids.insert(request.request_id.clone());
-            group.push((*id, request.clone(), *expected_epoch));
+            group.push(Arc::clone(work));
             if !request.gate_changes.is_empty() {
                 groups.push(std::mem::take(&mut group));
                 addressed.clear();
@@ -5084,7 +5078,16 @@ impl DerivedObjectLogTursoBackend {
                     for group in groups {
                         let mut commands = Vec::new();
                         let mut command_members = Vec::new();
-                        for (id, request, expected_epoch) in group {
+                        for work in group {
+                            let MutationGenerationWork::ItemMutation {
+                                id,
+                                request,
+                                expected_epoch,
+                                ..
+                            } = work.as_ref()
+                            else {
+                                unreachable!("addressed generation checked before submission")
+                            };
                             let result = async {
                                 if expected_epoch.is_some_and(|expected| expected != epoch) {
                                     return Err(EngineError::EpochFenced);
@@ -5118,7 +5121,7 @@ impl DerivedObjectLogTursoBackend {
                                 if let Some(command) = command {
                                     commands.push(CommandEnvelope {
                                         command_id: ids.next_command_id(),
-                                        request_id: Some(request.request_id),
+                                        request_id: Some(request.request_id.clone()),
                                         request_fingerprint: Some(fingerprint),
                                         request_outcome: Some(RequestOutcome::ItemMutation {
                                             response_payload,
@@ -5139,7 +5142,7 @@ impl DerivedObjectLogTursoBackend {
                             .await;
                             members.push(fireweed_engine::MutationGenerationMember {
                                 outcome: MutationGenerationMemberOutcome::ItemMutation {
-                                    id,
+                                    id: *id,
                                     result,
                                 },
                             });

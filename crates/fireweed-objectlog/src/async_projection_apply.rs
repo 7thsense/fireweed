@@ -906,7 +906,7 @@ where
             AsyncProjectionStore::apply_live(
                 inner.projection.as_ref(),
                 generation.positions.clone(),
-                generation.commands.clone(),
+                generation.commands,
             )
             .await
         };
