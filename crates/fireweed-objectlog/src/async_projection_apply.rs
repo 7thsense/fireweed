@@ -162,6 +162,31 @@ struct ApplyGeneration {
     commands: Vec<CommandEnvelope>,
 }
 
+// Selection can defer a claim repeatedly while notifications arrive. Borrow the
+// retained retry batches until a generation is actually chosen for application.
+struct ApplyGenerationPlan<'a> {
+    batches: Vec<&'a ApplyBatch>,
+}
+
+impl ApplyGenerationPlan<'_> {
+    fn commands(&self) -> impl Iterator<Item = &CommandEnvelope> {
+        self.batches.iter().flat_map(|batch| batch.commands.iter())
+    }
+
+    fn materialize(self) -> ApplyGeneration {
+        ApplyGeneration {
+            shard: self.batches[0].shard.clone(),
+            entry_ids: self.batches.iter().map(|batch| batch.id).collect(),
+            positions: self
+                .batches
+                .iter()
+                .flat_map(|batch| batch.positions.iter().cloned())
+                .collect(),
+            commands: self.commands().cloned().collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ShardApplyState {
     retry_count: u32,
@@ -768,21 +793,21 @@ fn select_worker_generation(
         let Some(generation) = next_coalesced_generation_excluding(state, &deferred) else {
             return earliest.map_or(WorkerSelection::Idle, WorkerSelection::WaitUntil);
         };
-        if generation_is_claim_without_complete(&generation) {
+        if commands_are_claim_without_complete(generation.commands()) {
             let window = joins
-                .entry(generation.entry_ids[0])
+                .entry(generation.batches[0].id)
                 .or_insert(ClaimJoinWindow {
                     started: now,
-                    commands_before: generation.commands.len(),
+                    commands_before: generation.commands().count(),
                 });
             let deadline = window.started + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS);
-            if now < deadline && !has_waiter(&generation.shard) {
+            if now < deadline && !has_waiter(&generation.batches[0].shard) {
                 earliest = Some(earliest.map_or(deadline, |prior: Instant| prior.min(deadline)));
-                deferred.insert(generation.shard.clone());
+                deferred.insert(generation.batches[0].shard.clone());
                 continue;
             }
         }
-        return WorkerSelection::Ready(generation);
+        return WorkerSelection::Ready(generation.materialize());
     }
 }
 
@@ -990,10 +1015,17 @@ fn queue_has_coverage_waiter<P: AsyncProjectionStore + 'static>(
         != 0
 }
 
+#[cfg(test)]
 fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
+    commands_are_claim_without_complete(generation.commands.iter())
+}
+
+fn commands_are_claim_without_complete<'a>(
+    commands: impl IntoIterator<Item = &'a CommandEnvelope>,
+) -> bool {
     let mut claim = false;
     let mut complete = false;
-    for envelope in &generation.commands {
+    for envelope in commands {
         match &envelope.command {
             QueueCommand::Claim(_) => claim = true,
             QueueCommand::Finalize(finalize)
@@ -1021,12 +1053,13 @@ fn generation_is_claim_without_complete(generation: &ApplyGeneration) -> bool {
 #[cfg(test)]
 fn next_coalesced_generation(state: &CoordinatorState) -> Option<ApplyGeneration> {
     next_coalesced_generation_excluding(state, &HashSet::new())
+        .map(ApplyGenerationPlan::materialize)
 }
 
-fn next_coalesced_generation_excluding(
-    state: &CoordinatorState,
+fn next_coalesced_generation_excluding<'a>(
+    state: &'a CoordinatorState,
     excluded: &HashSet<QueueKey>,
-) -> Option<ApplyGeneration> {
+) -> Option<ApplyGenerationPlan<'a>> {
     let (_, first) = next_runnable_excluding(state, excluded)?;
     let Some(mut last) = first.positions.last().cloned() else {
         return None;
@@ -1035,11 +1068,8 @@ fn next_coalesced_generation_excluding(
     let mut seen_items = HashSet::new();
     insert_batch_item_ids(&mut seen_items, first);
     let mut debt = first.debt_bytes;
-    let mut generation = ApplyGeneration {
-        shard: first.shard.clone(),
-        entry_ids: vec![first.id],
-        positions: first.positions.clone(),
-        commands: first.commands.clone(),
+    let mut generation = ApplyGenerationPlan {
+        batches: vec![first],
     };
 
     let mut candidates: Vec<&ApplyBatch> = state
@@ -1088,9 +1118,7 @@ fn next_coalesced_generation_excluding(
         envelopes = envelopes.saturating_add(add_envelopes);
         insert_batch_item_ids(&mut seen_items, batch);
         debt = debt.saturating_add(batch.debt_bytes);
-        generation.entry_ids.push(batch.id);
-        generation.positions.extend(batch.positions.iter().cloned());
-        generation.commands.extend(batch.commands.iter().cloned());
+        generation.batches.push(batch);
         if let Some(next_last) = batch.positions.last() {
             last = next_last.clone();
         }

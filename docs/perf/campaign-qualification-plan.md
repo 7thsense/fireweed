@@ -1279,3 +1279,19 @@ runner reports, device samples, summaries, provenance and property readbacks.
 Next: eliminate command copies during deferred apply selection and metadata
 serialization; independently test 2 KiB new-file projection pages to reduce
 page-level write amplification. Keep existing-file compatibility and every gate.
+
+## Avoid copies when deferring apply
+
+The apply selector previously materialized owned command vectors before deciding
+whether to defer a claim. Notifications could repeat that copying during the
+join window. It now builds a borrowed plan under the same state lock and copies
+commands only for the selected apply. The retained batches still own retry data;
+FIFO, contiguous-position, byte/item caps, coverage preemption and join deadlines
+are unchanged. Relational metadata serialization now borrows its map directly,
+using the existing identical map serializer rather than cloning `into_inner()`.
+
+All 75 local object-log tests and five relational tests passed (1.25 s / <.01 s);
+two live-S3 tests remain excluded without their service. Six public campaign
+tests passed (54.83 s), as did four recovery tests (2.50 s). Logs are archived as
+`fireweed-borrowed-apply-*`. No throughput improvement is claimed before a fresh
+release measurement.

@@ -52,7 +52,7 @@ pub fn metadata_to_json(metadata: &Metadata) -> EngineResult<String> {
     if metadata.is_empty() {
         return Ok("{}".to_string());
     }
-    to_json(&metadata.clone().into_inner())
+    to_json(metadata)
 }
 
 pub fn metadata_from_json(raw: String) -> EngineResult<Metadata> {
