@@ -52,6 +52,13 @@ Fireweed does not set the property automatically. See the
 A 64-store control with the same total workers was slower and stopped after two
 cycles; adding shards alone has not resolved the remaining waits.
 
+The subsequent cross-queue flush candidate `e1ee74b2` completed at 9,313.74/sec,
+with 1.11226 CPU-ms/recipient and approximately 3,682 sampled host bytes/recipient.
+Its observed cost implies 11.12 / 13.90 CPU-seconds/sec and 35.1 / 43.9 MiB/sec
+at 10k / 12.5k. These lower costs did not translate into faster completion:
+delivered bandwidth was 32.92 MiB/sec and progress latency still failed. The
+9,564.67 result remains the best throughput; neither run is qualified.
+
 ### Napkin math aligned with this workload
 
 A complete recipient entails approximately `8 + 2/19 = 8.1053` logical row

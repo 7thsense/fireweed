@@ -367,6 +367,7 @@ enum MetadataValueWire {
     Object(BTreeMap<String, MetadataValueWire>),
 }
 
+#[cfg(test)]
 impl From<&MetadataValue> for MetadataValueWire {
     fn from(v: &MetadataValue) -> Self {
         match v {
@@ -415,7 +416,29 @@ impl serde::Serialize for MetadataValue {
                 MetadataValue::Object(v) => v.serialize(serializer),
             }
         } else {
-            MetadataValueWire::from(self).serialize(serializer)
+            // Preserve the tagged native wire format without cloning a temporary
+            // recursive tree on every size calculation and durable serialization.
+            match self {
+                Self::Null => serializer.serialize_unit_variant("MetadataValueWire", 0, "Null"),
+                Self::Bool(v) => {
+                    serializer.serialize_newtype_variant("MetadataValueWire", 1, "Bool", v)
+                }
+                Self::Integer(v) => {
+                    serializer.serialize_newtype_variant("MetadataValueWire", 2, "Integer", v)
+                }
+                Self::Number(v) => {
+                    serializer.serialize_newtype_variant("MetadataValueWire", 3, "Number", v)
+                }
+                Self::String(v) => {
+                    serializer.serialize_newtype_variant("MetadataValueWire", 4, "String", v)
+                }
+                Self::Array(v) => {
+                    serializer.serialize_newtype_variant("MetadataValueWire", 5, "Array", v)
+                }
+                Self::Object(v) => {
+                    serializer.serialize_newtype_variant("MetadataValueWire", 6, "Object", v)
+                }
+            }
         }
     }
 }
@@ -2247,5 +2270,55 @@ mod coverage_tests {
         assert!(rendered.contains("illegal transition"));
         assert!(rendered.contains("Complete"));
         assert!(rendered.contains("Claim"));
+    }
+}
+
+#[cfg(test)]
+mod native_metadata_compatibility {
+    use super::*;
+
+    #[test]
+    fn borrowed_serialization_matches_owned_wire_for_nested_metadata() {
+        let mut values = vec![
+            MetadataValue::Null,
+            MetadataValue::Bool(false),
+            MetadataValue::Bool(true),
+            MetadataValue::Integer(i64::MIN),
+            MetadataValue::Integer(i64::MAX),
+            MetadataValue::Number(DecimalValue {
+                mantissa: i128::MIN,
+                scale: 28,
+            }),
+            MetadataValue::String("λ\0email@example.com".repeat(1024)),
+            MetadataValue::Array(Vec::new()),
+            MetadataValue::Object(Metadata::new()),
+        ];
+        for depth in 0..6 {
+            let nested = MetadataValue::Object(Metadata::from_entries(
+                [
+                    (
+                        format!("depth-{depth}"),
+                        MetadataValue::Array(values.clone()),
+                    ),
+                    ("empty".into(), MetadataValue::Object(Metadata::new())),
+                ]
+                .into_iter()
+                .collect(),
+            ));
+            for value in values.iter().chain(std::iter::once(&nested)) {
+                let legacy = postcard::to_allocvec(&MetadataValueWire::from(value)).unwrap();
+                let current = postcard::to_allocvec(value).unwrap();
+                assert_eq!(current, legacy);
+                assert_eq!(
+                    postcard::experimental::serialized_size(value).unwrap(),
+                    legacy.len()
+                );
+                assert_eq!(
+                    &postcard::from_bytes::<MetadataValue>(&current).unwrap(),
+                    value
+                );
+            }
+            values = vec![nested];
+        }
     }
 }

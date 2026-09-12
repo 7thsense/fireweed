@@ -1212,7 +1212,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if epoch != expected_epoch {
             return Err(EngineError::EpochFenced);
         }
-        self.produce_immediate(&shard, commands, expected_epoch, None)
+        self.produce_immediate(&shard, &commands, expected_epoch, None)
             .await
             .map_err(PackedAppendError::into_engine)
     }
@@ -1420,7 +1420,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         .await;
     }
 
-    async fn seal_group(&self, group: PackGroupKey, waiters: Vec<PackWaiter>) {
+    async fn seal_group(&self, group: PackGroupKey, mut waiters: Vec<PackWaiter>) {
         let waiter_n = waiters.len() as u64;
         let command_n = waiters.iter().map(|w| w.commands.len() as u64).sum::<u64>();
         let byte_n = waiters.iter().map(|w| w.bytes as u64).sum::<u64>();
@@ -1443,8 +1443,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             + Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
         let counts: Vec<usize> = waiters.iter().map(|w| w.commands.len()).collect();
         let mut all = Vec::with_capacity(counts.iter().sum());
-        for w in &waiters {
-            all.extend(w.commands.iter().cloned());
+        for w in &mut waiters {
+            all.append(&mut w.commands);
         }
         let gate = PackedProduceGate {
             post_positions: waiters
@@ -1454,12 +1454,12 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             pre_deadline,
         };
         let result = self
-            .produce_immediate(&group.shard, all.clone(), group.epoch, Some(gate))
+            .produce_immediate(&group.shard, &all, group.epoch, Some(gate))
             .await;
         match result {
             Ok(positions) => {
                 let mut offset = 0usize;
-                let mut leader = true;
+                let mut leader_commands = Some(all);
                 let apply_published = ApplyPublish::new();
                 let transferred_reservation_ids: Vec<u64> = waiters
                     .iter()
@@ -1472,11 +1472,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                         .map(|s| s.to_vec())
                         .unwrap_or_default();
                     offset += n;
-                    let apply_batch = if leader {
-                        leader = false;
+                    let apply_batch = if let Some(commands) = leader_commands.take() {
                         Some(PackedApplyBatch {
                             positions: positions.clone(),
-                            commands: all.clone(),
+                            commands,
                             transferred_reservation_ids: transferred_reservation_ids.clone(),
                         })
                     } else {
@@ -1500,7 +1499,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     async fn produce_immediate(
         &self,
         shard: &QueueKey,
-        commands: Vec<CommandEnvelope>,
+        commands: &[CommandEnvelope],
         expected_epoch: u64,
         gate: Option<PackedProduceGate>,
     ) -> Result<Vec<CommandPosition>, PackedAppendError> {
@@ -1536,7 +1535,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
             }
             let payload = Bytes::from(
-                fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
+                fireweed_engine::command_codec::encode_log_batch(expected_epoch, commands)
                     .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
             );
             let record_count = i32::try_from(commands.len()).map_err(|_| {
@@ -1653,8 +1652,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
 pub(crate) fn exact_envelope_bytes(commands: &[CommandEnvelope]) -> EngineResult<u64> {
     let mut total = 0_u64;
     for command in commands {
-        let encoded = fireweed_engine::command_codec::encode_command_envelope(command)?;
-        total = total.saturating_add(encoded.len() as u64);
+        let size = fireweed_engine::command_codec::encoded_command_envelope_size(command)?;
+        total = total.saturating_add(size as u64);
     }
     Ok(total)
 }
@@ -1727,7 +1726,7 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
             if epoch != expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
-            self.produce_immediate(&shard, commands, expected_epoch, None)
+            self.produce_immediate(&shard, &commands, expected_epoch, None)
                 .await
                 .map_err(PackedAppendError::into_engine)
         }

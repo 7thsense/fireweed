@@ -45,15 +45,14 @@ struct NativeLogBatch {
 /// This is the object-log hot path. Do not JSON-encode command envelopes here —
 /// payloads would Base64 and the batch would be cloned into a serde Value.
 pub fn encode_log_batch(backend_epoch: u64, commands: &[CommandEnvelope]) -> EngineResult<Vec<u8>> {
-    let body = postcard::to_allocvec(&NativeLogBatchRef {
-        backend_epoch,
-        commands,
-    })
-    .map_err(|e| EngineError::Storage(format!("native log-batch encode failed: {e}")))?;
-    let mut out = Vec::with_capacity(NATIVE_BATCH_MAGIC.len() + body.len());
-    out.extend_from_slice(NATIVE_BATCH_MAGIC);
-    out.extend_from_slice(&body);
-    Ok(out)
+    postcard::to_extend(
+        &NativeLogBatchRef {
+            backend_epoch,
+            commands,
+        },
+        NATIVE_BATCH_MAGIC.to_vec(),
+    )
+    .map_err(|e| EngineError::Storage(format!("native log-batch encode failed: {e}")))
 }
 
 #[derive(serde::Serialize)]
@@ -88,12 +87,15 @@ pub fn decode_log_batch(bytes: &[u8]) -> EngineResult<(u64, Vec<CommandEnvelope>
 /// index fields are [`fireweed_core::TypedValue`]. This is the bytes form
 /// retained by [`crate::LogStore::append_serialized`].
 pub fn encode_command_envelope(env: &CommandEnvelope) -> EngineResult<Vec<u8>> {
-    let body = postcard::to_allocvec(env)
-        .map_err(|e| EngineError::Storage(format!("native command encode failed: {e}")))?;
-    let mut out = Vec::with_capacity(NATIVE_ENVELOPE_MAGIC.len() + body.len());
-    out.extend_from_slice(NATIVE_ENVELOPE_MAGIC);
-    out.extend_from_slice(&body);
-    Ok(out)
+    postcard::to_extend(env, NATIVE_ENVELOPE_MAGIC.to_vec())
+        .map_err(|e| EngineError::Storage(format!("native command encode failed: {e}")))
+}
+
+/// Exact native framed size without allocating or copying serialized bytes.
+pub fn encoded_command_envelope_size(env: &CommandEnvelope) -> EngineResult<usize> {
+    postcard::experimental::serialized_size(env)
+        .map(|size| NATIVE_ENVELOPE_MAGIC.len() + size)
+        .map_err(|e| EngineError::Storage(format!("native command size failed: {e}")))
 }
 
 /// Decode a durable log row (FWC1 frame only).
@@ -210,6 +212,33 @@ mod tests {
             command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
             checksum: CommandChecksum(0),
             created_at: UtcTimestamp::new(0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn framed_encoding_and_exact_size_preserve_native_bytes() {
+        let commands = vec![
+            push_env(0, false),
+            push_env(131_072, true),
+            claim_env(1000),
+            finalize_env(1000),
+        ];
+        for env in &commands {
+            let mut expected = NATIVE_ENVELOPE_MAGIC.to_vec();
+            expected.extend(postcard::to_allocvec(env).unwrap());
+            assert_eq!(encode_command_envelope(env).unwrap(), expected);
+            assert_eq!(encoded_command_envelope_size(env).unwrap(), expected.len());
+        }
+        for epoch in [0, 127, 128, u64::MAX] {
+            let mut expected = NATIVE_BATCH_MAGIC.to_vec();
+            expected.extend(
+                postcard::to_allocvec(&NativeLogBatchRef {
+                    backend_epoch: epoch,
+                    commands: &commands,
+                })
+                .unwrap(),
+            );
+            assert_eq!(encode_log_batch(epoch, &commands).unwrap(), expected);
         }
     }
 

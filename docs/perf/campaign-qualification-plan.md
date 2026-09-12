@@ -970,3 +970,44 @@ six public campaign tests and four log-only recovery tests. One preceding full
 unit run hit the existing single-queue large-batch reopen test's 30-second produce
 timeout; its isolated rerun and the subsequent full suite passed. The failure is
 archived as a transient observation, not claimed fixed by the cross-queue change.
+
+
+## Cross-queue flush measurement and allocation reduction
+
+Clean `e1ee74b2`, binary
+`de47bc595329bf1ca3bd81357dce305b95a76d9adb1a3c0b5d2b7406c134c96a`,
+passed 42 native release tests (2.50 s), free-page history/reuse (0.38 s) and six
+public campaign tests (14.53 s). The unchanged 32-store explicit-zstd campaign
+completed at **9,313.74/sec**, below the 9,564.67 best. Wall time was 322.594 s;
+CPU cost 1.11226 ms/recipient; process output 11,876.64 bytes/recipient; peak RSS
+10.327 GiB. Sampled host writes were 10.2872 GiB at 32.92 MiB/sec, 82.61% busy.
+All 64 DB/WAL properties read back zstd. No diagnostic tracing was enabled.
+
+| Cycle | Maximum wall s | Load s | Preparation s | Delivery s | Purge s | Progress p95 s |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 | 86.106 | 6.216 | 38.109 | 30.657 | 6.070 | 1.816 |
+| 1 | 111.931 | 37.995 | 38.587 | 27.950 | 6.765 | 1.594 |
+| 2 | 120.669 | 41.679 | 38.467 | 33.313 | 6.816 | 1.454 |
+
+Correctness, due-time, RSS and WAL passed; overall/late-cycle throughput,
+105 progress checks and 32 DB stability checks failed. CPU cost fell 2.7% and
+sampled host writes fell 4.1% versus the preceding run, but lower delivered
+bandwidth offset those savings. This is not evidence of a throughput improvement.
+The per-waiter phase correction remains required for safe append disposition.
+
+The next candidate removes three avoidable command-tree clones in packed append:
+move each waiter's commands into the sealed batch, borrow that batch for durable
+encoding, then move it into the leader's projection publication. Byte accounting
+uses the codec's exact size serializer instead of allocating encoded buffers.
+Native metadata serialization borrows strings/maps/arrays rather than constructing
+an owned recursive wire tree. Framed encoding writes into one vector. Native tag
+numbers, framing bytes, human-readable JSON, durability and byte limits stay the
+same. Compatibility tests compare nested metadata against the old owned wire
+form, and complete envelopes/batches against the old framing algorithm.
+
+Allocation-candidate validation passed 30 core and 275 engine unit tests, 75 local
+object-log tests, six public campaign tests (37.96 s) and four recovery tests
+(2.30 s). The exact-size helper uses Postcard 1.1.3's size serializer; it still
+traverses the value and propagates serialization errors. This removes temporary
+output and metadata trees, not validation or debt accounting. Release validation
+and a fresh full-capacity measurement are required before claiming a speedup.
