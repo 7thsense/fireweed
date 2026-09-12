@@ -864,3 +864,42 @@ System mount settings and authoritative-log durability are unchanged. Sources:
 and [Linux v7.2 compression fallback](https://github.com/torvalds/linux/blob/v7.2/fs/btrfs/inode.c#L920).
 The host runs 7.2.3-arch1-3; this source explains the hypothesis, which still
 requires a measured control.
+
+## Same-binary compression control
+
+Clean `c8b0be7d` passed 42 native release unit tests (2.70 s), the free-page
+history test and six public campaign tests (13.61 s). Its fixed executable
+`33d0e21cd2eddd9b27848e70095cd52c26e540d5d3e76ad0cec5d35122f55749`
+then ran two serial full campaigns with separate projection directories on the
+same disk. The first used default attributes; the second inherited an explicit
+`compression=zstd` property. No mount or log durability settings changed.
+
+| Measurement | Default | Explicit zstd |
+|---|---:|---:|
+| Complete recipients/sec | 6,571.84 | 7,051.21 |
+| Process wall, seconds | 456.715 | 425.638 |
+| CPU-ms/recipient | 1.1675 | 1.1740 |
+| Process output bytes/recipient | 13,470.61 | 13,288.66 |
+| Sampled host writes, GiB | 15.4573 | 13.3137 |
+| Mean sampled write MiB/sec | 34.82 | 32.21 |
+| Device busy | 90.27% | 91.26% |
+| Maximum cycle walls, seconds | 99.67 / 164.42 / 189.24 | 106.78 / 151.29 / 165.49 |
+| Maximum progress p95, seconds | 1.646 / 0.833 / 0.674 | 1.111 / 1.111 / 0.981 |
+| Final NOCOMPRESS DB/WAL files | 12 / 6 | 0 / 0 |
+
+Explicit compression reduced sampled host writes 13.9% and increased complete
+throughput 7.3% in this pair. It started with a warmer device: first load took
+22.13 s versus 6.49 s, and measured device bandwidth differed. This is not an
+isolated coefficient or repeatable qualification. All 64 explicit file-property
+readbacks reported zstd. Both runs passed correctness and due-time checks but
+failed throughput, progress and database stability; default also failed RSS
+stability. Default had 52 failed checks, explicit 39. The planner change has
+not yet demonstrated an end-to-end CPU or throughput gain. The best complete
+result remains 7,718.50/sec on `386d79f7`; neither target is met.
+
+The next candidate restores clearing unused bytes in already-dirty freed pages,
+now with an explicitly compressed projection directory. The previous experiment
+had mixed compression attributes, so that storage configuration did not establish
+the combination's effect. The same native four-case history/reuse test and its
+nonzero-byte assertion pass (7.41 s). No frames are omitted and clean overflow
+pages stay clean. Release validation and unchanged full campaign gates follow.

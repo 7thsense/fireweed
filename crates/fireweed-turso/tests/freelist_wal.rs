@@ -195,4 +195,8 @@ fn exercise(cache_kib: usize, bytes: usize) {
         observed.bytes < 2 * 1024 * 1024,
         "clean overflow leaves must not be dirtied just to clear them"
     );
+    assert!(
+        observed.nonzero * 8 < observed.bytes,
+        "freed WAL images must not retransmit removed bodies: {observed:?}"
+    );
 }

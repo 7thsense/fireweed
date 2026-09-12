@@ -52,6 +52,15 @@ planned, without changing mount settings or log durability. See the
 [Btrfs explanation](https://btrfs.readthedocs.io/en/latest/Compression.html) and
 the [measurement plan](campaign-qualification-plan.md).
 
+On the next fixed binary, explicit per-directory zstd reduced sampled host writes
+from 15.4573 to 13.3137 GiB and raised full-run throughput from 6,571.84 to
+7,051.21/sec. All 64 projection files retained zstd. Both runs failed qualification;
+the second began warmer, so the paired 7.3% improvement is not a repeatable or
+isolated coefficient. At its observed 4,765 host bytes/recipient, 10k and 12.5k
+would need approximately 45.4 and 56.8 MiB/sec, compared with the run's 32.2 and
+the single-writer reference's 38.2 MiB/sec. The next test combines explicit
+compression with clearing obsolete bytes on already-dirty free pages.
+
 ### Napkin math aligned with this workload
 
 A complete recipient entails approximately `8 + 2/19 = 8.1053` logical row
