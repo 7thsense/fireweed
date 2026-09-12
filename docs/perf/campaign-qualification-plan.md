@@ -903,3 +903,70 @@ had mixed compression attributes, so that storage configuration did not establis
 the combination's effect. The same native four-case history/reuse test and its
 nonzero-byte assertion pass (7.41 s). No frames are omitted and clean overflow
 pages stay clean. Release validation and unchanged full campaign gates follow.
+
+
+## Explicit compression with cleared free pages; cross-queue log batching
+
+Clean `18e9aa33` completed three million recipient lifecycles at **9,564.67/sec**
+(314.012 seconds), using 32 stores, two campaigns/store, two workers and two
+loaders/campaign. Binary SHA-256:
+`d7a743d4f3a70d89b9f269d040ab90b95f20b6e1671fbac8efedd4c9ec6b9b31`.
+The new private projection directory explicitly inherited `compression=zstd`;
+all 64 database/WAL properties were read back. This configuration matters to the
+result; Fireweed does not silently configure it. The log remains durable on the
+normal filesystem. Release validation passed 42 native unit tests, the free-page
+history/reuse test and six public campaign tests.
+
+| Measurement | Value |
+|---|---:|
+| Maximum cycle wall, seconds | 83.671 / 109.659 / 116.843 |
+| Maximum load, seconds | 6.591 / 30.076 / 35.206 |
+| Maximum preparation, seconds | 32.400 / 38.056 / 42.765 |
+| Maximum delivery, seconds | 33.542 / 32.837 / 30.949 |
+| Maximum purge, seconds | 5.981 / 7.527 / 7.189 |
+| Maximum progress p95, seconds | 1.687 / 1.201 / 1.279 |
+| CPU-ms/recipient | 1.14346 |
+| Process output bytes/recipient | 12,574.92 |
+| Peak RSS, GiB | 10.486 |
+| Sampled host writes, GiB | 10.7230 |
+| Sampled device MiB/sec / busy | 35.254 / 81.22% |
+
+Correctness, due-time, RSS and WAL gates passed. Overall throughput, cycles one
+and two, 63 progress checks and 32 database stability checks failed. This is the
+best completed measurement, **not qualification**. Against the previous explicit
+compression run it combines free-page clearing with the same storage property;
+one run does not establish a repeatable effect size.
+
+A same-binary 64-store control used one worker/loader per campaign, preserving
+128 total workers while halving per-store residency and doubling aggregate
+checkpoint allowance. It was stopped after two complete cycles: maximum walls
+99.301 and 124.585 seconds, progress p95 1.601 and 1.185 seconds. It was slower
+than the 32-store candidate and already failed gates. Exit -15 after 271.879
+seconds is an interrupted run, with no full-run rate or per-recipient cost.
+All 128 DB/WAL compression properties were read back. Raw runner reports,
+provenance, device samples, summaries and validation logs are archived under
+`evidence/workflow-capacity/fireweed-campaign-18e9aa33-*` in the build evidence tree.
+
+The next code change removes the store-wide produce mutex. Queue-specific
+metadata permits still span epoch validation, durable append and high-water
+publication. Independent queues can now share a LogEngine group commit. Packed
+seals also submit independent groups concurrently. Stress testing exposed a
+pre-existing phase-map collision between overlapping seals with the same
+queue/epoch/lane: the older seal could remove the newer seal's phase. Each waiter
+now owns its append phase, preventing false before-position rejection and
+incorrect retry classification after a dropped result channel. No log format,
+durability boundary or retry gate changes.
+
+A regression demonstrates that independent queues enter one unsealed buffer and
+publish in one durable manifest while a same-queue epoch change waits. The old
+mutex fails the regression. A filesystem stress test mixes all three append paths
+across four queues and four workers each, checks 768 contiguous unique positions,
+reopens from the log and verifies continuation without offset reuse. A separate
+regression isolates dropped-waiter disposition across repeated logical keys.
+End-to-end throughput must be remeasured on a clean build before claiming benefit.
+
+Local validation passed 75 object-log unit tests (two live-S3 probes excluded),
+six public campaign tests and four log-only recovery tests. One preceding full
+unit run hit the existing single-queue large-batch reopen test's 30-second produce
+timeout; its isolated rerun and the subsequent full suite passed. The failure is
+archived as a transient observation, not claimed fixed by the cross-queue change.

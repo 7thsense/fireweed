@@ -1528,6 +1528,7 @@ dependencies = [
  "fireweed-projection",
  "fireweed-release",
  "fireweed-sim-support",
+ "futures",
  "object-log",
  "serde",
  "serde_json",

@@ -9,13 +9,13 @@ final disposition, and discovers retained rows for purge through the public API.
 There are two campaigns per physical store. Metadata enrichment retains varied
 input bodies; a separate payload-rewrite stress variant remains tested.
 
-The best complete three-cycle measurement is now **7,719 recipients/sec** on
-clean `386d79f7`, up from 7,470 on `440a60fd`. This comparison measures the full run; it does not isolate
-individual scheduling and allocation effects. Independent
-outcomes, due times, RSS and sampled WAL passed. Overall/late-cycle rates,
-61 progress checks and 32 projection-size stability checks failed. The objectives
-remain **10,000 complete recipients/sec**, then **12,500/sec** (+25%), with
-repeated qualification and 10k primitive floors. No campaign candidate is qualified.
+The best complete three-cycle measurement is **9,564.67 recipients/sec** on
+clean `18e9aa33`, with explicit zstd on its private projection directory and
+clearing obsolete bytes in already-dirty free pages. Correctness, due times,
+RSS and sampled WAL passed. Overall/late-cycle rates, 63 progress checks and
+32 projection-size stability checks failed. The objectives remain **10,000
+complete recipients/sec**, then **12,500/sec** (+25%), with repeated qualification
+and 10k primitive floors. No campaign candidate is qualified.
 See the [plan and full evidence](campaign-qualification-plan.md).
 
 | Complete campaign measurement | Value |
@@ -25,41 +25,32 @@ See the [plan and full evidence](campaign-qualification-plan.md).
 | Workers / loaders per campaign | 2 / 2 |
 | Storage batch / purge batch | 1,000 / 8,000 |
 | Enrichment / scheduling / delivery handler limits | 500 / 200 / 500 |
-| Process wall | 388.99 s |
-| Average complete recipients/sec | 7,718.50 |
-| Worst campaign wall, cycles 0 / 1 / 2 | 97.80 / 139.08 / 148.89 s |
-| CPU time/recipient | 1.217 ms |
-| Average charged logical CPU occupancy | 9.39 |
-| Peak RSS | 9.71 GiB |
-| Process-accounted output/recipient | 12,863.20 bytes |
+| Process wall | 314.012 s |
+| Average complete recipients/sec | 9,564.67 |
+| Worst campaign wall, cycles 0 / 1 / 2 | 83.67 / 109.66 / 116.84 s |
+| CPU time/recipient | 1.14346 ms |
+| Average charged logical CPU occupancy | 10.924 |
+| Peak RSS | 10.486 GiB |
+| Process-accounted output/recipient | 12,574.92 bytes |
 | Logical retained log bytes/recipient | 1,823.51 bytes |
 
-The subsequent `b86382a1` candidate failed with a post-position timeout and
-its 448 MiB checkpoint experiment was reverted to 250 MiB. Free-page zeroing on
-`3f43c661` completed at 7,390.37/sec, with 1.1620 CPU-ms/recipient but 15.1647 GiB
-sampled host writes. It did not demonstrate sustained benefit and is removed.
-The best complete result remains 7,718.50/sec. Its sampled physical byte budget
-is not stable across candidates: the later run cost about 5,428 host bytes per
-recipient versus 4,445 previously. At 12.5k that is roughly 64.7 versus 53.0
-MiB/sec, both above the 38.23 MiB/sec sequential reference. This is measured
-host/filesystem traffic, not NAND write amplification or a proven device ceiling.
+Sampled host writes were 10.723 GiB, approximately **3,838 bytes/recipient**.
+At that observed cost, 10k needs **36.6 MiB/sec** and 12.5k needs **45.8 MiB/sec**.
+The run delivered 35.25 MiB/sec; the private sequential reference measured
+38.23 MiB/sec. That reference would support roughly 10.4k recipients/sec at this
+byte cost. Reaching 12.5k at the reference bandwidth needs about **16.5% fewer
+physical bytes/recipient**, or about **20% more bandwidth** at unchanged cost.
+These are host/filesystem measurements, not NAND write amplification or a proven
+hardware ceiling. Samples omit startup/tail and include other host traffic.
 
-The archived file attributes reveal another variable: the later run ended with
-compression disabled on nine databases and eight WALs; the earlier best had only
-one such WAL. Btrfs can retain that decision for a whole file after an unfavorable
-compression attempt. An explicit per-directory compression-property control is
-planned, without changing mount settings or log durability. See the
-[Btrfs explanation](https://btrfs.readthedocs.io/en/latest/Compression.html) and
-the [measurement plan](campaign-qualification-plan.md).
-
-On the next fixed binary, explicit per-directory zstd reduced sampled host writes
-from 15.4573 to 13.3137 GiB and raised full-run throughput from 6,571.84 to
-7,051.21/sec. All 64 projection files retained zstd. Both runs failed qualification;
-the second began warmer, so the paired 7.3% improvement is not a repeatable or
-isolated coefficient. At its observed 4,765 host bytes/recipient, 10k and 12.5k
-would need approximately 45.4 and 56.8 MiB/sec, compared with the run's 32.2 and
-the single-writer reference's 38.2 MiB/sec. The next test combines explicit
-compression with clearing obsolete bytes on already-dirty free pages.
+Compression configuration is part of the measurement. Btrfs can mark a file
+incompressible after an unfavorable attempt; an explicit property prevents that
+sticky fallback. All 64 database/WAL properties in this run read back zstd.
+Fireweed does not set the property automatically. See the
+[Btrfs documentation](https://btrfs.readthedocs.io/en/latest/Compression.html) and
+[Linux v7.2 implementation](https://github.com/torvalds/linux/blob/v7.2/fs/btrfs/inode.c#L920).
+A 64-store control with the same total workers was slower and stopped after two
+cycles; adding shards alone has not resolved the remaining waits.
 
 ### Napkin math aligned with this workload
 
@@ -71,7 +62,8 @@ statements. Storage batching amortizes log syncs, and projection fusion can
 combine transitions. Handler/provider chunk limits remain independently enforced.
 
 Three full retained-row exports per cycle cover scheduled-state verification,
-final disposition and retention discovery. Progress is polled at 1 Hz/campaign.
+final disposition and retention discovery. Each campaign observer waits one second after each public progress read;
+actual frequency therefore falls as read latency rises (gate: at least 0.5 Hz).
 Reads, processing, settlement and purge are timed. Virtual-clock jumps remove
 intentional calendar waiting only. Provider/model latency is stubbed. The fixture
 does not establish delayed retry backoff, overlapping campaign intake, continuous
@@ -81,14 +73,14 @@ Actual initial bodies average **934.89 bytes**, despite the nominal 1 KiB fixtur
 setting. The metadata variant writes the body once. Its retained log averages
 **1,824 bytes/recipient**, including encoding and commands: about **17.4 / 21.7
 MiB/s** at the 10k / 12.5k targets. Process-accounted output implies approximately
-**122.7 / 153.3 MiB/s** at current amplification. Neither measure is physical NAND
+**119.9 / 149.9 MiB/s** at current amplification. Neither measure is physical NAND
 traffic. The payload-rewrite variant has a different, larger byte budget.
 
-At **1.217 CPU-ms/recipient**, 10k needs **12.17 CPU-s/s**, and 12.5k needs
-**15.21 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
+At **1.14346 CPU-ms/recipient**, 10k needs **11.43 CPU-s/s**, and 12.5k needs
+**14.29 CPU-s/s**. The stretch target now fits an optimistic sixteen-logical-thread
 accounting model, but with very little margin. This host has eight physical cores;
 SMT sharing, frequency, cache behavior and waiting prevent treating that arithmetic
-as guaranteed capacity. Compared with the observed 9.39 average occupancy,
+as guaranteed capacity. Compared with the observed 10.924 average occupancy,
 removing waiting remains essential. Further CPU reduction also creates margin.
 These figures do not establish a fundamental hardware ceiling or impossibility.
 

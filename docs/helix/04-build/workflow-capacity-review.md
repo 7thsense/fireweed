@@ -2,7 +2,7 @@
 
 Date: 2026-09-10. Exact measurement snapshots are recorded in the linked artifacts.
 
-> 2026-09-11: The richer million-resident campaign now measures 7,719 recipients/sec
+> 2026-09-11: The richer million-resident campaign now measures 9,565 recipients/sec
 > over three cycles and has not qualified against its 10k/12.5k targets. The results
 > below describe the earlier saturation fixture. See the [current campaign plan](../../perf/campaign-qualification-plan.md).
 

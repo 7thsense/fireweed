@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as IoWrite;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -124,7 +124,7 @@ const PACK_MAX_BATCHES: usize = 8;
 /// Gather window for concurrent produces. Seal immediately once a full window
 /// is waiting; otherwise wait this long for more callers to join the PUT.
 const PACK_LINGER: Duration = Duration::from_millis(20);
-/// Pre-position budget covering linger, produce-lock queueing, encode, and leader election.
+/// Pre-position budget covering linger, queue-permit waiting, encode, and leader election.
 pub const OBJECT_LOG_PRE_POSITION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Post-position budget covering `engine.produce` plus periodic high-water `put_json`.
 pub const OBJECT_LOG_POST_POSITION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -243,12 +243,6 @@ struct PackGroupKey {
     lane: PackLane,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PackGroupPhase {
-    PrePosition,
-    PostPosition,
-}
-
 struct PackWaiter {
     shard: QueueKey,
     epoch: u64,
@@ -257,6 +251,7 @@ struct PackWaiter {
     bytes: usize,
     reservation_id: Option<u64>,
     joined_at: Instant,
+    post_position: Arc<AtomicBool>,
     tx: oneshot::Sender<Result<PackedAppendOutcome, PackedAppendError>>,
 }
 
@@ -264,11 +259,10 @@ struct PackState {
     pending: Vec<PackWaiter>,
     bytes: usize,
     oldest: Option<Instant>,
-    groups: HashMap<PackGroupKey, PackGroupPhase>,
 }
 
 struct PackedProduceGate {
-    group: PackGroupKey,
+    post_positions: Vec<Arc<AtomicBool>>,
     pre_deadline: Instant,
 }
 
@@ -280,9 +274,9 @@ pub struct PackerStats {
     pub bytes: u64,
 }
 
-/// Time spent waiting on the metadata permit and/or produce lock.
+/// Time spent waiting on each queue's metadata permit.
 ///
-/// `append_wait` covers produce-path permit then produce-lock acquires.
+/// `append_wait` covers the produce-path queue-permit acquire.
 /// Epoch-acquire and emission-cursor waits are permit-only.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LockWaitStats {
@@ -369,7 +363,6 @@ impl ObjectLogPacker {
                 pending: Vec::new(),
                 bytes: 0,
                 oldest: None,
-                groups: HashMap::new(),
             }),
             notify: Notify::new(),
             counters: PackerCounters {
@@ -465,10 +458,6 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     /// already sequenced; the high-water blob is reopen acceleration only.
     high_water_appends: Mutex<HashMap<String, u64>>,
     packer: Arc<ObjectLogPacker>,
-    /// One sequenced produce at a time. Concurrent seals otherwise assign
-    /// overlapping or gapped offsets and the apply coordinator holds forever.
-    /// Always acquired after the per-shard metadata permit (never inverted).
-    produce_lock: tokio::sync::Mutex<()>,
     lock_wait: LockWaitCounters,
     metadata_permits: Arc<MetadataPermits>,
     catalog: Mutex<CatalogDoc>,
@@ -557,7 +546,6 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
             packer: Arc::new(ObjectLogPacker::new()),
-            produce_lock: tokio::sync::Mutex::new(()),
             lock_wait: LockWaitCounters::new(),
             metadata_permits,
             catalog: Mutex::new(CatalogDoc::default()),
@@ -732,7 +720,6 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
             packer: Arc::new(ObjectLogPacker::new()),
-            produce_lock: tokio::sync::Mutex::new(()),
             lock_wait: LockWaitCounters::new(),
             metadata_permits: Arc::new(Mutex::new(HashMap::new())),
             catalog: Mutex::new(CatalogDoc::default()),
@@ -1300,6 +1287,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             lane,
         };
         let (tx, rx) = oneshot::channel();
+        let post_position = Arc::new(AtomicBool::new(false));
         let joined_at = Instant::now();
         let should_seal = {
             let mut state = self.packer.state.lock().expect("packer");
@@ -1319,6 +1307,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 bytes,
                 reservation_id,
                 joined_at,
+                post_position: Arc::clone(&post_position),
                 tx,
             });
             state.bytes = state.bytes.saturating_add(bytes);
@@ -1334,45 +1323,41 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             } else {
                 self.seal_packed(true).await;
             }
-            return self.await_packed_result(rx, &group).await;
+            return self.await_packed_result(rx, &group, &post_position).await;
         }
         tokio::pin!(rx);
         tokio::select! {
             result = &mut rx => {
-                return self.unpack_packed_result(result.map_err(|_| ()), &group);
+                return self.unpack_packed_result(result.map_err(|_| ()), &group, &post_position);
             }
             _ = tokio::time::sleep(PACK_LINGER) => {
                 self.seal_packed(true).await;
             }
         }
-        self.unpack_packed_result(rx.await.map_err(|_| ()), &group)
+        self.unpack_packed_result(rx.await.map_err(|_| ()), &group, &post_position)
     }
 
     async fn await_packed_result(
         &self,
         rx: oneshot::Receiver<Result<PackedAppendOutcome, PackedAppendError>>,
         group: &PackGroupKey,
+        post_position: &AtomicBool,
     ) -> Result<PackedAppendOutcome, PackedAppendError> {
-        self.unpack_packed_result(rx.await.map_err(|_| ()), group)
+        self.unpack_packed_result(rx.await.map_err(|_| ()), group, post_position)
     }
 
     fn unpack_packed_result(
         &self,
         result: Result<Result<PackedAppendOutcome, PackedAppendError>, ()>,
         group: &PackGroupKey,
+        post_position: &AtomicBool,
     ) -> Result<PackedAppendOutcome, PackedAppendError> {
         match result {
             Ok(outcome) => outcome,
             Err(_) => {
-                let phase = self
-                    .packer
-                    .state
-                    .lock()
-                    .expect("packer")
-                    .groups
-                    .get(group)
-                    .copied();
-                if phase == Some(PackGroupPhase::PostPosition) {
+                // The phase belongs to this waiter, not its reusable queue/epoch/lane
+                // key. Another seal must never reset an ambiguous append to retryable.
+                if post_position.load(Ordering::Acquire) {
                     Err(PackedAppendError::PostPositionAmbiguous {
                         shard: group.shard.clone(),
                         reason: "object-log packer waiter dropped after position".into(),
@@ -1427,9 +1412,12 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 .or_default()
                 .push(w);
         }
-        for (group, waiters) in groups {
-            self.seal_group(group, waiters).await;
-        }
+        futures::future::join_all(
+            groups
+                .into_iter()
+                .map(|(group, waiters)| self.seal_group(group, waiters)),
+        )
+        .await;
     }
 
     async fn seal_group(&self, group: PackGroupKey, waiters: Vec<PackWaiter>) {
@@ -1453,28 +1441,21 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         // lock+encode only, not time spent waiting behind other sealed groups.
         let pre_deadline = Instant::now()
             + Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
-        {
-            let mut state = self.packer.state.lock().expect("packer");
-            state
-                .groups
-                .insert(group.clone(), PackGroupPhase::PrePosition);
-        }
         let counts: Vec<usize> = waiters.iter().map(|w| w.commands.len()).collect();
         let mut all = Vec::with_capacity(counts.iter().sum());
         for w in &waiters {
             all.extend(w.commands.iter().cloned());
         }
         let gate = PackedProduceGate {
-            group: group.clone(),
+            post_positions: waiters
+                .iter()
+                .map(|w| Arc::clone(&w.post_position))
+                .collect(),
             pre_deadline,
         };
         let result = self
             .produce_immediate(&group.shard, all.clone(), group.epoch, Some(gate))
             .await;
-        {
-            let mut state = self.packer.state.lock().expect("packer");
-            state.groups.remove(&group);
-        }
         match result {
             Ok(positions) => {
                 let mut offset = 0usize;
@@ -1541,8 +1522,9 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             if stall_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(stall_ms)).await;
             }
-            // Terminal suffix: metadata-permit then produce-lock. The permit is held
-            // across produce and the permit-held high-water decision/advance.
+            // Serialize each queue from epoch validation through durable produce
+            // and high-water publication. Independent queues may share an engine
+            // flush; a store-wide lock would prevent that group commit entirely.
             let wait_started = Instant::now();
             let metadata = permit.lock().await;
             self.lock_wait.record_append(wait_started.elapsed());
@@ -1553,9 +1535,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             if epoch != expected_epoch {
                 return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
             }
-            let wait_started = Instant::now();
-            let produce = self.produce_lock.lock().await;
-            self.lock_wait.record_append(wait_started.elapsed());
             let payload = Bytes::from(
                 fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
                     .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
@@ -1565,24 +1544,18 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                     "batch too large for object-log record_count",
                 ))
             })?;
-            Ok((metadata, produce, payload, record_count))
+            Ok((metadata, payload, record_count))
         };
         let remaining = pre_deadline.saturating_duration_since(Instant::now());
-        let (metadata, produce, payload, record_count) =
-            match tokio::time::timeout(remaining, pre).await {
-                Ok(Ok(parts)) => parts,
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Err(PackedAppendError::before_timeout()),
-            };
+        let (metadata, payload, record_count) = match tokio::time::timeout(remaining, pre).await {
+            Ok(Ok(parts)) => parts,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(PackedAppendError::before_timeout()),
+        };
         let _metadata = metadata;
-        let _produce = produce;
         if let Some(gate) = &gate {
-            let mut state = self.packer.state.lock().expect("packer");
-            match state.groups.get_mut(&gate.group) {
-                Some(phase) if *phase == PackGroupPhase::PrePosition => {
-                    *phase = PackGroupPhase::PostPosition;
-                }
-                Some(_) | None => return Err(PackedAppendError::before_timeout()),
+            for phase in &gate.post_positions {
+                phase.store(true, Ordering::Release);
             }
         }
         let pre_us = trace_started.elapsed().as_micros();
@@ -1975,7 +1948,7 @@ fn _parse_partition_smoke(key: &PartitionKey) -> Option<QueueKey> {
 mod tests {
     use std::sync::Arc;
 
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use fireweed_core::{
@@ -1991,7 +1964,7 @@ mod tests {
 
     use super::{
         OBJECT_LOG_POST_POSITION_TIMEOUT, OBJECT_LOG_PRE_POSITION_TIMEOUT, ObjectLogEngineStore,
-        PackedAppendError,
+        PackGroupKey, PackLane, PackedAppendError,
     };
     use crate::async_projection_apply::AsyncProjectionApplyCoordinator;
     use object_log::FlushConfig;
@@ -2700,9 +2673,202 @@ mod tests {
         }
     }
 
-    /// S3a: every produce path is metadata-permit → produce-lock with permit-held high-water.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn objectlog_metadata_produce_lock_order_is_global() {
+    async fn independent_queues_share_flush_while_epoch_changes_wait_for_their_queue() {
+        let mut flush = FlushConfig {
+            linger: Duration::from_secs(5),
+            ..FlushConfig::default()
+        };
+        // Make the unsealed buffer observable; the default budget controller
+        // may otherwise flush idle media before the configured linger.
+        flush.budget.enabled = false;
+        let log = Arc::new(ObjectLogEngineStore::open_memory(flush).await.unwrap());
+        let a_def = qdef_named("parallel-a");
+        let b_def = qdef_named("parallel-b");
+        let a = QueueKey::new(a_def.tenant_id.clone(), a_def.queue_id.clone());
+        let b = QueueKey::new(b_def.tenant_id.clone(), b_def.queue_id.clone());
+        log.create_or_read_definition(a_def).await.unwrap();
+        log.create_or_read_definition(b_def).await.unwrap();
+        let a_epoch = log.acquire_epoch(a.clone()).await.unwrap();
+        let b_epoch = log.acquire_epoch(b.clone()).await.unwrap();
+        let before = log.engine.sequencer().snapshot().manifest_count;
+        let a_append = {
+            let log = log.clone();
+            let a = a.clone();
+            tokio::spawn(
+                async move { log.append_exclusive(a, vec![pause_env("a")], a_epoch).await },
+            )
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while log.engine.buffer_stats().queued_batches != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("first append must reach the log buffer");
+        let fence = {
+            let log = log.clone();
+            let a = a.clone();
+            tokio::spawn(async move { log.acquire_epoch(a).await })
+        };
+        let b_append = {
+            let log = log.clone();
+            let b = b.clone();
+            tokio::spawn(
+                async move { log.append_exclusive(b, vec![pause_env("b")], b_epoch).await },
+            )
+        };
+        let shared_flush = tokio::time::timeout(Duration::from_millis(250), async {
+            while log.engine.buffer_stats().queued_batches != 2 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let fence_waited = !fence.is_finished();
+        // Drain even on the old serialized path before asserting, avoiding a
+        // five-second linger or detached append after the expected red failure.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !a_append.is_finished() || !b_append.is_finished() {
+                log.engine.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("flush both appends");
+        let a_positions = a_append.await.unwrap().unwrap();
+        let b_positions = b_append.await.unwrap().unwrap();
+        assert_eq!(fence.await.unwrap().unwrap(), a_epoch + 1);
+        assert!(
+            fence_waited,
+            "same-queue epoch change must wait through append publication"
+        );
+        assert_eq!(a_positions.len(), 1);
+        assert_eq!(b_positions.len(), 1);
+        assert_eq!(a_positions[0].queue, a);
+        assert_eq!(b_positions[0].queue, b);
+        assert_eq!(a_positions[0].sequence, b_positions[0].sequence);
+        assert_eq!(
+            log.read_from(a.clone(), None, 16)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(log.read_from(b, None, 16).await.unwrap().entries.len(), 1);
+        assert!(matches!(
+            log.append_exclusive(a, vec![pause_env("stale")], a_epoch)
+                .await,
+            Err(EngineError::EpochFenced)
+        ));
+        assert!(
+            shared_flush,
+            "independent queue appends must reach the same unsealed log buffer"
+        );
+        assert_eq!(
+            log.engine.sequencer().snapshot().manifest_count - before,
+            1,
+            "both partitions must publish in one durable manifest"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_queue_produce_paths_reopen_without_offset_gaps_or_reuse() {
+        let root = temp_root("parallel-queue-offsets");
+        let flush = super::flush_config_from_segment(256 * 1024, 5);
+        let log = Arc::new(
+            ObjectLogEngineStore::open_local(&root, flush)
+                .await
+                .unwrap(),
+        );
+        let mut queues = Vec::new();
+        let mut tasks = Vec::new();
+        for queue in 0..4 {
+            let definition = qdef_named(&format!("parallel-{queue}"));
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            log.create_or_read_definition(definition).await.unwrap();
+            let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+            queues.push((shard.clone(), epoch));
+            for worker in 0..4 {
+                let log = log.clone();
+                let shard = shard.clone();
+                tasks.push(tokio::spawn(async move {
+                    for generation in 0..16 {
+                        let commands = (0..3)
+                            .map(|entry| {
+                                pause_env(&format!("q{queue}-w{worker}-g{generation}-e{entry}"))
+                            })
+                            .collect();
+                        let positions = match generation % 3 {
+                            0 => log.append(shard.clone(), commands, epoch).await,
+                            1 => log.append_exclusive(shard.clone(), commands, epoch).await,
+                            _ => log
+                                .packed_append(shard.clone(), commands, epoch)
+                                .await
+                                .map(|outcome| outcome.positions)
+                                .map_err(PackedAppendError::into_engine),
+                        }
+                        .unwrap();
+                        assert_eq!(positions.len(), 3);
+                        assert!(
+                            positions
+                                .windows(2)
+                                .all(|pair| pair[0].sequence + 1 == pair[1].sequence)
+                        );
+                    }
+                }));
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for task in tasks {
+                task.await.unwrap();
+            }
+        })
+        .await
+        .expect("concurrent append paths must make progress");
+        for (shard, epoch) in &queues {
+            let page = log.read_from(shard.clone(), None, 1000).await.unwrap();
+            assert_eq!(page.entries.len(), 192);
+            let mut ids = std::collections::BTreeSet::new();
+            for (sequence, (position, envelope)) in page.entries.iter().enumerate() {
+                assert_eq!(position.sequence, sequence as u64);
+                assert_eq!(position.backend_epoch, *epoch);
+                assert!(ids.insert(envelope.command_id.0.clone()));
+            }
+            assert_eq!(log.acquire_epoch(shard.clone()).await.unwrap(), epoch + 1);
+            assert!(matches!(
+                log.append(shard.clone(), vec![pause_env("stale")], *epoch)
+                    .await,
+                Err(EngineError::EpochFenced)
+            ));
+        }
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_local(&root, flush)
+            .await
+            .unwrap();
+        for (shard, epoch) in queues {
+            let page = reopened.read_from(shard.clone(), None, 1000).await.unwrap();
+            assert_eq!(page.entries.len(), 192);
+            for (sequence, (position, _)) in page.entries.iter().enumerate() {
+                assert_eq!(position.sequence, sequence as u64);
+            }
+            let positions = reopened
+                .append_exclusive(shard, vec![pause_env("after-reopen")], epoch + 1)
+                .await
+                .unwrap();
+            assert_eq!(
+                positions[0].sequence, 192,
+                "reopen must not reuse a durable offset"
+            );
+        }
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every produce path holds the queue metadata permit through high-water publication.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn objectlog_metadata_permit_covers_every_produce_path() {
         let production = production_source();
         let produce_immediate = between(
             production,
@@ -2716,14 +2882,15 @@ mod tests {
             .find(".lock()")
             .map(|offset| permit_idx + offset)
             .expect("produce_immediate must lock the metadata permit");
-        let produce_lock_idx = produce_immediate
-            .find("self.produce_lock.lock()")
-            .expect("produce_immediate must acquire produce_lock");
+        let epoch_check_idx = produce_immediate.find(".load_epoch(shard)").unwrap();
+        let produce_idx = produce_immediate.find(".produce(").unwrap();
+        let high_water_idx = produce_immediate.find("advance_high_water_held(").unwrap();
         assert!(
-            permit_lock_idx < produce_lock_idx,
-            "produce_immediate must acquire metadata-permit before produce-lock; \
-             inverted order deadlocks Complete vs fenced produce"
+            permit_lock_idx < epoch_check_idx
+                && epoch_check_idx < produce_idx
+                && produce_idx < high_water_idx
         );
+        assert!(produce_immediate.contains("let _metadata = metadata;"));
         assert!(
             produce_immediate.contains("advance_high_water_held("),
             "produce_immediate must use the permit-held high-water helper"
@@ -2734,10 +2901,9 @@ mod tests {
                 .contains("advance_high_water"),
             "produce_immediate must not re-lock metadata via advance_high_water"
         );
-        assert_eq!(
-            production.matches("self.produce_lock.lock()").count(),
-            1,
-            "produce_lock must be acquired in exactly one produce path"
+        assert!(
+            !production.contains("produce_lock"),
+            "queue permits must not be nested under a store-wide produce lock"
         );
         assert_eq!(
             production.matches(".produce_immediate(").count(),
@@ -2867,9 +3033,7 @@ mod tests {
         };
         let completed = tokio::time::timeout(std::time::Duration::from_secs(15), raced)
             .await
-            .expect(
-                "metadata-permit → produce-lock inversion hung under Complete/acquire-epoch/produce",
-            );
+            .expect("queue metadata permit hung under Complete/acquire-epoch/produce");
         assert!(
             completed > 0,
             "concurrent Complete/acquire-epoch/produce must complete at least one lock-order path"
@@ -2890,7 +3054,7 @@ mod tests {
         );
         assert!(
             waits.append_waits >= 2,
-            "append must record metadata-permit and produce-lock waits, got {}",
+            "appends must record queue metadata-permit waits, got {}",
             waits.append_waits
         );
         assert!(
@@ -3145,6 +3309,36 @@ mod tests {
             later[0].sequence,
             used.sequence
         );
+    }
+
+    #[tokio::test]
+    async fn dropped_waiter_disposition_is_owned_by_its_append_attempt() {
+        let log = ObjectLogEngineStore::open_memory(FlushConfig::default())
+            .await
+            .unwrap();
+        let def = qdef_named("phase-ownership");
+        let group = PackGroupKey {
+            shard: QueueKey::new(def.tenant_id, def.queue_id),
+            epoch: 1,
+            lane: PackLane::Mutate,
+        };
+        let first = AtomicBool::new(false);
+        let second = AtomicBool::new(false);
+        first.store(true, Ordering::Release);
+        assert!(matches!(
+            log.unpack_packed_result(Err(()), &group, &first),
+            Err(PackedAppendError::PostPositionAmbiguous { .. })
+        ));
+        assert!(matches!(
+            log.unpack_packed_result(Err(()), &group, &second),
+            Err(PackedAppendError::BeforePosition(_))
+        ));
+        second.store(true, Ordering::Release);
+        drop(second);
+        assert!(matches!(
+            log.unpack_packed_result(Err(()), &group, &first),
+            Err(PackedAppendError::PostPositionAmbiguous { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
