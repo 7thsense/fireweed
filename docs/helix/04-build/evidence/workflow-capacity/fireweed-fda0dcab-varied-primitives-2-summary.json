@@ -1,0 +1,53 @@
+{
+  "iteration": 2,
+  "head": "fda0dcab22901bde86099afb728e553c4bb84567",
+  "binary_sha256": "2d2a99012f08141d40ad2c8fde3f68948f71db93e3e62ce88e4385ab47c8038f",
+  "qualified": true,
+  "payload_workload": "campaign_varied",
+  "phase_concurrency_per_store": 1,
+  "initial_payload_bytes": 934888890,
+  "payload_replacement_bytes": 959888890,
+  "process_wall_s": 131.22238816099707,
+  "cpu_s": 566.520186,
+  "output_bytes": 12517896192,
+  "max_rss_gib": 5.169410705566406,
+  "host_written_gib": 4.273624420166016,
+  "host_write_mib_s": 33.82292133732671,
+  "device_busy_percent": 95.61281459818117,
+  "page_sizes": [
+    4096
+  ],
+  "properties": 64,
+  "phases": [
+    {
+      "phase": "insert",
+      "records": 1000000,
+      "records_per_s": 29570.625044892888,
+      "wall_window_s": 33.817344019
+    },
+    {
+      "phase": "enrich_by_key",
+      "records": 1000000,
+      "records_per_s": 27405.313929889468,
+      "wall_window_s": 36.48927367
+    },
+    {
+      "phase": "schedule_by_id",
+      "records": 1000000,
+      "records_per_s": 49229.72032326203,
+      "wall_window_s": 20.312932786000005
+    },
+    {
+      "phase": "claim_and_complete",
+      "records": 1000000,
+      "records_per_s": 31014.905150312596,
+      "wall_window_s": 32.242561928
+    },
+    {
+      "phase": "purge",
+      "records": 1000000,
+      "records_per_s": 69884.19938326189,
+      "wall_window_s": 14.309386224999983
+    }
+  ]
+}

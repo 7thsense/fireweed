@@ -1407,3 +1407,49 @@ unknown body labels, undersized varied input and inconsistent byte totals. The
 primitive report also records its actual single sequential loop/store; generic
 workflow worker flags do not alter component-phase concurrency. Release validation
 and a million-row varied-body component measurement remain to be run.
+
+## Varied-body primitive qualification pair: `fda0dcab`
+
+Two clean serial million-row component runs on binary
+`2d2a99012f08141d40ad2c8fde3f68948f71db93e3e62ce88e4385ab47c8038f`
+passed the three 10k component floors with `--primitive-varied-payload`,
+1,000-row batches, 32 stores and one sequential batch loop/store. Actual headers
+confirmed 4 KiB pages, and all 64 DB/WAL properties/run read back zstd. Log runtime
+workers/store remain explicitly one. Neither run included a host TRIM operation.
+
+| Measurement | Run 1 | Run 2 |
+|---|---:|---:|
+| Inserts/sec | 113,776.51 | 29,570.63 |
+| Key-addressed updates/sec | 29,339.61 | 27,405.31 |
+| ID-addressed updates/sec | 44,187.24 | 49,229.72 |
+| Claim/complete rows/sec | 32,049.20 | 31,014.91 |
+| Purge rows/sec | 62,711.65 | 69,884.20 |
+| Process wall, seconds | 96.084 | 131.222 |
+| Total CPU seconds | 555.791 | 566.520 |
+| Process output bytes | 12,419,059,712 | 12,517,896,192 |
+| Peak RSS, GiB | 5.987 | 5.169 |
+| Sampled host writes, GiB | 3.984 | 4.274 |
+| Host write MiB/sec | 43.792 | 33.823 |
+| Device busy | 90.26% | 95.61% |
+
+Each run inserted exactly 934,888,890 body bytes and replaced them with
+959,888,890 bytes: 934.889 / 959.889 bytes per row. These inputs now share the
+campaign's initial body distribution. This remains a component ladder with one
+claim/complete pass and an explicit body replacement, rather than the campaign's
+three claimed stages and primary metadata-keep path. Phase windows overlap
+across stores; do not add them or turn component rates into campaign throughput.
+The second run took 36.6% longer with only 1.9% more CPU time, while sampled host
+bandwidth fell 22.8%. This reinforces the need to separate media-state effects
+from code effects. The first run also exceeded the old sequential reference's
+bandwidth, directly showing why 38.23 MiB/s must not be called a hardware ceiling.
+
+Artifacts use `fireweed-fda0dcab-varied-primitives-{1,2}*`. Release validation
+passed: 42 native tests (2.67 s), free-page coverage (0.79 s), three Turso recovery
+tests (0.10 s), two workload unit tests, six campaign tests (23.98 s), two primitive
+CLI tests (1.32 s), and four workload recovery tests (1.05 s).
+
+The maintenance helper additionally requires Python isolated mode before loading
+non-builtin modules; all eight mocked/helper-invocation tests pass. Its updated
+reviewed source and hash are in the maintenance document. The requested host
+approval is still pending. The component milestone is demonstrated with varied
+bodies, but the 10k and 12.5k complete-campaign objectives remain unmet.

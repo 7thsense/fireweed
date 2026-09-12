@@ -15,15 +15,16 @@ The runtime helper and its mocked tests are archived for review as
 [helper source](../helix/04-build/evidence/workflow-capacity/fireweed-trim-once.py.txt)
 and [control-flow tests](../helix/04-build/evidence/workflow-capacity/test_fireweed_trim_once.py.txt).
 The exact helper SHA256 is
-`06d5971fbfd03d05c967292eb40bc172b4681e9e7095ff3e941fb4a589e002f9`.
+`9eb11b1791a2c965c5a54271454cb1ddd3db5db325cb7dd9bb01904fdb933f69`.
 
 ## Exact proposed action
 
 After explicit approval, run the reviewed helper:
 
-    pkexec /usr/bin/python3 /tmp/fireweed-trim-once.py --apply
+    pkexec /usr/bin/python3 -I /tmp/fireweed-trim-once.py --apply
 
-It verifies the root filesystem is Btrfs on the expected encrypted `root`
+Python isolated mode prevents imports from the script directory or user environment.
+The helper refuses direct execution without `-I`. It verifies the root filesystem is Btrfs on the expected encrypted `root`
 mapping, verifies LUKS1/2 on `/dev/nvme0n1p2`, reads and preserves known active
 performance flags, and refuses unknown flags or a running Fireweed benchmark.
 It temporarily refreshes `root` with those flags plus `--allow-discards`, runs
@@ -38,7 +39,8 @@ free-block allocation information on an encrypted device; restoring the runtime
 flag cannot undo that disclosure or make discarded old free-space data recoverable.
 That host-level policy choice needs approval beyond repository optimization.
 
-Six mocked control-flow tests pass: read-only planning, preservation of every
+Eight mocked control-flow tests pass, including frozen-checkout benchmark detection,
+isolated invocation, read-only planning, preservation of every
 known flag, restoration after trim failure, restoration after ambiguous refresh
 failure, refusal of unknown/already-changed policy, and visible restore failure.
 These tests do not prove the host's firmware behavior. See the exact helper and

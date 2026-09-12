@@ -1,4 +1,6 @@
 test_ambiguous_enable_failure_still_restores (__main__.MaintenanceTests.test_ambiguous_enable_failure_still_restores) ... ok
+test_detects_main_and_frozen_benchmarks (__main__.MaintenanceTests.test_detects_main_and_frozen_benchmarks) ... ok
+test_direct_invocation_requires_isolation (__main__.MaintenanceTests.test_direct_invocation_requires_isolation) ... ok
 test_failed_restoration_is_not_reported_as_success (__main__.MaintenanceTests.test_failed_restoration_is_not_reported_as_success) ... ok
 test_plan_is_read_only (__main__.MaintenanceTests.test_plan_is_read_only) ... ok
 test_restores_every_known_flag_without_persistence (__main__.MaintenanceTests.test_restores_every_known_flag_without_persistence) ... ok
@@ -6,6 +8,6 @@ test_trim_failure_restores_original_flags (__main__.MaintenanceTests.test_trim_f
 test_unknown_or_changed_policy_refuses_before_mutation (__main__.MaintenanceTests.test_unknown_or_changed_policy_refuses_before_mutation) ... ok
 
 ----------------------------------------------------------------------
-Ran 6 tests in 0.001s
+Ran 8 tests in 0.060s
 
 OK

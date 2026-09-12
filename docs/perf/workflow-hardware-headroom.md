@@ -66,6 +66,27 @@ padding; their compression costs must not be used for the campaign. The new
 reports actual byte totals. It retains primitive semantics and a body replacement,
 so only a complete campaign run supplies the primary workflow's CPU/write budget.
 
+### Repeated component floors with varied bodies
+
+Clean `fda0dcab` repeated the million-row component test with the campaign's
+varied body generator, 1,000-row batches and 32 independent sequential store loops.
+Both runs qualified: inserts **113.78k / 29.57k**, key-addressed updates
+**29.34k / 27.41k**, and ID-addressed updates **44.19k / 49.23k rows/sec**.
+Thus the original 10k component targets are demonstrated with batching and varied
+records; this does not establish either complete-campaign target.
+
+Actual initial bodies average **934.889 bytes** and replacement bodies
+**959.889 bytes**. Process walls were 96.08 / 131.22 seconds while CPU work was
+555.79 / 566.52 CPU-seconds. Sampled host writes were 3.984 / 4.274 GiB at
+43.79 / 33.82 MiB/s, with 90.3% / 95.6% device busy time. Phase timing overlaps
+across stores and must not be added. These are component-body-replacement costs;
+use the complete campaign for its metadata-keep workflow coefficients.
+
+The 43.79 MiB/s sample exceeds the earlier 38.23 MiB/s sequential reference,
+confirming that the latter is not an intrinsic ceiling. The strong serial-run
+variation with little CPU-work change is another reason to test the observed
+blocked-discard configuration before claiming an unavoidable hardware limit.
+
 ## Historical mixed-priority stress measurements
 
 The older fixture mixed FIFO ordinals with small scheduled-second values;

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Reviewed one-time host maintenance; no changes unless --apply is supplied."""
+import sys
+if __name__ == '__main__' and not sys.flags.isolated:
+    raise SystemExit('Invoke this maintenance helper with python3 -I')
+
 import argparse
 import json
 import os
@@ -7,6 +11,7 @@ from pathlib import Path
 import subprocess
 
 CRYPT = '/usr/bin/cryptsetup'
+BENCHMARK_PATTERN = r'(^|/)fireweed-workload( |$)'
 FLAGS = {name: '--perf-' + name for name in (
     'same_cpu_crypt', 'submit_from_crypt_cpus', 'no_read_workqueue',
     'no_write_workqueue', 'high_priority')}
@@ -71,7 +76,7 @@ def main():
         raise RuntimeError('the root filesystem is not on the expected encrypted mapping')
     if run(['/usr/bin/findmnt', '-no', 'FSTYPE', '/']).strip() != 'btrfs':
         raise RuntimeError('unexpected root filesystem')
-    if subprocess.run(['/usr/bin/pgrep', '-f', '^/home/erik/Projects/fireweed/target/release/fireweed-workload'], stdout=subprocess.DEVNULL).returncode != 1:
+    if subprocess.run(['/usr/bin/pgrep', '-f', BENCHMARK_PATTERN], stdout=subprocess.DEVNULL).returncode != 1:
         raise RuntimeError('stop the benchmark before maintenance')
     perform(run, args.apply)
 

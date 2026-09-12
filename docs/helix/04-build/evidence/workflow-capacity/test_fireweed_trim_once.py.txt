@@ -1,6 +1,8 @@
 import contextlib
 import io
 import unittest
+import subprocess
+import re
 import fireweed_trim_once as trim
 
 class Fake:
@@ -31,6 +33,19 @@ class MaintenanceTests(unittest.TestCase):
     def perform(self, fake, apply=True):
         with contextlib.redirect_stdout(io.StringIO()):
             return trim.perform(fake, apply)
+    def test_detects_main_and_frozen_benchmarks(self):
+        for path in ('/home/erik/Projects/fireweed/target/release/fireweed-workload',
+                     '/home/erik/Projects/fireweed/target/perf-control-1fe89a44/target/release/fireweed-workload'):
+            self.assertIsNotNone(re.search(trim.BENCHMARK_PATTERN,path+' --profile campaign'))
+        self.assertIsNone(re.search(trim.BENCHMARK_PATTERN,'/tmp/fireweed-trim-once.py --apply'))
+
+    def test_direct_invocation_requires_isolation(self):
+        p=subprocess.run(['/usr/bin/python3','/tmp/fireweed-trim-once.py','--help'],capture_output=True,text=True)
+        self.assertNotEqual(p.returncode,0)
+        self.assertIn('python3 -I',p.stderr)
+        p=subprocess.run(['/usr/bin/python3','-I','/tmp/fireweed-trim-once.py','--help'],capture_output=True,text=True)
+        self.assertEqual(p.returncode,0,p.stderr)
+
     def test_plan_is_read_only(self):
         fake=Fake(['no_read_workqueue'])
         self.perform(fake, False)
