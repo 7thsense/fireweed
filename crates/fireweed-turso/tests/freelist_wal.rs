@@ -126,13 +126,15 @@ fn verify(conn: &Arc<Connection>, first: usize, count: usize, bytes: usize) {
 }
 #[test]
 fn free_page_history_preserves_readers_rollback_and_reuse() {
-    for cache_kib in [32768, 64] {
-        for bytes in [900, 5000] {
-            exercise(cache_kib, bytes);
+    for page_size in [2048, 4096] {
+        for cache_kib in [32768, 64] {
+            for bytes in [900, 5000] {
+                exercise(page_size, cache_kib, bytes);
+            }
         }
     }
 }
-fn exercise(cache_kib: usize, bytes: usize) {
+fn exercise(page_size: usize, cache_kib: usize, bytes: usize) {
     const COUNT: usize = 1024;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("freelist.db");
@@ -144,6 +146,9 @@ fn exercise(cache_kib: usize, bytes: usize) {
     });
     let db = Database::open_file(io.clone(), path).unwrap();
     let writer = db.connect().unwrap();
+    writer
+        .execute(format!("PRAGMA page_size={page_size}"))
+        .unwrap();
     writer.execute("PRAGMA wal_autocheckpoint=0").unwrap();
     writer
         .execute(format!("PRAGMA cache_size=-{cache_kib}"))
@@ -172,7 +177,7 @@ fn exercise(cache_kib: usize, bytes: usize) {
     // An addressed purge, not the special whole-table Clear opcode.
     writer.execute("DELETE FROM items WHERE id<=1024").unwrap();
     let observed = *writes.lock().unwrap();
-    eprintln!("freelist WAL cache={cache_kib}KiB body={bytes}: {observed:?}");
+    eprintln!("freelist WAL page={page_size} cache={cache_kib}KiB body={bytes}: {observed:?}");
     verify(&writer, 1, 0, bytes);
     verify(&reader, 1, COUNT, bytes);
     reader.execute("ROLLBACK").unwrap();

@@ -3108,8 +3108,18 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
     // Only takes effect before a new database is initialized; existing files
-    // retain their page size. Use 4 KiB pages for new projection files.
-    connection.pragma_update("page_size", "4096").await?;
+    // retain their page size. Smaller rebuildable pages bound the bytes rewritten
+    // for addressed hot-row changes; standalone files retain their 4 KiB default.
+    connection
+        .pragma_update(
+            "page_size",
+            if config.rebuildable_io {
+                "2048"
+            } else {
+                "4096"
+            },
+        )
+        .await?;
     // `journal_mode` produces a row. Turso's execute_batch rejects row-producing statements after applying
     // their side effect, so each pragma is deliberately driven through the row-aware API.
     connection
@@ -3525,43 +3535,53 @@ mod projection_checkpoint_config_tests {
         )
         .await
         .unwrap();
-        assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
+        assert_eq!(new.wal_truncate_min_bytes, 2048 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
         assert_eq!(
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            114_688
-        );
-        let path = root.path().join("existing.db");
-        {
-            let db = Builder::new_local(path.to_str().unwrap())
-                .build()
-                .await
-                .unwrap();
-            let connection = db.connect().unwrap();
-            connection.pragma_update("page_size", "2048").await.unwrap();
-            connection
-                .execute("CREATE TABLE previous_file (id INTEGER)", ())
-                .await
-                .unwrap();
-        }
-        let existing = TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
-            .await
-            .unwrap();
-        assert_eq!(existing.wal_truncate_min_bytes, 2048 * 1024);
-        assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
-        assert_eq!(
-            scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
-                .await
-                .unwrap(),
             229_376
         );
+        for page_size in [2048, 4096] {
+            let path = root.path().join(format!("existing-{page_size}.db"));
+            {
+                let db = Builder::new_local(path.to_str().unwrap())
+                    .build()
+                    .await
+                    .unwrap();
+                let connection = db.connect().unwrap();
+                connection
+                    .pragma_update("page_size", page_size)
+                    .await
+                    .unwrap();
+                connection
+                    .execute("CREATE TABLE previous_file (id INTEGER)", ())
+                    .await
+                    .unwrap();
+            }
+            let existing =
+                TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
+                    .await
+                    .unwrap();
+            assert_eq!(existing.wal_truncate_min_bytes, page_size as u64 * 1024);
+            assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
+            assert_eq!(
+                scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                    .await
+                    .unwrap(),
+                448 * 1024 * 1024 / page_size
+            );
+        }
         let standalone = TursoRelational::in_memory().await.unwrap();
+        assert_eq!(standalone.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(
-            scalar_i64(&*standalone.writer.lock().await, "PRAGMA wal_autocheckpoint")
-                .await
-                .unwrap(),
+            scalar_i64(
+                &*standalone.writer.lock().await,
+                "PRAGMA wal_autocheckpoint"
+            )
+            .await
+            .unwrap(),
             1_000
         );
     }

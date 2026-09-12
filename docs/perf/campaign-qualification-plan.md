@@ -1295,3 +1295,22 @@ two live-S3 tests remain excluded without their service. Six public campaign
 tests passed (54.83 s), as did four recovery tests (2.50 s). Logs are archived as
 `fireweed-borrowed-apply-*`. No throughput improvement is claimed before a fresh
 release measurement.
+
+## Candidate: smaller new-file projection pages
+
+New log-backed projections now request 2 KiB pages, testing whether smaller dirty
+page images reduce addressed-update write amplification. Existing 2 KiB and
+4 KiB files keep their page sizes; standalone projections still default to 4 KiB.
+The checkpoint budget stays 448 MiB by reading the actual page size, and NORMAL
+backfill accounting, log durability, cache byte caps and 512 MiB WAL gate remain
+unchanged. This is an unqualified candidate, not an established improvement.
+The next full run includes the preceding allocation refactor; its total difference
+from `60c699e5` cannot isolate the CPU contribution of either change.
+
+All 42 native tests passed (19.94 s). The free-page regression now crosses
+2/4 KiB pages with 32 MiB/64 KiB caches and 900/5,000-byte bodies; all eight cases
+passed (15.61 s), preserving rollback, concurrent-reader history and reopen/reuse.
+Six public campaign tests passed (59.42 s), plus four recovery tests (2.50 s).
+The configuration regression checks both existing page sizes, new-file settings
+and the unchanged standalone policy. Logs are archived as `fireweed-2k-pages-*`.
+Release validation and six-cycle capacity measurement follow on a clean revision.
