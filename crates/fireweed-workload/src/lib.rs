@@ -43,6 +43,8 @@ pub struct Config {
     pub payload_bytes: usize,
     /// Persist enrichment attributes in row metadata, retaining the original payload.
     pub campaign_metadata_only: bool,
+    /// Use Snorri-style timestamp priorities; false retains mixed-unit stress.
+    pub campaign_timestamp_priority: bool,
     pub deadline: Duration,
 }
 
@@ -64,6 +66,7 @@ impl Default for Config {
             faults: true,
             payload_bytes: 1024,
             campaign_metadata_only: false,
+            campaign_timestamp_priority: false,
             deadline: Duration::from_secs(120),
         }
     }

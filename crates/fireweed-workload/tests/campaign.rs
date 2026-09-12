@@ -1,5 +1,7 @@
 use fireweed::*;
-use fireweed_workload::{Config, TestClock, campaign, create_queue, item, open_store, ts};
+use fireweed_workload::{
+    Config, TestClock, campaign, create_queue, definition, item, open_store, ts,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retained_pages_include_terminal_metadata_and_isolate_queues() {
@@ -88,13 +90,16 @@ async fn retained_pages_include_terminal_metadata_and_isolate_queues() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn campaign_windows_reporting_and_discovered_retention() {
-    for campaign_metadata_only in [false, true] {
+    for (campaign_metadata_only, campaign_timestamp_priority) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let root = tempfile::tempdir().unwrap();
         let report = campaign::run(
             Config {
                 apply_debt_bytes: Some(96 * 1024),
                 items: 448,
                 campaign_metadata_only,
+                campaign_timestamp_priority,
                 shards: 2,
                 workers: 2,
                 load_workers: 2,
@@ -109,6 +114,14 @@ async fn campaign_windows_reporting_and_discovered_retention() {
         .await
         .unwrap();
         assert_eq!(report["apply_debt_max_bytes"], 96 * 1024);
+        assert_eq!(
+            report["priority_workload"],
+            if campaign_timestamp_priority {
+                "availability_timestamp"
+            } else {
+                "mixed_sequence_stress"
+            }
+        );
 
         let mut verified = 0;
         for shard in report["shards"].as_array().unwrap() {
@@ -161,6 +174,9 @@ fn campaign_acknowledged_child() {
         campaign::run(
             Config {
                 items: 112,
+                campaign_timestamp_priority: std::env::var("FIREWEED_CAMPAIGN_TIMESTAMP")
+                    .as_deref()
+                    == Ok("1"),
                 campaign_metadata_only: std::env::var("FIREWEED_CAMPAIGN_METADATA").as_deref()
                     == Ok("1"),
                 shards: 1,
@@ -191,7 +207,9 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_campaign_reports_rebuild_from_log_only() {
-    for campaign_metadata_only in [false, true] {
+    for (campaign_metadata_only, campaign_timestamp_priority) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let original = tempfile::tempdir().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "campaign_acknowledged_child", "--nocapture"])
@@ -199,6 +217,14 @@ async fn terminal_campaign_reports_rebuild_from_log_only() {
             .env(
                 "FIREWEED_CAMPAIGN_METADATA",
                 if campaign_metadata_only { "1" } else { "0" },
+            )
+            .env(
+                "FIREWEED_CAMPAIGN_TIMESTAMP",
+                if campaign_timestamp_priority {
+                    "1"
+                } else {
+                    "0"
+                },
             )
             .output()
             .unwrap();
@@ -215,9 +241,12 @@ async fn terminal_campaign_reports_rebuild_from_log_only() {
         let fw = open_store(rebuilt.path(), false, TestClock::at(2000)).unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for campaign in 0..2 {
-            let q = create_queue(&fw, &format!("campaign-{campaign}"))
-                .await
-                .unwrap();
+            let mut d = definition(&format!("campaign-{campaign}"));
+            if campaign_timestamp_priority {
+                d.priority_model = PriorityModel::timestamp_ascending();
+            }
+            let q = QueueKey::new(d.tenant_id.clone(), d.queue_id.clone());
+            fw.create_queue(d).await.unwrap();
             let m = fw.metrics(&q).await.unwrap();
             assert_eq!(m.complete + m.failed, 56);
             let rows = fw.retained_items(&q, None, 1000).await.unwrap();
@@ -263,6 +292,14 @@ async fn terminal_campaign_reports_rebuild_from_log_only() {
                     Some(&MetadataValue::String(format!("provider-{id}")))
                 );
                 assert_eq!(row.attempt_count, 3 + u32::from(id % 19 == 0));
+                assert_eq!(
+                    row.priority,
+                    Some(if campaign_timestamp_priority {
+                        PriorityValue::Timestamp(ts(first as i64))
+                    } else {
+                        PriorityValue::Int64(first as i64)
+                    })
+                );
                 assert_eq!(row.not_before, Some(ts(1000 + 60 * ((id / 7) % 4) as i64)));
             }
         }

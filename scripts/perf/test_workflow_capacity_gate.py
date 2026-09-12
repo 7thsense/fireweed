@@ -110,7 +110,7 @@ class QualificationTests(unittest.TestCase):
                 for row in campaign["cycles"]:
                     row["payload_replacements"]=0;row["payload_replacement_bytes"]=0
         self.assertTrue(qualify(metadata,12500)["passed"])
-        for key,value in [("enrichment_storage","unknown"),("payload_bytes",128),("schema","campaign-capacity/v1")]:
+        for key,value in [("priority_workload","unknown"),("enrichment_storage","unknown"),("payload_bytes",128),("schema","campaign-capacity/v1")]:
             broken=copy.deepcopy(metadata);broken["result"][key]=value
             self.assertFalse(qualify(broken)["passed"],key)
         broken=copy.deepcopy(report);broken["result"]["resident_backlog"]=500_000

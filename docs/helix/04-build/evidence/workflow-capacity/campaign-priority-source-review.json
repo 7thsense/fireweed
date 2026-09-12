@@ -1,0 +1,28 @@
+[
+  {
+    "path": "/home/erik/Projects/snorri/crates/snorri-fireweed/src/lib.rs",
+    "revision": "c11dc2b07ba7c18bce97fb1c15190c9460a9f17a",
+    "file_sha256": "39ef726d0d8a71c4df01714c0a93e78433252126969952caccdfd83c86711fb5",
+    "excerpts": [
+      {
+        "first_line": 14098,
+        "text": "    let mut queued = dynamic_item(serde_json::to_vec(&item.payload).map_err(core_error)?);\n    // `not_before` is both the eligibility gate and the ordering key, so an item\n    // with no explicit gate must sort ahead of scheduled work rather than at the\n    // epoch fallback used for unschedulable records.\n    let not_before = item\n        .not_before\n        .map(|value| timestamp_from_offset_datetime(value).map_err(queue_error_to_core))\n        .transpose()?;\n    queued.client_item_key =\n        Some(ClientItemKey::new(item.client_item_key.clone()).map_err(core_error)?);\n    queued.not_before = not_before;\n    queued.priority = Some(PriorityValue::Timestamp(not_before.unwrap_or(\n        UtcTimestamp {\n            seconds: 1,\n            nanoseconds: 0,\n        },\n    )));\n\n    let scheduled_at = item\n        .not_before\n        .unwrap_or_else(|| OffsetDateTime::from_unix_timestamp(1).expect(\"valid fallback ts\"))"
+      },
+      {
+        "first_line": 15235,
+        "text": "    )?;\n    let priority = timestamp_from_offset_datetime(item.available_at)?;\n    let spec = WorkflowQueueItemSpec {\n        client_item_key: format!(\"{}:{}:{}\", request_id, item.run_id, item.item_kind),\n        input_event_id: item.execution.input_event_id.clone(),\n        workflow_instance_id: item.execution.instance_id.clone(),\n        artifact_digest: item.execution.artifact_digest.clone(),\n        workflow_id: item.workflow_id.clone(),\n        workflow_version: item.workflow_version.clone(),\n        source_state_version: item.execution.expected_state_version,\n        transition: item.execution.transition.clone(),\n        priority: Some(priority),\n        not_before: Some(priority),\n        payload: item.payload.clone(),\n    };\n    let mut queued = workflow_item(&spec).map_err(workflow_error)?;\n    let mut metadata = Metadata::new();\n    // TD-009 B5 (snorri-904e8117): the v1 metadata blob re-serialized the"
+      }
+    ]
+  },
+  {
+    "path": "/tmp/fireweed-7thsense-review/infrastructure/postgres/src/main/scala/ss/postgres/quill/QuillScheduledActionsPersistence.scala",
+    "revision": "30c9e4bd archive previously reviewed",
+    "file_sha256": "4d6c7ca68f8626f68b74135a18745f19c73b677dc2f929d858ddf7770806c0fb",
+    "excerpts": [
+      {
+        "first_line": 63,
+        "text": "      if (withRetryStatuses) ScheduledActionStatus.PendingWithRetries\n      else ScheduledActionStatus.Pending\n    run(\n      queryScheduledActions\n        .filter(_.id.inSubQuery {\n          queryScheduledActions\n            .filter(_.jobId == lift(jobId))\n            .filter(_.scheduledTimestamp <= lift(asOf))\n            .filter(_.`type` == lift(scheduledActionType))\n            .filter(_.status.in(liftQuery(statusesToInclude)))\n            .sortBy(_.scheduledTimestamp)(Ord.asc)\n            .take(lift(maxCount))\n            .map(_.id)\n        })\n        .update(_.status -> lift {\n          ScheduledActionStatus.Executing: ScheduledActionStatus"
+      }
+    ]
+  }
+]

@@ -5,11 +5,13 @@ campaign qualification. Historical measurements remain valid for their declared
 workload and source. The source-preview v0.31.27 is committed locally; publication
 was blocked by GitHub credential scope.
 
-Current status (2026-09-12): best complete three-cycle result **10,850.17/sec**;
-neither target is qualified. The remaining failures are the last-cycle rate,
-progress latency and initial DB-file stability. Phase diagnostics identify the
-largest progress stalls during loading. The next experiment uses the existing
-async-debt policy to bound ingestion backlog, retaining 1,000-row storage batches.
+Current status (2026-09-12): the existing **mixed-sequence stress** fixture's best
+complete three-cycle result is **10,850.17/sec**, unqualified. A renewed source
+review found that it mixed FIFO ordinals with small timestamp values, unlike
+Snorri's availability-timestamp ordering. A new timestamp mode now models that
+workflow explicitly; its capacity baseline is pending. The old stress case and
+all historical evidence remain available. No throughput or correctness gate is
+relaxed, and results from the two priority models must not be conflated.
 See the [current resource math](workflow-hardware-headroom.md) and the evidence below.
 
 ## Fixed objectives and units
@@ -1170,3 +1172,64 @@ verifying retained metadata, retries/dispositions, reporting and discovered purg
 This checks the existing admission policy through the same public workflow API.
 
 All workload targets also pass `cargo check --locked -p fireweed-workload --all-targets`.
+
+
+## Debt diagnostic and priority-model correction
+
+Clean `7af493c8`, executable
+`c5a9a7c087778f9fc4a85b55301a77bb14acb49a92869e0a463cf0cc0ff492dd`,
+passed 42 native release tests (2.58 s), free-page history/reuse (0.38 s) and six
+public campaign tests (14.54 s). Its one-cycle, 2 MiB debt diagnostic completed
+at 11,615.76/sec, CPU 1.12725 ms/recipient, worst campaign wall 85.082 s and
+progress p95 2.219 s. Mean loading-read latency fell to 1.158 s but still reached
+4.483 s; preparation, delivery and purge means were 0.353 / 0.174 / 0.660 s.
+The smaller budget did not solve reporting and increased CPU cost. Do not adopt
+it as a qualified latency policy. This remains a one-cycle diagnostic, archived
+under `fireweed-campaign-7af493c8-debt2m-*`.
+
+A more fundamental fixture issue emerged when rechecking actual source behavior.
+Snorri revision `c11dc2b07ba7c18bce97fb1c15190c9460a9f17a`,
+`crates/snorri-fireweed/src/lib.rs:14109`, uses a timestamp priority equal to
+`not_before`, or timestamp 1 for immediately available work. Its comment explicitly
+requires unscheduled work to sort ahead of scheduled work. The workflow-item path
+at line 15236 uses `available_at` for both priority and `not_before`. The legacy
+7thsense scheduled-actions query filters `scheduledTimestamp <= asOf` and orders
+by that same timestamp (`QuillScheduledActionsPersistence.scala:70–73`). Source
+excerpts, revisions and file hashes are preserved in
+`campaign-priority-source-review.json` in the evidence directory.
+
+Our existing fixture instead placed FIFO integer ordinals 0…999,999 and virtual
+scheduled seconds 1,000…1,180 in the same integer priority domain. At large list
+sizes, future scheduled rows therefore formed a prefix ahead of unenriched rows.
+The 448-row correctness fixture did not have that rank inversion; the larger
+2,240-row chunk test and capacity runs did. This is a useful generic priority-queue
+stress case, but it is not Snorri's availability ordering and must not silently
+stand in for that workflow's capacity.
+
+`--campaign-timestamp-priority` now selects a timestamp queue and an explicit
+`availability_timestamp` report label. Unscheduled priorities start at timestamp
+1 and increment by one nanosecond per ordinal, preserving FIFO ahead of future
+windows. Scheduling replaces priority with the persisted chosen timestamp and
+sets the matching eligibility time. The virtual calendar offsets, records, body
+variation, handler limits, retries, reporting, exports and purge are unchanged.
+Without the flag, `mixed_sequence_stress` preserves the old priority values and
+all previous reproduction commands. The gate accepts those named variants and
+rejects unknown priority labels. Neither variant has yet qualified.
+
+The canonical workflow target is now evaluated with the source-aligned timestamp
+mode. This is a corrected workload baseline, not a claimed backend speedup over
+the old priority mixture. Both still perform approximately 8.105 logical row
+operations per recipient, but encoded bytes, index costs and scanning differ;
+CPU/byte coefficients must be measured again. The existing stress fixture remains
+available for generic future-prefix performance investigation and correctness.
+
+Validation covers both priority models crossed with metadata/payload enrichment,
+including two-cycle outcomes under a 96 KiB async budget. The public campaign
+suite passed (48.94 s), and four workload recovery tests passed (2.48 s). The
+expanded child-exit/log-only rebuild test passed all four mode combinations
+(11.10 s), checking retained priority type and values as well as outcomes. A new
+order regression checks FIFO ordinals through one billion remain before the first
+scheduled timestamp; the old stress values remain exact. Claims now reject a
+missing or wrong priority type instead of silently omitting their order check.
+Five qualification-gate tests also pass. Fresh release validation and separate
+million-resident timestamp diagnostics follow before any qualification claim.

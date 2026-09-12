@@ -1,6 +1,14 @@
 # Workflow capacity versus hardware cost
 
-## Current campaign result: both targets remain unmet
+## Current stress result; timestamp-workflow baseline pending
+
+2026-09-12: a renewed source review found that the historical campaign fixture
+mixed FIFO ordinals with small scheduled-second values. Snorri instead uses
+availability timestamps and keeps unscheduled work ahead of scheduled work. The
+new `--campaign-timestamp-priority` mode models that ordering explicitly. Its
+capacity and byte-cost baseline is pending; the results below describe the
+retained `mixed_sequence_stress` fixture and must not be relabeled as timestamp
+workflow performance. All acceptance thresholds remain unchanged.
 
 2026-09-11. The representative workload loads one million original rows,
 persists top-time and other enrichment metadata, schedules four future windows,

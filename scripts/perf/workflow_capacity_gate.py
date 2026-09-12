@@ -84,6 +84,8 @@ def qualify(report, campaign_target=10_000):
                     wal_growth = (max(wal_sizes) / min(wal_sizes) - 1) if min(wal_sizes) > 0 else None
                     check(f"shard_{index}_projection_wal_stable", wal_growth is not None and wal_growth <= .10, wal_growth, "<=10% range")
     elif result.get("schema") == "campaign-capacity/v3":
+        priority_workload = result.get("priority_workload", "mixed_sequence_stress")
+        check("campaign_priority_workload", priority_workload in ("mixed_sequence_stress", "availability_timestamp"))
         storage_mode = result.get("enrichment_storage")
         check("enrichment_storage_declared", storage_mode in ("row_metadata", "payload"))
         check("temporal_retention_model", result.get("lease_ms") == 3_600_000

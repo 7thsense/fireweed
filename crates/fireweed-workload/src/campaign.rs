@@ -37,6 +37,37 @@ fn progress_by_phase(samples: Vec<(usize, usize, f64, usize)>) -> Value {
     Value::Object(report)
 }
 
+// Snorri uses availability timestamps for both ordering and eligibility.
+// Unscheduled work sorts first, with a monotonic nanosecond FIFO tie-breaker.
+// The original ordinal/seconds mixture remains an explicitly labeled stress case.
+fn fifo_priority(id: usize, cfg: &Config) -> PriorityValue {
+    if cfg.campaign_timestamp_priority {
+        PriorityValue::Timestamp(
+            UtcTimestamp::new(1 + (id / 1_000_000_000) as i64, (id % 1_000_000_000) as u32)
+                .unwrap(),
+        )
+    } else {
+        PriorityValue::Int64(id as i64)
+    }
+}
+fn scheduled_priority(seconds: i64, cfg: &Config) -> PriorityValue {
+    if cfg.campaign_timestamp_priority {
+        PriorityValue::Timestamp(ts(seconds))
+    } else {
+        PriorityValue::Int64(seconds)
+    }
+}
+
+async fn create_campaign_queue(fw: &Fireweed, name: &str, cfg: &Config) -> Result<QueueKey> {
+    let mut d = definition(name);
+    if cfg.campaign_timestamp_priority {
+        d.priority_model = PriorityModel::timestamp_ascending();
+    }
+    let q = QueueKey::new(d.tenant_id.clone(), d.queue_id.clone());
+    fw.create_queue(d).await?;
+    Ok(q)
+}
+
 fn key(id: usize) -> ClientItemKey {
     ClientItemKey::new(format!("recipient-{id:012}")).unwrap()
 }
@@ -187,14 +218,15 @@ async fn workers(
                 .max_claim_batch
                 .fetch_max(rows.len(), Ordering::Relaxed);
             // Claim order, not handler completion order, is the queue's guarantee.
-            let mut previous = i64::MIN;
+            let mut previous = (i64::MIN, 0);
             for row in &rows {
-                if let Some(PriorityValue::Int64(p)) = row.priority {
-                    if p < previous {
-                        return Err("priority inversion within claim".into());
-                    }
-                    previous = p;
-                }
+                let order = match (&row.priority, cfg.campaign_timestamp_priority) {
+                    (Some(PriorityValue::Timestamp(t)), true) => (t.seconds, t.nanoseconds),
+                    (Some(PriorityValue::Int64(p)), false) => (*p, 0),
+                    _ => return Err("missing or wrong campaign priority type".into()),
+                };
+                if order < previous { return Err("priority inversion within claim".into()); }
+                previous = order;
                 if row.not_before.is_some_and(|t| t > ts(now)) {
                     return Err("early claim".into());
                 }
@@ -244,7 +276,7 @@ async fn workers(
                                 priority
                             };
                             patch.priority =
-                                BatchUpdateValue::Replace(Some(PriorityValue::Int64(priority)));
+                                BatchUpdateValue::Replace(Some(if stage == 0 { fifo_priority(id, cfg) } else { scheduled_priority(priority, cfg) }));
                             patch.not_before = BatchUpdateValue::Replace(Some(ts(if stage == 0 {
                                 1
                             } else {
@@ -381,7 +413,7 @@ async fn verify_rows(
                 || enriched["score"] != id % 101
                 || enriched["top_times"] != json!([first + 600, first, first + 300])
                 || enriched["scheduled_at"] != first
-                || row.priority != Some(PriorityValue::Int64(first))
+                || row.priority != Some(scheduled_priority(first, cfg))
                 || row.not_before != Some(ts(first))
             {
                 return Err("persisted enrichment/scheduling mismatch".into());
@@ -466,7 +498,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
             let campaign_results = futures::future::try_join_all((0..CAMPAIGNS).map(|campaign| {
                 let fw = fw.clone(); let clock = clock.clone(); let cfg = cfg.clone(); let barrier = barrier.clone(); let projection_root = projection_root.clone();
                 async move {
-                    let q = create_queue(&fw, &format!("campaign-{campaign}")).await?;
+                    let q = create_campaign_queue(&fw, &format!("campaign-{campaign}"), &cfg).await?;
                     let ids: Vec<_> = (shard..cfg.items).step_by(cfg.shards).enumerate().filter_map(|(offset,id)| (offset % CAMPAIGNS == campaign).then_some(id)).collect();
                     let mut cycles = Vec::new();
                     for cycle in 0..cfg.cycles {
@@ -502,7 +534,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                                 async move {
                                 let chunk = &ids[batch_index*cfg.batch..((batch_index+1)*cfg.batch).min(ids.len())];
                                 let rows: Vec<_> = chunk.iter().map(|id| NewItem { client_item_key: Some(key(*id)),
-                                    priority: Some(PriorityValue::Int64(*id as i64)), not_before: Some(ts(1)),
+                                    priority: Some(fifo_priority(*id, &cfg)), not_before: Some(ts(1)),
                                     metadata: meta(0, *id, campaign), payload: Some(initial_body(*id, campaign, cfg.payload_bytes)), ..Default::default() }).collect();
                                 counts.initial_payload_bytes.fetch_add(rows.iter().map(|row| row.payload.as_ref().map_or(0, |body| body.len() as u64)).sum::<u64>(), Ordering::Relaxed);
                                 let accepted = retry(deadline, || fw.push_batch(&q, rows.clone())).await?;
@@ -597,9 +629,48 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
     reports.sort_by_key(|s| s["shard"].as_u64());
     Ok(
         json!({"schema":"campaign-capacity/v3","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
-        "physical_shards":cfg.shards,"workers_per_campaign":cfg.workers,"load_workers_per_campaign":cfg.load_workers,"campaigns":CAMPAIGNS,"batch":cfg.batch,"stage_limits":[500,200,500],"faults":cfg.faults,"includes_purge":cfg.recycle,
+        "priority_workload":if cfg.campaign_timestamp_priority {"availability_timestamp"} else {"mixed_sequence_stress"},"physical_shards":cfg.shards,"workers_per_campaign":cfg.workers,"load_workers_per_campaign":cfg.load_workers,"campaigns":CAMPAIGNS,"batch":cfg.batch,"stage_limits":[500,200,500],"faults":cfg.faults,"includes_purge":cfg.recycle,
         "purge_batch":cfg.purge_batch.unwrap_or(8000),"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,
         "payload_bytes":cfg.payload_bytes,"scheduled_windows":WINDOWS,"resident_backlog":cfg.items,"progress_interval_ms":1000,"apply_debt_max_bytes":cfg.apply_debt_bytes.unwrap_or(AsyncProjectionSpec::default().apply_debt_max_bytes),
         "completed_lifecycles_per_s":(cfg.items*cfg.cycles) as f64/started.elapsed().as_secs_f64(),"settled_wall_s":started.elapsed().as_secs_f64(),"shards":reports}),
     )
+}
+
+#[cfg(test)]
+mod priority_model_tests {
+    use super::*;
+
+    #[test]
+    fn fifo_ordinals_remain_before_future_timestamps_at_large_list_sizes() {
+        let cfg = Config {
+            campaign_timestamp_priority: true,
+            ..Config::default()
+        };
+        let mut previous = (i64::MIN, 0);
+        for id in [0, 999, 1000, 1_000_000, 1_000_000_000] {
+            let PriorityValue::Timestamp(value) = fifo_priority(id, &cfg) else {
+                panic!("timestamp FIFO")
+            };
+            let order = (value.seconds, value.nanoseconds);
+            assert!(order > previous);
+            assert!(
+                order < (1000, 0),
+                "unscheduled FIFO work must precede the first scheduled window"
+            );
+            previous = order;
+        }
+        assert_eq!(
+            scheduled_priority(1000, &cfg),
+            PriorityValue::Timestamp(ts(1000))
+        );
+        let stress = Config::default();
+        assert_eq!(
+            fifo_priority(1_000_000, &stress),
+            PriorityValue::Int64(1_000_000)
+        );
+        assert_eq!(
+            scheduled_priority(1000, &stress),
+            PriorityValue::Int64(1000)
+        );
+    }
 }

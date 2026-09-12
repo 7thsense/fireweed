@@ -17,6 +17,7 @@ async fn main() -> Result<()> {
         match arg.as_str() {
             "--recycle" => config.recycle = true,
             "--campaign-metadata" => config.campaign_metadata_only = true,
+            "--campaign-timestamp-priority" => config.campaign_timestamp_priority = true,
             "--cycles" => config.cycles = args.next().ok_or("missing cycles")?.parse()?,
             "--items" => config.items = args.next().ok_or("missing items")?.parse()?,
             "--batch" => config.batch = args.next().ok_or("missing batch")?.parse()?,
@@ -74,7 +75,7 @@ async fn main() -> Result<()> {
             }
             "--help" => {
                 println!(
-                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--apply-debt-bytes N (campaign)] [--payload-bytes N] [--deadline-seconds N] [--campaign-metadata] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
+                    "fireweed-workload [--profile campaign|primitives|retention|bulk|mutable|snorri] [--items N] [--recycle --cycles N] [--batch 1..1000] [--shards N] [--workers N] [--load-workers N] [--purge-batch 1..8192] [--apply-debt-bytes N (campaign)] [--payload-bytes N] [--deadline-seconds N] [--campaign-metadata] [--campaign-timestamp-priority] [--memory] [--no-faults] [--root NEW_DIRECTORY] [--projection-root NEW_DIRECTORY]"
                 );
                 return Ok(());
             }
@@ -83,6 +84,9 @@ async fn main() -> Result<()> {
     }
     if config.campaign_metadata_only && !campaign {
         return Err("--campaign-metadata requires --profile campaign".into());
+    }
+    if config.campaign_timestamp_priority && !campaign {
+        return Err("--campaign-timestamp-priority requires --profile campaign".into());
     }
     if config.apply_debt_bytes.is_some() && !campaign {
         return Err("--apply-debt-bytes requires --profile campaign".into());
