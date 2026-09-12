@@ -81,6 +81,14 @@ fn block_on_local<T>(future: impl std::future::Future<Output = T>) -> T {
     })
 }
 
+/// Drive an owned native apply only from a blocking worker. This keeps native
+/// Unix VFS calls made by async commit/checkpoint off the application's workers.
+/// RelTx retains its existing separate hop, so its local block_on is never
+/// nested inside this current-thread runtime.
+pub(crate) fn block_on_owned_apply<T>(future: impl std::future::Future<Output = T>) -> T {
+    block_on_local(future)
+}
+
 fn block_on_turso<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> T {

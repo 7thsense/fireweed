@@ -554,6 +554,13 @@ pub struct TursoRelational {
 impl TursoRelational {
     /// Open, configure, migrate, and verify an embedded database.
     pub async fn open(config: TursoConfig) -> Result<Self> {
+        Self::open_with_io(config, None).await
+    }
+
+    pub(crate) async fn open_with_io(
+        config: TursoConfig,
+        io: Option<Arc<dyn turso_core::IO>>,
+    ) -> Result<Self> {
         if config.busy_timeout.is_zero() {
             return Err(TursoRelationalError::Configuration(
                 "busy timeout must be greater than zero".to_string(),
@@ -570,7 +577,9 @@ impl TursoRelational {
             .to_str()
             .ok_or_else(|| TursoRelationalError::InvalidPath(config.path.clone()))?;
         let mut builder = Builder::new_local(path);
-        if config.rebuildable_io && config.path != Path::new(":memory:") {
+        if let Some(io) = io {
+            builder = builder.with_io_impl(io);
+        } else if config.rebuildable_io && config.path != Path::new(":memory:") {
             let io = crate::rebuildable_io::RebuildableIo::new()
                 .map_err(|e| TursoRelationalError::Configuration(e.to_string()))?;
             builder = builder.with_io_impl(Arc::new(io));
@@ -3094,7 +3103,10 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
             "invalid projection page size {page_size}"
         )));
     }
-    Ok(64_000 * 4096 / page_size)
+    // Leave transaction headroom below the campaign's measured 512 MiB WAL
+    // gate. A larger window coalesces more intermediate projection pages;
+    // the authoritative log retains its independent durability protocol.
+    Ok(448 * 1024 * 1024 / page_size)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3518,6 +3530,12 @@ mod projection_checkpoint_config_tests {
         .unwrap();
         assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
+        assert_eq!(
+            scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                .await
+                .unwrap(),
+            114_688
+        );
         let path = root.path().join("existing.db");
         {
             let db = Builder::new_local(path.to_str().unwrap())
@@ -3536,5 +3554,18 @@ mod projection_checkpoint_config_tests {
             .unwrap();
         assert_eq!(existing.wal_truncate_min_bytes, 2048 * 1024);
         assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
+        assert_eq!(
+            scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                .await
+                .unwrap(),
+            229_376
+        );
+        let standalone = TursoRelational::in_memory().await.unwrap();
+        assert_eq!(
+            scalar_i64(&*standalone.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                .await
+                .unwrap(),
+            1_000
+        );
     }
 }

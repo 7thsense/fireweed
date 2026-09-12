@@ -734,3 +734,51 @@ including apply failure/retry; and the composed unapplied-claim lease/version
 guard regression (0.54 s). Release validation and clean capacity measurements
 follow. Repository-wide formatting check still reports pre-existing formatting
 in unrelated files; changed Rust files were formatted without unrelated edits.
+
+## Allocation candidate failure, device calibration and blocking commit fix
+
+Clean `b508d888` passed six release campaign tests (14.61 s), but its 32-store
+capacity run failed at 480.332 s with `object-log post-position produce timed out`.
+Exactly 128 campaign reports cover two complete cycles: maximum walls 95.45 /
+166.84 s, progress p95 1.678 / 0.901 s. The third cycle has no completed campaign
+reports. Total attempt CPU was 3,365.24 s and output 36.18 GB; neither is normalized
+by an assumed completed-recipient count. Peak RSS was 9.96 GiB. The best complete
+rate remains 7,718.50/sec on `386d79f7`.
+
+A same-binary 16-store control completed two cycles in 164.34 / 286.08 s, with
+progress p95 0.538 / 0.699 s and due maxima 26.95 / 40.94 s. It was stopped with
+SIGTERM at 555.400 s because the throughput failure was already established and
+code review identified the blocked-commit issue below. Its 64 campaign reports,
+nonzero exit and stop reason are preserved. It began with a warm device and
+halved aggregate WAL capacity; no isolated causal store-count claim is made.
+
+The subsequent private-file 8 GiB sequential-write calibration reached 38.23
+MiB/sec in 214.296 s including fdatasync. It used aligned 16 MiB incompressible
+writes with O_DIRECT requested and COW disabled only for that temporary file;
+first/last blocks verified and the file was removed. This is a diagnostic
+reference, not qualification or a proven device maximum. Reports, host CPU/I/O
+pressure traces and the scripts are `campaign-b508d888-*`. The updated hardware
+math retains the fixed goals and quantifies the approximate 28% physical-byte
+reduction needed for 12.5k at this reference bandwidth.
+
+A native MemoryIO wrapper then gated an actual WAL pwrite. An unrelated async
+worker could not resume until its 500 ms native timeout fired, reproducing the
+problem on both current-thread and one-worker multi-thread runtimes. The async
+SDK does not make Unix VFS calls nonblocking. The fix runs the entire owned apply,
+including commit/checkpoint, on a blocking worker with a local runtime; the RelTx
+hop remains separate to avoid nested block_on. Writer ownership, cancellation
+cuts, transaction validation and log authority are preserved. Both red/green
+regressions are archived. All 42 native unit tests (20.03 s) and six public
+campaign tests (38.41 s) pass.
+
+The candidate also increases only the rebuildable checkpoint window from 250 to
+448 MiB, with the 512 MiB measured peak gate unchanged. Explicit readback tests
+check 114,688 frames at 4 KiB and 229,376 at 2 KiB, and retain standalone 1,000
+frames. This is a write-coalescing experiment within the existing disk budget;
+its throughput, stability and transaction overshoot still require measurement.
+
+All eight selected native integration tests also passed: cancellation, concurrent
+writers, checkpoint policy and pinned readers, plus three recovery histories.
+The cgroup ancestry had no CPU quota or explicit I/O rate cap; that read-only
+observation is archived. No system settings were changed. Release validation
+and capacity measurements on the fixed candidate follow.

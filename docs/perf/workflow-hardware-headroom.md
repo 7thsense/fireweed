@@ -113,6 +113,48 @@ same pre-append mutation validation. No log format, authority or API semantics
 change. Current primitive qualification and repeated campaign passes are still
 required on a final build.
 
+### Local write calibration and async runtime starvation
+
+The allocation candidate `b508d888` did not produce a qualifying result. Its
+32-store run failed after 480.33 s with an object-log post-position timeout in
+cycle three; the two completed cycles took 95.45 / 166.84 s. A subsequent
+16-store control was stopped after two failing cycles (164.34 / 286.08 s).
+Neither has a complete-run rate. The control began with a warm drive and halved
+the aggregate checkpoint budget as well as store concurrency, so it does not
+isolate a causal store-count effect. Raw nonzero exits and partial results remain
+in the evidence archive.
+
+An 8 GiB private-file calibration then measured **38.23 MiB/sec** in 214.30 s,
+including fdatasync. It used 16 MiB incompressible writes, requested O_DIRECT,
+and disabled COW only on that new temporary file. First/last blocks verified and
+the file was removed. The sampled device was 99.5% busy, with approximately
+0.23 host CPU-seconds per second. This is a local sequential-write reference,
+not a fundamental device ceiling or a simulation of campaign page overwrites.
+It ran immediately after the campaign controls, with a warm device. NVMe
+composite temperature rose from roughly 34°C to 68°C during the preceding
+32-store run; temperature alone does not establish thermal throttling.
+
+The best complete `386d79f7` run sampled **12.42 GiB** of host writes in 380.62 s.
+Dividing by its three million recipients gives roughly **4,445 device bytes per
+recipient**, with startup/tail omission and host-wide attribution caveats. At the
+sequential reference rate that byte cost implies roughly **9,018 recipients/sec**.
+The 10k / 12.5k targets would require approximately **4,008 / 3,207 device bytes
+per recipient** at that bandwidth. The stretch target therefore calls for about
+**28% lower physical byte cost**, higher sustained bandwidth, or both. These
+estimates are additional resource constraints, not revised performance goals.
+
+Code review also found native Unix VFS writes occurring on application async
+workers during projection commit/checkpoint. A real WAL-write gate reproduced
+worker starvation on both a current-thread runtime and a one-worker multi-thread
+runtime. The next candidate moves the entire admitted apply to a blocking worker,
+retaining writer ownership through commit and token publication. Its existing
+RelTx hop stays separate to avoid nested runtimes. Both starvation regressions
+pass; this establishes the scheduling defect, not that it caused every observed
+log timeout. The rebuildable checkpoint window also increases from 250 to
+**448 MiB**, retaining the 512 MiB sampled WAL gate, fixed cache cap, page-size
+normalization and standalone 1,000-frame policy. Capacity effects remain to be
+measured. No log durability protocol or workflow representation changes.
+
 ## Historical all-due saturation qualification (2026-09-10)
 
 The following measurements apply to the earlier, lighter fixture and retain its

@@ -1,0 +1,26 @@
+{
+  "read_only_observation": true,
+  "cgroup": "/user.slice/user-1000.slice/session-3.scope",
+  "ancestors": [
+    {
+      "path": "/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope",
+      "cpu.max": "max 100000",
+      "cpu.weight": "100"
+    },
+    {
+      "path": "/sys/fs/cgroup/user.slice/user-1000.slice",
+      "cpu.max": "max 100000",
+      "cpu.weight": "100"
+    },
+    {
+      "path": "/sys/fs/cgroup/user.slice",
+      "io.max": "",
+      "io.weight": "default 100",
+      "cpu.max": "max 100000",
+      "cpu.weight": "100"
+    },
+    {
+      "path": "/sys/fs/cgroup"
+    }
+  ]
+}

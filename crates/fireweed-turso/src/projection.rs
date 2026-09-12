@@ -1685,7 +1685,10 @@ async fn apply_owned(
             .handle()
             .clone()
     });
-    handle.spawn(async move {
+    // The native Unix VFS performs synchronous writes even through the async
+    // client. Commit/checkpoint must not occupy an application runtime worker:
+    // a busy projection otherwise delays unrelated log acknowledgements/timers.
+    handle.spawn_blocking(move || crate::tx::block_on_owned_apply(async move {
     let mut connection = connection;
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
@@ -1906,7 +1909,7 @@ async fn apply_owned(
         }
     }
     Ok(())
-    }).await.map_err(|error| storage(format!("Turso owned apply task failed: {error}")))?
+    })).await.map_err(|error| storage(format!("Turso owned apply task failed: {error}")))?
 }
 
 /// Pre-position observation helper over a borrowed OutcomeReadAdmission connection
