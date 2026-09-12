@@ -113,34 +113,6 @@
                      wal.finish_append_frames_commit()?;
                      self.dirty_pages.write().clear();
                      commit_info.prepared_frames.clear();
-@@ -5145,6 +5146,17 @@
-                             page_id as u32,
-                         );
- 
-+                        // This leaf is no longer addressable by the current tree.
-+                        // If it is already dirty, its WAL image would otherwise
-+                        // retransmit removed record bodies. Clear only pages that
-+                        // already need a write; clean overflow leaves stay clean.
-+                        // add_dirty preserves the statement/savepoint before-image
-+                        // and resets any spill tag before changing the bytes.
-+                        if page.is_dirty() {
-+                            self.add_dirty(page)?;
-+                            page.get_contents().as_ptr()[..header.usable_space()].fill(0);
-+                        }
-+
-                         // Unpin page before finishing - it's added to freelist
-                         page.unpin();
-                         break;
-@@ -5161,6 +5173,9 @@
-                     let trunk_page_id = header.freelist_trunk_page.get();
- 
-                     let contents = page.get_contents();
-+                    // Only the freelist header/pointers remain meaningful here.
-+                    // Preserve any reserved tail bytes owned by the page codec.
-+                    contents.as_ptr()[..header.usable_space()].fill(0);
-                     // Point to previous trunk
-                     contents
-                         .write_u32_no_offset(FREELIST_TRUNK_OFFSET_NEXT_TRUNK_PTR, trunk_page_id);
 --- a/storage/wal.rs
 +++ b/storage/wal.rs
 @@ -726,6 +726,18 @@

@@ -34,11 +34,23 @@ See the [plan and full evidence](campaign-qualification-plan.md).
 | Process-accounted output/recipient | 12,863.20 bytes |
 | Logical retained log bytes/recipient | 1,823.51 bytes |
 
-The subsequent `b86382a1` candidate failed after 324.76 s with a log
-post-position timeout; it has no valid throughput result. Its 448 MiB checkpoint
-experiment is reverted to the previous 250 MiB window. The next write-reduction
-experiment clears obsolete bytes in already-dirty freed projection pages. Native
-correctness tests pass, but physical-byte and throughput benefits are unmeasured.
+The subsequent `b86382a1` candidate failed with a post-position timeout and
+its 448 MiB checkpoint experiment was reverted to 250 MiB. Free-page zeroing on
+`3f43c661` completed at 7,390.37/sec, with 1.1620 CPU-ms/recipient but 15.1647 GiB
+sampled host writes. It did not demonstrate sustained benefit and is removed.
+The best complete result remains 7,718.50/sec. Its sampled physical byte budget
+is not stable across candidates: the later run cost about 5,428 host bytes per
+recipient versus 4,445 previously. At 12.5k that is roughly 64.7 versus 53.0
+MiB/sec, both above the 38.23 MiB/sec sequential reference. This is measured
+host/filesystem traffic, not NAND write amplification or a proven device ceiling.
+
+The archived file attributes reveal another variable: the later run ended with
+compression disabled on nine databases and eight WALs; the earlier best had only
+one such WAL. Btrfs can retain that decision for a whole file after an unfavorable
+compression attempt. An explicit per-directory compression-property control is
+planned, without changing mount settings or log durability. See the
+[Btrfs explanation](https://btrfs.readthedocs.io/en/latest/Compression.html) and
+the [measurement plan](campaign-qualification-plan.md).
 
 ### Napkin math aligned with this workload
 

@@ -51,13 +51,3 @@ reopens and independently verifies every persisted value by count and checksum.
 This favors destination write locality over WAL read locality; performance on
 cold storage beyond the tested working set is not established. Safe frame
 selection, bounded batch sizes, reader guards and sync publication are unchanged.
-
-Freed pages that already require a WAL write now clear their unused usable bytes.
-Free-list trunks retain their header/pointers; clean free-list leaves are not
-made dirty, avoiding writes of otherwise untouched overflow pages. Existing
-`add_dirty` captures undo state and invalidates spill tags before clearing. WAL
-frames, synchronization, reserved codec bytes and reader snapshots are preserved.
-This makes obsolete body bytes compressible on the measured filesystem; it does
-not omit frames or promise secure deletion. A native VFS regression covers both
-900-byte and overflow bodies with large and spilling caches, savepoint rollback,
-pinned old readers, checkpoint/reopen, and reuse of every freed page.

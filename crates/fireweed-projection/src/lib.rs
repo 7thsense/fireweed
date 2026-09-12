@@ -3234,6 +3234,69 @@ impl ProjectionData {
         self.validate_item_mutation_plan(plan)
     }
 
+    /// Plan a disposable addressed image without constructing unrelated queue indexes.
+    /// Other shapes retain the full import-and-apply validation path.
+    pub fn plan_item_mutation_image(
+        definition: &QueueDefinition,
+        mut image: ProjectionImage,
+        request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
+        let independent = definition.secondary_indexes.is_empty()
+            && definition.typed_indexes.is_empty()
+            && definition.entity_schema.is_none()
+            && definition.cohort_policy.is_none()
+            && request.gate_changes.is_empty()
+            && image.items.iter().all(|item| {
+                item.group_key.is_none()
+                    && item.cohort_size.is_none()
+                    && !item.lease_is_cohort
+                    && item.gate_keys.is_empty()
+                    && item.index_fields.is_empty()
+                    && item.entity_document.is_none()
+            })
+            && matches!(&request.operation, ItemMutationOperation::Addressed { entries }
+                if entries.iter().all(|entry| entry.patch.entity_edits.is_empty()
+                    && entry.patch.gate_keys.add.is_empty()
+                    && entry.patch.gate_keys.remove.is_empty()
+                    && entry.patch.gate_keys.remove_prefixes.is_empty()));
+        if !independent {
+            return Self::from_image(definition, image)?.plan_item_mutation_owned(request);
+        }
+        let items = std::mem::take(&mut image.items);
+        let mut planning = Self::from_image(definition, image)?;
+        planning.items = items
+            .into_iter()
+            .map(|item| (item.item_id, ItemRecord::from(item)))
+            .collect();
+        // The addressed planner uses records and definition policy, not eligibility,
+        // lease, client-key or reporting indexes. It resolves each ID at most once.
+        let plan = planning.plan_item_mutation_unvalidated(request)?;
+        // Preserve the fallible checks of MutateItems apply: existing replacement
+        // targets and valid old/new index keys. No gates or cross-row indexes can
+        // change in this branch, so rebuilding/updating their scratch bookkeeping
+        // would add work without additional validation. The partially populated
+        // planning value never escapes this function or serves an actual query.
+        for mutation in &plan.command.items {
+            if let Some(old) = planning.items.get(&mutation.item_id) {
+                planning.record_index_keys(
+                    &old.fields,
+                    &old.index_fields,
+                    old.entity_document.as_ref(),
+                )?;
+            } else if mutation.action.replacement_values().is_some() {
+                return Err(EngineError::NotFound);
+            }
+            if let Some(values) = mutation.action.replacement_values() {
+                planning.record_index_keys(
+                    &values.fields,
+                    &values.index_fields,
+                    values.entity_document.as_ref(),
+                )?;
+            }
+        }
+        Ok(plan)
+    }
+
     fn validate_item_mutation_plan(
         mut self,
         plan: ItemMutationPlan,
@@ -5710,6 +5773,160 @@ mod tests {
                         serde_json::to_value(projection.to_image(None)).unwrap(),
                         original
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn addressed_image_planner_matches_full_import_and_apply() {
+        use fireweed_core::RequestId;
+        use fireweed_engine::{AddressedMutation, BatchUpdateValue, ItemPredicate};
+        let mut random = 0x749b_aba5_u64;
+        for case in 0..1024 {
+            let mut next = || {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                random
+            };
+            let mut definition = qdef_with_emit_change_records(false);
+            if case % 8 != 1 {
+                definition.secondary_indexes.clear();
+            }
+            let mut original = ProjectionData::new(
+                definition.priority_model,
+                definition.ordering_mode,
+                definition.max_rank_error,
+                definition.recurrence,
+                &definition.secondary_indexes,
+            );
+            original
+                .apply_command(&QueueCommand::Push(PushCommand {
+                    items: vec![push_item("1", "one", 1), push_item("2", "two", 2)],
+                }))
+                .unwrap();
+            let mut image = original.to_image(None);
+            for item in &mut image.items {
+                item.state = [
+                    ItemState::Pending,
+                    ItemState::Leased,
+                    ItemState::Complete,
+                    ItemState::Failed,
+                ][(next() % 4) as usize];
+                item.item_version = 1 + next() % 3;
+                item.attempt_count = (next() % 5) as u32;
+                item.superseded = next() % 11 == 0;
+                item.payload = Some(Bytes::from_static(b"original body"));
+                item.metadata
+                    .insert("color", MetadataValue::String("red".into()));
+                item.fields
+                    .insert("color".into(), Bytes::from_static(b"red"));
+                if item.state == ItemState::Leased {
+                    item.lease_token = Some(LeaseToken::new("lease").unwrap());
+                    item.lease_expires_at = Some(ts(if next() % 2 == 0 { 9 } else { 20 }));
+                }
+                // Exercise fallback images as well as independent rows.
+                match case % 8 {
+                    2 => item.gate_keys.push("paused".into()),
+                    3 => item.entity_document = Some(serde_json::json!({"rank": 1})),
+                    4 => item.group_key = Some(GroupKey::new("group").unwrap()),
+                    _ => {}
+                }
+            }
+            let mut entries = Vec::new();
+            for id in ["1", "2", "1", "99"] {
+                let mut patch = ItemPatch {
+                    lifecycle: [
+                        LifecyclePatch::Keep,
+                        LifecyclePatch::SetPending,
+                        LifecyclePatch::SetComplete,
+                        LifecyclePatch::SetFailed,
+                        LifecyclePatch::Purge,
+                    ][(next() % 5) as usize],
+                    ..Default::default()
+                };
+                if next() % 2 == 0 {
+                    let mut metadata = Metadata::new();
+                    metadata.insert("color", MetadataValue::String("blue".into()));
+                    patch.metadata = BatchUpdateValue::Replace(metadata);
+                }
+                if next() % 3 == 0 {
+                    patch.payload =
+                        BatchUpdateValue::Replace(Some(Bytes::from_static(b"replacement")));
+                }
+                if next() % 5 == 0 {
+                    patch.priority = BatchUpdateValue::Replace(Some(PriorityValue::Text(
+                        "invalid for int queue".into(),
+                    )));
+                }
+                if next() % 3 == 0 {
+                    patch.not_before = BatchUpdateValue::Replace(Some(ts(30)));
+                }
+                if case % 8 == 5 {
+                    patch.gate_keys.add.push("paused".into());
+                }
+                entries.push(AddressedMutation {
+                    item_id: iid(id),
+                    expected_item_version: if next() % 2 == 0 {
+                        Some(1 + next() % 3)
+                    } else {
+                        None
+                    },
+                    predicates: if next() % 3 == 0 {
+                        vec![ItemPredicate::AttemptCountEq(2)]
+                    } else {
+                        vec![]
+                    },
+                    lease_guard: match next() % 5 {
+                        0 => LeaseGuard::RejectActive,
+                        1 => LeaseGuard::RequireActive,
+                        2 => LeaseGuard::InvalidateActive,
+                        3 => LeaseGuard::Match(LeaseToken::new("lease").unwrap()),
+                        _ => LeaseGuard::Match(LeaseToken::new("wrong").unwrap()),
+                    },
+                    patch,
+                });
+            }
+            let request = ItemMutationRequest {
+                request_id: RequestId::new(format!("image-{case}")).unwrap(),
+                evaluated_at: ts(10),
+                dry_run: case % 3 == 0,
+                returning: if case % 2 == 0 {
+                    ItemMutationReturning::Identity
+                } else {
+                    ItemMutationReturning::BeforeSnapshot
+                },
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed { entries },
+            };
+            let full = ProjectionData::from_image(&definition, image.clone()).unwrap();
+            let expected = full.plan_item_mutation(&request);
+            let actual = ProjectionData::plan_item_mutation_image(&definition, image, &request);
+            match (expected, actual) {
+                (Ok(expected), Ok(actual)) => {
+                    assert_eq!(
+                        serde_json::to_value(&actual.response).unwrap(),
+                        serde_json::to_value(&expected.response).unwrap(),
+                        "response case {case}"
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&actual.command).unwrap(),
+                        serde_json::to_value(&expected.command).unwrap(),
+                        "command case {case}"
+                    );
+                    let mut applied = full;
+                    applied
+                        .apply_command(&QueueCommand::MutateItems(actual.command))
+                        .unwrap();
+                }
+                (Err(expected), Err(actual)) => assert_eq!(
+                    expected.to_string(),
+                    actual.to_string(),
+                    "error case {case}"
+                ),
+                (expected, actual) => {
+                    panic!("case {case}: full={expected:?}, addressed={actual:?}")
                 }
             }
         }

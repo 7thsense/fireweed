@@ -3122,7 +3122,7 @@ impl TursoRelational {
                 }
             }
         }
-        ProjectionData::from_image(definition, image)?.plan_item_mutation_owned(request)
+        ProjectionData::plan_item_mutation_image(definition, image, request)
     }
 
     pub async fn item_mutation_replay(

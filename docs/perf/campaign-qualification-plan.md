@@ -814,3 +814,53 @@ The latter assumed 1,024 failures could enqueue before a 10 ms retry; paused
 Tokio time now deterministically exercises the same full-queue assertion. All
 72 local object-log tests then passed; the two live-S3 probes remain unverified.
 The published vendor checksum and complete five-file patch roundtrip passed.
+
+## Free-page result, concurrency control and bounded image planner
+
+Clean `3f43c661` passed 42 native release unit tests, the free-page regression,
+and six public campaign tests (14.55 s), but its complete capacity result was
+**7,390.37 recipients/sec** over 406.164 s. CPU fell to 1.1620 ms/recipient;
+process output was 13,196.37 bytes/recipient and peak RSS 9.875 GiB. Maximum
+cycle walls were 85.750 / 132.368 / 184.244 s, load 6.603 / 36.805 / 45.673 s,
+and purge 6.338 / 10.084 / 35.080 s. Progress p95 was 1.772 / 0.959 / 0.908 s.
+Overall/later-cycle rates, 47 progress checks and 32 projection-size checks
+failed. Correctness, due-time, RSS and WAL gates passed. No qualification.
+
+Sampled host writes were 15.1647 GiB over 403.574 s (38.48 MiB/s), device busy
+87.38%, mean write latency 58.43 ms. These exceed the prior best's 12.4189 GiB,
+so the free-page experiment has not demonstrated physical-write savings. It is
+removed; its rollback, reader, checkpoint/reopen and reuse regression remains,
+including the bound against dirtying clean overflow pages. The earlier zeroing
+assertion and red/green evidence remain in history, not as a current gate.
+
+A same-binary one-worker/one-loader control completed only its first cycle,
+maximum 117.656 s and progress p95 0.579 s. It was stopped with SIGTERM at
+139.851 s because the cycle target already failed. No full-run rate is assigned.
+It started on a warm device, so this does not isolate a concurrency effect.
+Raw output, stop reason and device traces are archived as `campaign-3f43c661-*`.
+
+The next planner candidate avoids building temporary eligibility, lease, client-key
+and reporting indexes for independent unindexed addressed images. It uses the
+existing per-record planner and checks replacement existence plus old/new index
+key validity before returning commands. Gate changes, grouped/cohort rows, entity
+documents, index fields, secondary indexes and selection operations retain the
+full import-and-apply path. The temporary records never serve public queries.
+A deterministic 1,024-case differential test compares responses and commands to
+full import/plan/apply across state, lease/version/predicate failures, duplicate
+and missing IDs, payload replacement, metadata, dry runs, snapshots and fallback
+shapes. All 33 projection tests, 41 native functional unit tests, four native
+free-page/recovery tests, six public campaign tests (37.76 s) and four workload
+recovery tests pass. The debug reader latency test remains required in release.
+
+File-attribute review also found a hardware-specific source of variability:
+`3f43c661` ended with NOCOMPRESS (`m`) on nine databases and eight WALs, versus
+zero databases and one WAL in the best `386d79f7` run. This is correlation, not
+isolated causation. Btrfs can mark a whole file incompressible after a failed
+compression attempt; the kernel's explicit compression property prevents setting
+that sticky flag. The next controlled storage experiment sets `compression=zstd`
+on a new project-private projection directory and checks inheritance/readback.
+System mount settings and authoritative-log durability are unchanged. Sources:
+[Btrfs compression documentation](https://btrfs.readthedocs.io/en/latest/Compression.html)
+and [Linux v7.2 compression fallback](https://github.com/torvalds/linux/blob/v7.2/fs/btrfs/inode.c#L920).
+The host runs 7.2.3-arch1-3; this source explains the hypothesis, which still
+requires a measured control.
