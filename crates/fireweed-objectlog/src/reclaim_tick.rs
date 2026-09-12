@@ -715,7 +715,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // Fill the queue before its first retry deadline regardless of debug-build
+    // speed or host load. Tokio advances time when the full queue awaits a retry.
+    #[tokio::test(start_paused = true)]
     async fn reclaim_retry_queue_drains_before_next_page_when_full() {
         let mut pages = Vec::new();
         let mut remaining = HashMap::new();

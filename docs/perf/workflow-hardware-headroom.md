@@ -34,6 +34,12 @@ See the [plan and full evidence](campaign-qualification-plan.md).
 | Process-accounted output/recipient | 12,863.20 bytes |
 | Logical retained log bytes/recipient | 1,823.51 bytes |
 
+The subsequent `b86382a1` candidate failed after 324.76 s with a log
+post-position timeout; it has no valid throughput result. Its 448 MiB checkpoint
+experiment is reverted to the previous 250 MiB window. The next write-reduction
+experiment clears obsolete bytes in already-dirty freed projection pages. Native
+correctness tests pass, but physical-byte and throughput benefits are unmeasured.
+
 ### Napkin math aligned with this workload
 
 A complete recipient entails approximately `8 + 2/19 = 8.1053` logical row

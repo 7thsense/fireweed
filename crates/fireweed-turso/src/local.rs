@@ -3103,10 +3103,7 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
             "invalid projection page size {page_size}"
         )));
     }
-    // Leave transaction headroom below the campaign's measured 512 MiB WAL
-    // gate. A larger window coalesces more intermediate projection pages;
-    // the authoritative log retains its independent durability protocol.
-    Ok(448 * 1024 * 1024 / page_size)
+    Ok(64_000 * 4096 / page_size)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3534,7 +3531,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            114_688
+            64_000
         );
         let path = root.path().join("existing.db");
         {
@@ -3558,7 +3555,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            229_376
+            128_000
         );
         let standalone = TursoRelational::in_memory().await.unwrap();
         assert_eq!(

@@ -1587,6 +1587,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         }
         let pre_us = trace_started.elapsed().as_micros();
         let bytes = payload.len();
+        let mut post_phase = "produce";
         let produced = async {
             let produce_started = Instant::now();
             let outcome = self
@@ -1601,6 +1602,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 .await
                 .map_err(store_err)?;
             let produce_us = produce_started.elapsed().as_micros();
+            post_phase = "high-water metadata";
             let metadata_started = Instant::now();
             let base = outcome.base_offset.ok_or_else(|| {
                 EngineError::Storage("sequenced produce missing base_offset".into())
@@ -1627,7 +1629,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             }),
             Err(_) => Err(PackedAppendError::PostPositionAmbiguous {
                 shard: shard.clone(),
-                reason: "object-log post-position produce timed out".into(),
+                reason: format!("object-log post-position {post_phase} timed out"),
             }),
         }
     }

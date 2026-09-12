@@ -782,3 +782,35 @@ writers, checkpoint policy and pinned readers, plus three recovery histories.
 The cgroup ancestry had no CPU quota or explicit I/O rate cap; that read-only
 observation is archived. No system settings were changed. Release validation
 and capacity measurements on the fixed candidate follow.
+
+## Blocking-commit measurement and free-page write experiment
+
+Clean `b86382a1` passed 42 native release unit tests and six public campaign
+tests, but the full capacity attempt failed after 324.756 seconds with the same
+post-position timeout. Only the first cycle completed: maximum campaign wall
+101.098 s and progress p95 2.396 s. There is no valid whole-run throughput.
+Device sampling recorded 8.689 GiB written and 0.341 GiB read during 322.058 s,
+with 92.02% busy time and 122.18 ms mean write latency. The larger checkpoint
+window did not produce a successful result and is reverted to 250 MiB; this
+combined experiment does not isolate its causal effect. The independently
+reproduced blocking-worker fix is retained. The timeout diagnostic now distinguishes
+log production from high-water metadata publication under the same deadline.
+
+Review found that retention writes freed dirty page images containing obsolete
+recipient bodies. The next candidate clears only unused bytes on pages already
+requiring writes, preserving undo, readers, reserved bytes and clean overflow
+leaves. Its native red/green test reduced nonzero WAL bytes from 940,006 to 8,869
+out of the same 1,062,992 bytes in the first case. All four body/cache cases pass,
+including savepoint rollback, old-reader isolation, checkpoint/reopen and reuse.
+This is a filesystem-compression hypothesis, not a measured throughput gain.
+The fixed campaign workload and all qualification gates remain unchanged.
+
+Validation: 41 native functional unit tests, ten native integration tests, six
+public campaign tests (37.95 s), and four workload recovery tests passed. One
+90 ms reader latency test failed twice in debug mode (106 / 112 ms); it remains
+required in the release validation. The first broad object-log run also exposed
+two unavailable live-S3 probes and a wall-clock-sensitive retry-saturation test.
+The latter assumed 1,024 failures could enqueue before a 10 ms retry; paused
+Tokio time now deterministically exercises the same full-queue assertion. All
+72 local object-log tests then passed; the two live-S3 probes remain unverified.
+The published vendor checksum and complete five-file patch roundtrip passed.
