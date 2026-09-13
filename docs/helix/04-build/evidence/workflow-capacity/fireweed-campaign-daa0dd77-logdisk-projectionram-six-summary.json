@@ -1,0 +1,75 @@
+{
+  "head": "daa0dd776b2222b75238802182ce7896000bd1f1",
+  "binary_sha256": "c2691498f6d97fcde90e3164f7695a837cd7d9c6b2f36169cf882f25d0d98d35",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 11401.01061374358,
+  "process_wall_s": 526.7169470020453,
+  "cpu_ms_per_recipient": 1.0459681086666666,
+  "mean_cpu_occupancy": 11.9149548684934,
+  "output_bytes_per_recipient": 2555.908096,
+  "logical_log_bytes_per_recipient": 1834.827571,
+  "peak_rss_gib": 10.838085174560547,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 82.784568933,
+      "load_s": 11.530825507,
+      "prepare_s": 40.435290857,
+      "delivery_s": 23.825064282,
+      "verify_s": 0.558606421,
+      "purge_s": 6.388408261,
+      "progress_p95_s": 0.733253566,
+      "due_to_claim_max_us": 6782630
+    },
+    {
+      "wall_s": 87.039452043,
+      "load_s": 14.078533803,
+      "prepare_s": 38.538020136,
+      "delivery_s": 26.546359679,
+      "verify_s": 0.538875435,
+      "purge_s": 7.099915442,
+      "progress_p95_s": 0.699443854,
+      "due_to_claim_max_us": 9113302
+    },
+    {
+      "wall_s": 83.934886477,
+      "load_s": 9.383881641,
+      "prepare_s": 39.815729993,
+      "delivery_s": 26.546882012,
+      "verify_s": 0.674588938,
+      "purge_s": 6.956362835,
+      "progress_p95_s": 0.867221321,
+      "due_to_claim_max_us": 7900633
+    },
+    {
+      "wall_s": 89.771778882,
+      "load_s": 13.466858984,
+      "prepare_s": 37.733649392,
+      "delivery_s": 31.180953897,
+      "verify_s": 0.66334666,
+      "purge_s": 6.907673644,
+      "progress_p95_s": 0.825676677,
+      "due_to_claim_max_us": 9023774
+    },
+    {
+      "wall_s": 84.226505466,
+      "load_s": 9.428202325,
+      "prepare_s": 39.040040607,
+      "delivery_s": 27.740582193,
+      "verify_s": 0.573264059,
+      "purge_s": 6.766942844,
+      "progress_p95_s": 1.139952751,
+      "due_to_claim_max_us": 8873851
+    },
+    {
+      "wall_s": 90.793955216,
+      "load_s": 11.174089724,
+      "prepare_s": 39.391907035,
+      "delivery_s": 32.799715648,
+      "verify_s": 0.552367992,
+      "purge_s": 6.741785128,
+      "progress_p95_s": 0.906224453,
+      "due_to_claim_max_us": 9326730
+    }
+  ]
+}

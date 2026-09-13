@@ -1,6 +1,13 @@
 # Proposed one-time storage control
 
-Status update: the user approved the one-time change. `pkexec` exited before
+2026-09-13 disposition: **not performed and no longer a work dependency**.
+The desktop sudo invocation timed out before authentication; its exit status
+was 1 and the helper never ran. The user directed the investigation back to
+code. The historical procedure below is retained for audit, not as a pending
+action. New code profiling and the controlled projection I/O comparison are
+documented in `campaign-qualification-plan.md`.
+
+Historical status: the user approved the one-time change. `pkexec` exited before
 running the helper because this session lacked an authentication agent. A
 visible desktop terminal now invokes the same isolated helper with `sudo` and
 awaits administrator authentication. Approval is no longer outstanding; no

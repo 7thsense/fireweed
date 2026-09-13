@@ -20,7 +20,9 @@ See the [current resource math](workflow-hardware-headroom.md) and evidence belo
 The authorized helper never ran: sudo timed out before authentication. The user
 directed the investigation back to code. Two new instrumented, one-cycle,
 million-recipient diagnostics on the existing binary reached 17,157.49 and
-16,873.64 recipients/sec without host changes. These are neither sustained
+16,873.64 recipients/sec. Correction: those direct CLI commands omitted `--root`,
+so their default temporary data directories were on `/tmp` (tmpfs). They provide
+CPU profiles only, not durable-filesystem baselines. They are neither sustained
 qualification nor evidence of a code speedup. The six-cycle targets remain open.
 
 Apply tracing recorded 3,839 transactions and 1,049.62 aggregate apply-seconds,
@@ -40,8 +42,56 @@ log durability, SQL semantics, workload or acceptance gate changes.
 
 The new regression passes 1,024 inserts and NULL updates, constraint-error
 rollback and a subsequent fresh transaction. The existing fused-claim differential
-test also passes. Release validation and sustained measurement are still pending;
-no speedup is claimed. Diagnostic artifacts use `fireweed-code-*-20260913*`.
+test also passes. Release validation passed: 43 native, seven differential, six
+campaign, two primitive CLI, two workload unit, seven recovery tests across the
+two packages, and the free-page regression. Diagnostic artifacts use
+`fireweed-code-*-20260913*`; sustained measurements follow below.
+
+### Statement-reuse candidate and isolated projection I/O comparison
+
+Clean `daa0dd77`, binary SHA256
+`c2691498f6d97fcde90e3164f7695a837cd7d9c6b2f36169cf882f25d0d98d35`,
+ran two serial six-cycle campaigns, each with one million resident recipients,
+32 stores, two campaigns/store, 1,000-row storage batches, one worker/campaign,
+two loaders/campaign, timestamp priority, metadata enrichment and RT1. Both used
+the qualification runner's explicit repository-filesystem authoritative log.
+Only the second run's projection root was on a private `/dev/shm` directory.
+No TRIM or host configuration change ran. Private projection roots were removed
+after recording evidence. This single pair isolates a configuration difference;
+run order/media state remain possible confounders and repetition is still needed.
+
+| Measurement | Log + projection on disk | Disk log, tmpfs projection (diagnostic) |
+|---|---:|---:|
+| Complete recipients/sec | 8,520.83 | 11,401.01 |
+| Process wall, seconds | 704.47 | 526.72 |
+| CPU ms/recipient | 1.03661 | 1.04597 |
+| Average charged CPUs | 8.83 | 11.91 |
+| Process output bytes/recipient | 12,869.29 | 2,555.91 |
+| Logical log bytes/recipient | 1,834.826 | 1,834.828 |
+| Host writes, GiB | 24.8708 | 12.0149 |
+| Host write MiB/sec | 36.29 | 23.43 |
+| Peak process RSS, GiB | 10.25 | 10.84 |
+
+Disk cycle maxima were 87.82/122.39/110.42/140.88/114.00/122.83 seconds.
+It fails overall throughput, cycles 1–5 throughput, and three reporting checks
+(p95 1.030/1.139/1.149 seconds). Correctness, due-time, WAL, DB and RSS gates pass.
+The tmpfs projection run fails the required on-disk projection gate, three
+reporting checks and RSS stability. It is explicitly not qualification even
+though its overall and individual-cycle rates exceed 10k. Neither configuration
+qualifies 10k or 12.5k. Process RSS excludes tmpfs page storage.
+
+Removing projection disk writes reduced wall time 25.2% and increased throughput
+33.8%, while CPU work increased only 0.9%. This implicates the projection I/O
+path without establishing an intrinsic NVMe limit. Projection stable-storage
+sync is already omitted; remaining work includes WAL/main-file writes,
+checkpoint execution and buffered-write blocking. The next code attribution
+must distinguish those costs and authoritative-log waits under sustained load.
+Do not call all elapsed commit time fsync, infer NAND traffic from host counters,
+or treat observed bandwidth as device capacity. Statement reuse itself still
+needs a same-configuration before/after comparison; no isolated speedup is claimed.
+
+Artifacts use `fireweed-campaign-daa0dd77-{reuse-w1,logdisk-projectionram}-six*`.
+The diagnostic's negative gate audit is `fireweed-projectionram-diagnostic-gates.json.gz`.
 
 ## Fixed objectives and units
 

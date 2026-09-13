@@ -13,5 +13,6 @@
     "commit_us": 27.587247,
     "total_us": 1049.620478
   },
-  "trim_performed": false
+  "trim_performed": false,
+  "storage_correction": "CLI omitted --root; default tempfile root was /tmp on tmpfs. CPU diagnostic only, not a durable-filesystem baseline."
 }

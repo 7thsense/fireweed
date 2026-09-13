@@ -6,8 +6,26 @@ candidate are recorded in the [qualification plan](campaign-qualification-plan.m
 The projection already omits stable-storage sync through `RebuildableIo`; the
 authoritative log retains durability. First-cycle tracing attributes about 71%
 of aggregate apply time to update SQL and 2.6% to commit/checkpoint. Those times
-overlap across stores and do not establish the sustained bottleneck. No physical
-device ceiling has been demonstrated.
+overlap across stores, came from a default temporary root on tmpfs, and do not
+establish the sustained disk bottleneck. No physical device ceiling has been
+demonstrated.
+
+The subsequent same-binary, six-cycle comparison keeps the log on disk in both
+runs. With the projection also on disk it takes **704.47 s at 8,520.83/sec**;
+with only the projection on tmpfs it takes **526.72 s at 11,401.01/sec**. CPU cost
+is nearly unchanged: **1.03661 versus 1.04597 CPU-ms/recipient**. Host writes fall
+from **24.8708 to 12.0149 GiB**. This single pair supports investigating the
+projection write/checkpoint path, not declaring an intrinsic SSD limit or moving
+qualification to RAM. Both runs fail qualification; exact gates and provenance
+are in the qualification plan. The first-cycle 17k CPU diagnostics used tmpfs
+for both log and projection and must not be presented as durable-disk results.
+
+At the new disk run's measured CPU/byte costs, 10k/12.5k needs approximately
+**10.37/12.96 CPU-seconds per second** and **42.45/53.11 MiB/sec** of host writes.
+These are constant-cost demand estimates, not measured hardware limits. The
+projection-only comparison changes the backing filesystem and its CPU/cache
+behavior as well as physical I/O; it does not attribute the entire difference
+to SSD service time. It is not yet evidence that a faster computer is necessary.
 
 ## Current timestamp-workflow measurements
 
