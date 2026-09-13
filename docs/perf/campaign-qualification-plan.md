@@ -12,7 +12,7 @@ non-throughput gate, including all 384 campaign-cycle progress checks. Neither
 10k nor 12.5k is qualified. The 2 KiB default experiment did not improve sustained
 runtime and is being reverted to 4 KiB. A read-only hardware review found that
 the encrypted root device blocks TRIM and periodic fstrim is disabled. A controlled
-one-time maintenance comparison is prepared but awaits explicit host approval;
+one-time maintenance comparison is approved and awaits desktop administrator authentication;
 its contribution to the storage bottleneck remains unproven.
 See the [current resource math](workflow-hardware-headroom.md) and evidence below.
 

@@ -1,5 +1,14 @@
 # Proposed one-time storage control
 
+Status update: the user approved the one-time change. `pkexec` exited before
+running the helper because this session lacked an authentication agent. A
+visible desktop terminal now invokes the same isolated helper with `sudo` and
+awaits administrator authentication. Approval is no longer outstanding; no
+successful TRIM or restoration result has yet been observed. The terminal writes
+`/tmp/fireweed-trim-approved-result.log` and its exit status to
+`/tmp/fireweed-trim-approved-exit`. Do not start a benchmark while this maintenance
+invocation is pending or running.
+
 The current six-cycle source-aligned campaign control completes 6,000,000
 recipients at 7,911.78/sec. Every correctness, progress, due-time, RSS, database
 and WAL gate passes; overall and later-cycle throughput fail. All 32 DB/log pairs

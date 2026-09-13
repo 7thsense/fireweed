@@ -1,0 +1,21 @@
+{
+  "schema": "workflow-device-accounting/v1",
+  "device": "nvme0n1",
+  "host_wide_not_process_attribution": true,
+  "startup_tail_omitted": true,
+  "sampled_seconds": 718.1160813999886,
+  "write_iops": 1247.6395156801375,
+  "read_iops": 0.22837533408286462,
+  "write_mib_per_second": 32.613378272481576,
+  "write_kib_per_request": 26.767426753725097,
+  "mean_write_request_ms": 72.18574250795245,
+  "mean_read_request_ms": 13.792682926829269,
+  "weighted_mean_inflight": 90.23761990355148,
+  "max_sampled_inflight_not_peak_bound": 767,
+  "busy_percent_not_capacity_utilization": 88.12461054573036,
+  "flush_iops": 18.917554350705583,
+  "mean_flush_request_ms": 9.128229665071771,
+  "discard_iops": 0.0,
+  "discarded_gib": 0.0,
+  "source": "docs/helix/04-build/evidence/workflow-capacity/fireweed-campaign-60c699e5-timestamp-b1000-six-device.jsonl.gz"
+}

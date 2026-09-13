@@ -55,9 +55,49 @@ measurement of this media/configuration state, not an intrinsic device ceiling.
 The kernel documents discard blocking and its encryption-policy tradeoff;
 Kingston explains how TRIM assists reclamation. A causal performance comparison
 still requires the [reviewed one-time control](storage-trim-control.md), which
-awaits approval. No host maintenance has been performed.
+the user has now approved. The first noninteractive invocation could not obtain
+administrator authentication; a desktop terminal is waiting at the sudo prompt.
+No completed maintenance or post-maintenance measurement is established yet.
 [Kernel dm-crypt documentation](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html),
 [Kingston garbage-collection discussion](https://www.kingston.com/en/blog/servers-and-data-centers/garbage-collection).
+
+### Low throughput is not proof of a device limit
+
+The user's objection is correct: observed throughput and device busy time do not
+establish that Fireweed approaches the device's IOPS or bandwidth capability.
+Re-accounting the archived raw samples gives the following host-wide values:
+
+| Canonical campaign control | 4 KiB, two workers | 2 KiB, one worker |
+|---|---:|---:|
+| Write IOPS | 1,247.64 | 1,442.90 |
+| KiB/write request | 26.77 | 25.19 |
+| Mean write-request latency, ms | 72.19 | 50.22 |
+| Weighted mean outstanding I/Os | 90.24 | 72.67 |
+| Maximum sampled outstanding I/Os | 767 | 762 |
+| Device flushes/sec | 18.92 | 21.34 |
+| Mean device flush latency, ms | 9.13 | 9.05 |
+
+For the one-worker run, `1,442.90 × 25.19 / 1024 = 35.50 MiB/s` and
+`1,442.90 × 0.05022 ≈ 72.47` outstanding writes. This is consistent with
+the measured queue-depth integral. It demonstrates substantial backlog at low
+throughput, rather than a globally single-outstanding-request workload. It does
+not prove a firmware bottleneck: request times include block-layer residence,
+and application/filesystem burst patterns can create long queues. A one-second
+sample maximum is not a bound on instantaneous peak depth. Device flush counts
+are not application fsync counts; the block layer combines flush requests.
+
+At unchanged host bytes/recipient, the one-worker target needs only 44.76 MiB/s
+for 10k or 55.95 MiB/s for 12.5k. Treating the observed 35.50 MiB/s as the maximum
+would be circular. The remaining investigation must distinguish CPU work and
+application serialization, projection checkpoint/writeback bursts, and storage
+service latency. TRIM is a controlled diagnostic for the last category, not an
+assumed fix or a prerequisite for all future code optimization.
+
+Reproduce these calculations with `scripts/perf/workflow_device_accounting.py`
+and the archived `*-device.jsonl.gz` sources. It rejects counter resets and
+non-increasing sample times; two unit tests verify units and failure handling.
+Derived artifacts are `fireweed-w{1,2}-device-accounting.json`. Counter semantics
+follow the [Linux I/O statistics documentation](https://docs.kernel.org/admin-guide/iostats.html).
 
 The separate million-row primitive control passed at 103.95k inserts/sec,
 107.20k key updates/sec and 91.64k ID updates/sec. Those bodies use repetitive
