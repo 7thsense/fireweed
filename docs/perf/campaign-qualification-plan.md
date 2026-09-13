@@ -16,6 +16,33 @@ one-time maintenance comparison is approved and awaits desktop administrator aut
 its contribution to the storage bottleneck remains unproven.
 See the [current resource math](workflow-hardware-headroom.md) and evidence below.
 
+2026-09-13 update: storage maintenance is no longer a dependency for this work.
+The authorized helper never ran: sudo timed out before authentication. The user
+directed the investigation back to code. Two new instrumented, one-cycle,
+million-recipient diagnostics on the existing binary reached 17,157.49 and
+16,873.64 recipients/sec without host changes. These are neither sustained
+qualification nor evidence of a code speedup. The six-cycle targets remain open.
+
+Apply tracing recorded 3,839 transactions and 1,049.62 aggregate apply-seconds,
+overlapping across 32 stores: update SQL 742.00 s, read SQL 164.20 s, transformation
+105.55 s, commit/checkpoint 27.59 s and writer wait 3.94 s. This first-cycle
+attribution points to SQL execution, but cannot explain later checkpoint-heavy
+cycles by itself. A separate 199 Hz user-IP profile collected 155,597 samples
+without loss. Allocation, copying, VM execution and B-tree traversal dominate.
+
+The next code candidate reuses at most 32 write-statement execution objects
+within an owned apply transaction. Turso's existing compiled-SQL cache creates
+a fresh VM and tracked statement per call; the new bounded cache targets that
+allocation cost for repeated point updates. The SDK resets VM state and bindings
+before execution. Cache lifetime ends before commit/rollback, read queries retain
+their existing path, and no statement crosses a transaction or connection. No
+log durability, SQL semantics, workload or acceptance gate changes.
+
+The new regression passes 1,024 inserts and NULL updates, constraint-error
+rollback and a subsequent fresh transaction. The existing fused-claim differential
+test also passes. Release validation and sustained measurement are still pending;
+no speedup is claimed. Diagnostic artifacts use `fireweed-code-*-20260913*`.
+
 ## Fixed objectives and units
 
 First qualify **10,000 completed campaign recipients/sec**, then **12,500/sec**

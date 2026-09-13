@@ -1,5 +1,14 @@
 # Workflow capacity versus hardware cost
 
+2026-09-13: no SSD maintenance was performed. It is no longer a dependency for
+optimization. New first-cycle diagnostics and the statement-execution reuse
+candidate are recorded in the [qualification plan](campaign-qualification-plan.md).
+The projection already omits stable-storage sync through `RebuildableIo`; the
+authoritative log retains durability. First-cycle tracing attributes about 71%
+of aggregate apply time to update SQL and 2.6% to commit/checkpoint. Those times
+overlap across stores and do not establish the sustained bottleneck. No physical
+device ceiling has been demonstrated.
+
 ## Current timestamp-workflow measurements
 
 2026-09-12. The source-aligned timestamp workload's fastest six-cycle baseline is

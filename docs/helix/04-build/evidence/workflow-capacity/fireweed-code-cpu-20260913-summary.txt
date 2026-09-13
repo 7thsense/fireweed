@@ -1,0 +1,36 @@
+total 155597
+  8.40%   13068 _mi_page_malloc_zero
+  5.09%    7927 libc::__memcpy_avx_unaligned_erms
+  4.78%    7431 libc::__memcmp_avx2_movbe
+  4.22%    6560 turso_core::vdbe::execute::op_column
+  4.04%    6283 <turso_core::vdbe::Program>::normal_step
+  2.88%    4474 <turso_core::storage::btree::BTreeCursor>::indexbtree_move_to_internal
+  2.74%    4269 turso_core::types::compare_records_generic::<&turso_core::types::ValueRef, core::iter::adapters::peekable::Peekable<core::slice::iter::Iter<turso_core::types::ValueRef>>>
+  2.56%    3990 mi_free
+  2.40%    3741 <turso_core::storage::btree::BTreeCursor>::move_to
+  2.10%    3273 <turso_core::storage::btree::BTreeCursor>::indexbtree_seek_internal
+  1.66%    2582 <turso_core::storage::page_cache::PageCache>::get
+  1.45%    2257 libc::__memcpy_avx_unaligned
+  1.24%    1923 <turso_core::storage::pager::Pager>::read_page
+  1.23%    1918 <alloc::collections::btree::map::BTreeMap<_, _, _> as core::clone::Clone>::clone::clone_subtree::<alloc::string::String, fireweed_core::domain::MetadataValue, alloc::alloc::Global>
+  1.22%    1902 <turso_core::types::RecordCompare>::compare::<&turso_core::types::ValueRef, core::slice::iter::Iter<turso_core::types::ValueRef>, &[turso_core::types::ValueRef]>
+  1.13%    1766 fireweed_workload::campaign::initial_body
+  1.01%    1576 <turso_core::types::immutable_record::ImmutableRecord>::from_registers::<core::slice::iter::Iter<turso_core::vdbe::Register>, &[turso_core::vdbe::Register]>
+  1.00%    1551 <turso_core::storage::btree::BTreeCursor as turso_core::storage::btree::CursorTrait>::seek
+  0.97%    1505 mi_theap_malloc_aligned
+  0.86%    1344 <turso_core::connection::Connection>::should_interrupt_for_progress
+  0.85%    1315 turso_core::vdbe::execute::op_copy
+  0.80%    1245 <&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>> as serde_core::ser::Serializer>::serialize_str
+  0.74%    1155 turso_core::storage::sqlite3_ondisk::read_btree_cell
+  0.74%    1152 <turso_core::storage::btree::PageStack>::unpin_all_and_clear_slots
+  0.73%    1143 turso_core::vdbe::execute::op_comparison
+  0.69%    1071 core::ptr::drop_glue::<turso_core::vdbe::ActiveOpState>
+  0.69%    1070 core::ptr::drop_glue::<fireweed_core::domain::MetadataValue>
+  0.67%    1037 <alloc::collections::btree::map::IntoIter<alloc::string::String, fireweed_core::domain::MetadataValue>>::dying_next
+  0.67%    1035 _mi_page_free_collect_partly
+  0.66%    1034 <alloc::collections::btree::map::IntoIter<alloc::string::String, fireweed_core::domain::MetadataValue> as core::ops::drop::Drop>::drop
+  0.65%    1016 _mi_page_free_collect
+  0.65%    1005 fireweed_engine::async_composed::validate_purge_plan
+  0.63%     977 turso_core::vdbe::execute::op_variable
+  0.62%     960 <turso::Statement>::step
+  0.53%     830 mi_malloc_aligned

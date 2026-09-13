@@ -6,6 +6,145 @@ use turso::{Connection, Value};
 
 pub struct TursoRel<'a>(pub &'a Connection);
 
+/// Reuse execution state only within one owned apply transaction. Compiled-SQL
+/// caching alone still allocates a new VM and tracked statement for every row.
+pub(crate) struct ApplyTursoRel<'a> {
+    inner: TursoRel<'a>,
+    statements: std::cell::RefCell<std::collections::HashMap<String, (usize, turso::Statement)>>,
+}
+
+impl<'a> ApplyTursoRel<'a> {
+    pub(crate) fn new(connection: &'a Connection) -> Self {
+        Self {
+            inner: TursoRel(connection),
+            statements: Default::default(),
+        }
+    }
+}
+
+impl RelTx for ApplyTursoRel<'_> {
+    fn prefer_point_updates(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
+        if !USE_LOCAL_RT.get() {
+            return self.inner.execute(sql, params);
+        }
+        // Keep a fixed positional-bind shape for each reused execution object.
+        // The SDK resets both VM state and bindings before execute.
+        let cached = self
+            .statements
+            .borrow()
+            .get(sql)
+            .filter(|(count, _)| *count == params.len())
+            .map(|(_, statement)| statement.clone());
+        block_on_local(async {
+            let mut statement = match cached {
+                Some(statement) => statement,
+                None => {
+                    let statement = self.inner.0.prepare_cached(sql).await.map_err(storage)?;
+                    let mut cache = self.statements.borrow_mut();
+                    if cache.len() >= 32 {
+                        cache.clear();
+                    }
+                    cache.insert(sql.to_owned(), (params.len(), statement.clone()));
+                    statement
+                }
+            };
+            // execute resets VM cursors before rebinding; nothing escapes the
+            // apply's connection/transaction or overlaps another statement.
+            statement
+                .execute(params.iter().map(to_turso).collect::<Vec<_>>())
+                .await
+                .map(|changed| changed as usize)
+                .map_err(storage)
+        })
+    }
+
+    fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
+        self.inner.query(sql, params)
+    }
+}
+
+#[cfg(test)]
+mod apply_statement_reuse_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reused_writes_rebind_nulls_and_release_state_before_rollback() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE reuse_test(id INTEGER PRIMARY KEY, value TEXT UNIQUE)",
+                (),
+            )
+            .await
+            .unwrap();
+        run_reltx_blocking(move || {
+            let plain = TursoRel(&connection);
+            plain.execute("BEGIN", &[]).unwrap();
+            {
+                let cached = ApplyTursoRel::new(&connection);
+                let insert = "INSERT INTO reuse_test VALUES(?1,?2)";
+                for id in 0..1024 {
+                    assert_eq!(
+                        cached
+                            .execute(
+                                insert,
+                                &[RelValue::Integer(id), RelValue::Text(format!("value-{id}"))]
+                            )
+                            .unwrap(),
+                        1
+                    );
+                }
+                let update = "UPDATE reuse_test SET value=?2 WHERE id=?1";
+                for id in 0..1024 {
+                    assert_eq!(
+                        cached
+                            .execute(update, &[RelValue::Integer(id), RelValue::Null])
+                            .unwrap(),
+                        1
+                    );
+                }
+                // A uniqueness error must still abort the caller's transaction;
+                // dropping the cache must release all statement state.
+                assert!(
+                    cached
+                        .execute(insert, &[RelValue::Integer(0), RelValue::Null])
+                        .is_err()
+                );
+            }
+            plain.execute("ROLLBACK", &[]).unwrap();
+            assert_eq!(
+                plain.query("SELECT COUNT(*) FROM reuse_test", &[]).unwrap()[0]
+                    .get::<i64>(0)
+                    .unwrap(),
+                0
+            );
+            plain.execute("BEGIN", &[]).unwrap();
+            {
+                let cached = ApplyTursoRel::new(&connection);
+                cached
+                    .execute(
+                        "INSERT INTO reuse_test VALUES(?1,?2)",
+                        &[RelValue::Integer(1), RelValue::Text("fresh".into())],
+                    )
+                    .unwrap();
+            }
+            plain.execute("COMMIT", &[]).unwrap();
+            assert_eq!(
+                plain.query("SELECT value FROM reuse_test", &[]).unwrap()[0]
+                    .get::<String>(0)
+                    .unwrap(),
+                "fresh"
+            );
+        })
+        .await;
+    }
+}
+
 pub fn to_turso(value: &RelValue) -> Value {
     match value {
         RelValue::Null => Value::Null,

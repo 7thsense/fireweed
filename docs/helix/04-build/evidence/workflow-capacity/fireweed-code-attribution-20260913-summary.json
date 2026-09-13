@@ -1,0 +1,17 @@
+{
+  "instrumented_not_qualification": true,
+  "source_head": "06ce373b",
+  "binary_source_head": "fda0dcab",
+  "completed_applies": 3839,
+  "aggregate_seconds_overlap_between_shards": {
+    "wait_us": 3.937256,
+    "begin_us": 0.228545,
+    "cur_us": 1.36513,
+    "read_us": 164.200653,
+    "xform_us": 105.553374,
+    "upd_us": 741.998914,
+    "commit_us": 27.587247,
+    "total_us": 1049.620478
+  },
+  "trim_performed": false
+}

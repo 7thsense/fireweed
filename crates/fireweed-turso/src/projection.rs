@@ -1562,7 +1562,7 @@ struct RelApplyPhaseTotals {
 }
 
 struct ObservedTursoRel<'a> {
-    inner: crate::tx::TursoRel<'a>,
+    inner: crate::tx::ApplyTursoRel<'a>,
     statement_shape: Option<Arc<std::sync::Mutex<TursoBatchUpdateStatementShape>>>,
     phases: Arc<std::sync::Mutex<RelApplyPhaseTotals>>,
 }
@@ -1801,7 +1801,7 @@ async fn apply_owned(
     let relational_started = Instant::now();
     let relational_result = crate::tx::run_reltx_blocking(move || {
         let rel = ObservedTursoRel {
-            inner: crate::tx::TursoRel(&hop_txn),
+            inner: crate::tx::ApplyTursoRel::new(&hop_txn),
             statement_shape: Some(statement_shape_for_hop),
             phases: rel_phases_for_hop,
         };
