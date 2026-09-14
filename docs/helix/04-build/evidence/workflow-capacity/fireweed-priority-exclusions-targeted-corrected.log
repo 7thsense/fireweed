@@ -1,0 +1,7 @@
+
+running 1 test
+priority exclusions plan: ["SCAN t", "LIST SUBQUERY 1", "SCAN json_each", "SEARCH fireweed_items USING INDEX fireweed_items_pending_eligible_order_idx (tenant_id=? AND queue_id=? AND priority_sort>=?)", "SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)", "SEARCH p USING INDEX sqlite_autoindex_fireweed_item_payloads_1 (tenant_id=? AND queue_id=? AND item_id=?) LEFT-JOIN", "USE SORTER FOR ORDER BY"]
+test projection::item_mutation_tests::priority_claim_exclusions_preserve_due_order_and_full_bodies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.32s
+

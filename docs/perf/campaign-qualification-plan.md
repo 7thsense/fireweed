@@ -1,5 +1,23 @@
 # Campaign qualification and performance plan
 
+The next runtime candidate filters pending authoritative claim exclusions in
+the priority candidate subquery, before loading payloads, fields and metadata.
+A non-correlated JSON list supplies one bound exclusion set; the no-exclusion
+and FIFO paths keep their existing queries. Priority scans request only the
+remaining selected count instead of overfetching full excluded bodies.
+The regression covers 2,400 rows, priority ties, future not-before values,
+1,700-prefix and 1,200-interleaved exclusions, empty/all-excluded lists, exact
+returned body/metadata/identity/lease values, and native query bytecode.
+The candidate coroutine reads its item columns from the eligibility index;
+its exclusion list is non-correlated. All **310 release checks passed**,
+with two ignored diagnostics/checks and two unconfigured live-S3 exclusions.
+An initial assertion incorrectly expected the EQP label “COVERING INDEX”;
+Turso reports “USING INDEX” even for covered reads. The corrected check
+verifies actual bytecode rather than weakening the coverage requirement.
+The failed initial run and corrected results are archived. Next is the
+same 64-store/two-worker million-row single-cycle comparison; no throughput
+benefit is claimed yet.
+
 The completed six-cycle direct-join run (runtime `3cdfb41a`, 48 stores, two
 workers/campaign) reached **9,845.15 recipients/sec** over 609.89 seconds.
 All non-throughput gates passed, including reporting p95 (worst 0.521 seconds),
