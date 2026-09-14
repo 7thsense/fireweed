@@ -1,5 +1,32 @@
 # Campaign qualification and performance plan
 
+Clean six-cycle lifecycle run (`ea40bd7c`, runtime `264d9a3c`, 64 stores/two
+workers): **10,067.49 recipients/sec**, 596.52 seconds, **not qualified**.
+Every reporting check passed, worst p95 0.253 seconds. Five cycles missed
+12.5k; cycles 3/4 also missed 10k (9,897.10 and 7,954.74). Slowest cycle times
+were 78.99/91.66/96.05/101.03/125.70/96.45 seconds. All correctness, fairness,
+due-time, retention, WAL and RSS gates passed; 62 physical projection-size
+stability gates failed. CPU cost was 1.16622 ms/recipient, peak RSS 15.41 GiB,
+process output 10,087.07 bytes/recipient, and host writes 19.96585 GiB.
+
+Read-only post-run SQLite inspection explains the physical-size failures:
+representative shard 0's main file remained 4,096 bytes through cycle 3 and
+became 31,039,488 bytes in cycle 4 when WAL contents were checkpointed. Its
+final 7,578 pages include 6,198 free pages, zero items/payload rows and 62
+retained idempotency receipts occupying about 5.4 MB. This is evidence of
+late main-file materialization, not evidence of unbounded live-row growth.
+The existing physical-size gate remains failed and unchanged; this diagnosis
+does not turn the run into a pass. Selected shards 0/33/37/63 are captured
+in `fireweed-campaign-lifecycle-s64-w2-six-file-diagnosis.json`.
+
+The run also read 4.984 GiB from the device, versus zero in the first-cycle
+trace, and averaged 11.73 logical CPUs. Additional sharding has not produced
+a stable throughput improvement. The next code candidate removes avoidable
+claim-row buffer copies and avoids decoding excluded claimed rows. No SSD
+settings or qualification gates change. Raw evidence uses
+`fireweed-campaign-lifecycle-s64-w2-six*`; the owned root is removed after
+property capture and the read-only file diagnosis.
+
 Lifecycle-tail metrics (`264d9a3c`), 64 stores/two workers, one traced million-row
 cycle: **12,812.28 recipients/sec**, 78.39 seconds; worst campaign reporting
 p95 **0.338 seconds** versus 2.867 seconds in the preceding same-layout run.

@@ -1,5 +1,17 @@
 # Workflow capacity versus hardware cost
 
+The clean six-cycle lifecycle run (`264d9a3c`, 64 stores/two workers) reached
+10,067.49/sec, with all reporting gates passing but throughput and physical
+file-size stability still failing. Cost was **1.16622 CPU-ms/recipient**,
+19.96585 GiB host writes and 4.98410 GiB host reads for six million recipients.
+Constant-cost demands at 10k/12.5k are **11.66/14.58 CPU-seconds/sec**,
+**34.07/42.59 MiB/sec writes**, and **8.51/10.63 MiB/sec reads**.
+Mean CPU occupancy was 11.73, host writes 34.41 MiB/sec, device busy 79.90%,
+and full I/O pressure 9.51%. These observations do not establish an intrinsic
+SSD limit. Late physical-file growth coincides with initial WAL checkpoint
+materialization; the inspected final databases have mostly free pages and
+no retained workflow rows. See the qualification plan and archived file diagnosis.
+
 The lifecycle reporting trace (`264d9a3c`, 64 stores/two workers) reduced worst
 campaign reporting p95 from 2.867 to 0.338 seconds, at 12,812.28 recipients/sec.
 Its 1.06857 CPU-ms/recipient and 2.88332 GiB host writes per million imply

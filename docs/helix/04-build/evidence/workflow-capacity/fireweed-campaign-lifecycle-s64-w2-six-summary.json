@@ -1,0 +1,486 @@
+{
+  "head": "ea40bd7c0581dda64a2edd34b46e6b638f338fa7",
+  "binary_sha256": "f8cbd4afd5d9dd65c12dfa2d87ffe75efe028101fcee1077b2926cfe1a5adb1e",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 10067.492908414008,
+  "process_wall_s": 596.5195110280183,
+  "cpu_ms_per_recipient": 1.1662154411666668,
+  "mean_cpu_occupancy": 11.730199126162933,
+  "output_bytes_per_recipient": 10087.0656,
+  "logical_log_bytes_per_recipient": 1831.3995161666667,
+  "peak_rss_gib": 15.414031982421875,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 78.985704612,
+      "load_s": 10.90216948,
+      "prepare_s": 32.555354077,
+      "delivery_s": 27.818109075,
+      "verify_s": 0.337896216,
+      "purge_s": 5.769454715,
+      "progress_p95_s": 0.247276257,
+      "due_to_claim_max_us": 7709534
+    },
+    {
+      "wall_s": 91.662399492,
+      "load_s": 18.122017044,
+      "prepare_s": 34.259941014,
+      "delivery_s": 31.538844132,
+      "verify_s": 0.392636689,
+      "purge_s": 6.784125684,
+      "progress_p95_s": 0.227043759,
+      "due_to_claim_max_us": 8021729
+    },
+    {
+      "wall_s": 96.054790434,
+      "load_s": 16.209051918,
+      "prepare_s": 38.116018855,
+      "delivery_s": 32.831964859,
+      "verify_s": 0.307223597,
+      "purge_s": 6.252009199,
+      "progress_p95_s": 0.203411122,
+      "due_to_claim_max_us": 8111413
+    },
+    {
+      "wall_s": 101.033247548,
+      "load_s": 17.148592575,
+      "prepare_s": 39.723085127,
+      "delivery_s": 36.040391374,
+      "verify_s": 0.363398768,
+      "purge_s": 6.181389383,
+      "progress_p95_s": 0.21081198,
+      "due_to_claim_max_us": 10262370
+    },
+    {
+      "wall_s": 125.703100605,
+      "load_s": 35.915031284,
+      "prepare_s": 49.421508165,
+      "delivery_s": 31.922345935,
+      "verify_s": 0.335731337,
+      "purge_s": 6.30303557,
+      "progress_p95_s": 0.193618515,
+      "due_to_claim_max_us": 8108968
+    },
+    {
+      "wall_s": 96.450007532,
+      "load_s": 18.626694932,
+      "prepare_s": 37.806203185,
+      "delivery_s": 30.718647547,
+      "verify_s": 0.300171635,
+      "purge_s": 5.761908372,
+      "progress_p95_s": 0.252565707,
+      "due_to_claim_max_us": 7892675
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 10067.492908414008,
+      "required": 12500
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10908.900547462443,
+      "required": 12500
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10410.058628851664,
+      "required": 12500
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9897.098472707603,
+      "required": 12500
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7954.744116790913,
+      "required": 12500
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10367.401989763901,
+      "required": 12500
+    },
+    {
+      "name": "shard_0_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_1_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_2_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_3_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_4_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_5_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_6_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_7_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_8_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_9_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_10_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_11_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_12_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_13_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_14_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_15_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_16_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_17_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_18_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_19_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_20_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_21_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_22_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_23_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_24_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_25_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_26_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_27_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_28_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_29_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_30_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_31_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_32_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_34_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_35_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_36_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_38_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_39_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_40_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_41_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_42_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_43_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_44_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_45_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_46_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_47_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_48_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_49_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_50_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_51_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_52_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_53_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_54_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_55_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_56_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_57_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_58_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_59_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_60_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_61_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_62_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "shard_63_projection_stable",
+      "passed": false,
+      "actual": null,
+      "required": null
+    }
+  ]
+}
