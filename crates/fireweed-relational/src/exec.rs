@@ -12,6 +12,12 @@ pub trait RelTx {
         false
     }
 
+    /// Adapter-qualified row bound for the sixteen-bind resolved replacement
+    /// statement. Other SQL operations retain their portable bind budgets.
+    fn clearing_item_replacement_batch(&self) -> usize {
+        crate::CLEARING_ITEM_REPLACEMENT_BATCH
+    }
+
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize>;
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>>;
 }

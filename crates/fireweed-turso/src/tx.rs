@@ -4,6 +4,10 @@ use fireweed_engine::{EngineError, EngineResult};
 use fireweed_relational::{RelRow, RelTx, RelValue};
 use turso::{Connection, Value};
 
+// Qualified against native execution, complete row-image equivalence and
+// rollback after a conflict in the last chunk: 16 * 224 + 4 = 3588 binds.
+pub(crate) const TURSO_CLEARING_ITEM_REPLACEMENT_BATCH: usize = 224;
+
 pub struct TursoRel<'a>(pub &'a Connection);
 
 /// Reuse execution state only within one owned apply transaction. Compiled-SQL
@@ -25,6 +29,10 @@ impl<'a> ApplyTursoRel<'a> {
 impl RelTx for ApplyTursoRel<'_> {
     fn prefer_point_updates(&self) -> bool {
         true
+    }
+
+    fn clearing_item_replacement_batch(&self) -> usize {
+        TURSO_CLEARING_ITEM_REPLACEMENT_BATCH
     }
 
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
@@ -329,6 +337,10 @@ fn turso_reltx_worker() -> &'static TursoRelTxWorker {
 impl RelTx for TursoRel<'_> {
     fn prefer_point_updates(&self) -> bool {
         true
+    }
+
+    fn clearing_item_replacement_batch(&self) -> usize {
+        TURSO_CLEARING_ITEM_REPLACEMENT_BATCH
     }
 
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {

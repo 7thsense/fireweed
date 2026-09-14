@@ -1,0 +1,8 @@
+
+running 1 test
+batched replacement plan: ["SCAN incoming", "SEARCH target USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)", "SEARCH fireweed_items USING INTEGER PRIMARY KEY (rowid=?)"]
+batched replacement statements: TursoBatchUpdateStatementShape { item_count: 1, statement_count: 28, read_statement_count: 5, write_statement_count: 23, broad_current_row_read_count: 0, max_bind_count: 3588 }
+test projection::item_mutation_tests::clearing_replacements_batch_real_sql_and_rollback_late_conflicts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.54s
+

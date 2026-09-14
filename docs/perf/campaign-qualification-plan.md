@@ -1,5 +1,19 @@
 # Campaign qualification and performance plan
 
+The current candidate uses **224-row native Turso replacement statements**
+(3,588 binds) through an adapter-specific `RelTx` bound. The portable default
+remains 56 rows/900 binds; unrelated operations keep their existing budgets.
+A 1,000-row replacement now needs five replacement statements instead of 18.
+The measured complete apply transaction in the native regression uses 28
+statements (five reads, 23 writes including auxiliary work), no broad current-row
+read, and an observed maximum of 3,588 binds. Full tenant/queue/item and rowid
+seeks remain. Complete row/payload/gate images match sequential lowering;
+late version, missing-row and receipt conflicts roll back earlier chunks.
+All **309 release checks passed**, with two ignored checks/diagnostics and
+two unconfigured live-S3 exclusions. Evidence uses `fireweed-replacement-batch224-*`.
+The same 64-store/two-worker million-row single-cycle comparison is next;
+no workflow performance gain is claimed from the SQL diagnostic alone.
+
 The priority-exclusion candidate (`bf539d9e`) is **not retained**. Its clean
 64-store/two-worker single cycle reached 13,103.57 recipients/sec at 1.00318
 CPU-ms/recipient, versus 13,339.15 and 0.97226 for direct joined replacements.
