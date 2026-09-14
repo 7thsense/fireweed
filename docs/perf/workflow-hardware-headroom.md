@@ -1,5 +1,13 @@
 # Workflow capacity versus hardware cost
 
+Same-binary two-worker control `1e15109d` measured 9,287.72 recipients/sec,
+1.01649 CPU-ms/recipient and 21.2378 GiB of host writes over six million recipients.
+Constant-cost demands at 10k/12.5k are **10.16/12.71 CPU-seconds/sec** and
+**36.25/45.31 MiB/sec** of host writes. It failed 67 reporting latency checks
+and throughput qualification. This serial concurrency comparison shows useful
+headroom but does not establish either an intrinsic hardware ceiling or a
+qualified improvement. Timing of public metrics phases is the next code diagnostic.
+
 Current uninstrumented disk comparisons (32 stores, two campaigns/store, one
 worker/campaign, 1,000-row storage batches, six million complete recipients):
 

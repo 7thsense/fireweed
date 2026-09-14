@@ -1,0 +1,619 @@
+    Checking cfg-if v1.0.4
+    Checking zeroize v1.9.0
+    Checking libc v0.2.186
+    Checking serde_core v1.0.228
+    Checking typenum v1.20.1
+    Checking memchr v2.8.2
+    Checking pin-project-lite v0.2.17
+    Checking once_cell v1.21.4
+    Checking num-traits v0.2.19
+    Checking itoa v1.0.18
+    Checking subtle v2.6.1
+    Checking futures-core v0.3.32
+    Checking futures-sink v0.3.32
+    Checking zerofrom v0.1.8
+    Checking stable_deref_trait v1.2.1
+    Checking smallvec v1.15.2
+    Checking tracing-core v0.1.36
+    Checking yoke v0.8.3
+    Checking slab v0.4.12
+    Checking futures-channel v0.3.32
+    Checking zerovec v0.11.6
+    Checking outref v0.5.2
+    Checking num-integer v0.1.46
+    Checking writeable v0.6.3
+    Checking vsimd v0.8.0
+    Checking tracing v0.1.44
+    Checking futures-task v0.3.32
+    Checking generic-array v0.14.7
+    Checking getrandom v0.2.17
+    Checking socket2 v0.6.4
+    Checking mio v1.2.1
+    Checking futures-io v0.3.32
+    Checking rand_core v0.6.4
+    Checking futures-util v0.3.32
+    Checking litemap v0.8.2
+    Checking zerotrie v0.2.4
+    Checking either v1.16.0
+    Checking utf8_iter v1.0.4
+    Checking time-core v0.1.9
+    Checking ryu v1.0.23
+    Checking crypto-common v0.1.7
+    Checking fnv v1.0.7
+    Checking num-conv v0.2.2
+    Checking deranged v0.5.8
+    Checking powerfmt v0.2.0
+    Checking percent-encoding v2.3.2
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking getrandom v0.3.4
+    Checking getrandom v0.4.2
+    Checking icu_properties_data v2.2.0
+    Checking icu_locale_core v2.2.0
+    Checking icu_collections v2.2.0
+    Checking icu_normalizer_data v2.2.0
+    Checking write16 v1.0.0
+    Checking utf16_iter v1.0.5
+    Checking zerocopy v0.8.52
+    Checking aho-corasick v1.1.4
+    Checking regex-syntax v0.8.11
+    Checking serde v1.0.228
+    Checking const-oid v0.9.6
+    Checking sha1_smol v1.0.1
+    Checking base64 v0.22.1
+    Checking bytes v1.12.1
+    Checking time v0.3.53
+    Checking uuid v1.23.4
+    Checking icu_provider v2.2.0
+    Checking num-bigint v0.4.6
+    Checking hybrid-array v0.4.12
+    Checking http v1.4.2
+    Checking tokio v1.52.3
+    Checking icu_normalizer v2.2.0
+    Checking icu_properties v2.2.0
+    Checking regex-automata v0.4.16
+    Checking http-body v1.0.1
+    Checking http v0.2.12
+    Checking lazy_static v1.5.0
+    Checking http-body-util v0.1.3
+    Checking bytes-utils v0.1.4
+    Checking base64-simd v0.8.0
+    Checking pin-utils v0.1.0
+    Checking cmov v0.5.4
+    Checking cpufeatures v0.2.17
+    Checking ctutils v0.4.2
+    Checking thiserror v2.0.18
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking block-buffer v0.10.4
+    Checking http-body v0.4.6
+    Checking const-oid v0.10.2
+    Checking digest v0.10.7
+    Checking zmij v1.0.21
+    Checking base64ct v1.8.3
+    Checking idna_adapter v1.2.2
+    Checking cpufeatures v0.3.0
+    Checking equivalent v1.0.2
+    Checking idna v1.1.0
+    Checking hex v0.4.3
+    Checking serde_json v1.0.150
+    Checking pem-rfc7468 v0.7.0
+    Checking fastrand v2.4.1
+    Checking der v0.7.10
+    Checking ref-cast v1.0.25
+    Checking aws-lc-sys v0.42.0
+    Checking num-rational v0.4.2
+    Checking digest v0.11.3
+    Checking num-iter v0.1.45
+    Checking num-complex v0.4.6
+    Checking sha2 v0.11.0
+    Checking rustls-pki-types v1.15.0
+    Checking hashbrown v0.17.1
+    Checking bitflags v2.13.0
+    Checking borrow-or-share v0.2.4
+    Checking log v0.4.32
+    Checking bit-vec v0.8.0
+    Checking fluent-uri v0.3.2
+    Checking aws-lc-rs v1.17.1
+    Checking bit-set v0.8.0
+    Checking spki v0.7.3
+    Checking num v0.4.3
+    Checking ahash v0.8.12
+    Checking inout v0.1.4
+    Checking indexmap v2.14.0
+    Checking pkcs8 v0.10.2
+    Checking ff v0.13.1
+    Checking atomic-waker v1.1.2
+    Checking base16ct v0.2.0
+    Checking try-lock v0.2.5
+    Checking untrusted v0.9.0
+    Checking referencing v0.28.3
+    Checking want v0.3.1
+    Checking sec1 v0.7.3
+    Checking group v0.13.0
+    Checking fancy-regex v0.14.0
+    Checking cipher v0.4.4
+    Checking fraction v0.15.4
+    Checking crossbeam-utils v0.8.21
+    Checking httparse v1.10.1
+    Checking crc32fast v1.5.0
+    Checking ppv-lite86 v0.2.21
+    Checking arc-swap v1.9.2
+    Checking uuid-simd v0.8.0
+    Checking email_address v0.2.9
+    Checking rand_core v0.9.5
+    Checking universal-hash v0.5.1
+    Checking crypto-bigint v0.5.5
+    Checking opaque-debug v0.3.1
+    Checking num-cmp v0.1.0
+    Checking rustls-webpki v0.103.13
+    Checking linux-raw-sys v0.12.1
+    Checking rustc-hash v2.1.3
+    Checking tower-service v0.3.3
+    Checking bytecount v0.6.9
+    Checking rand_chacha v0.9.0
+    Checking polyval v0.6.2
+    Checking bytemuck v1.25.1
+    Checking jsonschema v0.28.3
+    Checking tokio-util v0.7.18
+    Checking aws-smithy-async v1.2.14
+    Checking matchers v0.2.0
+    Checking icu_locale_data v2.2.0
+    Checking libm v0.2.16
+    Checking tracing-log v0.2.0
+    Checking hmac v0.12.1
+    Checking sharded-slab v0.1.7
+    Checking thread_local v1.1.9
+    Checking rustls v0.23.41
+    Checking unicode-width v0.1.14
+    Checking aws-smithy-types v1.5.0
+    Checking h2 v0.4.16
+    Checking iana-time-zone v0.1.65
+    Checking ipnet v2.12.0
+    Checking elliptic-curve v0.13.8
+    Checking rustix v1.1.4
+    Checking scopeguard v1.2.0
+    Checking openssl-probe v0.2.1
+    Checking nu-ansi-term v0.50.3
+    Checking rustls-native-certs v0.8.4
+    Checking lock_api v0.4.14
+    Checking chrono v0.4.45
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-eventstream v0.60.21
+    Checking tracing-subscriber v0.3.23
+    Checking miette v7.6.0
+    Checking axon-esf v0.3.2 (https://github.com/DocumentDrivenDX/axon?tag=v0.3.2#64d2bf60)
+    Checking rfc6979 v0.4.0
+    Checking icu_locale v2.2.0
+    Checking rand v0.9.4
+    Checking aws-smithy-http v0.63.6
+    Checking aws-smithy-schema v0.1.0
+    Checking ghash v0.5.1
+    Checking memoffset v0.9.1
+    Checking icu_collator_data v2.2.0
+    Checking parking_lot_core v0.9.12
+    Checking strum v0.26.3
+    Checking ctr v0.9.2
+    Checking aes v0.8.4
+    Checking signature v2.2.0
+    Checking cobs v0.3.0
+    Checking futures-executor v0.3.32
+    Checking aead v0.5.2
+    Checking siphasher v1.0.3
+    Checking tower-layer v0.3.3
+    Checking byteorder v1.5.0
+    Checking softaes v0.1.5
+    Checking fastbloom v0.14.1
+    Checking tower v0.5.3
+    Checking postcard v1.1.3
+    Checking roaring v0.11.4
+    Checking aegis v0.9.15
+    Checking futures v0.3.32
+    Checking aes-gcm v0.10.3
+    Checking aristo v0.4.1
+    Checking ecdsa v0.16.9
+    Checking parking_lot v0.12.5
+    Checking hyper v1.10.1
+    Checking turso_parser v0.7.2
+    Checking icu_collator v2.2.1
+    Checking intrusive-collections v0.9.7
+    Checking twox-hash v2.1.2
+    Checking turso_ext v0.7.2
+    Checking aws-credential-types v1.2.14
+    Checking tokio-rustls v0.26.4
+    Checking fireweed-core v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-core)
+    Checking branches v0.4.4
+    Checking crc32c v0.6.8
+    Checking simsimd v6.5.16
+    Checking bigdecimal v0.4.10
+    Checking uncased v0.9.10
+   Compiling turso_core v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_core)
+    Checking hyper-util v0.1.20
+    Checking crossbeam-epoch v0.9.20
+    Checking primeorder v0.13.6
+    Checking io-uring v0.7.13
+    Checking pack1 v1.1.0
+    Checking regex v1.13.1
+    Checking sha2 v0.10.9
+    Checking rapidhash v4.5.1
+    Checking serde_path_to_error v0.1.20
+    Checking form_urlencoded v1.2.2
+    Checking libloading v0.8.9
+    Checking cfg_block v0.1.1
+    Checking fallible-iterator v0.3.0
+    Checking bumpalo v3.20.3
+    Checking allocator-api2 v0.4.0
+    Checking p256 v0.13.2
+    Checking fireweed-engine v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-engine)
+    Checking hyper-rustls v0.27.9
+    Checking aws-smithy-observability v0.2.6
+    Checking crossbeam-channel v0.5.16
+    Checking env_filter v2.0.0
+    Checking hmac v0.13.0
+    Checking aws-smithy-http-client v1.1.13
+    Checking spin v0.10.1
+    Checking allocator-api2 v0.2.21
+    Checking genawaiter-macro v0.99.1
+    Checking symlink v0.1.0
+    Checking foldhash v0.2.0
+    Checking genawaiter v0.99.1
+    Checking crc-fast v1.10.0
+    Checking tempfile v3.27.0
+    Checking polling v3.11.0
+    Checking env_logger v0.11.11
+    Checking tracing-appender v0.2.5
+    Checking hashbrown v0.16.1
+    Checking aws-sigv4 v1.4.5
+    Checking aws-smithy-runtime v1.11.3
+    Checking prost v0.14.4
+    Checking aws-types v1.3.16
+    Checking md-5 v0.11.0
+    Checking sha1 v0.11.0
+    Checking xmlparser v0.13.6
+    Checking lru v0.16.4
+    Checking url v2.5.8
+    Checking aws-smithy-json v0.62.7
+    Checking regex-lite v0.1.9
+    Checking aws-smithy-checksums v0.64.8
+    Checking aws-smithy-xml v0.60.15
+    Checking libmimalloc-sys v0.1.49
+    Checking mimalloc v0.1.52
+    Checking aws-runtime v1.7.5
+    Checking aws-sdk-s3 v1.137.0
+    Checking fireweed-projection v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-projection)
+    Checking fireweed-relational v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-relational)
+    Checking fireweed-memory v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-memory)
+warning: methods `move_to_root` and `indexbtree_move_to_unpacked` are never used
+    --> vendor/turso_core/storage/btree.rs:1463:8
+     |
+ 841 | impl BTreeCursor {
+     | ---------------- methods in this implementation
+...
+1463 |     fn move_to_root(&mut self) -> Result<Option<Completion>> {
+     |        ^^^^^^^^^^^^
+...
+1749 |     fn indexbtree_move_to_unpacked(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:499:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+499 |     pub step_fn: StepFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+    = note: `#[warn(unpredictable_function_pointer_comparisons)]` on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:500:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+500 |     pub finalize_fn: FinalizeFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:501:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+501 |     pub aggregate_destructor: Option<ContextDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:502:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+502 |     pub value_destructor: Option<ValueDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor/turso_core/vector/operations/text.rs:67:56
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector> {
+   |                                                        ^^^^            ^^^^^^ the same lifetime is hidden here
+   |                                                        |
+   |                                                        the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector<'_>> {
+   |                                                                              ++++
+
+warning: `turso_core` (lib) generated 6 warnings (run `cargo fix --lib -p turso_core` to apply 1 suggestion)
+    Checking turso_sdk_kit v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sdk_kit)
+    Checking turso_sync_engine v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sync_engine)
+warning: unused import: `DatabaseRowMutation`
+  --> vendor/turso_sync_engine/src/database_sync_operations.rs:37:55
+   |
+37 |         parse_bin_record, Coro, DatabasePullRevision, DatabaseRowMutation,
+   |                                                       ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Checking object-log v0.3.1 (https://github.com/7thsense/object-log.git?tag=v0.3.1#dcd37c0e)
+    Checking fireweed-objectlog v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-objectlog)
+warning: `turso_sync_engine` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_engine` to apply 1 suggestion)
+    Checking turso_sync_sdk_kit v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sync_sdk_kit)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor/turso_sync_sdk_kit/src/sync_engine_io.rs:211:14
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<SyncEngineIoCompletionInner<TBytes>>> {
+    |              ^^^^^ the lifetime is elided here   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<'_, SyncEngineIoCompletionInner<TBytes>>> {
+    |                                                             +++
+
+warning: `turso_sync_sdk_kit` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_sdk_kit` to apply 1 suggestion)
+    Checking turso v0.7.2 (/home/erik/Projects/fireweed/vendor/turso)
+    Checking fireweed-turso v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-turso)
+warning: function `cohort_id_for` is never used
+   --> crates/fireweed-turso/src/projection.rs:388:4
+    |
+388 | fn cohort_id_for(group_key: &str, now: i64) -> String {
+    |    ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cohort_retention_until` is never used
+   --> crates/fireweed-turso/src/projection.rs:392:4
+    |
+392 | fn cohort_retention_until(definition: &QueueDefinition, now: i64) -> i64 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PUSH_ITEM_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:410:7
+    |
+410 | const PUSH_ITEM_CHUNK: usize = 47; // 47 * 19 binds = 893
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `PUSH_GATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:411:7
+    |
+411 | const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_READ_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:418:7
+    |
+418 | const COHORT_READ_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_GENERATION_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:419:7
+    |
+419 | const COHORT_GENERATION_WRITE_CHUNK: usize = 90; // 90 * 10 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_ACTIVE_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:420:7
+    |
+420 | const COHORT_ACTIVE_WRITE_CHUNK: usize = 224; // tenant + queue + 224 * 4 updates = 898
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SCHEDULE_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:421:7
+    |
+421 | const SCHEDULE_UPDATE_CHUNK: usize = 299; // tenant + queue + 299 * 3 updates = 899
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_BLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:422:7
+    |
+422 | const GATE_BLOCK_WRITE_CHUNK: usize = 300; // 300 * 3 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_UNBLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:423:7
+    |
+423 | const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SIDE_RECORD_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:424:7
+    |
+424 | const SIDE_RECORD_WRITE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `KEY_RETENTION_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:425:7
+    |
+425 | const KEY_RETENTION_WRITE_CHUNK: usize = 180; // 180 * 5 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CURSOR_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:426:7
+    |
+426 | const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:427:7
+    |
+427 | const API001_UPDATE_CHUNK: usize = 89; // tenant + queue + 89 * 10 row binds = 892
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_GATE_DELETE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:428:7
+    |
+428 | const API001_GATE_DELETE_CHUNK: usize = 898; // tenant + queue + 898 item binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_typed_unique_conflicts` is never used
+   --> crates/fireweed-turso/src/projection.rs:501:10
+    |
+501 | async fn check_typed_unique_conflicts(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:546:10
+    |
+546 | async fn insert_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `delete_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:581:10
+    |
+581 | async fn delete_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `replace_typed_indexes_for_entity` is never used
+   --> crates/fireweed-turso/src/projection.rs:597:10
+    |
+597 | async fn replace_typed_indexes_for_entity(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `upsert_cohorts` is never used
+   --> crates/fireweed-turso/src/projection.rs:706:10
+    |
+706 | async fn upsert_cohorts(
+    |          ^^^^^^^^^^^^^^
+
+warning: function `cohort_item_ids` is never used
+   --> crates/fireweed-turso/src/projection.rs:884:10
+    |
+884 | async fn cohort_item_ids(
+    |          ^^^^^^^^^^^^^^^
+
+warning: function `groups_for_items` is never used
+   --> crates/fireweed-turso/src/projection.rs:922:10
+    |
+922 | async fn groups_for_items(
+    |          ^^^^^^^^^^^^^^^^
+
+warning: function `cohort_state` is never used
+    --> crates/fireweed-turso/src/projection.rs:1351:10
+     |
+1351 | async fn cohort_state(
+     |          ^^^^^^^^^^^^
+
+warning: function `append_item_ids` is never used
+    --> crates/fireweed-turso/src/projection.rs:1371:4
+     |
+1371 | fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `execute_for_items` is never used
+    --> crates/fireweed-turso/src/projection.rs:1375:10
+     |
+1375 | async fn execute_for_items<F>(
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: function `update_item_schedules` is never used
+    --> crates/fireweed-turso/src/projection.rs:1402:10
+     |
+1402 | async fn update_item_schedules(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retry_info_by_item` is never used
+    --> crates/fireweed-turso/src/projection.rs:1438:10
+     |
+1438 | async fn retry_info_by_item(
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `extend_claim_by_query_replays` is never used
+    --> crates/fireweed-turso/src/projection.rs:1468:10
+     |
+1468 | async fn extend_claim_by_query_replays(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_item_claim_ids_on` is never used
+    --> crates/fireweed-turso/src/projection.rs:2296:14
+     |
+2296 | pub async fn select_item_claim_ids_on(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fireweed-turso` (lib) generated 29 warnings
+    Checking fireweed v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed)
+warning: unused import: `DEFAULT_BLOCKING_AXIS_IN_FLIGHT`
+  --> crates/fireweed/src/turso_compose.rs:31:5
+   |
+31 |     DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `objectlog_recover_definitions` is never used
+    --> crates/fireweed/src/lib.rs:2864:4
+     |
+2864 | fn objectlog_recover_definitions(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `objectlog_high_water` is never used
+    --> crates/fireweed/src/lib.rs:2872:4
+     |
+2872 | fn objectlog_high_water(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `s3_provider_from_composed` is never used
+    --> crates/fireweed/src/lib.rs:6435:4
+     |
+6435 | fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3ComposedProvider> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `map_turso_storage` is never used
+   --> crates/fireweed/src/turso_compose.rs:131:4
+    |
+131 | fn map_turso_storage(error: impl std::fmt::Display) -> EngineError {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: constant `CLAIM_SELECT_EXCLUDE_CAP` is never used
+   --> crates/fireweed/src/turso_compose.rs:263:7
+    |
+263 | const CLAIM_SELECT_EXCLUDE_CAP: usize =
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fireweed` (lib) generated 6 warnings (run `cargo fix --lib -p fireweed` to apply 1 suggestion)
+    Checking fireweed-workload v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-workload)
+    Finished `release` profile [optimized] target(s) in 33.97s

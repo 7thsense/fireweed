@@ -1,5 +1,22 @@
 # Campaign qualification and performance plan
 
+2026-09-14 same-binary two-worker control (`1e15109d`): **9,287.72 recipients/sec**
+over 646.48 seconds, versus 7,651.62/sec with one worker. CPU cost was
+1.01649 ms/recipient, peak RSS 11.25 GiB, process output 11,542.90 bytes/recipient,
+and logical log output 1,834.32 bytes/recipient. All correctness, due-time, retention,
+WAL and stability checks passed, but 67 campaign/cycle reporting checks failed
+(worst p95 1.7205 s). Overall and cycles 2–5 throughput failed. This is not a
+qualified result. All raw, device, summary, provenance and compression-property
+artifacts use `fireweed-campaign-1e15109d-known-after-w2-six*`; the owned directory
+was removed after capture. Host writes were 21.24 GiB at 33.77 MiB/sec.
+
+The next diagnostic adds `FIREWEED_METRICS_TRACE`: exclusive microseconds for
+high-water lookup, first admission, snapshot SQL, retained claim-tail lookup,
+fallback coverage, second admission, and final SQL, in that order. It preserves
+read semantics and admission order; traced runs are diagnostic, not qualification.
+This will distinguish waiting for projection coverage from the SQL query itself
+before expanding reporting logic. No host/storage settings are changed.
+
 2026-09-14 guarded counter-read candidate: clean `70e64556` completed six disk
 cycles at **7,651.62 recipients/sec**, 784.43 seconds. All non-throughput gates
 passed; worst reporting p95 was 0.6014 s. Overall and cycles 1–5 throughput

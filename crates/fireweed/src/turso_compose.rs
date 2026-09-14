@@ -3939,26 +3939,46 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn committed_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        // Opt-in diagnostic only: successful reads report exclusive phase times.
+        // Keep the coverage contract and admission order unchanged.
+        let trace = std::env::var_os("FIREWEED_METRICS_TRACE").is_some();
+        let mut previous = trace.then(Instant::now);
+        let mut phases = [0_u128; 7];
+        let mut mark = |phase: usize| {
+            if let Some(previous) = &mut previous {
+                let now = Instant::now();
+                phases[phase] = now.duration_since(*previous).as_micros();
+                *previous = now;
+            }
+        };
         if let Some(coordinator) = &self.async_apply {
             coordinator.ensure_healthy(shard)?;
             let target = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?;
+            mark(0);
             // Release the snapshot and read slot before a fallback coverage wait.
             // Counts and SQL frontier must never be read separately.
             {
                 let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+                mark(1);
                 let (mut metrics, applied) = self
                     .projection
                     .server_metrics_with_position_committed(shard)
                     .await?;
+                mark(2);
                 if target
                     .as_ref()
                     .is_none_or(|target| position_covers(applied.as_ref(), target))
                 {
                     coordinator.ensure_healthy(shard)?;
+                    if trace {
+                        eprintln!("metrics_read path=covered phases_us={phases:?}");
+                    }
                     return Ok(metrics);
                 }
                 if let (Some(applied), Some(target)) = (&applied, &target) {
-                    if let Some(claims) = coordinator.retained_claim_tail(applied, target).await? {
+                    let claims = coordinator.retained_claim_tail(applied, target).await?;
+                    mark(3);
+                    if let Some(claims) = claims {
                         // Authoritative claims require every distinct named row to
                         // transition Pending -> Leased. The validator rejects gaps,
                         // duplicate IDs, historical claims and every other mutation.
@@ -3975,14 +3995,25 @@ impl DerivedObjectLogTursoBackend {
                             metrics.pending = pending;
                             metrics.leased = leased;
                             coordinator.ensure_healthy(shard)?;
+                            if trace {
+                                eprintln!("metrics_read path=claims phases_us={phases:?}");
+                            }
                             return Ok(metrics);
                         }
                     }
                 }
             }
         }
-        let _permit = self.acquire_outcome_read(shard).await?;
-        self.projection.server_metrics_committed(shard).await
+        self.wait_request_entry_coverage(shard).await?;
+        mark(4);
+        let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+        mark(5);
+        let result = self.projection.server_metrics_committed(shard).await;
+        mark(6);
+        if trace {
+            eprintln!("metrics_read path=fallback phases_us={phases:?}");
+        }
+        result
     }
 
     async fn dispatch_push(

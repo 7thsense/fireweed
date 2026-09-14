@@ -115,6 +115,7 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         "command": command, "head": head, "dirty": bool(status),
         "diagnostics": {key: os.environ[key] for key in (
             "FIREWEED_SQL_TRACE", "FIREWEED_APPLY_TRACE", "FIREWEED_WORKLOAD_TIMING",
+            "FIREWEED_METRICS_TRACE",
             "FIREWEED_LOG_TRACE", "FIREWEED_WORKLOAD_DEBUG", "LD_PRELOAD",
             "FIREWEED_PROJECTION_IO_TRACE",
         ) if key in os.environ},
