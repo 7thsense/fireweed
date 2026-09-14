@@ -1,0 +1,167 @@
+{
+  "all": {
+    "count": 9693,
+    "total_ms_percentiles": {
+      "0.5": 0.18,
+      "0.9": 622.097,
+      "0.95": 1031.213,
+      "0.99": 3072.633,
+      "1": 5026.809
+    },
+    "phase_sum_s": {
+      "high_water": 5.550373,
+      "first_admission": 0.042407,
+      "snapshot_sql": 1.821957,
+      "claim_tail": 1.458073,
+      "coverage": 1990.593194,
+      "second_admission": 0.005433,
+      "final_sql": 0.802066
+    },
+    "phase_p95_ms": {
+      "high_water": 0.008,
+      "first_admission": 0.003,
+      "snapshot_sql": 0.215,
+      "claim_tail": 0.198,
+      "coverage": 1030.9,
+      "second_admission": 0.002,
+      "final_sql": 0.176
+    },
+    "dominant_phase_counts": {
+      "high_water": 59,
+      "snapshot_sql": 5441,
+      "coverage": 2872,
+      "claim_tail": 1316,
+      "first_admission": 5
+    }
+  },
+  "by_path": {
+    "claims": {
+      "count": 1733,
+      "total_ms_percentiles": {
+        "0.5": 0.301,
+        "0.9": 0.407,
+        "0.95": 0.809,
+        "0.99": 3.11,
+        "1": 51.977
+      },
+      "phase_sum_s": {
+        "high_water": 0.00995,
+        "first_admission": 0.004228,
+        "snapshot_sql": 0.256407,
+        "claim_tail": 0.483617,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0
+      },
+      "phase_p95_ms": {
+        "high_water": 0.008,
+        "first_admission": 0.003,
+        "snapshot_sql": 0.195,
+        "claim_tail": 0.305,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0
+      },
+      "dominant_phase_counts": {
+        "snapshot_sql": 415,
+        "claim_tail": 1316,
+        "first_admission": 2
+      }
+    },
+    "covered": {
+      "count": 5088,
+      "total_ms_percentiles": {
+        "0.5": 0.115,
+        "0.9": 0.174,
+        "0.95": 0.215,
+        "0.99": 5.997,
+        "1": 385.873
+      },
+      "phase_sum_s": {
+        "high_water": 5.523134,
+        "first_admission": 0.016209,
+        "snapshot_sql": 0.883311,
+        "claim_tail": 0.0,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0
+      },
+      "phase_p95_ms": {
+        "high_water": 0.008,
+        "first_admission": 0.003,
+        "snapshot_sql": 0.199,
+        "claim_tail": 0.0,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0
+      },
+      "dominant_phase_counts": {
+        "high_water": 59,
+        "snapshot_sql": 5026,
+        "first_admission": 3
+      }
+    },
+    "fallback": {
+      "count": 2872,
+      "total_ms_percentiles": {
+        "0.5": 451.441,
+        "0.9": 1521.046,
+        "0.95": 2642.235,
+        "0.99": 3836.281,
+        "1": 5026.809
+      },
+      "phase_sum_s": {
+        "high_water": 0.017289,
+        "first_admission": 0.02197,
+        "snapshot_sql": 0.682239,
+        "claim_tail": 0.974456,
+        "coverage": 1990.593194,
+        "second_admission": 0.005433,
+        "final_sql": 0.802066
+      },
+      "phase_p95_ms": {
+        "high_water": 0.008,
+        "first_admission": 0.003,
+        "snapshot_sql": 0.416,
+        "claim_tail": 0.029,
+        "coverage": 2642.107,
+        "second_admission": 0.003,
+        "final_sql": 0.655
+      },
+      "dominant_phase_counts": {
+        "coverage": 2872
+      }
+    }
+  },
+  "over_1_second": {
+    "count": 511,
+    "total_ms_percentiles": {
+      "0.5": 1701.446,
+      "0.9": 3562.481,
+      "0.95": 3861.827,
+      "0.99": 4413.367,
+      "1": 5026.809
+    },
+    "phase_sum_s": {
+      "high_water": 0.003138,
+      "first_admission": 0.001041,
+      "snapshot_sql": 0.204394,
+      "claim_tail": 0.534436,
+      "coverage": 1047.494761,
+      "second_admission": 0.000883,
+      "final_sql": 0.206066
+    },
+    "phase_p95_ms": {
+      "high_water": 0.009,
+      "first_admission": 0.003,
+      "snapshot_sql": 0.536,
+      "claim_tail": 0.539,
+      "coverage": 3861.684,
+      "second_admission": 0.003,
+      "final_sql": 0.809
+    },
+    "dominant_phase_counts": {
+      "coverage": 511
+    }
+  }
+}

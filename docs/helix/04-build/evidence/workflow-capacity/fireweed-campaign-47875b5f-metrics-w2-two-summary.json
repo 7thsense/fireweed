@@ -1,0 +1,37 @@
+{
+  "head": "47875b5f641b95758d89ba753d9d75c498fa7482",
+  "binary_sha256": "070beade4a0a45c6915fdfc87b234f4e2405c15040d1cf397785d7179c71cb1d",
+  "diagnostics": {
+    "FIREWEED_METRICS_TRACE": "1"
+  },
+  "exit_code": 0,
+  "rate": 11688.25118734302,
+  "process_wall_s": 171.44843942002626,
+  "cpu_ms_per_recipient": 0.9629405055,
+  "mean_cpu_occupancy": 11.23300403033616,
+  "output_bytes_per_recipient": 10710.654976,
+  "logical_log_bytes_per_recipient": 1820.765605,
+  "peak_rss_gib": 10.766033172607422,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 77.61434734,
+      "load_s": 5.68050574,
+      "prepare_s": 31.658663173,
+      "delivery_s": 28.450147675,
+      "verify_s": 0.544817562,
+      "purge_s": 7.276065684,
+      "progress_p95_s": 2.091007943,
+      "due_to_claim_max_us": 9342124
+    },
+    {
+      "wall_s": 91.584140805,
+      "load_s": 27.218653927,
+      "prepare_s": 30.269552166,
+      "delivery_s": 25.027959617,
+      "verify_s": 0.606300482,
+      "purge_s": 8.570368363,
+      "progress_p95_s": 0.992781905,
+      "due_to_claim_max_us": 7290984
+    }
+  ]
+}

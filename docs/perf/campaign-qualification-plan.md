@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+2026-09-14 metrics-phase diagnostic (`47875b5f`, two workers, two cycles):
+9,693 successful metrics calls, including 511 over one second. **Every slow
+call was dominated by projection coverage**: 1,047.49 aggregate seconds in that
+wait versus 0.410 seconds in both SQL reads combined. Across all calls, coverage
+was 1,990.59 seconds, snapshot SQL 1.822 seconds, final SQL 0.802 seconds and
+high-water lookup 5.550 seconds. Call times overlap across queues. Covered reads
+had p95 0.215 ms and claim-tail reads 0.809 ms; fallback reads had p95 2,642.24 ms.
+The two-cycle rate was 11,688.25/sec, but this traced short run is **not qualification**.
+Complete evidence and summarizer use `fireweed-campaign-47875b5f-metrics-w2-two*`
+and `fireweed-metrics-trace-summary.py`; owned projection files were removed.
+
+The next write-path changes build general INSERT parameters directly per SQL
+chunk (preserving the global FIFO offset) and omit PurgeItems metadata prefetch
+only when retained keys and grouped rows cannot use it. New native tests cover
+chunk boundaries with nonzero FIFO base, group discovery after reopen, same-apply
+group creation, retained-key behavior and exact SQL read savings. These do not
+change log durability or add workflow records. A bounded exact push/purge-tail
+metrics read is under review; it is not yet implemented.
+
+All **75 release checks pass** for the insert/purge changes (50 native plus
+25 adapter, WAL, recovery, workload and CLI checks). The first run had 49 native
+passes and one new-test assertion failure: decimal ItemId input `00000` is
+canonically stored as `0`. Correcting that expected representation made the
+full suite pass; both failed and successful logs are retained.
+
 2026-09-14 same-binary two-worker control (`1e15109d`): **9,287.72 recipients/sec**
 over 646.48 seconds, versus 7,651.62/sec with one worker. CPU cost was
 1.01649 ms/recipient, peak RSS 11.25 GiB, process output 11,542.90 bytes/recipient,

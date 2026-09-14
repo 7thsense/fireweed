@@ -2099,39 +2099,9 @@ pub fn insert_item_specs(
         maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
         return Ok(base_seq);
     }
-    let mut rows: Vec<Vec<RelValue>> = Vec::with_capacity(specs.len());
-    for (i, spec) in specs.iter().enumerate() {
-        let item = spec.item;
-        let now_n = ts_nanos(spec.now);
-        let not_before = ts_nanos_opt(item.not_before);
-        rows.push(vec![
-            RelValue::Text(t.clone()),
-            RelValue::Text(q.clone()),
-            RelValue::Text(item.item_id.to_string()),
-            RelValue::Text(item.client_item_key.as_str().to_string()),
-            opt_text(item.priority.as_ref().map(to_json).transpose()?),
-            RelValue::Blob(elig_sort(&item.priority, model)),
-            opt_int(not_before),
-            RelValue::Integer(not_before.unwrap_or(now_n)),
-            opt_text(item.group_key.as_ref().map(|g| g.as_str().to_string())),
-            opt_int(item.cohort_size.map(|s| s as i64)),
-            RelValue::Null,
-            RelValue::Text(fields_to_json(&item.fields)?),
-            RelValue::Text(metadata_to_json(&item.metadata)?),
-            opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
-            opt_blob(fireweed_engine::index_fields::encode_index_fields_blob(
-                &item.index_fields,
-            )?),
-            RelValue::Integer(spec.command_seq as i64),
-            RelValue::Integer(now_n),
-            RelValue::Integer(now_n),
-            RelValue::Integer(item.max_attempts as i64),
-            RelValue::Integer(base_seq + i as i64),
-        ]);
-    }
     const ROW_PH: &str =
         "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
-    for chunk in rows.chunks(SQLITE_BATCH) {
+    for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_items \
@@ -2140,9 +2110,37 @@ pub fn insert_item_specs(
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
-        // prepare_cached: chunk lengths are stable (full SQLITE_BATCH or a fixed remainder per batch size),
-        // so statement compile cost is paid once per distinct SQL shape rather than once per chunk execute.
-        let flat: Vec<RelValue> = chunk.iter().flatten().cloned().collect();
+        let mut flat = Vec::with_capacity(chunk.len() * 20);
+        let offset = chunk_idx * SQLITE_BATCH;
+        for (i, spec) in chunk.iter().enumerate() {
+            let item = spec.item;
+            let now_n = ts_nanos(spec.now);
+            let not_before = ts_nanos_opt(item.not_before);
+            flat.extend([
+                RelValue::Text(t.clone()),
+                RelValue::Text(q.clone()),
+                RelValue::Text(item.item_id.to_string()),
+                RelValue::Text(item.client_item_key.as_str().to_string()),
+                opt_text(item.priority.as_ref().map(to_json).transpose()?),
+                RelValue::Blob(elig_sort(&item.priority, model)),
+                opt_int(not_before),
+                RelValue::Integer(not_before.unwrap_or(now_n)),
+                opt_text(item.group_key.as_ref().map(|g| g.as_str().to_string())),
+                opt_int(item.cohort_size.map(|s| s as i64)),
+                RelValue::Null,
+                RelValue::Text(fields_to_json(&item.fields)?),
+                RelValue::Text(metadata_to_json(&item.metadata)?),
+                opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
+                opt_blob(fireweed_engine::index_fields::encode_index_fields_blob(
+                    &item.index_fields,
+                )?),
+                RelValue::Integer(spec.command_seq as i64),
+                RelValue::Integer(now_n),
+                RelValue::Integer(now_n),
+                RelValue::Integer(item.max_attempts as i64),
+                RelValue::Integer(base_seq + offset as i64 + i as i64),
+            ]);
+        }
         crate::rel_exec(tx, &sql, &flat)?;
     }
     upsert_item_payloads(
@@ -5979,8 +5977,15 @@ fn apply_command_sql_with_claims(
             // (client_item_key, item_id) tombstones for every removed item, deduped LAST-wins on key so the
             // batched upsert never touches the same conflict target twice (DO UPDATE cardinality).
             let mut retention: Vec<(String, String)> = Vec::new();
-            // One set-based read of every purged item (was one SELECT per item).
-            for chunk in id_strs.chunks(SQLITE_BATCH) {
+            // Only retained keys and group-summary repair need pre-delete
+            // metadata. The conservative group memo is loaded on reopen and
+            // set whenever a grouped row is inserted; it is never cleared here.
+            let metadata_ids = if retention_ms > 0 || grouped_shards.contains(shard) {
+                id_strs.as_slice()
+            } else {
+                &[]
+            };
+            for chunk in metadata_ids.chunks(SQLITE_BATCH) {
                 let ph = vec!["?"; chunk.len()].join(",");
                 let (sql, p) = if tx.prefer_point_updates() {
                     let values = vec!["(?)"; chunk.len()].join(",");

@@ -5416,6 +5416,310 @@ mod item_mutation_tests {
     }
 
     #[tokio::test]
+    async fn purge_skips_only_unused_metadata_and_preserves_groups_after_reopen() {
+        use fireweed_core::GroupKey;
+        use fireweed_engine::PurgeItemsCommand;
+        for (grouped, retention_ms) in [(false, 0), (false, 60_000), (true, 0), (true, 60_000)] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut definition = qdef();
+            definition.client_item_key_retention_ms = retention_ms;
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let paths = [
+                directory.path().join("fast.db"),
+                directory.path().join("reference.db"),
+            ];
+            let pushed = (1..=3)
+                .map(|n| {
+                    let mut row = item(&n.to_string(), &n.to_string(), n);
+                    row.payload = Some(Bytes::from(format!("body-{n}")));
+                    row.gate_keys = vec!["membership".into()];
+                    if grouped && n <= 2 {
+                        row.group_key = Some(GroupKey::new("group").unwrap());
+                    }
+                    row
+                })
+                .collect::<Vec<_>>();
+            for path in &paths {
+                let store = TursoRelational::open(TursoConfig::local(path))
+                    .await
+                    .unwrap();
+                AsyncProjectionStore::ensure_shard(&store, definition.clone())
+                    .await
+                    .unwrap();
+                AsyncProjectionStore::apply_live(
+                    &store,
+                    vec![CommandPosition::new(shard.clone(), 0, 0)],
+                    vec![envelope(
+                        QueueCommand::Push(PushCommand {
+                            items: pushed.clone(),
+                        }),
+                        pushed.iter().map(|i| i.item_id).collect(),
+                    )],
+                )
+                .await
+                .unwrap();
+            }
+            let fast = TursoRelational::open(TursoConfig::local(&paths[0]))
+                .await
+                .unwrap();
+            let reference = TursoRelational::open(TursoConfig::local(&paths[1]))
+                .await
+                .unwrap();
+            assert_eq!(
+                fast.grouped_shards.lock().unwrap().contains(&shard),
+                grouped
+            );
+            // Conservatively claiming the reference queue may contain groups
+            // forces the old metadata-prefetch path on identical stored rows.
+            reference
+                .grouped_shards
+                .lock()
+                .unwrap()
+                .insert(shard.clone());
+            let ids = vec![pushed[0].item_id, pushed[2].item_id];
+            let purge = envelope(
+                QueueCommand::PurgeItems(PurgeItemsCommand {
+                    item_ids: ids.clone(),
+                    force: true,
+                }),
+                ids,
+            );
+            for store in [&fast, &reference] {
+                AsyncProjectionStore::apply_live(
+                    store,
+                    vec![CommandPosition::new(shard.clone(), 0, 1)],
+                    vec![purge.clone()],
+                )
+                .await
+                .unwrap();
+                let metrics = store.server_metrics(&shard).await.unwrap();
+                assert_eq!(
+                    (
+                        metrics.pending,
+                        metrics.leased,
+                        metrics.complete,
+                        metrics.failed
+                    ),
+                    (1, 0, 0, 0)
+                );
+            }
+            let a = fast.last_apply_statement_shape().unwrap();
+            let b = reference.last_apply_statement_shape().unwrap();
+            assert_eq!(
+                b.read_statement_count,
+                a.read_statement_count + usize::from(!grouped && retention_ms == 0),
+                "grouped={grouped} retention={retention_ms} fast={a:?} reference={b:?}"
+            );
+            assert_eq!(a.write_statement_count, b.write_statement_count);
+            for table in [
+                "fireweed_items",
+                "fireweed_item_payloads",
+                "fireweed_item_gates",
+                "fireweed_item_key_retention",
+                "fireweed_group_summary",
+                "fireweed_lease_bearers",
+            ] {
+                let sql = format!("SELECT * FROM {table} ORDER BY 1,2,3");
+                let a = fast
+                    .query(&sql, vec![])
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.values)
+                    .collect::<Vec<_>>();
+                let b = reference
+                    .query(&sql, vec![])
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.values)
+                    .collect::<Vec<_>>();
+                assert_eq!(a, b, "{table}");
+            }
+            let retained = fast
+                .query(
+                    "SELECT item_id FROM fireweed_item_key_retention ORDER BY item_id",
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(retained.len(), if retention_ms > 0 { 2 } else { 0 });
+            if retention_ms > 0 {
+                assert_eq!(
+                    retained[0].values[0],
+                    Value::Text(pushed[0].item_id.to_string())
+                );
+                assert_eq!(
+                    retained[1].values[0],
+                    Value::Text(pushed[2].item_id.to_string())
+                );
+            }
+            let remaining = fast
+                .query("SELECT item_id FROM fireweed_items", vec![])
+                .await
+                .unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(
+                remaining[0].values[0],
+                Value::Text(pushed[1].item_id.to_string())
+            );
+            if grouped {
+                let group = fast
+                    .query(
+                        "SELECT eligible_item_count,rep_item_id FROM fireweed_group_summary",
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(group.len(), 1);
+                assert_eq!(
+                    group[0].values,
+                    vec![
+                        Value::Integer(1),
+                        Value::Text(pushed[1].item_id.to_string())
+                    ]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn purge_observes_group_created_earlier_in_same_apply() {
+        use fireweed_core::GroupKey;
+        use fireweed_engine::PurgeItemsCommand;
+        let mut definition = qdef();
+        definition.client_item_key_retention_ms = 0;
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        assert!(!store.grouped_shards.lock().unwrap().contains(&shard));
+        let pushed = (1..=2)
+            .map(|n| {
+                let mut row = item(&n.to_string(), &n.to_string(), n);
+                row.group_key = Some(GroupKey::new("group").unwrap());
+                row
+            })
+            .collect::<Vec<_>>();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![
+                CommandPosition::new(shard.clone(), 0, 0),
+                CommandPosition::new(shard.clone(), 0, 1),
+            ],
+            vec![
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: pushed.clone(),
+                    }),
+                    pushed.iter().map(|i| i.item_id).collect(),
+                ),
+                envelope(
+                    QueueCommand::PurgeItems(PurgeItemsCommand {
+                        item_ids: vec![pushed[0].item_id],
+                        force: true,
+                    }),
+                    vec![pushed[0].item_id],
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        let group = store
+            .query(
+                "SELECT eligible_item_count,rep_item_id FROM fireweed_group_summary",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(group.len(), 1);
+        assert_eq!(
+            group[0].values,
+            vec![
+                Value::Integer(1),
+                Value::Text(pushed[1].item_id.to_string())
+            ]
+        );
+        let metrics = store.server_metrics(&shard).await.unwrap();
+        assert_eq!(
+            (
+                metrics.pending,
+                metrics.leased,
+                metrics.complete,
+                metrics.failed
+            ),
+            (1, 0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn general_insert_preserves_fifo_and_values_across_parameter_chunks() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        // Cross the 1,500-row SQL chunk boundary with a nonzero FIFO base.
+        for (sequence, start, count) in [(0, 0, 3), (1, 3, 1501)] {
+            let pushed = (start..start + count)
+                .map(|n| {
+                    let mut row = item(&format!("{n:05}"), &format!("key-{n}"), 7);
+                    row.not_before = Some(ts(100 + n));
+                    row.payload = Some(Bytes::from(format!("payload-{n}")));
+                    row.fields.insert("n".into(), Bytes::from(n.to_string()));
+                    row.gate_keys = vec![format!("gate-{n}")];
+                    row
+                })
+                .collect::<Vec<_>>();
+            AsyncProjectionStore::apply_live(
+                &store,
+                vec![CommandPosition::new(shard.clone(), 0, sequence)],
+                vec![envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: pushed.clone(),
+                    }),
+                    pushed.iter().map(|i| i.item_id).collect(),
+                )],
+            )
+            .await
+            .unwrap();
+        }
+        let rows = store
+            .query(
+                "SELECT i.item_id,i.client_item_key,i.created_seq,i.not_before,p.payload,g.gate_key \
+             FROM fireweed_items i JOIN fireweed_item_payloads p \
+             ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+             JOIN fireweed_item_gates g \
+             ON g.tenant_id=i.tenant_id AND g.queue_id=i.queue_id AND g.item_id=i.item_id \
+             ORDER BY i.created_seq",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1504);
+        let first = match rows[0].values[2] {
+            Value::Integer(n) => n,
+            _ => panic!("FIFO is integer"),
+        };
+        for (n, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.values,
+                vec![
+                    Value::Text(n.to_string()),
+                    Value::Text(format!("key-{n}")),
+                    Value::Integer(first + n as i64),
+                    Value::Integer((100 + n as i64) * 1_000_000_000),
+                    Value::Blob(format!("payload-{n}").into_bytes()),
+                    Value::Text(format!("gate-{n}")),
+                ]
+            );
+        }
+        assert_eq!(store.server_metrics(&shard).await.unwrap().pending, 1504);
+    }
+
+    #[tokio::test]
     async fn lifecycle_shortcuts_match_measured_rows_and_replay_fallbacks() {
         use fireweed_core::ItemId;
         use fireweed_engine::{CommandEnvelope, PurgeItemsCommand};
