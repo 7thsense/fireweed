@@ -32,7 +32,7 @@ pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlo
 #[doc(hidden)]
 pub use async_projection_apply::{
     AsyncProjectionApplyCoordinator, AsyncProjectionApplyReservation, AsyncProjectionApplySnapshot,
-    RetainedMembershipChange, claim_only_tail,
+    RetainedLifecycleChange, RetainedMembershipChange, claim_only_tail,
 };
 pub use commit_surface::{
     CommitIdempotency, PreparedCommitTransition, durability_for_strict,

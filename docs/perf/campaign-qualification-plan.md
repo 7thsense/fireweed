@@ -1,12 +1,48 @@
 # Campaign qualification and performance plan
 
+The same-binary 64-store/two-worker diagnostic (`0be1e74f`) reached
+**13,100.43 recipients/sec** for one million recipients in 76.61 seconds,
+but **all 128 campaign reporting latency gates failed**, worst p95 2.867 seconds.
+Enrichment reporting was the main slow phase: one campaign's prepare reads
+had p95 3.325 seconds versus 0.053 seconds during load. One cycle is not
+qualification, and this result does not demonstrate stable 12.5k capacity.
+CPU cost was 0.97452 ms/recipient, mean occupancy 12.72 logical CPUs, peak
+RSS 14.04 GiB, process output 9,292.64 bytes/recipient, and sampled host writes
+2.83965 GiB at 38.83 MiB/sec. Evidence uses
+`fireweed-campaign-fixed-target-s64-w2-one*`; its private root was removed
+after property capture. No host settings changed.
+
+The next code candidate extends exact progress reporting to a bounded,
+contiguous tail of authoritative claims and resolved lease-clearing row
+replacements. It checks actual row state, version and supersession against
+one SQL counter/cursor/row snapshot and rebases if application advanced.
+Missing rows, version conflicts, gaps, unsupported commands and bounds retain
+the normal coverage wait. Mutation acknowledgments and physical row reads
+still wait for projection coverage. The target is reporting latency during
+both enrichment and delivery, without changing the workload or its gates.
+All **307 release checks passed** after the test correction described below,
+with one existing ignored test and two unconfigured live-S3 exclusions.
+The next run traces reporting on the unchanged 64-store/two-worker million-row
+workload; measurements are pending. The broad all-target check finds
+legacy integration targets still referencing retired SQLite constructors;
+these are not current-backend failures. The first release test run failed the
+new second-mutation test because it reused an idempotency request ID with a
+different body, then waited for an append that could not occur. The test now
+uses a distinct request ID and detects premature completion; the failed log
+is retained. No timeout or product guarantee was relaxed. The optional Turso-only feature
+check also exposes an existing constructor/module-gating mismatch in
+`fireweed/src/lib.rs`: its constructor references `blocking_backend`, whose
+module requires objectlog/postgres/test. This candidate does not change that
+file; the default filesystem-log/Turso configuration passes the release suite.
+The failed feature check is archived, not counted as a pass.
+
 Same-binary 64-store/one-worker diagnostic (`f174475d`): **11,509.56/sec**
-for one million recipients in87.17 seconds, worst reporting p951.121 seconds.
-This does not qualify and does not improve the32-store first-cycle result.
-CPU cost was1.02504ms/recipient, mean11.76 logical CPUs, peak RSS12.37GiB;
-process writes were10,593.83bytes/recipient and host writes3.21092GiB at
-38.27MiB/sec. The next single-cycle control keeps64 stores and raises workers
-per campaign to2 (256 total). It tests additional concurrency explicitly; it
+for one million recipients in 87.17 seconds, worst reporting p95 1.121 seconds.
+This does not qualify and does not improve the 32-store first-cycle result.
+CPU cost was 1.02504 ms/recipient, mean 11.76 logical CPUs, peak RSS 12.37 GiB;
+process writes were 10,593.83 bytes/recipient and host writes 3.21092 GiB at
+38.27MiB/sec. The next single-cycle control keeps 64 stores and raises workers
+per campaign to 2 (256 total). It tests additional concurrency explicitly; it
 cannot be interpreted as an isolated sharding gain. Same binary and all rows,
 payloads, handler limits, global barriers and oracles are retained.
 Evidence uses `fireweed-campaign-fixed-target-s64-w1-one*`; the private root was

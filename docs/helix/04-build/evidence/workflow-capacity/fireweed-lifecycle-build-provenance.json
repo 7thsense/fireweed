@@ -1,0 +1,10 @@
+{
+  "source_base": "0be1e74fbf2bf7c8b2f98956270b1a58fb670509",
+  "candidate": "lifecycle-tail metrics; source committed with this artifact",
+  "SOURCE_DATE_EPOCH": "1789179522",
+  "CARGO_BUILD_JOBS": "8",
+  "binary_sha256": "f8cbd4afd5d9dd65c12dfa2d87ffe75efe028101fcee1077b2926cfe1a5adb1e",
+  "release_checks_passed": 307,
+  "ignored": 1,
+  "unconfigured_live_s3_exclusions": 2
+}

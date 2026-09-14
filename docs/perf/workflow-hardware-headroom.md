@@ -1,5 +1,15 @@
 # Workflow capacity versus hardware cost
 
+The 64-store/two-worker single-cycle control reached 13,100.43 recipients/sec
+but failed reporting latency across all campaigns. Its measured cost was
+0.97452 CPU-ms/recipient and 2.83965 GiB of host writes per million recipients.
+At constant cost, 10k/12.5k would require **9.75/12.18 CPU-seconds/sec** and
+**29.08/36.35 MiB/sec** of host writes. These are first-cycle demands, not
+steady-state capacities. Reporting during enrichment was slow despite fast
+load reporting; the next code change targets the projection-coverage dependency
+in lifecycle counts. Neither the observed 38.83 MiB/sec nor 82.05% device busy
+time establishes an intrinsic SSD ceiling or justifies moving hardware.
+
 The fixed-frontier run (`d124c24b`) reached **10,167.33 recipients/sec**, with
 all non-rate gates passing but three late cycles below10k. Cost was
 1.01615 CPU-ms/recipient and 20.18009 GiB of sampled host writes per six million

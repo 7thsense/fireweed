@@ -2198,7 +2198,7 @@ pub(crate) async fn server_metrics_with_position_on(
 
 const METRICS_MEMBERSHIP_SQL: &str = "SELECT q.resident_pending,q.resident_leased,q.resident_complete,q.resident_failed,\
          c.next_seq,c.assignment_epoch,json_extract(incoming.value,'$[0]'),\
-         i.lifecycle_state,i.superseded,k.item_id IS NOT NULL \
+         i.lifecycle_state,i.superseded,k.item_id IS NOT NULL,i.item_version \
          FROM queues q LEFT JOIN relational_cursor c ON c.tenant=q.tenant AND c.queue=q.queue \
          LEFT JOIN json_each(?3) incoming ON 1=1 \
          LEFT JOIN fireweed_items i ON i.tenant_id=q.tenant AND i.queue_id=q.queue \
@@ -2267,6 +2267,8 @@ pub(crate) async fn server_metrics_with_membership_on(
         presence.insert(
             id,
             crate::MetricsMembershipRow {
+                item_version: optional_integer(&values[10])?
+                    .map(|v| nonnegative_u64(v, "item version")).transpose()?,
                 state,
                 superseded,
                 active_key_exists: integer(&values[9])? != 0,
@@ -5869,6 +5871,7 @@ mod item_mutation_tests {
         assert_eq!(snapshot.rows.len(), 3);
         let existing = &snapshot.rows[&identities[0].0];
         assert_eq!(existing.state, Some(ItemState::Pending));
+        assert_eq!(existing.item_version, Some(1));
         assert!(!existing.superseded);
         assert!(existing.active_key_exists);
         let collision = &snapshot.rows[&identities[1].0];
@@ -5876,6 +5879,7 @@ mod item_mutation_tests {
         assert!(collision.active_key_exists);
         let missing = &snapshot.rows[&identities[2].0];
         assert!(missing.state.is_none());
+        assert_eq!(missing.item_version, None);
         assert!(!missing.active_key_exists);
         let empty = store
             .server_metrics_with_membership_committed(&shard, &[])

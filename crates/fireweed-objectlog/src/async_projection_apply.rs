@@ -20,6 +20,13 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::PackedAppendError;
 
+/// Count-relevant facts only; payloads and metadata remain in the durable commands.
+#[derive(Debug, Clone)]
+pub enum RetainedLifecycleChange {
+    Claim(Vec<ItemId>),
+    Replace(Vec<(ItemId, fireweed_core::ItemState, u64)>),
+}
+
 /// One admission reserved before the authoritative append begins.
 #[derive(Debug)]
 pub struct AsyncProjectionApplyReservation {
@@ -672,6 +679,97 @@ where
                 }
                 _ => return Ok(None),
             }
+        }
+        Ok(Some(entries))
+    }
+
+    /// Retain only count-relevant facts from a complete, bounded lifecycle tail.
+    /// Row state/version guards are checked against one SQL snapshot by the reader.
+    pub async fn retained_lifecycle_tail(
+        &self,
+        applied: &CommandPosition,
+        target: &CommandPosition,
+    ) -> EngineResult<Option<Vec<(CommandPosition, RetainedLifecycleChange)>>> {
+        self.ensure_healthy(&target.queue)?;
+        if applied.queue != target.queue
+            || applied.backend_epoch != target.backend_epoch
+            || !matches!(target.sequence.checked_sub(applied.sequence), Some(1..=16))
+        {
+            return Ok(None);
+        }
+        let state = self.inner.state.lock().await;
+        let mut entries = Vec::new();
+        let mut remaining = 8192usize;
+        for entry in &state.entries {
+            let ApplyEntry::Ready(batch) = entry else {
+                continue;
+            };
+            if batch.shard != target.queue {
+                continue;
+            }
+            if batch.positions.len() != batch.commands.len() {
+                return Ok(None);
+            }
+            for (position, envelope) in batch.positions.iter().zip(&batch.commands) {
+                if position.backend_epoch != target.backend_epoch
+                    || position.sequence <= applied.sequence
+                    || position.sequence > target.sequence
+                {
+                    continue;
+                }
+                if position.queue != target.queue || entries.len() == 16 {
+                    return Ok(None);
+                }
+                let change = match &envelope.command {
+                    QueueCommand::Claim(claim) if claim.authority_first => {
+                        let Some(left) = remaining.checked_sub(claim.item_ids.len()) else {
+                            return Ok(None);
+                        };
+                        remaining = left;
+                        let mut unique = HashSet::new();
+                        if claim.item_ids.iter().any(|id| !unique.insert(*id)) {
+                            return Ok(None);
+                        }
+                        RetainedLifecycleChange::Claim(claim.item_ids.clone())
+                    }
+                    QueueCommand::MutateItems(command) if command.gate_changes.is_empty() => {
+                        let Some(left) = remaining.checked_sub(command.items.len()) else {
+                            return Ok(None);
+                        };
+                        remaining = left;
+                        let mut unique = HashSet::new();
+                        let mut replacements = Vec::with_capacity(command.items.len());
+                        for item in &command.items {
+                            let Some(values) = item.action.replacement_values() else {
+                                return Ok(None);
+                            };
+                            if !values.invalidate_lease
+                                || values.state == fireweed_core::ItemState::Leased
+                                || values.item_version == 0
+                                || values.item_version > i64::MAX as u64
+                                || !values.gate_keys.is_empty()
+                                || !values.index_fields.is_empty()
+                                || !unique.insert(item.item_id)
+                            {
+                                return Ok(None);
+                            }
+                            replacements.push((item.item_id, values.state, values.item_version));
+                        }
+                        RetainedLifecycleChange::Replace(replacements)
+                    }
+                    _ => return Ok(None),
+                };
+                entries.push((position.clone(), change));
+            }
+        }
+        entries.sort_by_key(|(position, _)| position.sequence);
+        if entries.len() as u64 != target.sequence - applied.sequence
+            || entries
+                .iter()
+                .enumerate()
+                .any(|(i, (position, _))| position.sequence != applied.sequence + 1 + i as u64)
+        {
+            return Ok(None);
         }
         Ok(Some(entries))
     }
@@ -1696,6 +1794,153 @@ mod tests {
         state.entries.push_back(ready(2, 2));
         state.entries.push_back(ready(3, 3));
         assert_eq!(generation_ids(&state), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_tail_requires_contiguous_bounded_guarded_commands() {
+        use fireweed_engine::{
+            ClaimCommand, MutateItemsCommand, ResolvedItemMutation, ResolvedItemMutationAction,
+            ResolvedItemValues,
+        };
+        let coordinator = coordinator();
+        coordinator.pause();
+        let id = fireweed_core::ItemId::mint(1, 0, 1);
+        let claim = ClaimCommand::new(
+            vec![id],
+            fireweed_core::LeaseToken::new("lifecycle").unwrap(),
+            fireweed_core::UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        )
+        .with_authority_first();
+        let values = ResolvedItemValues {
+            state: fireweed_core::ItemState::Pending,
+            item_version: 3,
+            priority: None,
+            not_before: None,
+            eligible_since: fireweed_core::UtcTimestamp::new(1, 0).unwrap(),
+            payload: None,
+            fields: Default::default(),
+            metadata: Default::default(),
+            gate_keys: vec![],
+            index_fields: Default::default(),
+            entity_document: None,
+            invalidate_lease: true,
+        };
+        let mutation = MutateItemsCommand {
+            items: vec![ResolvedItemMutation {
+                item_id: id,
+                action: ResolvedItemMutationAction::ReplaceKeepingPayload(Box::new(values.clone())),
+            }],
+            gate_changes: vec![],
+        };
+        let batch = |sequence, command| {
+            let mut envelope = pause_env("lifecycle");
+            envelope.command = command;
+            ApplyBatch {
+                id: sequence,
+                shard: shard(),
+                positions: vec![pos(sequence)],
+                commands: vec![envelope],
+                command_count: 1,
+                debt_bytes: 0,
+                enqueued_at: Instant::now(),
+            }
+        };
+        let coordinator_ref = &coordinator;
+        let install = |batches: Vec<ApplyBatch>| async move {
+            coordinator_ref.inner.state.lock().await.entries =
+                batches.into_iter().map(ApplyEntry::Ready).collect();
+        };
+        let first = batch(1, QueueCommand::Claim(claim.clone()));
+        let second = batch(2, QueueCommand::MutateItems(mutation.clone()));
+        install(vec![second.clone(), first.clone()]).await;
+        let retained = coordinator
+            .retained_lifecycle_tail(&pos(0), &pos(2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(
+            matches!(&retained[1].1, RetainedLifecycleChange::Replace(items) if items == &vec![(id, fireweed_core::ItemState::Pending, 3)])
+        );
+        for target in [pos(0), pos(3), pos(17), CommandPosition::new(shard(), 1, 2)] {
+            assert!(
+                coordinator
+                    .retained_lifecycle_tail(&pos(0), &target)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        install(vec![second.clone()]).await;
+        assert!(
+            coordinator
+                .retained_lifecycle_tail(&pos(0), &pos(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .retained_lifecycle_tail(&pos(1), &pos(2))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        for (case, mut bad) in [claim.clone(), claim.clone(), claim.clone()]
+            .into_iter()
+            .enumerate()
+        {
+            match case {
+                0 => bad.authority_first = false,
+                1 => bad.item_ids.push(id),
+                _ => {
+                    bad.item_ids = (0..8193)
+                        .map(|n| fireweed_core::ItemId::mint(1, 0, n))
+                        .collect()
+                }
+            }
+            install(vec![batch(1, QueueCommand::Claim(bad)), second.clone()]).await;
+            assert!(
+                coordinator
+                    .retained_lifecycle_tail(&pos(0), &pos(2))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for case in 0..5 {
+            let mut bad = mutation.clone();
+            match case {
+                0 => bad.items.push(bad.items[0].clone()),
+                1 => bad.items[0].action = ResolvedItemMutationAction::Purge,
+                _ => {
+                    let mut v = values.clone();
+                    match case {
+                        2 => v.invalidate_lease = false,
+                        3 => v.item_version = 0,
+                        _ => v.gate_keys.push("gate".into()),
+                    }
+                    bad.items[0].action =
+                        ResolvedItemMutationAction::ReplaceKeepingPayload(Box::new(v));
+                }
+            }
+            install(vec![
+                first.clone(),
+                batch(2, QueueCommand::MutateItems(bad)),
+            ])
+            .await;
+            assert!(
+                coordinator
+                    .retained_lifecycle_tail(&pos(0), &pos(2))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]

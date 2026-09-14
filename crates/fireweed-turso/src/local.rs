@@ -3609,6 +3609,7 @@ mod projection_checkpoint_config_tests {
 /// Presence of an addressed row and, when supplied, its proposed active client key.
 #[derive(Debug)]
 pub struct MetricsMembershipRow {
+    pub item_version: Option<u64>,
     pub state: Option<fireweed_core::ItemState>,
     pub superseded: bool,
     pub active_key_exists: bool,

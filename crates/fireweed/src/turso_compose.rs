@@ -3952,7 +3952,7 @@ impl DerivedObjectLogTursoBackend {
         // Keep the coverage contract and admission order unchanged.
         let trace = std::env::var_os("FIREWEED_METRICS_TRACE").is_some();
         let mut previous = trace.then(Instant::now);
-        let mut phases = [0_u128; 9];
+        let mut phases = [0_u128; 11];
         let mut mark = |phase: usize| {
             if let Some(previous) = &mut previous {
                 let now = Instant::now();
@@ -4037,6 +4037,30 @@ impl DerivedObjectLogTursoBackend {
                             coordinator.ensure_healthy(shard)?;
                             if trace { eprintln!("metrics_read path=membership phases_us={phases:?}"); }
                             return Ok(metrics);
+                        }
+                    }
+                    if let Some(applied) = applied.as_ref() {
+                        let lifecycle = coordinator.retained_lifecycle_tail(applied, target).await?;
+                        mark(9);
+                        if let Some(tail) = lifecycle {
+                            use fireweed_objectlog::RetainedLifecycleChange;
+                            let mut ids = HashSet::new();
+                            for (_, change) in &tail {
+                                match change {
+                                    RetainedLifecycleChange::Claim(items) => ids.extend(items.iter().copied()),
+                                    RetainedLifecycleChange::Replace(items) => ids.extend(items.iter().map(|(id, _, _)| *id)),
+                                }
+                            }
+                            let mut identities = ids.into_iter().map(|id| (id, None)).collect::<Vec<_>>();
+                            identities.sort_unstable_by_key(|(id, _)| *id);
+                            let snapshot = self.projection.server_metrics_with_membership_committed(shard, &identities).await?;
+                            mark(10);
+                            if let Some(metrics) = snapshot.and_then(|snapshot|
+                                fold_lifecycle_metrics(snapshot, applied, target, &tail)) {
+                                coordinator.ensure_healthy(shard)?;
+                                if trace { eprintln!("metrics_read path=lifecycle phases_us={phases:?}"); }
+                                return Ok(metrics);
+                            }
                         }
                     }
                 }
@@ -5751,6 +5775,98 @@ mod s4b_lifecycle {
 }
 
 #[cfg(feature = "objectlog")]
+fn fold_lifecycle_metrics(
+    mut snapshot: fireweed_turso::MetricsMembershipSnapshot,
+    base: &CommandPosition,
+    target: &CommandPosition,
+    tail: &[(CommandPosition, fireweed_objectlog::RetainedLifecycleChange)],
+) -> Option<QueueMetrics> {
+    use fireweed_objectlog::RetainedLifecycleChange;
+    let applied = snapshot.position.as_ref()?;
+    if applied.queue != base.queue
+        || applied.backend_epoch != base.backend_epoch
+        || applied.sequence < base.sequence
+        || target.queue != base.queue
+        || target.backend_epoch != base.backend_epoch
+        || snapshot.cursor_epoch != Some(base.backend_epoch)
+    {
+        return None;
+    }
+    if position_covers(Some(applied), target) {
+        return Some(snapshot.metrics);
+    }
+    let mut next = applied.sequence.checked_add(1)?;
+    fn count(metrics: &mut QueueMetrics, state: ItemState) -> &mut u64 {
+        match state {
+            ItemState::Pending => &mut metrics.pending,
+            ItemState::Leased => &mut metrics.leased,
+            ItemState::Complete => &mut metrics.complete,
+            ItemState::Failed => &mut metrics.failed,
+        }
+    }
+    for (position, change) in tail {
+        if position.sequence <= applied.sequence {
+            continue;
+        }
+        if position.queue != base.queue
+            || position.backend_epoch != base.backend_epoch
+            || position.sequence != next
+            || position.sequence > target.sequence
+        {
+            return None;
+        }
+        next = next.checked_add(1)?;
+        let mut seen = HashSet::new();
+        let mut apply = |id: ItemId, replacement: Option<(ItemState, u64)>| -> Option<()> {
+            if !seen.insert(id) {
+                return None;
+            }
+            let row = snapshot.rows.get_mut(&id)?;
+            if row.superseded {
+                return None;
+            }
+            let before = row.state?;
+            let version = row.item_version?;
+            let next_version = version.checked_add(1).filter(|n| *n <= i64::MAX as u64)?;
+            let after = match replacement {
+                None if before == ItemState::Pending => ItemState::Leased,
+                Some((state, version)) if state != ItemState::Leased && version == next_version => {
+                    state
+                }
+                _ => return None,
+            };
+            let old_count = count(&mut snapshot.metrics, before);
+            *old_count = old_count.checked_sub(1)?;
+            let new_count = count(&mut snapshot.metrics, after);
+            *new_count = new_count.checked_add(1)?;
+            row.state = Some(after);
+            row.item_version = Some(next_version);
+            Some(())
+        };
+        match change {
+            RetainedLifecycleChange::Claim(ids) => {
+                for id in ids {
+                    apply(*id, None)?;
+                }
+            }
+            RetainedLifecycleChange::Replace(items) => {
+                for (id, state, version) in items {
+                    apply(*id, Some((*state, *version)))?;
+                }
+            }
+        }
+    }
+    if next != target.sequence.checked_add(1)? {
+        return None;
+    }
+    snapshot.metrics.resident_terminal_count = snapshot
+        .metrics
+        .complete
+        .checked_add(snapshot.metrics.failed)?;
+    Some(snapshot.metrics)
+}
+
+#[cfg(feature = "objectlog")]
 fn fold_membership_metrics(
     mut snapshot: fireweed_turso::MetricsMembershipSnapshot,
     base: Option<&CommandPosition>,
@@ -6146,6 +6262,173 @@ mod s3c_activation {
     }
 
     #[test]
+    fn lifecycle_metrics_rebase_and_validate_row_versions() {
+        use fireweed_objectlog::RetainedLifecycleChange as Change;
+        use fireweed_turso::{MetricsMembershipRow, MetricsMembershipSnapshot};
+        let shard = QueueKey::new(
+            TenantId::new("t").unwrap(),
+            QueueId::new("lifecycle").unwrap(),
+        );
+        let pos = |n| CommandPosition::new(shard.clone(), 0, n);
+        let id = |n| ItemId::mint(1, 0, n);
+        let snapshot = |sequence, rows: Vec<(u32, ItemState, u64, bool)>| {
+            let mut metrics = QueueMetrics::default();
+            let rows = rows
+                .into_iter()
+                .map(|(n, state, version, superseded)| {
+                    if !superseded {
+                        match state {
+                            ItemState::Pending => metrics.pending += 1,
+                            ItemState::Leased => metrics.leased += 1,
+                            ItemState::Complete => metrics.complete += 1,
+                            ItemState::Failed => metrics.failed += 1,
+                        }
+                    }
+                    (
+                        id(n),
+                        MetricsMembershipRow {
+                            state: Some(state),
+                            item_version: Some(version),
+                            superseded,
+                            active_key_exists: false,
+                        },
+                    )
+                })
+                .collect();
+            metrics.resident_terminal_count = metrics.complete + metrics.failed;
+            MetricsMembershipSnapshot {
+                cursor_epoch: Some(0),
+                position: Some(pos(sequence)),
+                metrics,
+                rows,
+            }
+        };
+        let tail = vec![
+            (pos(1), Change::Claim(vec![id(1), id(2), id(3)])),
+            (
+                pos(2),
+                Change::Replace(vec![
+                    (id(1), ItemState::Pending, 3),
+                    (id(2), ItemState::Complete, 3),
+                    (id(3), ItemState::Failed, 3),
+                ]),
+            ),
+        ];
+        for (sequence, state, version) in [(0, ItemState::Pending, 1), (1, ItemState::Leased, 2)] {
+            let s = snapshot(
+                sequence,
+                (1..=3).map(|n| (n, state, version, false)).collect(),
+            );
+            let m = fold_lifecycle_metrics(s, &pos(0), &pos(2), &tail).unwrap();
+            assert_eq!(
+                (
+                    m.pending,
+                    m.leased,
+                    m.complete,
+                    m.failed,
+                    m.resident_terminal_count
+                ),
+                (1, 0, 1, 1, 2)
+            );
+        }
+        // Valid repeated IDs across commands represent another claim/release cycle.
+        let mut repeated = tail.clone();
+        repeated.extend([
+            (pos(3), Change::Claim(vec![id(1)])),
+            (pos(4), Change::Replace(vec![(id(1), ItemState::Failed, 5)])),
+        ]);
+        let m = fold_lifecycle_metrics(
+            snapshot(
+                0,
+                (1..=3).map(|n| (n, ItemState::Pending, 1, false)).collect(),
+            ),
+            &pos(0),
+            &pos(4),
+            &repeated,
+        )
+        .unwrap();
+        assert_eq!((m.pending, m.leased, m.complete, m.failed), (0, 0, 1, 2));
+        // Missing row, incorrect old state/version, superseded row and overflow.
+        for rows in [
+            vec![],
+            vec![(1, ItemState::Leased, 1, false)],
+            vec![(1, ItemState::Pending, 9, false)],
+            vec![(1, ItemState::Pending, 1, true)],
+            vec![(1, ItemState::Pending, i64::MAX as u64, false)],
+        ] {
+            let t = [
+                (pos(1), Change::Claim(vec![id(1)])),
+                (
+                    pos(2),
+                    Change::Replace(vec![(id(1), ItemState::Pending, 3)]),
+                ),
+            ];
+            assert!(fold_lifecycle_metrics(snapshot(0, rows), &pos(0), &pos(2), &t).is_none());
+        }
+        let mut missing_version = snapshot(0, vec![(1, ItemState::Pending, 1, false)]);
+        missing_version.rows.get_mut(&id(1)).unwrap().item_version = None;
+        assert!(fold_lifecycle_metrics(missing_version, &pos(0), &pos(1), &tail[..1]).is_none());
+        let mut underflow = snapshot(0, vec![(1, ItemState::Pending, 1, false)]);
+        underflow.metrics.pending = 0;
+        assert!(
+            fold_lifecycle_metrics(
+                underflow,
+                &pos(0),
+                &pos(1),
+                &[(pos(1), Change::Claim(vec![id(1)]))]
+            )
+            .is_none()
+        );
+        for changes in [
+            vec![(pos(2), Change::Claim(vec![id(1)]))],
+            vec![(pos(1), Change::Claim(vec![id(1), id(1)]))],
+            vec![(pos(1), Change::Replace(vec![(id(1), ItemState::Leased, 2)]))],
+            vec![(
+                pos(1),
+                Change::Replace(vec![
+                    (id(1), ItemState::Pending, 2),
+                    (id(1), ItemState::Complete, 3),
+                ]),
+            )],
+        ] {
+            let target = changes.last().unwrap().0.clone();
+            assert!(
+                fold_lifecycle_metrics(
+                    snapshot(0, vec![(1, ItemState::Pending, 1, false)]),
+                    &pos(0),
+                    &target,
+                    &changes
+                )
+                .is_none()
+            );
+        }
+        let mut foreign = snapshot(0, vec![]);
+        foreign.cursor_epoch = Some(1);
+        assert!(fold_lifecycle_metrics(foreign, &pos(0), &pos(1), &tail[..1]).is_none());
+        assert!(fold_lifecycle_metrics(snapshot(0, vec![]), &pos(1), &pos(2), &tail).is_none());
+        let mut covered = snapshot(3, vec![]);
+        covered.metrics.pending = 7;
+        assert_eq!(
+            fold_lifecycle_metrics(covered, &pos(0), &pos(2), &tail)
+                .unwrap()
+                .pending,
+            7
+        );
+        // A mutation-only tail is validated against the actual leased SQL version.
+        let m = fold_lifecycle_metrics(
+            snapshot(0, vec![(1, ItemState::Leased, 7, false)]),
+            &pos(0),
+            &pos(1),
+            &[(
+                pos(1),
+                Change::Replace(vec![(id(1), ItemState::Complete, 8)]),
+            )],
+        )
+        .unwrap();
+        assert_eq!((m.leased, m.complete), (0, 1));
+    }
+
+    #[test]
     fn membership_metrics_rebases_and_rejects_conflicts_gaps_and_underflow() {
         use fireweed_objectlog::RetainedMembershipChange as Change;
         use fireweed_turso::{MetricsMembershipRow, MetricsMembershipSnapshot};
@@ -6167,6 +6450,7 @@ mod s3c_activation {
                         (
                             id,
                             MetricsMembershipRow {
+                                item_version: state.map(|_| 1),
                                 state,
                                 superseded,
                                 active_key_exists,
@@ -6441,8 +6725,8 @@ mod s3c_activation {
                 ItemMutationOutcome::StaleLease
             ));
             let mut caught_up_request = request.clone();
-            let ItemMutationOperation::Addressed { entries } = &mut caught_up_request.operation
-            else {
+            caught_up_request.request_id = RequestId::new("tail-update-second").unwrap();
+            let ItemMutationOperation::Addressed { entries } = &mut caught_up_request.operation else {
                 unreachable!()
             };
             entries[0].item_id = claimed.items[1].item_id;
@@ -6450,9 +6734,7 @@ mod s3c_activation {
             let worker = {
                 let backend = Arc::clone(&backend);
                 let shard = shard.clone();
-                tokio::spawn(
-                    async move { backend.dispatch_item_mutation(&shard, request, None).await },
-                )
+                tokio::spawn(async move { backend.dispatch_item_mutation(&shard, request, None).await })
             };
             loop {
                 let high = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
@@ -6472,11 +6754,41 @@ mod s3c_activation {
                 !worker.is_finished(),
                 "response must still cover the mutation before releasing fence"
             );
+            let metrics = tokio::time::timeout(Duration::from_millis(250), backend.metrics(&shard))
+                .await
+                .expect("resolved lifecycle counts do not wait for paused apply")
+                .unwrap();
+            assert_eq!(
+                (
+                    metrics.pending,
+                    metrics.leased,
+                    metrics.complete,
+                    metrics.failed
+                ),
+                (0, 1, 1, 0)
+            );
+            let (sql_metrics, _) = backend
+                .projection
+                .server_metrics_with_position_committed(&shard)
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    sql_metrics.pending,
+                    sql_metrics.leased,
+                    sql_metrics.complete
+                ),
+                (2, 0, 0)
+            );
             assert!(
-                tokio::time::timeout(Duration::from_millis(100), backend.metrics(&shard),)
+                !worker.is_finished(),
+                "mutation response must still cover projection apply"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), backend.peek(&shard, 1))
                     .await
                     .is_err(),
-                "a mixed claim/mutation tail must retain the coverage barrier"
+                "physical reads still require coverage"
             );
             coordinator.resume();
             let response = worker.await.unwrap().unwrap();
@@ -6495,6 +6807,53 @@ mod s3c_activation {
                 caught_up.response.summary.changed, 1,
                 "already-applied claim must not bump version twice"
             );
+            coordinator.pause();
+            let before = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let second_worker = {
+                let backend = backend.clone();
+                let shard = shard.clone();
+                tokio::spawn(async move {
+                    backend
+                        .dispatch_item_mutation(&shard, caught_up_request, None)
+                        .await
+                })
+            };
+            loop {
+                let high = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if high.sequence > before.sequence {
+                    break;
+                }
+                assert!(
+                    !second_worker.is_finished(),
+                    "second mutation ended before appending"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let metrics = tokio::time::timeout(Duration::from_millis(250), backend.metrics(&shard))
+                .await
+                .expect("mutation-only lifecycle tail must not wait for paused apply")
+                .unwrap();
+            assert_eq!(
+                (metrics.pending, metrics.leased, metrics.complete),
+                (0, 0, 2)
+            );
+            let (sql, _) = backend
+                .projection
+                .server_metrics_with_position_committed(&shard)
+                .await
+                .unwrap();
+            assert_eq!((sql.leased, sql.complete), (1, 1));
+            assert!(!second_worker.is_finished());
+            coordinator.resume();
+            assert_eq!(second_worker.await.unwrap().unwrap().summary.changed, 1);
+            assert_eq!(backend.metrics(&shard).await.unwrap().complete, 2);
+            drop(coordinator);
             drop(backend);
             let _ = std::fs::remove_dir_all(root);
         })
