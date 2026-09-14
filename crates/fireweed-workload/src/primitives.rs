@@ -49,6 +49,12 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                 initial_payload_bytes += rows.iter().map(|row| row.payload.as_ref().map_or(0, |body| body.len()) as u64).sum::<u64>();
                 ids.extend(retry(deadline, || fw.push_batch(&q, rows.clone())).await?);
             }
+            // Include projection catch-up in phase timing even when metrics can
+            // derive exact counts from a durable, not-yet-applied membership tail.
+            if !cfg.memory {
+                let resident = retry(deadline, || fw.retained_items(&q,None,1)).await?;
+                if resident.is_empty() != ids.is_empty() { return Err("load projection presence mismatch".into()); }
+            }
             let m = retry(deadline, || fw.metrics(&q)).await?;
             if m.pending != recipients.len() as u64 { return Err("load count mismatch".into()); }
             phases.push(phase_report("insert", recipients.len(), phase, started));
@@ -108,6 +114,10 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
             for chunk in ids.chunks(cfg.batch) {
                 let removed = retry(deadline, || fw.purge(&q, chunk.iter().copied(), false)).await?;
                 if removed != chunk.len() as u64 { return Err("purge count mismatch".into()); }
+            }
+            // The memory backend applies synchronously and has no retained-row API.
+            if !cfg.memory && !retry(deadline, || fw.retained_items(&q,None,1)).await?.is_empty() {
+                return Err("purge left projected rows".into());
             }
             let m = retry(deadline, || fw.metrics(&q)).await?;
             if m.complete + m.pending + m.leased + m.failed != 0 { return Err("retention left queue rows".into()); }

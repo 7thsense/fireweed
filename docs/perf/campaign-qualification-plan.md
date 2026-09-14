@@ -49,7 +49,24 @@ recovery failures and their final passing run. The query timing summarizer v2
 supports the appended membership-tail and membership-SQL timing phases while
 preserving historical seven-phase totals.
 
-The next measurement is the unchanged six-cycle disk campaign with two workers,
+Before measuring the membership candidate, the workload's implicit metrics
+barriers were made explicit: public retained-row reads now settle projection
+work after load and purge (also primitive phase timing and other recycle
+profiles). Metrics can legitimately report exact durable counts before SQL
+applies, so a zero counter alone would otherwise let the last purge escape the
+timed workload. The first workload rerun passed all six disk campaign tests but
+failed the memory primitive path because that synchronous backend has no
+retained-row API. The new settle reads are required only on the asynchronous
+disk backend; the memory backend's existing metrics follows synchronous apply.
+Both runs are retained. The corrected workload passes all **14 release checks**
+(two workload unit, six campaign, two primitive CLI covering disk and memory,
+and four recovery), following the 304-check engine/native suite. The retained
+read must see an empty queue after purge and runs
+inside the measured cycle/primitive phase. No full performance run of the new
+membership path was taken without this fix. This preserves the original
+projection-completion requirement; it does not count queued work as completed.
+
+The next measurement is the same six-cycle disk campaign with two workers,
 all correctness/reporting/storage gates intact and diagnostic tracing disabled.
 The performance goal remains unmet until repeated full qualification passes.
 

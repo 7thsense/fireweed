@@ -554,6 +554,10 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
                             }}).buffer_unordered(cfg.load_workers).try_collect::<Vec<_>>().await?;
                             let load_s = phase.elapsed().as_secs_f64();
+                            // Metrics may fold an unapplied durable tail. A public
+                            // retained read explicitly settles projection work.
+                            let resident = retry(deadline, || fw.retained_items(&q,None,1)).await?;
+                            if resident.is_empty() != ids.is_empty() { return Err("load projection presence mismatch".into()); }
                             let m = retry(deadline, || fw.metrics(&q)).await?;
                             if m.pending != ids.len() as u64 { return Err("resident load mismatch".into()); }
                             barrier.wait().await; // entire list is resident before any preparation starts
@@ -604,6 +608,9 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                                     purge_ids.clear();
                                 }
                                 if ended { break; }
+                            }
+                            if cfg.recycle && !retry(deadline, || fw.retained_items(&q,None,1)).await?.is_empty() {
+                                return Err("purge left projected rows".into());
                             }
                             let m = retry(deadline, || fw.metrics(&q)).await?;
                             if cfg.recycle && (purged != ids.len() as u64 || m.pending+m.leased+m.complete+m.failed != 0) { return Err("retention mismatch".into()); }
