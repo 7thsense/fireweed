@@ -42,6 +42,8 @@ const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 56;
 
 /// SQL used by the adapter for bounded resolved replacement writes.
+/// The incoming rows drive full-key target and rowid seeks directly, avoiding
+/// an intermediate rowid list and a second index over the incoming values.
 /// Exposed for native query-plan qualification of the executed statement.
 pub fn clearing_item_replacements_sql(row_count: usize) -> String {
     let values_sql = vec!["(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; row_count].join(",");
@@ -55,14 +57,14 @@ pub fn clearing_item_replacements_sql(row_count: usize) -> String {
              fields=incoming.fields,metadata=incoming.metadata,entity_document=incoming.entity_document,\
              index_fields=incoming.index_fields,lease_token_hash=NULL,lease_expires_at=NULL,worker_id=NULL,fenced=0,\
              item_version=incoming.new_version,terminal_at=incoming.terminal_at,terminal_command_epoch=incoming.terminal_epoch,\
-             updated_at=?,last_command_sequence=?,retry_count=retry_count+incoming.claimed_here \
-             FROM incoming WHERE fireweed_items.rowid IN ( \
-             SELECT target.rowid FROM incoming CROSS JOIN fireweed_items target \
+             updated_at=?,last_command_sequence=?,retry_count=fireweed_items.retry_count+incoming.claimed_here \
+             FROM incoming CROSS JOIN fireweed_items target \
              INDEXED BY sqlite_autoindex_fireweed_items_1 \
-             ON target.tenant_id=? AND target.queue_id=? AND target.item_id=incoming.item_id) \
+             ON target.tenant_id=? AND target.queue_id=? AND target.item_id=incoming.item_id \
+             WHERE fireweed_items.rowid=target.rowid \
              AND fireweed_items.item_id=incoming.item_id \
              AND fireweed_items.item_version=incoming.expected_version \
-             AND (incoming.claimed_here=0 OR (lifecycle_state='Pending' AND superseded=0))"
+             AND (incoming.claimed_here=0 OR (fireweed_items.lifecycle_state='Pending' AND fireweed_items.superseded=0))"
     )
 }
 

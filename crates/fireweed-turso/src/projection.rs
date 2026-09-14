@@ -6161,6 +6161,26 @@ mod item_mutation_tests {
             .await
             .unwrap();
         }
+        let mut neighbor = definition.clone();
+        neighbor.queue_id = fireweed_core::QueueId::new("replacement-neighbor").unwrap();
+        let neighbor_shard = QueueKey::new(neighbor.tenant_id.clone(), neighbor.queue_id.clone());
+        for store in [&fast, &sequential] {
+            AsyncProjectionStore::ensure_shard(store, neighbor.clone())
+                .await
+                .unwrap();
+            AsyncProjectionStore::apply_live(
+                store,
+                vec![CommandPosition::new(neighbor_shard.clone(), 0, 0)],
+                vec![envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![pushed[0].clone()],
+                    }),
+                    vec![pushed[0].item_id],
+                )],
+            )
+            .await
+            .unwrap();
+        }
         let plan = fast
             .query(
                 format!(
@@ -6181,6 +6201,13 @@ mod item_mutation_tests {
             })
             .collect();
         eprintln!("batched replacement plan: {details:?}");
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("LIST SUBQUERY")
+                    && !detail.contains("ephemeral_subquery")),
+            "direct joined writes must avoid redundant incoming indexes and rowid lists: {details:?}"
+        );
         assert!(
             details
                 .iter()
@@ -6220,7 +6247,8 @@ mod item_mutation_tests {
                 mutation
             })
             .collect();
-        let image_sql = "SELECT * FROM fireweed_items WHERE item_id<>'999999' ORDER BY item_id";
+        let image_sql =
+            "SELECT * FROM fireweed_items WHERE item_id<>'999999' ORDER BY tenant_id,queue_id,item_id";
         let before: Vec<_> = fast
             .query(image_sql, vec![])
             .await
@@ -6295,8 +6323,8 @@ mod item_mutation_tests {
         assert!(shape.max_bind_count <= fireweed_relational::SQLITE_BIND_CAP);
         for sql in [
             image_sql,
-            "SELECT * FROM fireweed_item_payloads WHERE item_id<>'999999' ORDER BY item_id",
-            "SELECT * FROM fireweed_item_gates WHERE item_id<>'999999' ORDER BY item_id,gate_key",
+            "SELECT * FROM fireweed_item_payloads WHERE item_id<>'999999' ORDER BY tenant_id,queue_id,item_id",
+            "SELECT * FROM fireweed_item_gates WHERE item_id<>'999999' ORDER BY tenant_id,queue_id,item_id,gate_key",
         ] {
             let actual: Vec<_> = fast
                 .query(sql, vec![])
@@ -6339,9 +6367,7 @@ mod item_mutation_tests {
         for mutation in &mut mutations.items {
             match &mut mutation.action {
                 ResolvedItemMutationAction::Replace(values)
-                | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
-                    values.item_version += 1
-                }
+                | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => values.item_version += 1,
                 _ => unreachable!(),
             }
         }

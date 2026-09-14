@@ -1,0 +1,2 @@
+sampler_pid 1298962 prefix /tmp/fireweed-current-cpu-cb9d1fe9
+exit 0 root_requires_owned_cleanup /home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-cb9d1fe9-d6yhfcof

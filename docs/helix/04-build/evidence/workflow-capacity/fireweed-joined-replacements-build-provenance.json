@@ -1,0 +1,11 @@
+{
+  "source_base": "cb9d1fe9153731c1eb74ee5e1e3314866d48647b",
+  "candidate": "direct joined replacements, unchanged 56-row/900-bind bound; source committed with this artifact",
+  "SOURCE_DATE_EPOCH": "1789179522",
+  "CARGO_BUILD_JOBS": "8",
+  "binary_sha256": "aab72188f59b52bffb58b8b8a1f5fe59f76b20ca615e0fa2f9b5f3f3993939dc",
+  "release_checks_passed": 309,
+  "ignored": 2,
+  "ignored_details": "one pre-existing check plus the explicit SQL timing diagnostic",
+  "unconfigured_live_s3_exclusions": 2
+}

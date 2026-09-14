@@ -1,5 +1,17 @@
 # Workflow capacity versus hardware cost
 
+Current user-IP CPU profile (`cb9d1fe9`, runtime `d024a298`, one million rows,
+64 stores/two workers) collected **179,311 samples at 199 Hz, zero lost**.
+Largest leaf symbols: allocation 6.77%, SQL `op_column` 5.96%, VM `normal_step`
+4.46%, `memcmp` 4.36%, two memcpy variants totaling 6.15%, B-tree `move_to`
+2.71%, record comparison 2.54%, index move/seek 2.41%/2.34%, and free 2.22%.
+This resembles the earlier profile despite removing claim-carrier copies.
+It measures sampled executing user instructions, not call-stack ownership,
+off-CPU waits or device service time. The next diagnostic compares native
+replacement query shapes and statement sizes; no SQL fixture rate counts as
+workflow qualification. Raw samples, symbols, mappings, summary and provenance
+use `fireweed-current-cpu-cb9d1fe9*`. The owned root was removed after capture.
+
 The clean six-cycle lifecycle run (`264d9a3c`, 64 stores/two workers) reached
 10,067.49/sec, with all reporting gates passing but throughput and physical
 file-size stability still failing. Cost was **1.16622 CPU-ms/recipient**,

@@ -1,0 +1,72 @@
+{
+  "diagnostic": true,
+  "qualification": false,
+  "purpose": "current 64-store/two-worker CPU attribution after lifecycle metrics and owned claim decoding",
+  "head": "cb9d1fe9153731c1eb74ee5e1e3314866d48647b",
+  "binary_sha256": "394027dc95a89e23dd57feaebf437091ba5aec430ff65edfd7103e7392d479c7",
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "campaign",
+    "--campaign-metadata",
+    "--recycle",
+    "--cycles",
+    "1",
+    "--items",
+    "1000000",
+    "--batch",
+    "1000",
+    "--shards",
+    "64",
+    "--workers",
+    "2",
+    "--load-workers",
+    "2",
+    "--deadline-seconds",
+    "1800",
+    "--projection-root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-cb9d1fe9-d6yhfcof/projections",
+    "--campaign-timestamp-priority",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-cb9d1fe9-d6yhfcof/data"
+  ],
+  "root": "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-cb9d1fe9-d6yhfcof",
+  "mount": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "projection_compression": "compression=zstd\n",
+  "sample_frequency_hz": 199,
+  "environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  },
+  "elf_load_segments": [
+    {
+      "file_offset": 0,
+      "virtual_address": 0,
+      "file_size": 8256860
+    },
+    {
+      "file_offset": 8256896,
+      "virtual_address": 8260992,
+      "file_size": 25383136
+    },
+    {
+      "file_offset": 33640032,
+      "virtual_address": 33648224,
+      "file_size": 879784
+    },
+    {
+      "file_offset": 34519816,
+      "virtual_address": 34532104,
+      "file_size": 45112
+    }
+  ],
+  "libc_private_symbols_sha256": "d271b107ea52e8ce5424564d952102de22cd3b50a4b6ab39603db4e2723f73e4"
+}

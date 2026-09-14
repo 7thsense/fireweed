@@ -1,5 +1,32 @@
 # Campaign qualification and performance plan
 
+The current native CPU profile led to a concrete bulk-update query change.
+The previous `UPDATE ... FROM` built a rowid-list subquery and a temporary
+index over incoming values. A direct `incoming CROSS JOIN target` makes one
+full tenant/queue/item-key seek followed by the target rowid seek, without
+those intermediate structures. All version, fused-claim and namespace guards
+remain, as do the 56-row chunk and 900-bind ceiling.
+
+An explicit native SQL diagnostic, excluded from workflow qualification,
+measured 8,000 updates after warmup for each case. At 56 rows/statement the
+old query measured 18,008 and 17,854 updates/sec in bracketing controls;
+the scalar-subquery form reached 23,537 and the direct join 24,967. Larger
+112/224-row variants also executed successfully but are **not adopted**.
+This diagnostic uses an in-memory fixture and the public adapter's statement
+execution path, not the production apply transaction's retained-VM cache or
+the workload CLI's allocator. Its rates are screening evidence, not campaign
+capacity predictions. The old query is frozen inside the diagnostic so later
+production edits do not silently replace its control.
+
+The production candidate adopts only the direct join. Its native regression
+now includes an identical item ID in another queue and compares complete row,
+payload and gate images with sequential lowering; late version/missing-row
+conflicts must roll back all preceding chunks. Query-plan assertions reject
+the former temporary incoming index and rowid-list subquery. All **309 release checks passed**; the pre-existing ignored check and explicit
+SQL timing diagnostic are ignored in that suite, and two unconfigured live-S3
+checks are excluded. The public workflow measurement is next. Evidence uses
+`fireweed-replacement-shape-diagnostic.log` and `fireweed-joined-replacements-*`.
+
 Owned claim decoding (`d024a298`), clean 64-store/two-worker single cycle:
 **12,478.68 recipients/sec**, 80.41 seconds, reporting p95 0.327 seconds,
 CPU 1.07716 ms/recipient, mean occupancy 13.40, peak RSS 14.59 GiB.
