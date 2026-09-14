@@ -1,5 +1,18 @@
 # Workflow capacity versus hardware cost
 
+Six-cycle direct-join costs (48 stores, runtime `3cdfb41a`) were **1.03450
+CPU-ms/recipient**, 21.31616 GiB host writes and 0.01965 GiB host reads for
+six million recipients. Constant-cost demand at 10k/12.5k is **10.345/12.931
+CPU-seconds/sec** and **36.38/45.48 MiB/sec writes**. Observed throughput was
+9,845.15/sec, mean CPU occupancy 10.18, host writes 35.91 MiB/sec, device busy
+82.07%, mean write-request latency 47.57 ms and full I/O pressure 15.59%.
+These show application/storage-path stalls alongside CPU work; they do not
+establish the SSD hardware bandwidth limit. The earlier 40.58 MiB/sec path
+calibration is not a hard ceiling: separate application runs exceeded it.
+No host settings changed. All non-rate campaign gates passed, but throughput
+did not. Further work targets code and records checkpoint timing before any
+checkpoint-specific causal claim.
+
 Direct joined replacements (`3cdfb41a`) reduced observed first-cycle CPU cost
 from 1.07716 to **0.97226 ms/recipient**, while the clean 64-store/two-worker
 rate rose from 12,478.68 to **13,339.15/sec**. First-cycle constant-cost demands

@@ -1,5 +1,21 @@
 # Campaign qualification and performance plan
 
+The completed six-cycle direct-join run (runtime `3cdfb41a`, 48 stores, two
+workers/campaign) reached **9,845.15 recipients/sec** over 609.89 seconds.
+All non-throughput gates passed, including reporting p95 (worst 0.521 seconds),
+physical projection-size stability, recovery/correctness checks exercised by
+the workload, retention and sampled WAL bounds. Overall and five cycle rate
+gates failed at 12.5k; three cycles also fell below 10k. This is not qualification.
+CPU cost was 1.03450 ms/recipient and peak RSS 13.40 GiB. Cycle 2 purge took
+24.59 seconds and cycle 5 delivery 72.31 seconds, versus roughly 6–8 and 28–33
+seconds otherwise. The forced TRUNCATE workaround is bypassed for this
+NORMAL-accounting configuration. Native auto-checkpoint executes inside commit;
+its timing is a hypothesis for these stalls, not an established cause.
+No device ceiling or hardware replacement conclusion follows from this run.
+Evidence uses `fireweed-campaign-joined-replacements-s48-w2-six*`; properties
+were captured before removing its private projection root. The next code
+candidate filters authoritative claim exclusions before body materialization.
+
 Direct joined replacements (`3cdfb41a`), clean 64-store/two-worker single cycle:
 **13,339.15 recipients/sec**, 75.19 seconds, worst reporting p95 0.553 seconds.
 CPU cost was **0.97226 ms/recipient**, 9.7% below the preceding owned-decoder

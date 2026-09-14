@@ -1,0 +1,114 @@
+{
+  "head": "47ec82500da70984b2df32c0ca682eb1774d72a6",
+  "binary_sha256": "aab72188f59b52bffb58b8b8a1f5fe59f76b20ca615e0fa2f9b5f3f3993939dc",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 9845.148541124872,
+  "process_wall_s": 609.8871732869884,
+  "cpu_ms_per_recipient": 1.0344982341666666,
+  "mean_cpu_occupancy": 10.17727487454346,
+  "output_bytes_per_recipient": 11310.777685333333,
+  "logical_log_bytes_per_recipient": 1832.9188305,
+  "peak_rss_gib": 13.395015716552734,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 76.003339547,
+      "load_s": 9.243833757,
+      "prepare_s": 30.014862656,
+      "delivery_s": 28.441521688,
+      "verify_s": 0.50618726,
+      "purge_s": 6.519454662,
+      "progress_p95_s": 0.520775583,
+      "due_to_claim_max_us": 6717120
+    },
+    {
+      "wall_s": 89.45307159,
+      "load_s": 24.624341027,
+      "prepare_s": 29.764973624,
+      "delivery_s": 27.857249461,
+      "verify_s": 0.375854561,
+      "purge_s": 6.349397784,
+      "progress_p95_s": 0.238166217,
+      "due_to_claim_max_us": 7602672
+    },
+    {
+      "wall_s": 110.020807565,
+      "load_s": 16.572371767,
+      "prepare_s": 33.698584018,
+      "delivery_s": 32.981124092,
+      "verify_s": 0.425709425,
+      "purge_s": 24.589489962000002,
+      "progress_p95_s": 0.284325306,
+      "due_to_claim_max_us": 12029198
+    },
+    {
+      "wall_s": 101.606053559,
+      "load_s": 29.67337548,
+      "prepare_s": 35.340843963,
+      "delivery_s": 28.705238964,
+      "verify_s": 0.493215056,
+      "purge_s": 6.843406949,
+      "progress_p95_s": 0.253492623,
+      "due_to_claim_max_us": 7458525
+    },
+    {
+      "wall_s": 94.775016878,
+      "load_s": 26.112254727,
+      "prepare_s": 32.920535759,
+      "delivery_s": 28.010329589,
+      "verify_s": 0.447379117,
+      "purge_s": 6.979061168,
+      "progress_p95_s": 0.23789277,
+      "due_to_claim_max_us": 7357391
+    },
+    {
+      "wall_s": 132.307934937,
+      "load_s": 20.215366635,
+      "prepare_s": 31.645848055,
+      "delivery_s": 72.305793289,
+      "verify_s": 0.418813028,
+      "purge_s": 7.654601307,
+      "progress_p95_s": 0.208313134,
+      "due_to_claim_max_us": 26241294
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 9845.148541124872,
+      "required": 12500
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 11178.330517068385,
+      "required": 12500
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9088.608074515727,
+      "required": 12500
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9841.303396547757,
+      "required": 12500
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10551.641486778106,
+      "required": 12500
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7558.367534616704,
+      "required": 12500
+    }
+  ]
+}
