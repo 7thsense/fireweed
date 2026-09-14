@@ -1,5 +1,17 @@
 # Campaign qualification and performance plan
 
+Same-binary 64-store/one-worker diagnostic (`f174475d`): **11,509.56/sec**
+for one million recipients in87.17 seconds, worst reporting p951.121 seconds.
+This does not qualify and does not improve the32-store first-cycle result.
+CPU cost was1.02504ms/recipient, mean11.76 logical CPUs, peak RSS12.37GiB;
+process writes were10,593.83bytes/recipient and host writes3.21092GiB at
+38.27MiB/sec. The next single-cycle control keeps64 stores and raises workers
+per campaign to2 (256 total). It tests additional concurrency explicitly; it
+cannot be interpreted as an isolated sharding gain. Same binary and all rows,
+payloads, handler limits, global barriers and oracles are retained.
+Evidence uses `fireweed-campaign-fixed-target-s64-w1-one*`; the private root was
+removed after property capture. No runtime code or host settings changed.
+
 2026-09-14 fixed-frontier full run (`d124c24b`, 32 stores, two workers per
 campaign): **10,167.33 recipients/sec**, 590.48 seconds. **All reporting and
 all other non-rate gates passed**, with worst p95 0.982 seconds. This is still
