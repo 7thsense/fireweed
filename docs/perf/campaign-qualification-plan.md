@@ -50,8 +50,14 @@ test names claiming SQLite/Turso comparison are corrected: their fixtures both
 instantiate Turso, so they establish repeatability, not independent-engine parity.
 The new batching test deliberately forces the existing sequential lowering in its
 reference vector with a lease-preserving sentinel. The black-box campaign oracle
-and public API recovery tests remain the workflow correctness evidence. Full
-release validation is running; campaign performance has not yet been measured.
+and public API recovery tests remain the workflow correctness evidence. All 70
+release checks pass: 45 native tests, seven adapter/history tests, one WAL/free-page
+test, three native recovery tests, two workload unit tests, six campaign tests,
+two primitive CLI tests and four workload recovery tests. The release reader
+latency deadline remains unchanged. Full validation is archived in
+`fireweed-batched-replacements-release-validation.log`. A normal production build
+and the unchanged six-cycle disk measurement follow; no campaign speedup is yet
+claimed for batching.
 
 2026-09-14 one-second claim-join experiment rejected: clean `1879ecc6`
 completed the canonical six-cycle disk run at **8,151.94 recipients/sec** in
