@@ -74,6 +74,11 @@ projection I/O, and label RAM-filesystem results separately from disk projection
 `FIREWEED_SQL_TRACE=1` optionally records slow SQL timings without bound values.
 `FIREWEED_WORKLOAD_TIMING=1` records public API wait times and backpressure resources;
 `FIREWEED_LOG_TRACE=1` separates log preparation, durable produce, and metadata time.
+`FIREWEED_PROJECTION_IO_TRACE=1` records per-file WAL, temporary-file and main/other
+write counts, requested bytes and time inside the projection VFS write calls.
+Totals are emitted on handle close; abnormal termination can omit them. These
+are overlapping call times, not physical-device latency. The capacity runner
+marks this flag as instrumentation and rejects it for qualification.
 The composed Turso projection uses filesystem I/O without stable-storage sync;
 all authoritative-log syncs remain enabled. Turso uses NORMAL checkpoint accounting
 to avoid repeatedly backfilling the same pages. After machine/power failure, a

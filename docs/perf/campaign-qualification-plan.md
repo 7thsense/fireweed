@@ -1,5 +1,37 @@
 # Campaign qualification and performance plan
 
+2026-09-14 attribution follow-up: added opt-in
+`FIREWEED_PROJECTION_IO_TRACE=1` to the disposable projection VFS. It reports
+per-file write calls, requested bytes (including failed calls), elapsed time
+inside pwrite/pwritev, maximum call time, counts at 1/10/100 ms and errors when
+the handle closes. Classes distinguish WAL, Turso's `tursodb_temp_file`, and
+main/other files. No paths or row data are logged. With tracing disabled it
+does not collect clocks/counters; writes, completions, errors and omitted sync
+retain their existing behavior. The runner records this flag as instrumentation,
+so traced results cannot qualify performance.
+
+These are VFS call times, not physical device service times or CPU times. Unix
+PlatformIO completes these writes synchronously. Calls across stores overlap;
+their elapsed times must not be added to campaign wall time. Temporary file
+creation/removal and reads are not timed by these write counters. Abnormal
+termination can omit handle-close totals, so only successful completed runs
+support aggregate accounting.
+
+Two VFS tests and six Python gate tests pass. An explicit repository-filesystem
+debug campaign with 4,480 recipients, two stores, metadata/timestamp stages and
+retention verified normal output and all three trace classes: 146 temporary
+file writes (598,016 requested bytes), 147 WAL writes (32,873,544 bytes), and
+two main-file writes (8,192 bytes). This is instrumentation validation, not
+capacity evidence. Artifacts use `fireweed-vfs-trace-smoke-20260914*`.
+
+Source review found no `temp_store` setting in the connection configuration.
+Turso's `TempFile::with_temp_store` uses files for its Default/File settings;
+the smoke trace confirms this path is exercised. That makes temporary execution
+storage a candidate for measurement, but it does not establish its share of the
+large-run slowdown or justify unbounded in-memory query scratch space. The next
+run combines projection-write, apply-phase and authoritative-log tracing on the
+unchanged full disk workload. The 10k/12.5k qualification goals remain unmet.
+
 2026-09-11. This supersedes treating the original-row saturation test as full
 campaign qualification. Historical measurements remain valid for their declared
 workload and source. The source-preview v0.31.27 is committed locally; publication

@@ -3,7 +3,8 @@
 //! Preserve writes, ordering, errors and locks; omit only stable-storage sync.
 //! A machine/power failure may require deleting and rebuilding this projection.
 //! This adapter must never be used for the authoritative log itself.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use turso_core::io::{FileId, FileSyncType, SharedWalLockKind, SharedWalMappedRegion};
 use turso_core::{
     Buffer, Clock, Completion, File, IO, MonotonicInstant, OpenFlags, PlatformIO, WallClockInstant,
@@ -27,13 +28,15 @@ impl Clock for RebuildableIo {
 }
 impl IO for RebuildableIo {
     fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Arc<dyn File>> {
-        Ok(Arc::new(RebuildableFile(
+        Ok(Arc::new(RebuildableFile::new(
             self.0.open_file(path, flags, direct)?,
+            path,
         )))
     }
     fn open_shared_wal_file(&self, path: &str) -> Result<Arc<dyn File>> {
-        Ok(Arc::new(RebuildableFile(
+        Ok(Arc::new(RebuildableFile::new(
             self.0.open_shared_wal_file(path)?,
+            path,
         )))
     }
     fn remove_file(&self, path: &str) -> Result<()> {
@@ -59,7 +62,92 @@ impl IO for RebuildableIo {
     }
 }
 
-struct RebuildableFile(Arc<dyn File>);
+#[derive(Default)]
+struct WriteTotals {
+    calls: u64,
+    requested_bytes: u64,
+    elapsed_us: u64,
+    max_us: u64,
+    over_1ms: u64,
+    over_10ms: u64,
+    over_100ms: u64,
+    errors: u64,
+}
+
+struct WriteTrace {
+    class: &'static str,
+    totals: Mutex<WriteTotals>,
+}
+
+struct RebuildableFile(Arc<dyn File>, Option<WriteTrace>);
+impl RebuildableFile {
+    fn new(inner: Arc<dyn File>, path: &str) -> Self {
+        let trace = std::env::var_os("FIREWEED_PROJECTION_IO_TRACE").map(|_| WriteTrace {
+            class: if path.ends_with("-wal") {
+                "wal"
+            } else if std::path::Path::new(path).file_name()
+                == Some(std::ffi::OsStr::new("tursodb_temp_file"))
+            {
+                "temporary"
+            } else {
+                "main_or_other"
+            },
+            totals: Mutex::default(),
+        });
+        Self(inner, trace)
+    }
+
+    fn traced_write(
+        &self,
+        bytes: usize,
+        write: impl FnOnce() -> Result<Completion>,
+    ) -> Result<Completion> {
+        let Some(trace) = &self.1 else {
+            return write();
+        };
+        let started = Instant::now();
+        let result = write();
+        // PlatformIO on Unix completes pwrite/pwritev synchronously. This is
+        // time inside the VFS call, not physical-device service time or CPU time.
+        let elapsed_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let mut totals = trace
+            .totals
+            .lock()
+            .expect("projection write trace poisoned");
+        totals.calls += 1;
+        totals.requested_bytes += bytes as u64;
+        totals.elapsed_us += elapsed_us;
+        totals.max_us = totals.max_us.max(elapsed_us);
+        totals.over_1ms += u64::from(elapsed_us >= 1_000);
+        totals.over_10ms += u64::from(elapsed_us >= 10_000);
+        totals.over_100ms += u64::from(elapsed_us >= 100_000);
+        totals.errors += u64::from(result.is_err());
+        result
+    }
+}
+
+impl Drop for RebuildableFile {
+    fn drop(&mut self) {
+        if let Some(trace) = &self.1 {
+            let t = trace
+                .totals
+                .lock()
+                .expect("projection write trace poisoned");
+            eprintln!(
+                "projection_io class={} calls={} requested_bytes={} elapsed_us={} max_us={} over_1ms={} over_10ms={} over_100ms={} errors={}",
+                trace.class,
+                t.calls,
+                t.requested_bytes,
+                t.elapsed_us,
+                t.max_us,
+                t.over_1ms,
+                t.over_10ms,
+                t.over_100ms,
+                t.errors
+            );
+        }
+    }
+}
 impl File for RebuildableFile {
     fn lock_file(&self, exclusive: bool) -> Result<()> {
         self.0.lock_file(exclusive)
@@ -71,10 +159,14 @@ impl File for RebuildableFile {
         self.0.pread(pos, c)
     }
     fn pwrite(&self, pos: u64, buffer: Arc<Buffer>, c: Completion) -> Result<Completion> {
-        self.0.pwrite(pos, buffer, c)
+        self.traced_write(buffer.as_slice().len(), || self.0.pwrite(pos, buffer, c))
     }
     fn pwritev(&self, pos: u64, buffers: Vec<Arc<Buffer>>, c: Completion) -> Result<Completion> {
-        self.0.pwritev(pos, buffers, c)
+        if self.1.is_none() {
+            return self.0.pwritev(pos, buffers, c);
+        }
+        let bytes = buffers.iter().map(|buffer| buffer.as_slice().len()).sum();
+        self.traced_write(bytes, || self.0.pwritev(pos, buffers, c))
     }
     fn sync(&self, c: Completion, _sync_type: FileSyncType) -> Result<Completion> {
         c.complete(0);
@@ -154,11 +246,44 @@ mod tests {
     }
 
     #[test]
+    fn write_trace_preserves_results_and_accounts_for_blocking_and_errors() {
+        let file = RebuildableFile(
+            Arc::new(FailingFile {
+                syncs: AtomicUsize::new(0),
+            }),
+            Some(WriteTrace {
+                class: "wal",
+                totals: Mutex::default(),
+            }),
+        );
+        assert!(matches!(
+            file.traced_write(32, || Err(turso_core::LimboError::Busy)),
+            Err(turso_core::LimboError::Busy)
+        ));
+        let completion = file
+            .traced_write(64, || {
+                std::thread::sleep(std::time::Duration::from_millis(12));
+                let completion = Completion::new_sync(|_| {});
+                completion.complete(0);
+                Ok(completion)
+            })
+            .unwrap();
+        assert!(completion.finished());
+        let t = file.1.as_ref().unwrap().totals.lock().unwrap();
+        assert_eq!(t.calls, 2);
+        assert_eq!(t.requested_bytes, 96);
+        assert_eq!(t.errors, 1);
+        assert!(t.elapsed_us >= 10_000);
+        assert!(t.max_us >= 10_000);
+        assert!(t.over_10ms >= 1);
+    }
+
+    #[test]
     fn omits_only_sync_and_preserves_lock_and_storage_errors() {
         let inner = Arc::new(FailingFile {
             syncs: AtomicUsize::new(0),
         });
-        let file = RebuildableFile(inner.clone());
+        let file = RebuildableFile(inner.clone(), None);
         let completion = Completion::new_sync(|_| {});
         let result = file.sync(completion, FileSyncType::FullFsync).unwrap();
         assert!(result.finished());
