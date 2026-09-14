@@ -1,0 +1,102 @@
+
+running 79 tests
+test async_product::tests::async_projection_memory::all_async_products_preserve_ambiguous_durable_reservations ... ok
+test async_product::tests::async_projection_memory::debt_byte_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::lag_command_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::oldest_unapplied_age_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::paused_selected_projection_is_stale_until_ordered_watermark_catch_up ... ok
+test async_product::tests::async_projection_memory::queue_depth_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::repeated_apply_failure_poisons_and_fails_closed ... ok
+test async_product::tests::async_projection_memory::restart_replays_selected_projection_without_loss_or_duplicate_apply ... ok
+test async_product::tests::async_projection_memory::strict_constructor_preserves_response_after_apply_contract ... ok
+test async_product::tests::concurrent_item_mutation_request_id_commits_once ... ok
+test async_product::tests::current_position_tracks_authoritative_high_water ... ok
+test async_product::tests::object_log_engine_finalize_after_claim ... ok
+test async_product::tests::object_log_engine_push_claim_round_trip ... ok
+test async_projection_apply::tests::claim_join_deadline_is_not_extended_by_ready_neighbors ... ok
+test async_projection_apply::tests::claim_join_does_not_block_ready_neighbor_or_force_claim_apply ... ok
+test async_projection_apply::tests::coalesces_contiguous_underfilled_ready_entries ... ok
+test async_projection_apply::tests::coalesces_underfilled_claim_and_complete_of_the_same_items ... ok
+test async_projection_apply::tests::coordinator_coalesces_contiguous_underfilled_ready_entries ... ok
+test async_projection_apply::tests::coverage_read_bypasses_claim_followup_delay ... ok
+test async_projection_apply::tests::covered_read_does_not_interrupt_background_coalescing ... ok
+test async_projection_apply::tests::does_not_coalesce_across_outstanding_earlier_reservation ... ok
+test async_projection_apply::tests::does_not_coalesce_across_sequence_gap ... ok
+test async_projection_apply::tests::does_not_coalesce_across_shard ... ok
+test async_projection_apply::tests::does_not_coalesce_poisoned_shard ... ok
+test async_projection_apply::tests::does_not_coalesce_when_follower_introduces_an_801st_distinct_item ... ok
+test async_projection_apply::tests::does_not_join_nine_and_seven_empty_envelopes ... ok
+test async_projection_apply::tests::does_not_join_two_sequencer_generations_of_empty_envelopes ... ok
+test async_projection_apply::tests::empty_queue_is_not_applied_high_water_coverage ... ok
+test async_projection_apply::tests::first_produce_delay_is_not_multiplied_across_coalesced_packs ... ok
+test async_projection_apply::tests::holds_non_contiguous_ready_until_the_hole_is_filled ... ok
+test async_projection_apply::tests::independent_claim_windows_overlap_and_coverage_preempts_only_its_queue ... ok
+test async_projection_apply::tests::injected_failure_retries_the_same_combined_prefix ... ok
+test async_projection_apply::tests::joins_underfilled_packs_up_to_eight_envelopes ... ok
+test async_projection_apply::tests::late_followup_can_join_without_restarting_the_claim_deadline ... ok
+test async_projection_apply::tests::later_contiguous_ready_is_not_hidden_by_an_earlier_gap ... ok
+test async_projection_apply::tests::membership_tail_requires_complete_unique_bounded_single_family ... ok
+test async_projection_apply::tests::neighboring_ready_work_does_not_hide_a_claim_followup ... ok
+test async_projection_apply::tests::ready_queues_keep_fifo_turns_under_replenishment ... ok
+test async_projection_apply::tests::reserved_does_not_hide_a_contiguous_ready_batch ... ok
+test async_projection_apply::tests::retained_claim_tail_requires_complete_bounded_authority ... ok
+test async_projection_apply::tests::seeded_high_water_covers_without_ready_entries ... ok
+test async_projection_apply::tests::stops_at_eight_envelope_bound ... ok
+test async_projection_apply::tests::stops_at_eight_hundred_item_bound ... ok
+test async_projection_apply::tests::stops_at_four_mib_debt_bound ... ok
+test async_projection_apply::tests::unrelated_queue_coverage_does_not_break_claim_followup_join ... ok
+test compose_log::tests::composed_objectlog_backend_opens_under_current_thread_runtime ... ok
+test compose_log::tests::open_local_memory_product_empty_root ... ok
+test log_engine_store::tests::all_waiters_receive_same_typed_append_disposition ... ok
+test log_engine_store::tests::concurrent_queue_produce_paths_reopen_without_offset_gaps_or_reuse ... ok
+test log_engine_store::tests::driver_vector_force_seals_and_charges_own_group ... ok
+test log_engine_store::tests::dropped_waiter_disposition_is_owned_by_its_append_attempt ... ok
+test log_engine_store::tests::emission_cursor_advances_monotonically_and_survives_reopen ... ok
+test log_engine_store::tests::independent_queues_share_flush_while_epoch_changes_wait_for_their_queue ... ok
+test log_engine_store::tests::legacy_catalog_definition_migrates_without_candidate_overwrite ... ok
+test log_engine_store::tests::local_definition_authority_has_exactly_one_concurrent_creator ... ok
+test log_engine_store::tests::local_definition_authority_preserves_concurrent_different_queues ... ok
+test log_engine_store::tests::local_definition_authority_returns_preopen_winner_and_full_definition ... ok
+test log_engine_store::tests::local_log_reopen_preserves_large_batches_across_process_boundary ... ok
+test log_engine_store::tests::local_namespace_rejects_conflicting_live_flush_configuration ... ok
+test log_engine_store::tests::local_preopen_handles_share_epoch_authority_cache ... ok
+test log_engine_store::tests::local_snapshots_are_distinct_readable_and_durable_across_reopen ... ok
+test log_engine_store::tests::log_engine_append_and_read_round_trip ... ok
+test log_engine_store::tests::object_log_append_phase_timeouts_default_to_thirty_seconds ... ok
+test log_engine_store::tests::objectlog_metadata_permit_covers_every_produce_path ... ok
+test log_engine_store::tests::post_produce_high_water_failure_never_cancels_or_reuses_position ... ok
+test log_engine_store::tests::s3_emission_cursor_native_cas_monotonic_and_reopen ... FAILED
+test maintenance::tests::limits_are_strictly_nonzero ... ok
+test reclaim_tick::tests::reclaim_backpressure_isolated_and_retried_per_queue ... ok
+test reclaim_tick::tests::reclaim_retry_queue_drains_before_next_page_when_full ... ok
+test reclaim_tick::tests::reclaim_stops_on_epoch_change_and_poison ... ok
+test request_id_probe::tests::after_append_before_apply_poisons_then_recovers_authoritatively ... ok
+test s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set ... FAILED
+test segment_config::tests::production_validation_rejects_only_forced_single_batch_shapes_and_private_override ... ok
+test storage_generation::tests::empty_root_opens_cleanly_via_reject ... ok
+test storage_generation::tests::fwsg_key_shapes_detected ... ok
+test storage_generation::tests::fwsg_segment_magic_fails_open_detectably ... ok
+test storage_generation::tests::mixed_fwsg_and_logengine_fails_with_mixed_token ... ok
+test storage_generation::tests::scan_prefix_strips_fw_prefixes ... ok
+test traced_blob_store::tests::tracing_preserves_chunk_range_error_and_accounting_contracts ... ok
+
+failures:
+
+---- log_engine_store::tests::s3_emission_cursor_native_cas_monotonic_and_reopen stdout ----
+
+thread 'log_engine_store::tests::s3_emission_cursor_native_cas_monotonic_and_reopen' (1215691) panicked at crates/fireweed-objectlog/src/log_engine_store.rs:2497:67:
+FIREWEED_S3_TEST_ENDPOINT required for P8cs S3 emission-cursor CAS (fail-closed; no LOUD skip): NotPresent
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set stdout ----
+
+thread 's3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set' (1215722) panicked at crates/fireweed-objectlog/src/s3_create_only.rs:308:67:
+FIREWEED_S3_TEST_ENDPOINT required for live create-only probe (fail-closed; no LOUD skip): NotPresent
+
+
+failures:
+    log_engine_store::tests::s3_emission_cursor_native_cas_monotonic_and_reopen
+    s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set
+
+test result: FAILED. 77 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+

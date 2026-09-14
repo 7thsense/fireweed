@@ -1,5 +1,58 @@
 # Campaign qualification and performance plan
 
+2026-09-14 reporting candidate (on `e27e7442`): public metrics can fold a
+complete retained tail of either Push or PurgeItems commands over a fresh SQL
+snapshot. The coordinator copies only identities, caps the tail at 16 commands
+and 8,192 identities, and rejects gaps, duplicate positions/IDs/keys, mixed
+command families, foreign epochs and unsupported commands. No authoritative
+counter cache, side records, storage settings or workload changes are introduced.
+
+The second SQL statement reads counters, their cursor, addressed row states and
+proposed active-key presence together. If apply advanced since the first read,
+commands already represented by the new cursor are excluded before folding.
+Existing push IDs or active keys, missing snapshot rows, cursor regression and
+count overflow/underflow fall back to normal projection coverage. Purge subtracts
+only present, unsuperseded rows. Both the initial and folded reads check poison.
+An initial queue without an applied cursor retains the coverage fallback.
+
+Focused release validation passed: bounded tail selection, cursor rebase/conflict
+checks, native snapshot consistency, and actual Turso query-plan/identity-bound
+checks. The 8,192-identity lookup took 36.09 ms on an empty native projection;
+this is a query diagnostic, not a loaded-workflow latency claim. Its plan uses
+full `(tenant_id, queue_id, item_id)` and `(tenant_id, queue_id, client_item_key)`
+index seeks. All 11 activation tests passed, including paused-projection push
+and purge reads that return exact durable counts without moving SQL counts or
+cursor, followed by recovery/reopen verification. The first complete object-log
+unit invocation had 77 passes and two failures due to absent
+`FIREWEED_S3_TEST_ENDPOINT`; the live S3 tests are explicitly excluded from the
+subsequent local-disk suite, not counted as passes. Full logs are retained.
+
+The expanded Fireweed library suite initially passed 149 tests, ignored one and
+failed the legacy outbox fixture. That fixture directly changed a modern row
+from Pending to Leased while leaving `resident_counts_version=1` and its counters
+unchanged. It now marks counters uninitialized to represent the pre-counter
+schema it claims to model, then asserts reopen's existing migration backfills
+exactly one lease. That stronger assertion then exposed a real startup defect:
+legacy outbox drain appended a Claim but never applied it, leaving recovery's
+coordinator frontier unseeded and subsequent public metrics waiting for missing
+coverage. Drain now uses the existing packed-apply publisher before deleting the
+outbox entry, so startup can seed a frontier covering the newly logged claim.
+Both failure logs are retained. Counter backfill and nonnegative-counter checks
+remain unchanged; the test requires public metrics to work on the first reopen.
+
+The final expanded local release suite passes **304 tests**: 150 Fireweed library,
+77 object-log, 52 native Turso, seven adapter/history, one WAL/free-page, three
+native recovery, two workload unit, six public campaign, two primitive CLI and
+four workload recovery. One test remains ignored and the two unavailable live-S3
+tests are explicitly filtered. Logs use `fireweed-membership-*` and include both
+recovery failures and their final passing run. The query timing summarizer v2
+supports the appended membership-tail and membership-SQL timing phases while
+preserving historical seven-phase totals.
+
+The next measurement is the unchanged six-cycle disk campaign with two workers,
+all correctness/reporting/storage gates intact and diagnostic tracing disabled.
+The performance goal remains unmet until repeated full qualification passes.
+
 2026-09-14 metrics-phase diagnostic (`47875b5f`, two workers, two cycles):
 9,693 successful metrics calls, including 511 over one second. **Every slow
 call was dominated by projection coverage**: 1,047.49 aggregate seconds in that

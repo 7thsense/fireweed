@@ -990,6 +990,24 @@ impl TursoRelational {
         .await
     }
 
+    /// Read counters/frontier and bounded row/key presence atomically, without
+    /// requiring projection catch-up. The caller must validate its log tail.
+    pub async fn server_metrics_with_membership_committed(
+        &self,
+        shard: &QueueKey,
+        identities: &[(ItemId, Option<ClientItemKey>)],
+    ) -> EngineResult<Option<MetricsMembershipSnapshot>> {
+        let identities = identities.to_vec();
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move {
+                crate::projection::server_metrics_with_membership_on(connection, &shard, &identities)
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Exact counters and the frontier they cover, read from one SQL snapshot.
     pub async fn server_metrics_with_position_committed(
         &self,
@@ -3586,4 +3604,20 @@ mod projection_checkpoint_config_tests {
             1_000
         );
     }
+}
+
+/// Presence of an addressed row and, when supplied, its proposed active client key.
+#[derive(Debug)]
+pub struct MetricsMembershipRow {
+    pub state: Option<fireweed_core::ItemState>,
+    pub superseded: bool,
+    pub active_key_exists: bool,
+}
+
+/// Counters, applied frontier and addressed row/key presence from one SQL snapshot.
+#[derive(Debug)]
+pub struct MetricsMembershipSnapshot {
+    pub metrics: QueueMetrics,
+    pub position: Option<CommandPosition>,
+    pub rows: std::collections::HashMap<ItemId, MetricsMembershipRow>,
 }

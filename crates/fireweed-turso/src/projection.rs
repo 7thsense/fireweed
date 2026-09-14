@@ -2196,6 +2196,88 @@ pub(crate) async fn server_metrics_with_position_on(
     Ok((metrics, position))
 }
 
+const METRICS_MEMBERSHIP_SQL: &str = "SELECT q.resident_pending,q.resident_leased,q.resident_complete,q.resident_failed,\
+         c.next_seq,c.assignment_epoch,json_extract(incoming.value,'$[0]'),\
+         i.lifecycle_state,i.superseded,k.item_id IS NOT NULL \
+         FROM queues q LEFT JOIN relational_cursor c ON c.tenant=q.tenant AND c.queue=q.queue \
+         LEFT JOIN json_each(?3) incoming ON 1=1 \
+         LEFT JOIN fireweed_items i ON i.tenant_id=q.tenant AND i.queue_id=q.queue \
+         AND i.item_id=json_extract(incoming.value,'$[0]') \
+         LEFT JOIN fireweed_items k ON k.tenant_id=q.tenant AND k.queue_id=q.queue \
+         AND k.client_item_key=json_extract(incoming.value,'$[1]') AND k.superseded=0 \
+         WHERE q.tenant=?1 AND q.queue=?2";
+
+pub(crate) async fn server_metrics_with_membership_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    identities: &[(ItemId, Option<ClientItemKey>)],
+) -> EngineResult<Option<crate::MetricsMembershipSnapshot>> {
+    if identities.len() > 8192 {
+        return Err(EngineError::Invalid("metrics identity limit is 8192"));
+    }
+    let input = serde_json::to_string(
+        &identities
+            .iter()
+            .map(|(id, key)| (id.to_string(), key.as_ref().map(|k| k.as_str())))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(storage)?;
+    let rows = query_value_rows(
+        connection,
+        METRICS_MEMBERSHIP_SQL,
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+            input.into(),
+        ],
+    )
+    .await?;
+    let Some(values) = rows.first() else {
+        return Ok(None);
+    };
+    let mut metrics = QueueMetrics {
+        pending: nonnegative_u64(integer(&values[0])?, "pending count")?,
+        leased: nonnegative_u64(integer(&values[1])?, "leased count")?,
+        complete: nonnegative_u64(integer(&values[2])?, "complete count")?,
+        failed: nonnegative_u64(integer(&values[3])?, "failed count")?,
+        ..QueueMetrics::default()
+    };
+    metrics.resident_terminal_count = metrics.complete.saturating_add(metrics.failed);
+    let position = if matches!(values[4], Value::Null) || integer(&values[4])? <= 0 {
+        None
+    } else {
+        Some(CommandPosition::new(
+            shard.clone(),
+            nonnegative_u64(integer(&values[5])?, "assignment epoch")?,
+            nonnegative_u64(integer(&values[4])? - 1, "applied sequence")?,
+        ))
+    };
+    let mut presence = std::collections::HashMap::new();
+    for values in rows {
+        let Some(id) = optional_text(&values[6])? else {
+            continue;
+        };
+        let id = ItemId::new(id).map_err(storage)?;
+        let state = optional_text(&values[7])?
+            .map(|v| parse_state(&v).map_err(storage))
+            .transpose()?;
+        let superseded = optional_integer(&values[8])?.unwrap_or(0) != 0;
+        presence.insert(
+            id,
+            crate::MetricsMembershipRow {
+                state,
+                superseded,
+                active_key_exists: integer(&values[9])? != 0,
+            },
+        );
+    }
+    Ok(Some(crate::MetricsMembershipSnapshot {
+        metrics,
+        position,
+        rows: presence,
+    }))
+}
+
 pub(crate) async fn push_idempotency_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -5717,6 +5799,94 @@ mod item_mutation_tests {
             );
         }
         assert_eq!(store.server_metrics(&shard).await.unwrap().pending, 1504);
+    }
+
+    #[tokio::test]
+    async fn metrics_membership_uses_full_key_seeks_at_its_identity_bound() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition).await.unwrap();
+        let plan = store.query(format!("EXPLAIN QUERY PLAN {}", super::METRICS_MEMBERSHIP_SQL),
+            vec![shard.tenant_id.as_str().into(), shard.queue_id.as_str().into(), "[]".into()]).await.unwrap();
+        let details = plan.iter().map(|row| super::text(&row.values[3]).unwrap()).collect::<Vec<_>>();
+        for (table, key) in [("i", "item_id"), ("k", "client_item_key")] {
+            assert!(details.iter().any(|line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))), "{details:?}");
+        }
+        let identities = (1..=8192).map(|n| (fireweed_core::ItemId::mint(1, 0, n),
+            Some(fireweed_core::ClientItemKey::new(format!("key-{n}")).unwrap()))).collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let snapshot = store.server_metrics_with_membership_committed(&shard, &identities).await.unwrap().unwrap();
+        eprintln!("8192 membership identities read in {:?}; plan={details:?}", started.elapsed());
+        assert_eq!(snapshot.rows.len(), identities.len());
+        assert!(snapshot.rows.values().all(|row| row.state.is_none() && !row.active_key_exists));
+        assert_eq!(snapshot.metrics.pending, 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_membership_snapshot_checks_ids_and_active_keys_together() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        let pushed = vec![item("1", "key-a", 1), item("2", "key-b", 2)];
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 0)],
+            vec![envelope(
+                QueueCommand::Push(PushCommand {
+                    items: pushed.clone(),
+                }),
+                pushed.iter().map(|i| i.item_id).collect(),
+            )],
+        )
+        .await
+        .unwrap();
+        let identities = vec![
+            (pushed[0].item_id, Some(pushed[0].client_item_key.clone())),
+            (
+                fireweed_core::ItemId::new("3").unwrap(),
+                Some(pushed[1].client_item_key.clone()),
+            ),
+            (fireweed_core::ItemId::new("4").unwrap(), None),
+        ];
+        let snapshot = store
+            .server_metrics_with_membership_committed(&shard, &identities)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.metrics.pending, 2);
+        assert_eq!(
+            snapshot.position,
+            Some(CommandPosition::new(shard.clone(), 0, 0))
+        );
+        assert_eq!(snapshot.rows.len(), 3);
+        let existing = &snapshot.rows[&identities[0].0];
+        assert_eq!(existing.state, Some(ItemState::Pending));
+        assert!(!existing.superseded);
+        assert!(existing.active_key_exists);
+        let collision = &snapshot.rows[&identities[1].0];
+        assert!(collision.state.is_none());
+        assert!(collision.active_key_exists);
+        let missing = &snapshot.rows[&identities[2].0];
+        assert!(missing.state.is_none());
+        assert!(!missing.active_key_exists);
+        let empty = store
+            .server_metrics_with_membership_committed(&shard, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty.metrics.pending, 2);
+        assert!(empty.rows.is_empty());
+        assert!(
+            store
+                .server_metrics_with_membership_committed(&shard, &vec![identities[0].clone(); 8193])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

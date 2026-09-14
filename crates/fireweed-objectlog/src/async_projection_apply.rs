@@ -50,6 +50,13 @@ pub struct AsyncProjectionApplySnapshot {
     pub paused: bool,
 }
 
+/// Compact, non-authoritative row identities borrowed from retained durable commands.
+#[derive(Debug, Clone)]
+pub enum RetainedMembershipChange {
+    Push(Vec<(ItemId, fireweed_core::ClientItemKey)>),
+    Purge(Vec<ItemId>),
+}
+
 pub struct AsyncProjectionApplyCoordinator<P>
 where
     P: AsyncProjectionStore + 'static,
@@ -561,6 +568,106 @@ where
         }
         entries.sort_by_key(|(position, _)| position.sequence);
         Ok(claim_only_tail(applied, target, entries))
+    }
+
+    /// Copy only row identities from a complete retained Push/Purge tail.
+    /// No payloads or authoritative side counters are retained by this read.
+    pub async fn retained_membership_tail(
+        &self,
+        applied: &CommandPosition,
+        target: &CommandPosition,
+    ) -> EngineResult<Option<Vec<(CommandPosition, RetainedMembershipChange)>>> {
+        self.ensure_healthy(&target.queue)?;
+        if applied.queue != target.queue
+            || applied.backend_epoch != target.backend_epoch
+            || !matches!(target.sequence.checked_sub(applied.sequence), Some(1..=16))
+        {
+            return Ok(None);
+        }
+        let state = self.inner.state.lock().await;
+        let mut entries = Vec::new();
+        let mut remaining = 8192_usize;
+        for entry in &state.entries {
+            let ApplyEntry::Ready(batch) = entry else {
+                continue;
+            };
+            if batch.shard != target.queue {
+                continue;
+            }
+            if batch.positions.len() != batch.commands.len() {
+                return Ok(None);
+            }
+            for (position, envelope) in batch.positions.iter().zip(&batch.commands) {
+                if position.backend_epoch != target.backend_epoch
+                    || position.sequence <= applied.sequence
+                    || position.sequence > target.sequence
+                {
+                    continue;
+                }
+                if position.queue != target.queue || entries.len() == 16 {
+                    return Ok(None);
+                }
+                let change = match &envelope.command {
+                    QueueCommand::Push(command) => {
+                        let Some(left) = remaining.checked_sub(command.items.len()) else {
+                            return Ok(None);
+                        };
+                        remaining = left;
+                        RetainedMembershipChange::Push(
+                            command
+                                .items
+                                .iter()
+                                .map(|item| (item.item_id, item.client_item_key.clone()))
+                                .collect(),
+                        )
+                    }
+                    QueueCommand::PurgeItems(command) => {
+                        let Some(left) = remaining.checked_sub(command.item_ids.len()) else {
+                            return Ok(None);
+                        };
+                        remaining = left;
+                        RetainedMembershipChange::Purge(command.item_ids.clone())
+                    }
+                    _ => return Ok(None),
+                };
+                entries.push((position.clone(), change));
+            }
+        }
+        entries.sort_by_key(|(position, _)| position.sequence);
+        if entries.len() as u64 != target.sequence - applied.sequence
+            || entries
+                .iter()
+                .enumerate()
+                .any(|(i, (position, _))| position.sequence != applied.sequence + 1 + i as u64)
+        {
+            return Ok(None);
+        }
+        // Restrict this shortcut to a single operation family. Mixed tails use
+        // the existing coverage barrier, avoiding interactions between purges
+        // and reused client keys.
+        let push = matches!(entries[0].1, RetainedMembershipChange::Push(_));
+        let mut ids = HashSet::new();
+        let mut keys = HashSet::new();
+        for (_, change) in &entries {
+            match change {
+                RetainedMembershipChange::Push(items) if push => {
+                    for (id, key) in items {
+                        if !ids.insert(*id) || !keys.insert(key.clone()) {
+                            return Ok(None);
+                        }
+                    }
+                }
+                RetainedMembershipChange::Purge(items) if !push => {
+                    for id in items {
+                        if !ids.insert(*id) {
+                            return Ok(None);
+                        }
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(entries))
     }
 
     /// Reject projection-dependent work synchronously after poison latches for `shard`.
@@ -1583,6 +1690,107 @@ mod tests {
         state.entries.push_back(ready(2, 2));
         state.entries.push_back(ready(3, 3));
         assert_eq!(generation_ids(&state), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn membership_tail_requires_complete_unique_bounded_single_family() {
+        let coordinator = coordinator();
+        coordinator.pause();
+        let mut batches = Vec::new();
+        for sequence in 1..=2 {
+            let mut envelope = pause_env("membership");
+            envelope.command = QueueCommand::Push(fireweed_engine::PushCommand {
+                items: vec![fireweed_conformance::item(
+                    &sequence.to_string(),
+                    &format!("key-{sequence}"),
+                    1,
+                )],
+            });
+            batches.push(ApplyBatch {
+                id: sequence,
+                shard: shard(),
+                positions: vec![pos(sequence)],
+                commands: vec![envelope],
+                command_count: 1,
+                debt_bytes: 0,
+                enqueued_at: Instant::now(),
+            });
+        }
+        let coordinator_ref = &coordinator;
+        let install = |batches: Vec<ApplyBatch>| async move {
+            let mut state = coordinator_ref.inner.state.lock().await;
+            state.entries = batches.into_iter().map(ApplyEntry::Ready).collect();
+        };
+        install(vec![batches[1].clone(), batches[0].clone()]).await;
+        let tail = coordinator
+            .retained_membership_tail(&pos(0), &pos(2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        for target in [pos(3), pos(17), CommandPosition::new(shard(), 1, 2)] {
+            assert!(
+                coordinator
+                    .retained_membership_tail(&pos(0), &target)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let mut duplicate = batches.clone();
+        duplicate[1].commands = duplicate[0].commands.clone();
+        install(duplicate).await;
+        assert!(
+            coordinator
+                .retained_membership_tail(&pos(0), &pos(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut mixed = batches.clone();
+        mixed[1].commands[0].command = QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
+            item_ids: vec![ItemId::mint(1, 0, 7)],
+            force: true,
+        });
+        install(mixed).await;
+        assert!(
+            coordinator
+                .retained_membership_tail(&pos(0), &pos(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut large = batches.clone();
+        let QueueCommand::Push(push) = &mut large[0].commands[0].command else {
+            unreachable!()
+        };
+        push.items = vec![push.items[0].clone(); 8193];
+        install(large).await;
+        assert!(
+            coordinator
+                .retained_membership_tail(&pos(0), &pos(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        install(vec![batches[1].clone()]).await;
+        assert!(
+            coordinator
+                .retained_membership_tail(&pos(0), &pos(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .retained_membership_tail(&pos(1), &pos(2))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

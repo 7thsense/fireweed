@@ -1,5 +1,13 @@
 # Workflow capacity versus hardware cost
 
+Reporting-phase attribution on `47875b5f` (two diagnostic cycles) found all 511
+reads over one second dominated by projection coverage. Across these calls,
+coverage accumulated 1,047.49 seconds; their two SQL reads accumulated just
+0.410 seconds. These are overlapping wall times, not CPU or device service time.
+This establishes a coordination dependency in slow metrics reads and does not
+establish an SSD limit. The new bounded push/purge-tail read targets that wait;
+its throughput impact must be measured in the unchanged full workload.
+
 Same-binary two-worker control `1e15109d` measured 9,287.72 recipients/sec,
 1.01649 CPU-ms/recipient and 21.2378 GiB of host writes over six million recipients.
 Constant-cost demands at 10k/12.5k are **10.16/12.71 CPU-seconds/sec** and

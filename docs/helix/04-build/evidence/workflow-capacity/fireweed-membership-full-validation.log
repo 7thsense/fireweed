@@ -1,0 +1,716 @@
+warning: methods `move_to_root` and `indexbtree_move_to_unpacked` are never used
+    --> vendor/turso_core/storage/btree.rs:1463:8
+     |
+ 841 | impl BTreeCursor {
+     | ---------------- methods in this implementation
+...
+1463 |     fn move_to_root(&mut self) -> Result<Option<Completion>> {
+     |        ^^^^^^^^^^^^
+...
+1749 |     fn indexbtree_move_to_unpacked(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:499:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+499 |     pub step_fn: StepFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+    = note: `#[warn(unpredictable_function_pointer_comparisons)]` on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:500:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+500 |     pub finalize_fn: FinalizeFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:501:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+501 |     pub aggregate_destructor: Option<ContextDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:502:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+502 |     pub value_destructor: Option<ValueDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor/turso_core/vector/operations/text.rs:67:56
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector> {
+   |                                                        ^^^^            ^^^^^^ the same lifetime is hidden here
+   |                                                        |
+   |                                                        the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector<'_>> {
+   |                                                                              ++++
+
+warning: `turso_core` (lib) generated 6 warnings (run `cargo fix --lib -p turso_core` to apply 1 suggestion)
+warning: unused import: `DatabaseRowMutation`
+  --> vendor/turso_sync_engine/src/database_sync_operations.rs:37:55
+   |
+37 |         parse_bin_record, Coro, DatabasePullRevision, DatabaseRowMutation,
+   |                                                       ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `turso_sync_engine` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_engine` to apply 1 suggestion)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor/turso_sync_sdk_kit/src/sync_engine_io.rs:211:14
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<SyncEngineIoCompletionInner<TBytes>>> {
+    |              ^^^^^ the lifetime is elided here   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<'_, SyncEngineIoCompletionInner<TBytes>>> {
+    |                                                             +++
+
+warning: `turso_sync_sdk_kit` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_sdk_kit` to apply 1 suggestion)
+warning: function `cohort_id_for` is never used
+   --> crates/fireweed-turso/src/projection.rs:388:4
+    |
+388 | fn cohort_id_for(group_key: &str, now: i64) -> String {
+    |    ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cohort_retention_until` is never used
+   --> crates/fireweed-turso/src/projection.rs:392:4
+    |
+392 | fn cohort_retention_until(definition: &QueueDefinition, now: i64) -> i64 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PUSH_ITEM_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:410:7
+    |
+410 | const PUSH_ITEM_CHUNK: usize = 47; // 47 * 19 binds = 893
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `PUSH_GATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:411:7
+    |
+411 | const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_READ_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:418:7
+    |
+418 | const COHORT_READ_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_GENERATION_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:419:7
+    |
+419 | const COHORT_GENERATION_WRITE_CHUNK: usize = 90; // 90 * 10 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_ACTIVE_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:420:7
+    |
+420 | const COHORT_ACTIVE_WRITE_CHUNK: usize = 224; // tenant + queue + 224 * 4 updates = 898
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SCHEDULE_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:421:7
+    |
+421 | const SCHEDULE_UPDATE_CHUNK: usize = 299; // tenant + queue + 299 * 3 updates = 899
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_BLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:422:7
+    |
+422 | const GATE_BLOCK_WRITE_CHUNK: usize = 300; // 300 * 3 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_UNBLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:423:7
+    |
+423 | const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SIDE_RECORD_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:424:7
+    |
+424 | const SIDE_RECORD_WRITE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `KEY_RETENTION_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:425:7
+    |
+425 | const KEY_RETENTION_WRITE_CHUNK: usize = 180; // 180 * 5 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CURSOR_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:426:7
+    |
+426 | const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:427:7
+    |
+427 | const API001_UPDATE_CHUNK: usize = 89; // tenant + queue + 89 * 10 row binds = 892
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_GATE_DELETE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:428:7
+    |
+428 | const API001_GATE_DELETE_CHUNK: usize = 898; // tenant + queue + 898 item binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_typed_unique_conflicts` is never used
+   --> crates/fireweed-turso/src/projection.rs:501:10
+    |
+501 | async fn check_typed_unique_conflicts(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:546:10
+    |
+546 | async fn insert_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `delete_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:581:10
+    |
+581 | async fn delete_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `replace_typed_indexes_for_entity` is never used
+   --> crates/fireweed-turso/src/projection.rs:597:10
+    |
+597 | async fn replace_typed_indexes_for_entity(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `upsert_cohorts` is never used
+   --> crates/fireweed-turso/src/projection.rs:706:10
+    |
+706 | async fn upsert_cohorts(
+    |          ^^^^^^^^^^^^^^
+
+warning: function `cohort_item_ids` is never used
+   --> crates/fireweed-turso/src/projection.rs:884:10
+    |
+884 | async fn cohort_item_ids(
+    |          ^^^^^^^^^^^^^^^
+
+warning: function `groups_for_items` is never used
+   --> crates/fireweed-turso/src/projection.rs:922:10
+    |
+922 | async fn groups_for_items(
+    |          ^^^^^^^^^^^^^^^^
+
+warning: function `cohort_state` is never used
+    --> crates/fireweed-turso/src/projection.rs:1351:10
+     |
+1351 | async fn cohort_state(
+     |          ^^^^^^^^^^^^
+
+warning: function `append_item_ids` is never used
+    --> crates/fireweed-turso/src/projection.rs:1371:4
+     |
+1371 | fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `execute_for_items` is never used
+    --> crates/fireweed-turso/src/projection.rs:1375:10
+     |
+1375 | async fn execute_for_items<F>(
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: function `update_item_schedules` is never used
+    --> crates/fireweed-turso/src/projection.rs:1402:10
+     |
+1402 | async fn update_item_schedules(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retry_info_by_item` is never used
+    --> crates/fireweed-turso/src/projection.rs:1438:10
+     |
+1438 | async fn retry_info_by_item(
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `extend_claim_by_query_replays` is never used
+    --> crates/fireweed-turso/src/projection.rs:1468:10
+     |
+1468 | async fn extend_claim_by_query_replays(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_item_claim_ids_on` is never used
+    --> crates/fireweed-turso/src/projection.rs:2378:14
+     |
+2378 | pub async fn select_item_claim_ids_on(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fireweed-turso` (lib) generated 29 warnings
+   Compiling fireweed-turso v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-turso)
+   Compiling fireweed v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed)
+warning: unused import: `DEFAULT_BLOCKING_AXIS_IN_FLIGHT`
+  --> crates/fireweed/src/turso_compose.rs:31:5
+   |
+31 |     DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `RequestId`
+    --> crates/fireweed/src/lib.rs:7123:68
+     |
+7123 |         LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy, RequestId, ResponseBarrier,
+     |                                                                    ^^^^^^^^^
+
+warning: function `objectlog_recover_definitions` is never used
+    --> crates/fireweed/src/lib.rs:2864:4
+     |
+2864 | fn objectlog_recover_definitions(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `objectlog_high_water` is never used
+    --> crates/fireweed/src/lib.rs:2872:4
+     |
+2872 | fn objectlog_high_water(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `s3_provider_from_composed` is never used
+    --> crates/fireweed/src/lib.rs:6435:4
+     |
+6435 | fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3ComposedProvider> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `map_turso_storage` is never used
+   --> crates/fireweed/src/turso_compose.rs:131:4
+    |
+131 | fn map_turso_storage(error: impl std::fmt::Display) -> EngineError {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: constant `CLAIM_SELECT_EXCLUDE_CAP` is never used
+   --> crates/fireweed/src/turso_compose.rs:263:7
+    |
+263 | const CLAIM_SELECT_EXCLUDE_CAP: usize =
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling fireweed-workload v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-workload)
+warning: method `test_buffered_group_commit_commands` is never used
+    --> crates/fireweed/src/facade.rs:1092:19
+     |
+1030 | impl Fireweed {
+     | ------------- method in this implementation
+...
+1092 |     pub(crate) fn test_buffered_group_commit_commands(&self) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `FrozenClock` is never constructed
+    --> crates/fireweed/src/lib.rs:7154:12
+     |
+7154 |     struct FrozenClock {
+     |            ^^^^^^^^^^^
+
+warning: `fireweed` (lib) generated 6 warnings (run `cargo fix --lib -p fireweed` to apply 1 suggestion)
+warning: `fireweed-turso` (lib test) generated 19 warnings (19 duplicates)
+warning: `fireweed` (lib test) generated 8 warnings (5 duplicates) (run `cargo fix --lib -p fireweed --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 3m 51s
+     Running unittests src/lib.rs (target/release/deps/fireweed-4072912da899d9ba)
+
+running 151 tests
+test active_scope_selector_unit_tests::routing_score_length_frames_every_identity_component ... ok
+test blocking_backend::tests::accepted_job_survives_response_cancellation_and_explicit_shutdown_drains ... ok
+test blocking_backend::tests::admission_is_finite ... ok
+test blocking_backend::tests::durable_job_runs_off_reactor_while_reactor_keeps_advancing ... ok
+test storage_config_matrix_tests::constructs_and_validates_all_five_logs_and_four_projections ... ok
+test storage_config_matrix_tests::constructs_and_validates_public_four_logs_and_three_projections ... ok
+test storage_config_matrix_tests::filesystem_memory_async_opens_and_retires_the_pending_pin ... ok
+test storage_config_matrix_tests::filesystem_memory_no_longer_uses_a_fake_sqlite_projection ... ok
+test storage_config_matrix_tests::memory_helper_and_objectlog_mapping ... ok
+test storage_config_matrix_tests::object_log_runtime_mapping_preserves_nested_fields ... ok
+test storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io ... ok
+test storage_config_matrix_tests::provider_helpers_have_no_shared_selector_backedge ... ok
+test storage_config_matrix_tests::rejects_empty_paths_and_filesystem_postgres_authority ... ok
+test storage_config_matrix_tests::split_object_log_validation_freezes_provider_results ... ok
+test storage_config_matrix_tests::split_s3_field_validation_preserves_exact_errors ... ok
+test storage_config_matrix_tests::split_s3_memory_open_preserves_the_engine_error_fingerprint ... ok
+test storage_config_matrix_tests::sqlite_log_and_projection_fail_closed_as_retired ... ok
+test storage_config_matrix_tests::turso_projection_feature_and_recovery_boundaries ... ok
+test storage_config_matrix_tests::turso_projection_full_facade_matrix ... ok
+test storage_config_open_tests::open_dispatches_postgres_and_s3_cells_or_skips_without_live_env ... ok
+test storage_config_open_tests::open_opens_multiple_local_matrix_cells_via_storage_config ... ok
+test storage_config_open_tests::open_sqlite_wrapper_matches_storage_config_cell ... ok
+test test_active_scope_routing::queue_definition_accessor_reads_memory_and_durable_policy ... ok
+test test_coordination::coordinated_owner_acquires_and_operates ... ok
+test test_coordination::draining_owner_refuses_new_claim_but_serves_in_flight ... ok
+test test_coordination::ownership_value_form ... ok
+test test_coordination::superseded_owner_is_fenced_on_api004_mutation_and_query_claim ... ok
+test test_coordination::superseded_owner_is_fenced_on_data_path ... ok
+test test_encapsulation::composed_storage_config_is_owned_and_secret_safe ... ok
+test test_facade::ack_of_non_leased_id_is_a_structured_error ... ok
+test test_facade::api001_reservation_policy_is_recorded_or_enforced ... ok
+test test_facade::claim_at_resolves_eligibility_at_an_explicit_epoch_over_memory ... ok
+test test_facade::claimed_item_exposes_api001_shape_over_facade ... ok
+test test_facade::claimed_renders_only_leased_items ... ok
+test test_facade::composed_objectlog_supports_atomic_upsert ... ok
+test test_facade::composed_objectlog_supports_read_your_write_field_mutation ... ok
+test test_facade::discover_alias_preserves_exact_scope_order ... ok
+test test_facade::fail_dead_letters_a_claimed_item ... ok
+test test_facade::lifecycle_convenience_verbs_preserve_batch_state_and_structured_errors ... ok
+test test_facade::opaque_bytes_items_push_claim_roundtrip ... ok
+test test_facade::purge_force_removes_a_leased_item_and_gates_without_force ... ok
+test test_facade::push_claim_ack_nack_lifecycle_over_memory ... ok
+test test_facade::rearm_resets_attempt_and_requeues_the_item ... ok
+test test_facade::reassign_transfers_and_charges_one_delivery ... ok
+test test_facade::reclaim_expired_at_honors_caller_time_without_reading_handle_clock ... ok
+test test_facade::reclaim_expired_at_is_deterministic_under_divergent_frozen_clocks ... ok
+test test_facade::reclaim_expired_convenience_uses_handle_clock ... ok
+test test_facade::renew_extends_lease_without_charging_a_delivery ... ok
+test test_facade::request_id_push_is_idempotent_on_memory_backend ... ok
+test test_facade::retry_aliases_match_absolute_relative_and_exhaustion_behavior ... ok
+test test_facade::snapshot_now_records_position_and_ref_on_memory ... ok
+test test_facade::two_handles_on_one_backend_do_not_collide_ids ... ok
+test test_facade::typed_json_payload_round_trips_push_claim_and_commit_lifecycle ... ok
+test test_facade::update_fields_merges_versions_and_cas_over_memory ... ok
+test test_facade::update_fields_rejects_terminal_over_memory ... ok
+test test_facade::upsert_dedups_on_client_item_key_over_memory ... ok
+test test_hot_projection_queries::backend_capability_advertising_is_explicit ... ok
+test test_hot_projection_queries::bounded_mutation_rejects_claimed_records_without_losing_the_claim ... ok
+test test_hot_projection_queries::claim_due_scheduled_actions_by_query ... ok
+test test_hot_projection_queries::detail_range_filter_by_run_status_and_schedule ... ok
+test test_hot_projection_queries::engagement_probability_segments ... ok
+test test_hot_projection_queries::hot_projection_fixture_seeds_six_claimable_records_and_resolves_target_key_lookup ... ok
+test test_hot_projection_queries::hourly_distribution_by_status ... ok
+test test_hot_projection_queries::ordered_cursor_pagination_is_stable ... ok
+test test_hot_projection_queries::recycling_preview_by_hour ... ok
+test test_hot_projection_queries::safe_recycling_rule_update_marks_only_act_001 ... ok
+test test_multi_queue_claim::coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target ... ok
+test test_product_validation::callback_cohort_e2e ... ok
+test test_product_validation::downstream_pacing_non_goal_e2e ... ok
+test test_product_validation::generic_priority_bounded_relaxed_e2e ... ok
+test test_product_validation::jobs_connectors_recurring_e2e ... ok
+test test_product_validation::marketo_group_batching_e2e ... ok
+test test_product_validation::noisy_neighbor_scale_e2e ... ok
+test test_product_validation::operator_repair_redrive_e2e ... ok
+test test_product_validation::scheduled_action_delivery_e2e ... ok
+test test_product_validation::worker_crash_recovery_e2e ... ok
+test test_queue_template::durable_public_constructors_reopen_idempotently ... ok
+test test_request_id_idempotency::batch_push_reports_fresh_then_replayed_disposition ... ok
+test test_request_id_idempotency::distinct_request_ids_each_append ... ok
+test test_request_id_idempotency::retry_after_retention_window_is_a_fresh_push ... ok
+test test_request_id_idempotency::same_request_id_different_body_conflicts ... ok
+test test_request_id_idempotency::same_request_id_same_body_replays_without_a_second_append ... ok
+test test_schema_validation::schema_validation_invalid_commit_lifecycle_item_does_not_consume_item_counter ... ok
+test test_schema_validation::schema_validation_invalid_push_does_not_consume_item_counter ... ok
+test test_schema_validation::schema_validation_invalid_push_with_request_id_does_not_consume_item_counter ... ok
+test test_schema_validation::schema_validation_push_invalid_entity_rejected ... ok
+test test_schema_validation::schema_validation_push_no_entity_on_typed_queue_accepted ... ok
+test test_schema_validation::schema_validation_push_valid_entity_accepted ... ok
+test test_schema_validation::schema_validation_push_with_request_id_no_idempotency_entry_on_failure ... ok
+test test_schema_validation::schema_validation_schemaless_queue_accepts_any_entity ... ok
+test test_schema_validation::schema_validation_update_fields_invalid_entity_rejected ... ok
+test test_schema_validation::schema_validation_update_fields_valid_entity_accepted ... ok
+test test_schema_validation::schema_validation_upsert_invalid_entity_rejected ... ok
+test test_secondary_indexes::secondary_indexes_missing_fields_remain_sparse ... ok
+test test_secondary_indexes::secondary_indexes_purge_removes_the_index_entry ... ok
+test test_secondary_indexes::secondary_indexes_raw_bytes_invalid_for_typed_index_are_rejected ... ok
+test test_secondary_indexes::secondary_indexes_string_typed_field_with_numeric_looking_value_is_queryable ... ok
+test test_secondary_indexes::secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics_work ... ok
+test test_secondary_indexes::secondary_indexes_typed_query_relational_error_precedence_is_explicit ... ok
+test test_secondary_indexes::secondary_indexes_typed_value_query_and_name_based_resolution ... ok
+test test_secondary_indexes::secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_replace ... ok
+test test_secondary_indexes::secondary_indexes_untyped_index_is_byte_exact_for_invalid_utf8 ... ok
+test test_secondary_indexes::secondary_indexes_update_fields_and_replace_move_the_indexed_entry ... ok
+test test_secondary_indexes::secondary_indexes_update_fields_none_entity_preserves_typed_index ... ok
+test test_secondary_indexes::secondary_indexes_upsert_insert_typed_unique_conflict_is_rejected ... ok
+test test_vectorized_commit::capabilities_advertise_atomic_commit_on_memory_and_objectlog ... ok
+test test_vectorized_commit::commit_advances_validates_and_rejects_instance_fence ... ok
+test test_vectorized_commit::commit_rejects_bad_lease_token_and_bad_version_without_writing ... ok
+test test_vectorized_commit::commit_request_id_replays_conflicts_and_expires ... ok
+test test_vectorized_commit::commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes ... ok
+test test_vectorized_commit::direct_objectlog_commit_is_available_and_observable ... ignored, objectlog LogEngine product does not implement CommitTransitionPort (defaults Unavailable)
+test test_vectorized_commit::explain_commit_reconstructs_the_transition_and_side_records_are_non_work ... ok
+test test_vectorized_commit::multi_claim_commit_atomically_consumes_result_and_await_and_appends_continuation ... ok
+test test_vectorized_commit::multi_claim_commit_rejects_atomically_when_any_claim_is_stale ... ok
+test tests::blocking_lib_backend_concurrent_creates_are_create_or_read ... ok
+test tests::blocking_lib_backend_concurrent_incompatible_losers_conflict ... ok
+test tests::claim_by_item_ids_claims_and_finalizes_over_memory ... ok
+test tests::claim_by_query_at_uses_explicit_times_and_bypasses_clock ... ok
+test tests::dropping_final_coordinated_handle_never_joins_blocked_control_plane_worker ... ok
+test tests::facade_enforces_persisted_push_and_claim_batch_limits ... ok
+test tests::filesystem_memory_split_preserves_common_fields_and_namespace ... ok
+test tests::mixed_renewal_outcomes_process_all_rows_and_preserve_transient_sessions ... ok
+test tests::owned_control_plane_boundary_builds_a_working_coordinated_owner ... ok
+test tests::public_open_async_memory_claim_and_commit_on_current_thread ... ok
+test tests::public_open_async_objectlog_filesystem_memory_on_current_thread ... ok
+test tests::public_open_memory_claim_and_commit_on_current_thread ... ok
+test tests::public_open_objectlog_filesystem_memory_claim_and_commit_on_current_thread ... ok
+test tests::public_open_objectlog_helper_claim_and_commit_on_current_thread ... ok
+test tests::snapshot_policy_is_lazy_by_default ... ok
+test turso_compose::contention_mapping_tests::append_admission_carrier_audits_derived_dispatch_and_commit_sites ... ok
+test turso_compose::contention_mapping_tests::grouped_cohort_claim_materializes_before_append ... ok
+test turso_compose::contention_mapping_tests::map_claim_preserves_per_key_and_global_gate_capacity ... ok
+test turso_compose::contention_mapping_tests::map_lifecycle_preserves_per_key_and_global_gate_capacity ... ok
+test turso_compose::contention_mapping_tests::map_push_preserves_per_key_and_global_gate_capacity ... ok
+test turso_compose::contention_mapping_tests::mutation_generations_are_live_for_compatible_push_and_batch_update ... ok
+test turso_compose::contention_mapping_tests::overlay_claim_exclude_unions_leased_and_terminal_without_history ... ok
+test turso_compose::contention_mapping_tests::public_reads_wait_then_take_outcome_admission_before_pool ... ok
+test turso_compose::s3c_activation::addressed_mutation_appends_behind_unapplied_claim_with_lease_guards ... ok
+test turso_compose::s3c_activation::delayed_generation_waiter_retains_result_without_global_cache ... ok
+test turso_compose::s3c_activation::duplicate_client_key_conflicts_after_apply_covers ... ok
+test turso_compose::s3c_activation::duplicate_client_key_conflicts_after_reopen ... ok
+test turso_compose::s3c_activation::duplicate_client_key_conflicts_before_apply_covers ... ok
+test turso_compose::s3c_activation::eight_inflight_pushes_all_land_exactly_once ... ok
+test turso_compose::s3c_activation::grouped_and_item_claim_use_retained_carrier_without_sql_first_lease ... ok
+test turso_compose::s3c_activation::membership_metrics_rebases_and_rejects_conflicts_gaps_and_underflow ... ok
+test turso_compose::s3c_activation::metrics_read_durable_push_and_purge_without_advancing_projection ... ok
+test turso_compose::s3c_activation::public_reads_use_outcome_pool_after_request_entry_high_water ... ok
+test turso_compose::s3c_activation::sixteen_inflight_pushes_overlay_across_generations_exactly_once ... ok
+test turso_compose::s3v_after_append::after_append_before_apply_poisons_then_recovers_authoritatively ... ok
+test turso_compose::s4b_lifecycle::dropping_objectlog_turso_drains_registered_driver ... ok
+test turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover ... ok
+
+test result: ok. 150 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 13.30s
+
+     Running unittests src/lib.rs (target/release/deps/fireweed_objectlog-e636efbc347add09)
+
+running 77 tests
+test async_product::tests::async_projection_memory::all_async_products_preserve_ambiguous_durable_reservations ... ok
+test async_product::tests::async_projection_memory::debt_byte_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::lag_command_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::oldest_unapplied_age_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::paused_selected_projection_is_stale_until_ordered_watermark_catch_up ... ok
+test async_product::tests::async_projection_memory::queue_depth_bound_rejects_before_append ... ok
+test async_product::tests::async_projection_memory::repeated_apply_failure_poisons_and_fails_closed ... ok
+test async_product::tests::async_projection_memory::restart_replays_selected_projection_without_loss_or_duplicate_apply ... ok
+test async_product::tests::async_projection_memory::strict_constructor_preserves_response_after_apply_contract ... ok
+test async_product::tests::concurrent_item_mutation_request_id_commits_once ... ok
+test async_product::tests::current_position_tracks_authoritative_high_water ... ok
+test async_product::tests::object_log_engine_finalize_after_claim ... ok
+test async_product::tests::object_log_engine_push_claim_round_trip ... ok
+test async_projection_apply::tests::claim_join_deadline_is_not_extended_by_ready_neighbors ... ok
+test async_projection_apply::tests::claim_join_does_not_block_ready_neighbor_or_force_claim_apply ... ok
+test async_projection_apply::tests::coalesces_contiguous_underfilled_ready_entries ... ok
+test async_projection_apply::tests::coalesces_underfilled_claim_and_complete_of_the_same_items ... ok
+test async_projection_apply::tests::coordinator_coalesces_contiguous_underfilled_ready_entries ... ok
+test async_projection_apply::tests::coverage_read_bypasses_claim_followup_delay ... ok
+test async_projection_apply::tests::covered_read_does_not_interrupt_background_coalescing ... ok
+test async_projection_apply::tests::does_not_coalesce_across_outstanding_earlier_reservation ... ok
+test async_projection_apply::tests::does_not_coalesce_across_sequence_gap ... ok
+test async_projection_apply::tests::does_not_coalesce_across_shard ... ok
+test async_projection_apply::tests::does_not_coalesce_poisoned_shard ... ok
+test async_projection_apply::tests::does_not_coalesce_when_follower_introduces_an_801st_distinct_item ... ok
+test async_projection_apply::tests::does_not_join_nine_and_seven_empty_envelopes ... ok
+test async_projection_apply::tests::does_not_join_two_sequencer_generations_of_empty_envelopes ... ok
+test async_projection_apply::tests::empty_queue_is_not_applied_high_water_coverage ... ok
+test async_projection_apply::tests::first_produce_delay_is_not_multiplied_across_coalesced_packs ... ok
+test async_projection_apply::tests::holds_non_contiguous_ready_until_the_hole_is_filled ... ok
+test async_projection_apply::tests::independent_claim_windows_overlap_and_coverage_preempts_only_its_queue ... ok
+test async_projection_apply::tests::injected_failure_retries_the_same_combined_prefix ... ok
+test async_projection_apply::tests::joins_underfilled_packs_up_to_eight_envelopes ... ok
+test async_projection_apply::tests::late_followup_can_join_without_restarting_the_claim_deadline ... ok
+test async_projection_apply::tests::later_contiguous_ready_is_not_hidden_by_an_earlier_gap ... ok
+test async_projection_apply::tests::membership_tail_requires_complete_unique_bounded_single_family ... ok
+test async_projection_apply::tests::neighboring_ready_work_does_not_hide_a_claim_followup ... ok
+test async_projection_apply::tests::ready_queues_keep_fifo_turns_under_replenishment ... ok
+test async_projection_apply::tests::reserved_does_not_hide_a_contiguous_ready_batch ... ok
+test async_projection_apply::tests::retained_claim_tail_requires_complete_bounded_authority ... ok
+test async_projection_apply::tests::seeded_high_water_covers_without_ready_entries ... ok
+test async_projection_apply::tests::stops_at_eight_envelope_bound ... ok
+test async_projection_apply::tests::stops_at_eight_hundred_item_bound ... ok
+test async_projection_apply::tests::stops_at_four_mib_debt_bound ... ok
+test async_projection_apply::tests::unrelated_queue_coverage_does_not_break_claim_followup_join ... ok
+test compose_log::tests::composed_objectlog_backend_opens_under_current_thread_runtime ... ok
+test compose_log::tests::open_local_memory_product_empty_root ... ok
+test log_engine_store::tests::all_waiters_receive_same_typed_append_disposition ... ok
+test log_engine_store::tests::concurrent_queue_produce_paths_reopen_without_offset_gaps_or_reuse ... ok
+test log_engine_store::tests::driver_vector_force_seals_and_charges_own_group ... ok
+test log_engine_store::tests::dropped_waiter_disposition_is_owned_by_its_append_attempt ... ok
+test log_engine_store::tests::emission_cursor_advances_monotonically_and_survives_reopen ... ok
+test log_engine_store::tests::independent_queues_share_flush_while_epoch_changes_wait_for_their_queue ... ok
+test log_engine_store::tests::legacy_catalog_definition_migrates_without_candidate_overwrite ... ok
+test log_engine_store::tests::local_definition_authority_has_exactly_one_concurrent_creator ... ok
+test log_engine_store::tests::local_definition_authority_preserves_concurrent_different_queues ... ok
+test log_engine_store::tests::local_definition_authority_returns_preopen_winner_and_full_definition ... ok
+test log_engine_store::tests::local_log_reopen_preserves_large_batches_across_process_boundary ... ok
+test log_engine_store::tests::local_namespace_rejects_conflicting_live_flush_configuration ... ok
+test log_engine_store::tests::local_preopen_handles_share_epoch_authority_cache ... ok
+test log_engine_store::tests::local_snapshots_are_distinct_readable_and_durable_across_reopen ... ok
+test log_engine_store::tests::log_engine_append_and_read_round_trip ... ok
+test log_engine_store::tests::object_log_append_phase_timeouts_default_to_thirty_seconds ... ok
+test log_engine_store::tests::objectlog_metadata_permit_covers_every_produce_path ... ok
+test log_engine_store::tests::post_produce_high_water_failure_never_cancels_or_reuses_position ... ok
+test maintenance::tests::limits_are_strictly_nonzero ... ok
+test reclaim_tick::tests::reclaim_backpressure_isolated_and_retried_per_queue ... ok
+test reclaim_tick::tests::reclaim_retry_queue_drains_before_next_page_when_full ... ok
+test reclaim_tick::tests::reclaim_stops_on_epoch_change_and_poison ... ok
+test request_id_probe::tests::after_append_before_apply_poisons_then_recovers_authoritatively ... ok
+test segment_config::tests::production_validation_rejects_only_forced_single_batch_shapes_and_private_override ... ok
+test storage_generation::tests::empty_root_opens_cleanly_via_reject ... ok
+test storage_generation::tests::fwsg_key_shapes_detected ... ok
+test storage_generation::tests::fwsg_segment_magic_fails_open_detectably ... ok
+test storage_generation::tests::mixed_fwsg_and_logengine_fails_with_mixed_token ... ok
+test storage_generation::tests::scan_prefix_strips_fw_prefixes ... ok
+test traced_blob_store::tests::tracing_preserves_chunk_range_error_and_accounting_contracts ... ok
+
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.07s
+
+     Running unittests src/lib.rs (target/release/deps/fireweed_turso-db03909f0c6db4c7)
+
+running 52 tests
+test local::class_s_tests::class_s_claim_preserves_fields_metadata_and_entity ... ok
+test local::class_s_tests::class_s_sequential_claims_are_disjoint ... ok
+test local::class_s_tests::item_claim_microbatch_on_connection_splits_fifo_and_overwrites_tokens ... ok
+test local::class_s_tests::reader_select_does_not_wait_on_held_immediate_writer ... ok
+test local::class_s_tests::serving_reader_fifo_select_advances_floor_without_apply ... ok
+test local::committed_pool_tests::busy_reads_map_to_retryable_pool_backpressure ... ok
+test local::committed_pool_tests::committed_pools_construct_isolated_connections ... ok
+test local::committed_pool_tests::serving_peek_committed_borrows_outcome_pool_not_shared_reader ... ok
+test local::committed_pool_tests::seventeen_outcome_readers_bound_to_two_waves_and_retry ... ok
+test local::committed_pool_tests::twenty_four_pooled_committed_readers_do_not_restore_47b1a223_wal_freeze ... ok
+test local::committed_reader_tests::committed_reader_pool_candidate_semantics_and_settings ... ok
+test local::committed_reader_tests::in_memory_reader_preserves_turso_07_post_commit_freshness_mode ... ok
+test local::committed_reader_tests::records_v03121_read_uncommitted_keyword_disposition ... ok
+test local::committed_reader_tests::serving_reader_is_query_only_committed_and_nonblocking ... ok
+test local::projection_checkpoint_config_tests::new_and_existing_files_use_their_actual_page_size ... ok
+test metrics::tests::bounded_counts_seek_the_full_item_key ... ok
+test metrics::tests::deltas_follow_actual_rows_and_rollback_atomically ... ok
+test projection::addressed_query_tests::addressed_snapshot_uses_full_key_seeks_for_every_join ... ok
+test projection::committed_pool_helper_tests::grouped_cohort_claim_materializes_before_append ... ok
+test projection::committed_pool_helper_tests::post_publication_response_never_borrows_committed_pool ... ok
+test projection::committed_pool_helper_tests::pre_position_outcome_helpers_accept_borrowed_connection ... ok
+test projection::deterministic_cancellation_tests::queued_started_and_resolved_cancellation_cuts_do_not_strand_writer_or_outcome ... ok
+test projection::item_mutation_tests::clearing_replacements_batch_real_sql_and_rollback_late_conflicts ... ok
+test projection::item_mutation_tests::general_insert_preserves_fifo_and_values_across_parameter_chunks ... ok
+test projection::item_mutation_tests::lifecycle_shortcuts_match_measured_rows_and_replay_fallbacks ... ok
+test projection::item_mutation_tests::metrics_membership_snapshot_checks_ids_and_active_keys_together ... ok
+test projection::item_mutation_tests::metrics_membership_uses_full_key_seeks_at_its_identity_bound ... ok
+test projection::item_mutation_tests::mutation_batch_conflict_rolls_back_every_item_and_cursor ... ok
+test projection::item_mutation_tests::purge_observes_group_created_earlier_in_same_apply ... ok
+test projection::item_mutation_tests::purge_skips_only_unused_metadata_and_preserves_groups_after_reopen ... ok
+test projection::item_mutation_tests::required_active_transition_invalidates_lease_and_purge_is_atomic ... ok
+test projection::item_mutation_tests::resolved_mutation_is_durable_and_exact_replay_is_idempotent ... ok
+test projection::lease_target_query_tests::lease_target_resolution_seeks_items_and_payloads_by_full_key ... ok
+test projection::metrics_query_tests::lifecycle_counts_do_not_read_resident_rows ... ok
+test projection::metrics_query_tests::lifecycle_counts_handle_empty_terminal_and_superseded_rows ... ok
+test projection::ordered_claim_query_tests::eligibility_is_covered_before_full_key_materialization ... ok
+test projection::push_batch_lowering_tests::accepted_push_statement_count_is_constant_within_item_chunk ... ok
+test projection::push_batch_lowering_tests::group_summary_await_count_grows_only_at_bind_safe_chunk_boundaries ... ok
+test projection::push_batch_lowering_tests::lease_validation_select_count_grows_only_at_bind_safe_chunk_boundaries ... ok
+test projection::push_batch_lowering_tests::legacy_batch_helper_chunk_arithmetic_stays_bounded ... ok
+test projection::push_batch_lowering_tests::rich_claim_and_replay_lowering_is_set_based_and_request_bounded ... ok
+test rebuildable_io::tests::omits_only_sync_and_preserves_lock_and_storage_errors ... ok
+test rebuildable_io::tests::write_trace_preserves_results_and_accounts_for_blocking_and_errors ... ok
+test runtime_isolation_tests::blocked_wal_commit_preserves_current_thread_runtime_progress ... ok
+test runtime_isolation_tests::blocked_wal_commit_preserves_multi_thread_runtime_progress ... ok
+test tx::apply_statement_reuse_tests::consumed_row_values_survive_statement_reuse_and_teardown ... ok
+test tx::apply_statement_reuse_tests::reused_writes_rebind_nulls_and_release_state_before_rollback ... ok
+test tx::packed_authority_first_tests::packed_authority_first_claim_matches_solo_model_in_one_transaction ... ok
+test tx::packed_authority_first_tests::packed_claim_run_then_complete_run_fuses_like_adjacent_pairs ... ok
+test tx::packed_authority_first_tests::packed_complete_is_non_rejecting_and_mixed_vector_matches_model ... ok
+test tx::packed_authority_first_tests::packed_update_fields_matches_solo_model_in_one_transaction ... ok
+test tx::packed_authority_first_tests::purge_reclaims_payload_sidecars_across_cycles ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.19s
+
+     Running tests/differential.rs (target/release/deps/differential-f1a04facec44e4d8)
+
+running 7 tests
+test addressed_metadata_changes_omit_unchanged_payload_but_clear_and_replace_replay ... ok
+test addressed_payload_and_gate_writes_are_batched_with_exact_replacements ... ok
+test fused_claim_mutation_matches_individual_replay_with_partial_claims ... ok
+test generated_rich_history_has_exact_projection_image_and_read_parity ... ok
+test named_rowid_reads_use_full_keys_and_integer_ranges ... ok
+test two_turso_instances_replay_lifecycle_identically ... ok
+test two_turso_instances_rollback_conflicting_batches_without_cursor_drift ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/freelist_wal.rs (target/release/deps/freelist_wal-31ff48e50e118428)
+
+running 1 test
+test free_page_history_preserves_readers_rollback_and_reuse ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+     Running tests/recovery.rs (target/release/deps/recovery-682b489ee4c06f73)
+
+running 3 tests
+test local_file_loss_rebuilds_exactly_from_authoritative_history ... ok
+test reopen_and_genesis_replay_converge_to_the_same_cursor_and_state ... ok
+test snapshot_tail_recovery_skips_overlap_and_applies_only_the_contiguous_tail ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src/lib.rs (target/release/deps/fireweed_workload-991b674a58114cfa)
+
+running 2 tests
+test campaign::priority_model_tests::fifo_ordinals_remain_before_future_timestamps_at_large_list_sizes ... ok
+test primitives::payload_tests::varied_replacement_preserves_identity_and_varied_content ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/campaign.rs (target/release/deps/campaign-026301c0b4b83d19)
+
+running 6 tests
+test campaign_acknowledged_child ... ok
+test campaign_chunks_obey_distinct_handler_limits ... ok
+test campaign_windows_reporting_and_discovered_retention ... ok
+test kept_payload_planning_preserves_no_change_and_before_snapshot ... ok
+test retained_pages_include_terminal_metadata_and_isolate_queues ... ok
+test terminal_campaign_reports_rebuild_from_log_only ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.01s
+
+     Running tests/primitives.rs (target/release/deps/primitives-76ae3c2df0d1eff5)
+
+running 2 tests
+test component_cli_labels_payloads_and_verifies_both_storage_modes ... ok
+test varied_payload_option_requires_the_component_profile ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+
+     Running tests/recovery.rs (target/release/deps/recovery-ef5696db72fc1a65)
+
+running 4 tests
+test acknowledged_basic_child ... ok
+test acknowledged_child ... ok
+test acknowledged_log_rebuild_preserves_ids_payloads_leases_and_receipts ... ok
+test original_row_enrichments_and_outcomes_rebuild_from_log_alone ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+

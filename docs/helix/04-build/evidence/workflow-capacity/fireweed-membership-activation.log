@@ -1,0 +1,16 @@
+
+running 11 tests
+test turso_compose::s3c_activation::addressed_mutation_appends_behind_unapplied_claim_with_lease_guards ... ok
+test turso_compose::s3c_activation::delayed_generation_waiter_retains_result_without_global_cache ... ok
+test turso_compose::s3c_activation::duplicate_client_key_conflicts_after_apply_covers ... ok
+test turso_compose::s3c_activation::duplicate_client_key_conflicts_after_reopen ... ok
+test turso_compose::s3c_activation::duplicate_client_key_conflicts_before_apply_covers ... ok
+test turso_compose::s3c_activation::eight_inflight_pushes_all_land_exactly_once ... ok
+test turso_compose::s3c_activation::grouped_and_item_claim_use_retained_carrier_without_sql_first_lease ... ok
+test turso_compose::s3c_activation::membership_metrics_rebases_and_rejects_conflicts_gaps_and_underflow ... ok
+test turso_compose::s3c_activation::metrics_read_durable_push_and_purge_without_advancing_projection ... ok
+test turso_compose::s3c_activation::public_reads_use_outcome_pool_after_request_entry_high_water ... ok
+test turso_compose::s3c_activation::sixteen_inflight_pushes_overlay_across_generations_exactly_once ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 3.33s
+

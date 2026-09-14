@@ -3652,10 +3652,15 @@ impl DerivedObjectLogTursoBackend {
                 | AppendAdmissionClass::ClaimCoordinatorLive => {}
             }
             debug_assert_eq!(fault, RawCommitFault::None);
-            self.log
+            let outcome = self.log
                 .packed_append(append_shard, commands, append_epoch)
                 .await
                 .map_err(PackedAppendError::into_engine)?;
+            // Publish the newly logged migration claim before deleting its
+            // outbox entry. Startup must seed a cursor covering this append;
+            // otherwise every later dependent read waits for an unqueued apply.
+            publish_packed_apply(None, None, outcome, self.projection.as_ref(), shard, None)
+                .await?;
             self.projection
                 .delete_claim_outbox_row(
                     shard.tenant_id.as_str(),
@@ -3943,7 +3948,7 @@ impl DerivedObjectLogTursoBackend {
         // Keep the coverage contract and admission order unchanged.
         let trace = std::env::var_os("FIREWEED_METRICS_TRACE").is_some();
         let mut previous = trace.then(Instant::now);
-        let mut phases = [0_u128; 7];
+        let mut phases = [0_u128; 9];
         let mut mark = |phase: usize| {
             if let Some(previous) = &mut previous {
                 let now = Instant::now();
@@ -3998,6 +4003,25 @@ impl DerivedObjectLogTursoBackend {
                             if trace {
                                 eprintln!("metrics_read path=claims phases_us={phases:?}");
                             }
+                            return Ok(metrics);
+                        }
+                    }
+                    let membership = coordinator.retained_membership_tail(applied, target).await?;
+                    mark(7);
+                    if let Some(tail) = membership {
+                        use fireweed_objectlog::RetainedMembershipChange;
+                        let identities = tail.iter().flat_map(|(_, change)| match change {
+                            RetainedMembershipChange::Push(items) => items.iter()
+                                .map(|(id, key)| (*id, Some(key.clone()))).collect::<Vec<_>>(),
+                            RetainedMembershipChange::Purge(ids) => ids.iter()
+                                .map(|id| (*id, None)).collect::<Vec<_>>(),
+                        }).collect::<Vec<_>>();
+                        let snapshot = self.projection.server_metrics_with_membership_committed(shard, &identities).await?;
+                        mark(8);
+                        if let Some(metrics) = snapshot.and_then(|snapshot|
+                            fold_membership_metrics(snapshot, applied, target, &tail)) {
+                            coordinator.ensure_healthy(shard)?;
+                            if trace { eprintln!("metrics_read path=membership phases_us={phases:?}"); }
                             return Ok(metrics);
                         }
                     }
@@ -5706,6 +5730,80 @@ mod s4b_lifecycle {
     }
 }
 
+#[cfg(feature = "objectlog")]
+fn fold_membership_metrics(
+    mut snapshot: fireweed_turso::MetricsMembershipSnapshot,
+    base: &CommandPosition,
+    target: &CommandPosition,
+    tail: &[(
+        CommandPosition,
+        fireweed_objectlog::RetainedMembershipChange,
+    )],
+) -> Option<QueueMetrics> {
+    use fireweed_objectlog::RetainedMembershipChange;
+    let applied = snapshot.position.as_ref()?;
+    if applied.queue != base.queue
+        || applied.backend_epoch != base.backend_epoch
+        || applied.sequence < base.sequence
+        || target.queue != base.queue
+        || target.backend_epoch != base.backend_epoch
+    {
+        return None;
+    }
+    if position_covers(Some(applied), target) {
+        return Some(snapshot.metrics);
+    }
+    let mut next = applied.sequence.checked_add(1)?;
+    for (position, change) in tail {
+        if position.sequence <= applied.sequence {
+            continue;
+        }
+        if position.queue != base.queue
+            || position.backend_epoch != base.backend_epoch
+            || position.sequence != next
+            || position.sequence > target.sequence
+        {
+            return None;
+        }
+        next = next.checked_add(1)?;
+        match change {
+            RetainedMembershipChange::Push(items) => {
+                for (id, _) in items {
+                    let row = snapshot.rows.remove(id)?;
+                    if row.state.is_some() || row.active_key_exists {
+                        return None;
+                    }
+                    snapshot.metrics.pending = snapshot.metrics.pending.checked_add(1)?;
+                }
+            }
+            RetainedMembershipChange::Purge(ids) => {
+                for id in ids {
+                    let row = snapshot.rows.remove(id)?;
+                    if row.superseded {
+                        continue;
+                    }
+                    let count = match row.state {
+                        None => continue,
+                        Some(ItemState::Pending) => &mut snapshot.metrics.pending,
+                        Some(ItemState::Leased) => &mut snapshot.metrics.leased,
+                        Some(ItemState::Complete) => &mut snapshot.metrics.complete,
+                        Some(ItemState::Failed) => &mut snapshot.metrics.failed,
+                    };
+                    *count = count.checked_sub(1)?;
+                }
+            }
+        }
+    }
+    if next != target.sequence.checked_add(1)? {
+        return None;
+    }
+    snapshot.metrics.resident_terminal_count = snapshot
+        .metrics
+        .complete
+        .checked_add(snapshot.metrics.failed)?;
+    Some(snapshot.metrics)
+}
+
 #[cfg(all(test, feature = "objectlog"))]
 mod s3c_activation {
     use std::sync::Arc;
@@ -5798,6 +5896,210 @@ mod s3c_activation {
                 Err(error) => panic!("concurrent push: {error:?}"),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn metrics_read_durable_push_and_purge_without_advancing_projection() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let root = std::env::temp_dir().join(format!(
+                "fireweed-membership-tail-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            let backend = open(&root).await;
+            let definition = qdef("membership-tail");
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            backend.create_queue(definition).await.unwrap();
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default(); 2],
+                    UtcTimestamp::new(1, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let initial = backend.peek(&shard, 10).await.unwrap();
+            assert_eq!(initial.len(), 2);
+            let coordinator = backend.async_apply.as_ref().unwrap().clone();
+            coordinator.pause();
+            let before = coordinator.snapshot(&shard).await.applied_high_water;
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default(); 2],
+                    UtcTimestamp::new(2, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let metrics = tokio::time::timeout(Duration::from_millis(250), backend.metrics(&shard))
+                .await
+                .expect("durable push counts do not wait for paused apply")
+                .unwrap();
+            assert_eq!(metrics.pending, 4);
+            let (sql, cursor) = backend
+                .projection
+                .server_metrics_with_position_committed(&shard)
+                .await
+                .unwrap();
+            assert_eq!(sql.pending, 2);
+            assert_eq!(cursor, before);
+            assert_eq!(
+                coordinator.snapshot(&shard).await.applied_high_water,
+                before
+            );
+            coordinator.resume();
+            let all = backend.peek(&shard, 10).await.unwrap();
+            assert_eq!(all.len(), 4);
+            coordinator.pause();
+            let before = coordinator.snapshot(&shard).await.applied_high_water;
+            backend
+                .purge(
+                    &shard,
+                    all[..3].iter().map(|i| i.item_id).collect(),
+                    true,
+                    UtcTimestamp::new(3, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let metrics = tokio::time::timeout(Duration::from_millis(250), backend.metrics(&shard))
+                .await
+                .expect("durable purge counts do not wait for paused apply")
+                .unwrap();
+            assert_eq!(metrics.pending, 1);
+            let (sql, cursor) = backend
+                .projection
+                .server_metrics_with_position_committed(&shard)
+                .await
+                .unwrap();
+            assert_eq!(sql.pending, 4);
+            assert_eq!(cursor, before);
+            assert_eq!(
+                coordinator.snapshot(&shard).await.applied_high_water,
+                before
+            );
+            coordinator.resume();
+            assert_eq!(backend.peek(&shard, 10).await.unwrap().len(), 1);
+            drop(coordinator);
+            drop(backend);
+            let reopened = open(&root).await;
+            assert_eq!(reopened.metrics(&shard).await.unwrap().pending, 1);
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn membership_metrics_rebases_and_rejects_conflicts_gaps_and_underflow() {
+        use fireweed_objectlog::RetainedMembershipChange as Change;
+        use fireweed_turso::{MetricsMembershipRow, MetricsMembershipSnapshot};
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let pos = |sequence| CommandPosition::new(shard.clone(), 0, sequence);
+        let id = |n| ItemId::mint(1, 0, n);
+        let push = |n| Change::Push(vec![(id(n), ClientItemKey::new(format!("k{n}")).unwrap())]);
+        let snapshot = |sequence, pending, rows: Vec<(ItemId, Option<ItemState>, bool, bool)>| {
+            MetricsMembershipSnapshot {
+                metrics: QueueMetrics {
+                    pending,
+                    ..Default::default()
+                },
+                position: Some(pos(sequence)),
+                rows: rows
+                    .into_iter()
+                    .map(|(id, state, superseded, active_key_exists)| {
+                        (
+                            id,
+                            MetricsMembershipRow {
+                                state,
+                                superseded,
+                                active_key_exists,
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        };
+        let tail = vec![(pos(1), push(1)), (pos(2), push(2))];
+        // Apply advanced while row presence was being read. The first push is
+        // already represented in both the SQL counter and the existing row.
+        let s = snapshot(
+            1,
+            1,
+            vec![
+                (id(1), Some(ItemState::Pending), false, true),
+                (id(2), None, false, false),
+            ],
+        );
+        assert_eq!(
+            fold_membership_metrics(s, &pos(0), &pos(2), &tail)
+                .unwrap()
+                .pending,
+            2
+        );
+        for (state, key_exists) in [(Some(ItemState::Pending), false), (None, true)] {
+            let s = snapshot(
+                0,
+                0,
+                vec![
+                    (id(1), state, false, key_exists),
+                    (id(2), None, false, false),
+                ],
+            );
+            assert!(fold_membership_metrics(s, &pos(0), &pos(2), &tail).is_none());
+        }
+        assert!(
+            fold_membership_metrics(
+                snapshot(0, 0, vec![(id(2), None, false, false)]),
+                &pos(0),
+                &pos(2),
+                &tail[1..]
+            )
+            .is_none()
+        );
+        assert!(fold_membership_metrics(snapshot(0, 0, vec![]), &pos(1), &pos(2), &tail).is_none());
+        let purge = vec![(pos(1), Change::Purge(vec![id(1), id(2), id(3)]))];
+        let s = snapshot(
+            0,
+            1,
+            vec![
+                (id(1), Some(ItemState::Pending), false, false),
+                (id(2), Some(ItemState::Pending), true, false),
+                (id(3), None, false, false),
+            ],
+        );
+        assert_eq!(
+            fold_membership_metrics(s, &pos(0), &pos(1), &purge)
+                .unwrap()
+                .pending,
+            0
+        );
+        let s = snapshot(0, 0, vec![(id(1), Some(ItemState::Pending), false, false)]);
+        assert!(fold_membership_metrics(s, &pos(0), &pos(1), &purge).is_none());
+        let mut all_states = snapshot(0, 1, vec![
+            (id(1), Some(ItemState::Pending), false, false),
+            (id(2), Some(ItemState::Leased), false, false),
+            (id(3), Some(ItemState::Complete), false, false),
+            (id(4), Some(ItemState::Failed), false, false),
+        ]);
+        all_states.metrics.leased = 1;
+        all_states.metrics.complete = 1;
+        all_states.metrics.failed = 1;
+        all_states.metrics.resident_terminal_count = 2;
+        let all_purged = fold_membership_metrics(all_states, &pos(0), &pos(1),
+            &[(pos(1), Change::Purge((1..=4).map(id).collect()))]).unwrap();
+        assert_eq!((all_purged.pending, all_purged.leased, all_purged.complete,
+            all_purged.failed, all_purged.resident_terminal_count), (0,0,0,0,0));
+        // A snapshot that already covers the target needs no retained rows.
+        assert_eq!(
+            fold_membership_metrics(snapshot(3, 7, vec![]), &pos(0), &pos(2), &tail)
+                .unwrap()
+                .pending,
+            7
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6599,6 +6901,13 @@ mod s8c_outbox_migration {
             1,
             "fixture must plant one pre-upgrade committed lease"
         );
+        // This fixture represents a database from before resident counters
+        // existed. Raw SQL above bypasses modern counter maintenance; mark the
+        // counters uninitialized so reopen exercises the real migration backfill.
+        backend.projection().execute(
+            "UPDATE queues SET resident_pending=0,resident_leased=0,resident_complete=0,resident_failed=0,resident_counts_version=0 WHERE tenant='t' AND queue='q-s8c-outbox'",
+            vec![],
+        ).await.unwrap();
         drop(backend);
 
         let drained = open(&root).await;
@@ -6611,6 +6920,9 @@ mod s8c_outbox_migration {
                 .is_empty(),
             "reopen must drain the pre-upgrade outbox row"
         );
+        let migrated_counts = drained.metrics(&shard).await.unwrap();
+        assert_eq!((migrated_counts.pending, migrated_counts.leased), (0, 1),
+            "pre-counter schema must backfill the already committed lease exactly once");
         let page = AsyncLogStore::read_from(drained.log.as_ref(), shard.clone(), None, 16)
             .await
             .unwrap();
