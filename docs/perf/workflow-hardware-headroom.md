@@ -10,8 +10,15 @@ worker/campaign, 1,000-row storage batches, six million complete recipients):
 | `4256e0c0`, guarded replacement batches | 8,355.53 | 1.04291 | 2 | No |
 | `1af38acf`, rejected 16-row chunks | 7,428.07 | 1.13144 | 6 | No |
 | `f9598882`, owned row transfer | 8,230.52 | 1.04907 | 0 | No |
+| `70e64556`, guarded counter-read shortcut | 7,651.62 | 1.03330 | 0 | No |
 
 These are serial candidate observations, not replicated causal comparisons.
+The counter-read run's cost implies **10.33/12.92 CPU-seconds per second** and
+approximately **42.7/53.3 MiB/sec of host writes** at 10k/12.5k recipients/sec.
+It passed all non-throughput gates but showed lower throughput; this is not a
+qualified performance gain. The next same-code control retests two workers per
+campaign now that reporting behavior has changed.
+
 The owned-row run passes all non-throughput gates but demonstrates no throughput
 or CPU gain over the earlier 56-row candidate. Its measured cost implies
 10.49/13.11 CPU-seconds per second and approximately 42.5/53.1 MiB/sec of host

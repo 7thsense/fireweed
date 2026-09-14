@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+2026-09-14 guarded counter-read candidate: clean `70e64556` completed six disk
+cycles at **7,651.62 recipients/sec**, 784.43 seconds. All non-throughput gates
+passed; worst reporting p95 was 0.6014 s. Overall and cycles 1–5 throughput
+failed. CPU cost was **1.03330 ms/recipient**, 1.5% below the preceding owned-row
+run, but measured throughput fell 7.0%. Peak RSS was 10.93 GiB, process output
+12,686.02 bytes/recipient, and logical log output 1,834.83 bytes/recipient.
+Host writes were 25.01 GiB at 32.75 MiB/sec. This serial comparison does not
+establish a causal speedup; fewer read queries have not met the workflow target.
+Raw/summary/device/provenance artifacts use
+`fireweed-campaign-70e64556-known-after-w1-six*`; compression properties were
+captured before removing the owned projection directory.
+
+Read-only thread-state observations during this run found filesystem waits.
+The archived snapshot contains five threads in `wait_log_commit`, 26 in
+`folio_wait_bit_common`, and one in `btrfs_btree_wait_writeback_range`; an earlier
+interactive snapshot saw 31 log-commit waits and one `write_all_supers` wait.
+Kernel stacks were inaccessible, so these names do not establish exact call
+stacks or a single bottleneck. Host RAM is about 64 GiB; existing dirty-page
+limits were 256 MiB foreground / 64 MiB background. No host settings changed.
+These observations do not establish an intrinsic SSD ceiling or TRIM cause.
+
+The next controlled run uses two workers per campaign on the same code and
+binary, retaining all workload operations and qualification gates. Earlier
+concurrency runs predated the exact claim-tail reporting and counter-read fixes;
+their reporting failures do not establish the current concurrency tradeoff.
+The guarded purge-metadata skip and its tests remain prepared outside the
+checkout for subsequent evaluation.
+
 2026-09-14 owned-row candidate: clean `f9598882` completed the canonical six-cycle
 disk workload at **8,230.52 recipients/sec**, 729.58 seconds. All non-throughput
 gates passed, including all 384 reporting checks (worst p95 0.9427 s), stronger
