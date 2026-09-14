@@ -1,5 +1,17 @@
 # Campaign qualification and performance plan
 
+The priority-exclusion candidate (`bf539d9e`) is **not retained**. Its clean
+64-store/two-worker single cycle reached 13,103.57 recipients/sec at 1.00318
+CPU-ms/recipient, versus 13,339.15 and 0.97226 for direct joined replacements.
+This serial comparison does not prove regression, but it does not demonstrate
+a benefit from the additional JSON exclusion set either. Reporting p95 was
+0.600 seconds and all workload assertions completed; a single cycle remains
+unqualified. Evidence uses `fireweed-campaign-priority-exclusions-s64-w2-one*`.
+The production query and its added regression are restored to the preceding
+validated source; the candidate commit and test/measurement evidence remain
+in history. Next is an adapter-specific larger replacement batch, preserving
+the portable 900-bind policy for other operations and adapters.
+
 The next runtime candidate filters pending authoritative claim exclusions in
 the priority candidate subquery, before loading payloads, fields and metadata.
 A non-correlated JSON list supplies one bound exclusion set; the no-exclusion

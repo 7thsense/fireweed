@@ -2529,16 +2529,6 @@ const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WH
      LEFT JOIN fireweed_item_payloads p \
        ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id ORDER BY t.priority_sort,t.created_seq";
 
-// Filter pending authoritative claims while scanning the covered candidate index,
-// before loading their payloads and metadata. The JSON contains canonical non-null IDs.
-fn ordered_item_claim_sql_with_exclusions() -> &'static str {
-    static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SQL.get_or_init(|| ORDERED_ITEM_CLAIM_SQL.replace(
-        "ORDER BY priority_sort,created_seq LIMIT ?3",
-        "AND item_id NOT IN (SELECT value FROM json_each(?7)) ORDER BY priority_sort,created_seq LIMIT ?3",
-    )).as_str()
-}
-
 /// Next due item-Claim rows with bodies in indexed priority or FIFO order.
 /// Priority scans filter eligibility before bounded full-row/payload loading;
 /// FIFO scans retain their rowid cursor and check residual eligibility in-process.
@@ -2632,19 +2622,16 @@ pub async fn select_and_materialize_item_claims_on(
     } else {
         let mut after_priority = Vec::<u8>::new();
         let mut after_sequence = i64::MIN;
-        let exclusions = if exclude.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(exclude).map_err(storage)?)
-        };
-        let sql = if exclusions.is_some() {
-            ordered_item_claim_sql_with_exclusions()
-        } else {
-            ORDERED_ITEM_CLAIM_SQL
-        };
+        let mut first_page = true;
         while ids.len() < max {
-            let fetch = max.saturating_sub(ids.len()).max(1);
-            let mut params = vec![
+            let extra = if first_page {
+                exclude_set.len().min(1_600)
+            } else {
+                0
+            };
+            first_page = false;
+            let fetch = max.saturating_sub(ids.len()).saturating_add(extra).max(1);
+            let params = vec![
                 Value::Text(tenant.to_string()),
                 Value::Text(queue.to_string()),
                 Value::Integer(i64::try_from(fetch).map_err(storage)?),
@@ -2652,11 +2639,8 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Integer(after_sequence),
                 Value::Integer(now_n),
             ];
-            if let Some(exclusions) = &exclusions {
-                params.push(Value::Text(exclusions.clone()));
-            }
             let mut rows = connection
-                .query(sql, params)
+                .query(ORDERED_ITEM_CLAIM_SQL, params)
                 .await
                 .map_err(driver_read_error)?;
             let mut page = 0usize;
@@ -5835,175 +5819,6 @@ mod item_mutation_tests {
             );
         }
         assert_eq!(store.server_metrics(&shard).await.unwrap().pending, 1504);
-    }
-
-    #[tokio::test]
-    async fn priority_claim_exclusions_preserve_due_order_and_full_bodies() {
-        use bytes::Bytes;
-        use fireweed_core::LeaseToken;
-        let definition = qdef();
-        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-        let store = TursoRelational::in_memory().await.unwrap();
-        AsyncProjectionStore::ensure_shard(&store, definition)
-            .await
-            .unwrap();
-        let pushed = (1..=2400)
-            .map(|n| {
-                let mut row = item(&n.to_string(), &format!("key-{n}"), n / 3);
-                row.payload = Some(Bytes::from(format!("payload-{n}")));
-                row.fields
-                    .insert("color".into(), Bytes::from(format!("color-{n}")));
-                row.metadata
-                    .insert("top_time", fireweed_core::MetadataValue::Integer(n));
-                if n % 11 == 0 {
-                    row.not_before = Some(ts(100));
-                }
-                row
-            })
-            .collect::<Vec<_>>();
-        AsyncProjectionStore::apply_live(
-            &store,
-            vec![CommandPosition::new(shard.clone(), 0, 0)],
-            vec![envelope(
-                QueueCommand::Push(PushCommand {
-                    items: pushed.clone(),
-                }),
-                pushed.iter().map(|i| i.item_id).collect(),
-            )],
-        )
-        .await
-        .unwrap();
-        let prefix = pushed
-            .iter()
-            .take(1700)
-            .map(|i| i.item_id)
-            .collect::<Vec<_>>();
-        let interleaved = pushed
-            .iter()
-            .enumerate()
-            .filter(|(n, _)| n % 2 == 0)
-            .map(|(_, i)| i.item_id)
-            .collect::<Vec<_>>();
-        let all = pushed.iter().map(|i| i.item_id).collect::<Vec<_>>();
-        let token = LeaseToken::new("exclusion-test").unwrap();
-        for excluded in [vec![], prefix, interleaved, all] {
-            let expected = pushed
-                .iter()
-                .filter(|i| !excluded.contains(&i.item_id) && i.not_before.is_none())
-                .take(200)
-                .collect::<Vec<_>>();
-            let connection = store.reader.lock().await;
-            let (ids, rows, floor) = super::select_and_materialize_item_claims_on(
-                &connection,
-                &shard,
-                ts(1),
-                200,
-                &excluded,
-                &token,
-                ts(30),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(ids, expected.iter().map(|i| i.item_id).collect::<Vec<_>>());
-            assert_eq!(floor, None);
-            assert_eq!(rows.len(), expected.len());
-            for (actual, original) in rows.iter().zip(expected) {
-                assert_eq!(actual.payload, original.payload);
-                assert_eq!(actual.fields, original.fields);
-                assert_eq!(actual.metadata, original.metadata);
-                assert_eq!(actual.priority, original.priority);
-                assert_eq!(actual.client_item_key, original.client_item_key);
-                assert_eq!(actual.item_version, 2);
-                assert_eq!(actual.lease_token.as_ref(), Some(&token));
-            }
-        }
-        let plan = store
-            .query(
-                format!(
-                    "EXPLAIN QUERY PLAN {}",
-                    super::ordered_item_claim_sql_with_exclusions()
-                ),
-                vec![
-                    shard.tenant_id.as_str().into(),
-                    shard.queue_id.as_str().into(),
-                    super::Value::Integer(200),
-                    super::Value::Blob(vec![]),
-                    super::Value::Integer(i64::MIN),
-                    super::Value::Integer(1_000_000_000),
-                    "[\"1\"]".into(),
-                ],
-            )
-            .await
-            .unwrap();
-        let details = plan
-            .iter()
-            .map(|r| super::text(&r.values[3]).unwrap())
-            .collect::<Vec<_>>();
-        eprintln!("priority exclusions plan: {details:?}");
-        assert!(
-            details
-                .iter()
-                .any(|s| s.contains("USING INDEX fireweed_items_pending_eligible_order_idx")),
-            "{details:?}"
-        );
-        // EQP does not label covered reads specially in this engine. Check
-        // actual candidate bytecode, including its one-time exclusion set.
-        let program = store
-            .query(
-                format!(
-                    "EXPLAIN {}",
-                    super::ordered_item_claim_sql_with_exclusions()
-                ),
-                vec![
-                    shard.tenant_id.as_str().into(),
-                    shard.queue_id.as_str().into(),
-                    super::Value::Integer(200),
-                    super::Value::Blob(vec![]),
-                    super::Value::Integer(i64::MIN),
-                    super::Value::Integer(1_000_000_000),
-                    "[\"1\"]".into(),
-                ],
-            )
-            .await
-            .unwrap();
-        let candidate = program
-            .iter()
-            .take_while(|r| super::text(&r.values[1]).unwrap() != "EndCoroutine")
-            .collect::<Vec<_>>();
-        assert!(candidate.len() < program.len());
-        let columns = candidate
-            .iter()
-            .filter(|r| super::text(&r.values[1]).unwrap() == "Column")
-            .map(|r| super::text(&r.values[7]).unwrap())
-            .collect::<Vec<_>>();
-        assert!(
-            !columns.iter().any(|c| c.contains("fireweed_items.")),
-            "{columns:?}"
-        );
-        for column in [
-            "item_id",
-            "priority_sort",
-            "created_seq",
-            "not_before",
-            "eligible_since",
-            "cohort_size",
-        ] {
-            assert!(
-                columns.iter().any(|c| c.ends_with(&format!(
-                    "fireweed_items_pending_eligible_order_idx.{column}"
-                ))),
-                "{columns:?}"
-            );
-        }
-        assert!(
-            details.iter().any(|s| s.contains("LIST SUBQUERY")),
-            "{details:?}"
-        );
-        assert!(
-            !details.iter().any(|s| s.contains("CORRELATED")),
-            "{details:?}"
-        );
     }
 
     #[tokio::test]
