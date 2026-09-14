@@ -1,5 +1,53 @@
 # Campaign qualification and performance plan
 
+2026-09-14 completed write-attribution run: clean `b9dd17ef` used the full
+six-cycle disk workload with apply/log/VFS tracing enabled. It completed at
+8,627.19 recipients/sec in 695.96 process seconds, costing 1.00353 CPU-ms per
+recipient. This is instrumented evidence, not qualification or a speedup over
+the uninstrumented run. All 32 WAL and 32 main-file handles emitted close totals;
+no traced write errors occurred.
+
+| VFS class | Write calls | Requested bytes | Aggregate call seconds | Longest call, seconds |
+|---|---:|---:|---:|---:|
+| WAL | 40,794 | 55,125,488,736 | 668.96 | 2.392 |
+| Main/other | 6,849 | 5,909,356,544 | 93.04 | 1.767 |
+| Temporary | 119,728 | 490,405,888 | 3.77 | 0.017 |
+
+These overlapping VFS times do not measure physical-device service time.
+Temporary-file creation/removal is not included. Apply time aggregated across
+stores was 6,608.72 s: update SQL 4,129.20 s, read SQL 993.12 s, transformation
+508.88 s, commit 924.28 s and writer wait 5.77 s. Writes can also occur during
+SQL execution, so VFS totals must not be added to those phase totals.
+
+The authoritative log produced 45,366 append observations. Produce latency
+p50/p90/p95/p99 was 433/1,061/2,266/3,556 ms; 19,250 (42.4%) exceeded 500 ms.
+Of 19,053 background claim-join windows, 5,207 expired after at least 500 ms
+unchanged and without a coverage waiter. Another 7,646 unchanged windows ended
+with a waiter. A growing generation is not itself proof of per-row fusion.
+
+This evidence prioritizes avoiding unnecessary intermediate leased-state writes
+over temporary-file write tuning. The next candidate increases only the bounded
+background claim-follow-up window from 500 to 1,000 ms. It leaves immediate
+strong-read bypass, original deadlines, ready-neighbor scheduling, log durability,
+generation caps and every acceptance gate unchanged. The intended benefit is
+fewer intermediate writes when a durable follow-up arrives late; it is not yet
+measured. A new regression covers a follow-up at 750 ms without extending the
+deadline. Existing tests verify waiter preemption and FIFO/neighbor behavior.
+
+All 76 local object-log tests pass, excluding the same two live-S3 tests. The first
+suite was interrupted after an empty-store open test stalled; that test passed
+in isolation and the full rerun finished in 1.22 s. No fix for that unreproduced
+stall is claimed. The new regression's initial push fixture was corrected to a
+completion before the passing rerun. All six campaign tests (55.45 s) and four
+workload recovery tests (2.41 s) also pass. A clean six-cycle performance
+measurement is pending; no speedup is claimed for the one-second window.
+
+Raw and derived artifacts use `fireweed-campaign-b9dd17ef-vfs-attribution-six*`,
+`fireweed-b9dd17ef-vfs-accounting.json` and `fireweed-b9dd17ef-join-accounting.json`.
+The archived `fireweed-account-vfs-trace.py.txt` reproduces VFS/phase aggregation
+and checks that successful close totals cover all stores. The private disk
+projection directory was removed after property readback and evidence capture.
+
 2026-09-14 attribution follow-up: added opt-in
 `FIREWEED_PROJECTION_IO_TRACE=1` to the disposable projection VFS. It reports
 per-file write calls, requested bytes (including failed calls), elapsed time

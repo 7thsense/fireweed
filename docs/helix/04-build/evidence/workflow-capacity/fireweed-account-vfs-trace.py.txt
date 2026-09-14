@@ -1,0 +1,32 @@
+import collections, json, re, sys
+from pathlib import Path
+source=Path(sys.argv[1])
+report=json.loads(source.read_text())
+assert report['exit_code']==0, 'Only a completed successful workload supplies full close-time totals'
+lines=report.get('stderr','').splitlines()
+classes={}
+apply=collections.Counter(); logs=collections.Counter(); blobs={}
+for line in lines:
+ values={k:int(v) for k,v in re.findall(r'(\w+)=(\d+)',line)}
+ if line.startswith('projection_io '):
+  kind=re.search(r'class=(\w+)',line)[1]
+  row=classes.setdefault(kind,{'handles':0,'calls':0,'requested_bytes':0,'elapsed_us':0,'max_us':0,'over_1ms':0,'over_10ms':0,'over_100ms':0,'errors':0})
+  row['handles']+=1
+  for key,value in values.items():
+   if key=='max_us': row[key]=max(row[key],value)
+   else: row[key]+=value
+ elif line.startswith('apply cmds='):
+  apply['batches']+=1;apply.update(values)
+ elif line.startswith('log_pre_us='):
+  logs['calls']+=1;logs.update({k:v for k,v in values.items() if k!='seq'})
+ elif line.startswith('log_blob '):
+  kind=re.search(r'class=(\w+)',line)[1]
+  row=blobs.setdefault(kind,collections.Counter());row['calls']+=1;row.update(values)
+assert classes.get('wal',{}).get('calls',0)>0, 'Missing WAL totals'
+assert classes['wal']['handles']==report['result']['physical_shards'], 'WAL close totals do not cover every store'
+result={'source':str(source),'head':report['head'],'binary_sha256':report['binary_sha256'],
+ 'diagnostic_only':True,'successful_child_exit':True,'timings_overlap_between_stores':True,
+ 'write_elapsed_is_vfs_call_time_not_cpu_or_device_service_time':True,
+ 'write_bytes_are_requested_not_device_counters':True,'write_classes':classes,
+ 'apply_totals':dict(apply),'log_append_totals':dict(logs),'log_blob_totals':blobs}
+print(json.dumps(result,indent=2))

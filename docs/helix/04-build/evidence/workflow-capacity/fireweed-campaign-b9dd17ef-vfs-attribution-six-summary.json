@@ -1,0 +1,174 @@
+{
+  "head": "b9dd17ef1db76ae5ccfa9b87e797c499b20f5147",
+  "binary_sha256": "523477e9bc5d4159c5e4f4d51241ee32ee10a4d3badca5a42eb6cdc6e265ea87",
+  "diagnostics": {
+    "FIREWEED_APPLY_TRACE": "1",
+    "FIREWEED_LOG_TRACE": "1",
+    "FIREWEED_PROJECTION_IO_TRACE": "1"
+  },
+  "exit_code": 0,
+  "rate": 8627.19120978368,
+  "process_wall_s": 695.9579879550147,
+  "cpu_ms_per_recipient": 1.0035287053333335,
+  "mean_cpu_occupancy": 8.651631759687765,
+  "output_bytes_per_recipient": 12738.790058666667,
+  "logical_log_bytes_per_recipient": 1834.8266986666667,
+  "peak_rss_gib": 10.316650390625,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 85.012035083,
+      "load_s": 5.589900903,
+      "prepare_s": 38.159131731,
+      "delivery_s": 29.336760637,
+      "verify_s": 0.522623888,
+      "purge_s": 7.051765283,
+      "progress_p95_s": 1.221114692,
+      "due_to_claim_max_us": 8528805
+    },
+    {
+      "wall_s": 117.295892687,
+      "load_s": 20.095103308,
+      "prepare_s": 37.676844288,
+      "delivery_s": 51.332735438,
+      "verify_s": 0.511424356,
+      "purge_s": 7.385671542,
+      "progress_p95_s": 0.687707323,
+      "due_to_claim_max_us": 24048576
+    },
+    {
+      "wall_s": 105.477833675,
+      "load_s": 25.324402508,
+      "prepare_s": 44.468644043,
+      "delivery_s": 28.345311244,
+      "verify_s": 0.538229454,
+      "purge_s": 6.510997028,
+      "progress_p95_s": 0.797359746,
+      "due_to_claim_max_us": 8341508
+    },
+    {
+      "wall_s": 141.91758253,
+      "load_s": 23.397756281,
+      "prepare_s": 57.675792557,
+      "delivery_s": 53.469447852,
+      "verify_s": 0.644910291,
+      "purge_s": 6.630906655,
+      "progress_p95_s": 0.613718899,
+      "due_to_claim_max_us": 22824417
+    },
+    {
+      "wall_s": 113.663956343,
+      "load_s": 24.118726788,
+      "prepare_s": 45.763725074,
+      "delivery_s": 34.368484545,
+      "verify_s": 0.615926622,
+      "purge_s": 8.619244393,
+      "progress_p95_s": 0.502468934,
+      "due_to_claim_max_us": 9760721
+    },
+    {
+      "wall_s": 125.504185564,
+      "load_s": 36.159880112,
+      "prepare_s": 47.57724497,
+      "delivery_s": 34.421986159,
+      "verify_s": 0.591492891,
+      "purge_s": 6.800016793,
+      "progress_p95_s": 0.752057258,
+      "due_to_claim_max_us": 8930167
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 8627.19120978368,
+      "required": 10000
+    },
+    {
+      "name": "s7_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.13802495,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s11_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.013219242,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s21_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.221114692,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s30_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.048689173,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8525.4477125509,
+      "required": 10000
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9480.664943131238,
+      "required": 10000
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7046.34325199705,
+      "required": 10000
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8797.863739515918,
+      "required": 10000
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7967.861753025415,
+      "required": 10000
+    }
+  ],
+  "join_trace": {
+    "count": 19053,
+    "grew_during_wait": 6200,
+    "ending_with_waiter": 13719,
+    "waiter_true": {
+      "count": 13719,
+      "p50_us": 235834,
+      "p95_us": 492765
+    },
+    "waiter_false": {
+      "count": 5334,
+      "p50_us": 501256,
+      "p95_us": 506280
+    }
+  },
+  "apply_trace": {
+    "groups": 37141,
+    "claim_with_other": 7883
+  },
+  "large_single_other_summed_overlapping_elapsed_s": {
+    "groups": 768,
+    "total_us": 930.234524,
+    "read_us": 226.910042,
+    "upd_us": 549.707338,
+    "commit_us": 125.135023,
+    "wait_us": 5.638596
+  },
+  "claim_tail_trace": {
+    "calls": 20679,
+    "retained_hits": 20675,
+    "summed_elapsed_s": 8.677613
+  }
+}

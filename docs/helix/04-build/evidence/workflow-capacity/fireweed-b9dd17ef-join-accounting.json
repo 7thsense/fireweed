@@ -1,0 +1,19 @@
+{
+  "append_count": 45366,
+  "produce_ms_percentiles": {
+    "0.5": 433.402,
+    "0.9": 1061.071,
+    "0.95": 2265.851,
+    "0.99": 3555.889
+  },
+  "produce_over_500ms": 19250,
+  "join_windows": 19053,
+  "join_outcomes": {
+    "unchanged:waiter=true": 7646,
+    "grew:waiter=true": 6073,
+    "grew:waiter=false": 127,
+    "unchanged:waiter=false": 5207
+  },
+  "unchanged_without_waiter_past_500ms": 5207,
+  "grew_is_not_proof_of_row_fusion": true
+}

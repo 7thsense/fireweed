@@ -997,9 +997,11 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 
 /// Briefly join a follow-up that invalidates the claimed leases before applying
 /// intermediate Leased rows. Disk-backed append can take hundreds of milliseconds
-/// under concurrent writes; an 80 ms window missed nearly every follow-up in the
-/// sustained workload. Coverage waiters bypass this bounded background delay.
-const CLAIM_COMPLETE_JOIN_MS: u64 = 500;
+/// under concurrent writes. The sustained trace also found many 500 ms windows
+/// expiring before the durable follow-up, causing intermediate lease writes.
+/// Allow one second in the background; coverage waiters still bypass the delay,
+/// and notifications cannot restart the original deadline.
+const CLAIM_COMPLETE_JOIN_MS: u64 = 1_000;
 
 fn queue_has_coverage_waiter<P: AsyncProjectionStore + 'static>(
     inner: &CoordinatorInner<P>,
@@ -2033,6 +2035,41 @@ mod tests {
             None,
         ));
         entry
+    }
+
+    #[test]
+    fn late_followup_can_join_without_restarting_the_claim_deadline() {
+        let now = Instant::now();
+        let mut state = CoordinatorState {
+            entries: VecDeque::from([waiting_claim(shard(), 1)]),
+            ..Default::default()
+        };
+        let mut joins = HashMap::new();
+        let WorkerSelection::WaitUntil(deadline) =
+            select_worker_generation(&state, &mut joins, now, |_| false)
+        else {
+            panic!("claim should await its follow-up");
+        };
+        let late = now + Duration::from_millis(750);
+        let WorkerSelection::WaitUntil(unchanged_deadline) =
+            select_worker_generation(&state, &mut joins, late, |_| false)
+        else {
+            panic!("do not materialize the claim at the old 500 ms boundary");
+        };
+        assert_eq!(unchanged_deadline, deadline);
+        let mut followup = ready_on(shard(), 2, 2, 1, 1, 0);
+        let ApplyEntry::Ready(batch) = &mut followup else {
+            unreachable!()
+        };
+        batch.commands[0].command =
+            QueueCommand::Finalize(fireweed_engine::FinalizeCommand { outcomes: vec![] });
+        state.entries.push_back(followup);
+        let WorkerSelection::Ready(next) =
+            select_worker_generation(&state, &mut joins, late, |_| false)
+        else {
+            panic!("ready follow-up should release the joined prefix immediately");
+        };
+        assert_eq!(next.entry_ids, vec![1, 2]);
     }
 
     #[test]

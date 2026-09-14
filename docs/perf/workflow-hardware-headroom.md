@@ -1,5 +1,16 @@
 # Workflow capacity versus hardware cost
 
+2026-09-14 write attribution on the full disk workload recorded **55.13 GB of
+requested WAL writes**, **5.91 GB of main-file writes**, and **0.49 GB of temporary
+file writes** over six million recipients. Time inside those VFS calls totaled
+669/93/3.8 seconds respectively, overlapping across stores. These are neither
+NAND bytes nor device-service times; creation/removal of temporary files is not
+timed. The traced run is diagnostic only. The [qualification plan](campaign-qualification-plan.md)
+contains raw provenance, apply/log timings and the proposed one-second background
+claim-join experiment. It targets redundant intermediate lease writes while
+preserving immediate coverage-waiter bypass and all qualification gates. This
+does not change the fixed 10k/12.5k targets or establish an intrinsic SSD ceiling.
+
 2026-09-13: no SSD maintenance was performed. It is no longer a dependency for
 optimization. New first-cycle diagnostics and the statement-execution reuse
 candidate are recorded in the [qualification plan](campaign-qualification-plan.md).

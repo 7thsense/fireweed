@@ -1,0 +1,88 @@
+{
+  "source": "/tmp/fireweed-campaign-b9dd17ef-vfs-attribution-six.json",
+  "head": "b9dd17ef1db76ae5ccfa9b87e797c499b20f5147",
+  "binary_sha256": "523477e9bc5d4159c5e4f4d51241ee32ee10a4d3badca5a42eb6cdc6e265ea87",
+  "diagnostic_only": true,
+  "successful_child_exit": true,
+  "timings_overlap_between_stores": true,
+  "write_elapsed_is_vfs_call_time_not_cpu_or_device_service_time": true,
+  "write_bytes_are_requested_not_device_counters": true,
+  "write_classes": {
+    "temporary": {
+      "handles": 119728,
+      "calls": 119728,
+      "requested_bytes": 490405888,
+      "elapsed_us": 3774659,
+      "max_us": 17103,
+      "over_1ms": 551,
+      "over_10ms": 15,
+      "over_100ms": 0,
+      "errors": 0
+    },
+    "main_or_other": {
+      "handles": 32,
+      "calls": 6849,
+      "requested_bytes": 5909356544,
+      "elapsed_us": 93044354,
+      "max_us": 1767164,
+      "over_1ms": 1699,
+      "over_10ms": 1217,
+      "over_100ms": 140,
+      "errors": 0
+    },
+    "wal": {
+      "handles": 32,
+      "calls": 40794,
+      "requested_bytes": 55125488736,
+      "elapsed_us": 668956269,
+      "max_us": 2391643,
+      "over_1ms": 10316,
+      "over_10ms": 3017,
+      "over_100ms": 998,
+      "errors": 0
+    }
+  },
+  "apply_totals": {
+    "batches": 37141,
+    "cmds": 48384,
+    "items": 48631584,
+    "push": 6144,
+    "upd": 0,
+    "claim": 20736,
+    "fin": 0,
+    "other": 21504,
+    "wait_us": 5767072,
+    "begin_us": 4935930,
+    "cur_us": 12430413,
+    "read_us": 993115462,
+    "xform_us": 508880945,
+    "upd_us": 4129195438,
+    "commit_us": 924283700,
+    "total_us": 6608724363
+  },
+  "log_append_totals": {
+    "calls": 45366,
+    "log_pre_us": 67318725,
+    "produce_us": 26370759110,
+    "metadata_us": 131612054,
+    "bytes": 11001428761,
+    "commands": 48384
+  },
+  "log_blob_totals": {
+    "segment": {
+      "calls": 45355,
+      "bytes": 11001428761,
+      "put_us": 13599424245
+    },
+    "manifest": {
+      "calls": 45355,
+      "bytes": 7481831,
+      "put_us": 8476035357
+    },
+    "metadata": {
+      "calls": 768,
+      "bytes": 25920,
+      "put_us": 130390708
+    }
+  }
+}
