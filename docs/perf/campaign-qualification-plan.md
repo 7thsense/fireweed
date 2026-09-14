@@ -1,5 +1,24 @@
 # Campaign qualification and performance plan
 
+2026-09-14 membership candidate with explicit projection barriers (`cd5db494`):
+**10,097.35 recipients/sec overall**, 594.45 seconds. This is **not qualification**:
+cycles 2, 4 and 5 reached only 9,220.75 / 9,050.08 / 8,681.55 equivalent
+recipients/sec, and 12 reporting checks failed (worst p95 1.411 s). All other
+gates passed. Reporting failures by cycle were 8/1/0/2/0/1, versus 27/13/2/9/10/6
+in the earlier two-worker control. CPU cost was 1.03782 ms/recipient (+2.1%),
+peak RSS 10.90 GiB, process output 11,391.17 bytes/recipient and logical log
+output 1,834.32 bytes/recipient. Host writes were 21.11 GiB at 36.52 MiB/sec.
+Observed rate rose 8.7% in this serial comparison, while measured device bandwidth
+also rose; this is not a replicated causal throughput claim.
+
+Slowest cycle times were 73.75/84.39/108.45/96.27/110.50/115.19 seconds. Late
+loads reached 39.26 seconds and the final purge reached 29.82 seconds, which is
+included by the explicit retained-row completion barrier. Raw, summary, device,
+provenance and compression properties use `fireweed-campaign-cd5db494-membership-w2-six*`.
+The private projection root was removed after capture. The next short same-binary
+trace distinguishes remaining initial-cursor/unsupported-tail fallbacks from
+the new membership query cost. No SSD/host settings changed.
+
 2026-09-14 reporting candidate (on `e27e7442`): public metrics can fold a
 complete retained tail of either Push or PurgeItems commands over a fresh SQL
 snapshot. The coordinator copies only identities, caps the tail at 16 commands

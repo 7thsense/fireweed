@@ -1,0 +1,168 @@
+{
+  "head": "cd5db494da5ba3224aa0256b4af7592d509b07d0",
+  "binary_sha256": "f1b0db63ddd7af1bb64e5ec41d45e5161f7aab76316193ca255ecd3c9b7e4c81",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 10097.34630311045,
+  "process_wall_s": 594.4519284600392,
+  "cpu_ms_per_recipient": 1.0378181846666668,
+  "mean_cpu_occupancy": 10.475042320295193,
+  "output_bytes_per_recipient": 11391.165781333333,
+  "logical_log_bytes_per_recipient": 1834.3240923333333,
+  "peak_rss_gib": 10.895439147949219,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 73.751074306,
+      "load_s": 6.2687239,
+      "prepare_s": 32.433056481,
+      "delivery_s": 24.612342601,
+      "verify_s": 0.514256939,
+      "purge_s": 6.632810426,
+      "progress_p95_s": 1.4110129310000001,
+      "due_to_claim_max_us": 7263581
+    },
+    {
+      "wall_s": 84.388575855,
+      "load_s": 21.117440382,
+      "prepare_s": 30.187120546,
+      "delivery_s": 25.097327876,
+      "verify_s": 0.531990515,
+      "purge_s": 7.576838748,
+      "progress_p95_s": 1.027417916,
+      "due_to_claim_max_us": 7637953
+    },
+    {
+      "wall_s": 108.451082169,
+      "load_s": 39.257486914,
+      "prepare_s": 35.530920435,
+      "delivery_s": 25.089191111,
+      "verify_s": 0.599098361,
+      "purge_s": 8.042041721,
+      "progress_p95_s": 0.961534624,
+      "due_to_claim_max_us": 7811604
+    },
+    {
+      "wall_s": 96.27220955,
+      "load_s": 21.588123164,
+      "prepare_s": 33.474508337,
+      "delivery_s": 30.081419377,
+      "verify_s": 0.53384659,
+      "purge_s": 10.512922984,
+      "progress_p95_s": 1.158794063,
+      "due_to_claim_max_us": 7702416
+    },
+    {
+      "wall_s": 110.496311024,
+      "load_s": 36.722175045,
+      "prepare_s": 36.182450732,
+      "delivery_s": 28.484493006,
+      "verify_s": 0.527718207,
+      "purge_s": 7.964896609,
+      "progress_p95_s": 0.974974843,
+      "due_to_claim_max_us": 8029365
+    },
+    {
+      "wall_s": 115.186798498,
+      "load_s": 19.544979821,
+      "prepare_s": 35.414281093,
+      "delivery_s": 29.89053395,
+      "verify_s": 0.671695922,
+      "purge_s": 29.815510103,
+      "progress_p95_s": 1.03173439,
+      "due_to_claim_max_us": 8667289
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "s1_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.124927648,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s3_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.030325064,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s7_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.253738443,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.231975619,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s17_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.047776689,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s25_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.067617521,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s27_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.172135302,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.4110129310000001,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s26_c1_cycle1_progress",
+      "passed": false,
+      "actual": 1.027417916,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9220.74708707557,
+      "required": 10000
+    },
+    {
+      "name": "s0_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.158794063,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s3_c1_cycle3_progress",
+      "passed": false,
+      "actual": 1.027334526,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9050.07588699317,
+      "required": 10000
+    },
+    {
+      "name": "s13_c0_cycle5_progress",
+      "passed": false,
+      "actual": 1.03173439,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8681.550429734038,
+      "required": 10000
+    }
+  ]
+}

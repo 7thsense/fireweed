@@ -1,5 +1,15 @@
 # Workflow capacity versus hardware cost
 
+`cd5db494` with exact membership metrics and explicit disk-projection phase
+barriers completed six million recipients at **10,097.35/sec**, but failed
+three per-cycle throughput gates and 12 reporting checks. CPU cost was
+1.03782 ms/recipient; host writes were 21.1052 GiB. Constant-cost demands at
+10k/12.5k are **10.38/12.97 CPU-seconds/sec** and **36.02/45.02 MiB/sec** of
+host writes. These are demands, not hardware ceilings. The overall rate was
+8.7% above the preceding same-worker control, but CPU cost rose 2.1% and device
+bandwidth also changed; no isolated causal throughput gain is established.
+All other correctness, retention, due-time, WAL and stability gates passed.
+
 Reporting-phase attribution on `47875b5f` (two diagnostic cycles) found all 511
 reads over one second dominated by projection coverage. Across these calls,
 coverage accumulated 1,047.49 seconds; their two SQL reads accumulated just
