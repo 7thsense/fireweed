@@ -1,0 +1,8 @@
+{
+  "projection_root": "/home/erik/Projects/fireweed/target/workflow-capacity/compressed-dec6e387-genesis-w3-six-7cuj5rro",
+  "property": "compression=zstd\n",
+  "only_new_private_projection_directory_changed": true,
+  "runtime_environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  }
+}

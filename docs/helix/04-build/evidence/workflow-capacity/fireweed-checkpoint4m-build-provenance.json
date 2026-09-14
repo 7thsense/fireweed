@@ -1,0 +1,7 @@
+{
+  "build_command": "SOURCE_DATE_EPOCH=1789179522 CARGO_BUILD_JOBS=8 cargo test --locked --release -p fireweed -p fireweed-objectlog -p fireweed-turso -p fireweed-workload --lib --test differential --test campaign --test primitives --test freelist_wal --test recovery -- --test-threads=1 --skip s3_emission_cursor_native_cas_monotonic_and_reopen --skip live_minio_probe_enforced_create_only_when_env_set",
+  "source_date_epoch": 1789179522,
+  "binary_sha256": "dfb3a729c406bdf4526c1d906f8cb08afcb2da7e7b0038507403b07d5f320e4e",
+  "benchmark_binary_built_by_release_integration_validation": true,
+  "runtime_source_blob": "00091e62ffad6aaf2ab8ffc169411f4222c173b5"
+}

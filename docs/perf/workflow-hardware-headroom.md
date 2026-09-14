@@ -1,5 +1,16 @@
 # Workflow capacity versus hardware cost
 
+The latest three-worker comparison (`dec6e387`) is **not qualified**:
+8,637.08 recipients/sec, 1.20484 CPU-ms/recipient, 10.40 mean logical CPUs,
+23.38694 GiB of sampled host writes over six million recipients. Constant-cost
+10k/12.5k demands are **12.05/15.06 CPU-seconds/sec** and **39.91/49.89 MiB/sec**.
+These exceed the better two-worker costs below. Increasing workers has not
+resolved the stalls. Device busy time was 84.12%, measured host writes averaged
+34.56 MiB/sec and mean write-request time was 47.11 ms. These observations do not
+identify an intrinsic SSD limit. The next code trial shortens the rebuildable
+WAL checkpoint window, testing the tradeoff between transient WAL writes and
+main-file/checkpoint work. No SSD or host configuration changes are involved.
+
 `cd5db494` with exact membership metrics and explicit disk-projection phase
 barriers completed six million recipients at **10,097.35/sec**, but failed
 three per-cycle throughput gates and 12 reporting checks. CPU cost was

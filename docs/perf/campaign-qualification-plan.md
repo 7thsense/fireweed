@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+2026-09-14 genesis reporting fix, three-worker comparison (`dec6e387`):
+**8,637.08 recipients/sec**, 695.11 seconds, **not qualified**. Five cycle-rate
+checks and 54 reporting checks failed; all other gates passed. Slowest cycle
+times were 86.51/115.74/107.83/132.32/111.09/135.23 seconds. CPU cost rose to
+1.20484 ms/recipient, peak RSS was 11.31 GiB, and host writes were 23.39 GiB at
+34.56 MiB/sec. This combines the genesis fix and a worker-count change, so it
+is not an isolated measurement of either. It provides no evidence for retaining
+three workers; the next trial returns to two.
+
+The next isolated code experiment reduces the log-backed projection's automatic
+checkpoint window from 448 MiB to 4 MiB, preserving its byte size across database
+page sizes. At 32 stores this reduces the nominal aggregate transient WAL window
+from 14 GiB to 128 MiB. It may reduce old WAL versions written before file reuse,
+but may increase main-file writes and checkpoint CPU. Only measurements decide.
+The log's durable append and sync path, rebuildable I/O adapter, read barriers,
+row workload, and qualification gates remain unchanged. Readers use OFF; writers
+use NORMAL for correct checkpoint accounting while the VFS omits physical sync.
+This is a disk-backed database policy experiment, not RAM-WAL or host tuning.
+
+The full three-worker evidence uses `fireweed-campaign-dec6e387-genesis-w3-six*`
+and `fireweed-genesis-release-build.log`. The owned projection root was removed
+after capturing compression properties. For subsequent builds/tests,
+`SOURCE_DATE_EPOCH=1789179522` is fixed to the last vendored-core source commit.
+The existing Turso build script supports this reproducibility seed; it prevents
+unrelated documentation commits from invalidating the entire core build and
+changes source-id metadata. This value must stay consistent and be recorded;
+it does not change the SQL or I/O policy.
+
 2026-09-14 membership candidate with explicit projection barriers (`cd5db494`):
 **10,097.35 recipients/sec overall**, 594.45 seconds. This is **not qualification**:
 cycles 2, 4 and 5 reached only 9,220.75 / 9,050.08 / 8,681.55 equivalent
@@ -2080,3 +2108,14 @@ tests are explicitly filtered because this environment has no configured
 endpoint. The four focused membership checks also passed. Logs are archived as
 `fireweed-genesis-membership-tests.log` and `fireweed-genesis-library-tests.log`.
 No sustained performance improvement is claimed before the next full run.
+
+### Short checkpoint candidate validation
+
+The 4 MiB candidate passed all 304 release checks, including native WAL reuse,
+recovery from the authoritative log, public campaigns and component workflows.
+The same one existing ignored test and two unconfigured live-S3 tests remain
+excluded as documented above. Release validation also built the workload CLI;
+that exact executable is used for the initial one-cycle diagnostic, with its
+SHA-256, build command, reproducibility seed and modified source blob recorded
+in `fireweed-checkpoint4m-build-provenance.json`. The diagnostic is not a full
+qualification. Sustained improvement still requires clean six-cycle repeats.

@@ -3127,15 +3127,17 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
     if !config.rebuildable_io {
         return Ok(1_000);
     }
-    // Preserve the checkpoint byte budget across new and existing page sizes.
-    // In particular, smaller pages must not halve the coalescing window.
+    // Reuse a bounded disk WAL instead of retaining hundreds of MiB of transient
+    // page versions per store. Only the log needs stable-storage durability;
+    // the rebuildable VFS still preserves writes and suppresses physical sync.
+    // Keep the same byte window across new and existing database page sizes.
     let page_size = scalar_i64(connection, "PRAGMA page_size").await?;
     if !(512..=65_536).contains(&page_size) || !(page_size as u64).is_power_of_two() {
         return Err(TursoRelationalError::Configuration(format!(
             "invalid projection page size {page_size}"
         )));
     }
-    Ok(448 * 1024 * 1024 / page_size)
+    Ok(4 * 1024 * 1024 / page_size)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3560,7 +3562,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            114_688
+            1_024
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));
@@ -3589,7 +3591,7 @@ mod projection_checkpoint_config_tests {
                 scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                     .await
                     .unwrap(),
-                448 * 1024 * 1024 / page_size
+                4 * 1024 * 1024 / page_size
             );
         }
         let standalone = TursoRelational::in_memory().await.unwrap();
