@@ -21,9 +21,13 @@ and temporary-index cost; client/storage batch and handler limits remain unchang
 The actual native execution test and full-key/rowid plan assertions remain gates.
 The 16-row candidate passes those checks at 85 writes per thousand replacements;
 its 8.02-second debug regression time is essentially unchanged from the previous
-8.16 seconds and is not evidence of a sustained speedup. Full release validation
-with the stronger progress oracle is running. No campaign performance benefit has
-been measured yet. The native result is `fireweed-batched-replacements-16.log`.
+8.16 seconds and is not evidence of a sustained speedup. All 70 release checks
+pass with the stronger progress oracle: 45 native tests, seven adapter/history
+checks, one WAL/free-page test, three native recovery tests, two workload unit
+tests, six campaign tests (24.13 s), two primitive CLI tests and four workload
+recovery tests (1.12 s). Results are archived in
+`fireweed-batched-replacements-16-release-validation.log`. No campaign performance
+benefit has been measured yet. The native result is `fireweed-batched-replacements-16.log`.
 
 The concurrent progress oracle is strengthened independently: between completed
 load and the start of purge, every read must count the full resident list and
