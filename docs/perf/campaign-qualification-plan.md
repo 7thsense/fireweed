@@ -1,5 +1,37 @@
 # Campaign qualification and performance plan
 
+2026-09-14 current CPU attribution: clean `391829ee`, with normal release binary
+and explicit Btrfs log/projection roots, completed three million-recipient cycles
+under a 199 Hz user-IP sampler. It collected **540,506 samples with zero lost**.
+Largest symbols included allocation (6.91%), SQL column decoding (5.90%), memcmp
+(4.95%), VM stepping (4.70%), two memcpy routines (4.53% and 1.70%), and B-tree
+traversal. This identifies broad CPU costs, not call stacks attributing all
+allocation/copy cost to a specific adapter. Instrumented rate was 8,120.34/sec;
+this three-cycle diagnostic is not qualification or a code-speedup comparison.
+Artifacts use `fireweed-current-cpu-391829ee*`; sampler/driver sources and normal
+release build log are included. Projection compression properties were captured
+before removing the owned data directory.
+
+The next candidate consumes owned Turso row values in the relational and
+public-read collection helpers. Previously the SDK materialized owned values,
+then `Row::get_value` cloned each text/blob again before the caller discarded the
+row. `Row::into_values` transfers those buffers through the existing value
+conversion. Queries, result columns, errors, transaction boundaries, persisted
+representation and qualification gates remain unchanged. A focused SDK test
+asserts value types and original text/blob buffer addresses; a native regression
+checks values survive statement rebinding and teardown. The focused SDK test
+passes, and all **71 workspace release checks pass** (46 native, seven
+adapter/history, one WAL/free-page, three native recovery, two workload unit,
+six campaign, two primitive CLI and four workload recovery tests). Logs use
+`fireweed-owned-row-sdk-*` and `fireweed-owned-rows-*`. Initial test invocations
+hit vendored-workspace/lock restrictions; the standalone test passed after
+resolving its dev dependencies. A subsequent workspace cache conflict was
+resolved by clearing the affected Turso build artifacts. Both lockfiles remain
+unchanged. The successful workspace run used `--locked`. Sustained performance
+measurement is pending; no speedup is claimed. The reported libc copy/compare
+symbol offsets were verified against current build ID
+`503200d7fda94a5dc6058d7e0694e5d1dcb2e372`; that provenance is archived too.
+
 2026-09-14 16-row replacement experiment rejected: clean `1af38acf` completed
 all six canonical disk cycles at **7,428.07 recipients/sec** in 808.11 seconds,
 compared with 8,355.53/sec for 56-row batches. CPU cost rose from 1.04291 to

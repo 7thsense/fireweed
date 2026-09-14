@@ -72,6 +72,44 @@ mod apply_statement_reuse_tests {
     use super::*;
 
     #[tokio::test]
+    async fn consumed_row_values_survive_statement_reuse_and_teardown() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let connection = database.connect().unwrap();
+        let mut statement = connection
+            .prepare_cached("SELECT ?1,?2,?3,?4,?5")
+            .await
+            .unwrap();
+        let expected = vec![
+            Value::Null,
+            Value::Integer(i64::MIN),
+            Value::Real(1.25),
+            Value::Text("metadata \0 λ".repeat(4096)),
+            Value::Blob(vec![0, 255, 31, 128].repeat(16384)),
+        ];
+        let mut rows = statement.query(expected.clone()).await.unwrap();
+        let held: Vec<_> = rows.next().await.unwrap().unwrap().into_values().collect();
+        assert!(rows.next().await.unwrap().is_none());
+        drop(rows);
+        let replacement = vec![Value::Integer(7); 5];
+        let mut rows = statement.query(replacement.clone()).await.unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_values()
+                .collect::<Vec<_>>(),
+            replacement
+        );
+        assert!(rows.next().await.unwrap().is_none());
+        drop(rows);
+        drop(statement);
+        drop(connection);
+        drop(database);
+        assert_eq!(held, expected);
+    }
+
+    #[tokio::test]
     async fn reused_writes_rebind_nulls_and_release_state_before_rollback() {
         let database = turso::Builder::new_local(":memory:").build().await.unwrap();
         let connection = database.connect().unwrap();
@@ -321,14 +359,9 @@ impl RelTx for TursoRel<'_> {
             return block_on_local(async {
                 let mut stmt = self.0.prepare_cached(sql).await.map_err(storage)?;
                 let mut rows = stmt.query(params).await.map_err(storage)?;
-                let width = rows.column_count();
                 let mut collected = Vec::new();
                 while let Some(row) = rows.next().await.map_err(storage)? {
-                    let mut values = Vec::with_capacity(width);
-                    for index in 0..width {
-                        values.push(from_turso(row.get_value(index).map_err(storage)?));
-                    }
-                    collected.push(RelRow(values));
+                    collected.push(RelRow(row.into_values().map(from_turso).collect()));
                 }
                 Ok(collected)
             });
@@ -338,14 +371,9 @@ impl RelTx for TursoRel<'_> {
         block_on_turso(async move {
             let mut stmt = conn.prepare_cached(&sql).await.map_err(storage)?;
             let mut rows = stmt.query(params).await.map_err(storage)?;
-            let width = rows.column_count();
             let mut collected = Vec::new();
             while let Some(row) = rows.next().await.map_err(storage)? {
-                let mut values = Vec::with_capacity(width);
-                for index in 0..width {
-                    values.push(from_turso(row.get_value(index).map_err(storage)?));
-                }
-                collected.push(RelRow(values));
+                collected.push(RelRow(row.into_values().map(from_turso).collect()));
             }
             Ok(collected)
         })

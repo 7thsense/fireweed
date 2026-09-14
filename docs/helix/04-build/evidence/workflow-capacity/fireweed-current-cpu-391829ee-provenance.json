@@ -1,0 +1,49 @@
+{
+  "diagnostic": true,
+  "qualification": false,
+  "purpose": "current disk-workflow user-IP CPU attribution after restoring 56-row SQL chunks",
+  "head": "391829ee6b2c68c863e056e364dfd793e8c540d8",
+  "binary_sha256": "424bf2c45237a2da42a297c6ba7a89f09902ceced6fade6249b4480ce4df7cc6",
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "campaign",
+    "--campaign-metadata",
+    "--recycle",
+    "--cycles",
+    "3",
+    "--items",
+    "1000000",
+    "--batch",
+    "1000",
+    "--shards",
+    "32",
+    "--workers",
+    "1",
+    "--load-workers",
+    "2",
+    "--deadline-seconds",
+    "1800",
+    "--projection-root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-391829ee-ejbhzpy7/projections",
+    "--campaign-timestamp-priority",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-391829ee-ejbhzpy7/data"
+  ],
+  "root": "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-391829ee-ejbhzpy7",
+  "mount": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "projection_compression": "compression=zstd\n",
+  "sample_frequency_hz": 199,
+  "environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  }
+}

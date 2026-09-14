@@ -3495,13 +3495,9 @@ async fn collect_rows(
     let columns = rows.column_names();
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await? {
-        let mut values = Vec::with_capacity(row.column_count());
-        for index in 0..row.column_count() {
-            values.push(row.get_value(index)?);
-        }
         collected.push(OwnedRow {
             columns: columns.clone(),
-            values,
+            values: row.into_values().collect(),
         });
     }
     crate::projection::trace_sql(sql, bind_count, collected.len(), started.elapsed());

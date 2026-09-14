@@ -73,6 +73,12 @@ pub struct Row {
 }
 
 impl Row {
+    /// Consume this row, transferring its text and blob buffers to the caller.
+    /// Values remain owned independently of the statement and subsequent rows.
+    pub fn into_values(self) -> impl ExactSizeIterator<Item = Value> {
+        self.values.into_iter().map(Value::from)
+    }
+
     pub fn get_value(&self, idx: usize) -> Result<Value> {
         let val = self.values.get(idx).ok_or_else(|| {
             Error::Misuse(format!(
@@ -110,5 +116,56 @@ impl Row {
 
     pub fn column_count(&self) -> usize {
         self.values.len()
+    }
+}
+
+#[cfg(test)]
+mod owned_row_tests {
+    use super::*;
+
+    #[test]
+    fn consuming_row_preserves_types_and_transfers_variable_buffers() {
+        let text = "owned metadata".repeat(100);
+        let blob = vec![0, 255, 31, 128].repeat(1024);
+        let text_pointer = text.as_ptr();
+        let blob_pointer = blob.as_ptr();
+        let row = Row {
+            values: vec![
+                Value::Null.into(),
+                Value::Integer(i64::MIN).into(),
+                Value::Real(1.25).into(),
+                Value::Text(text).into(),
+                Value::Blob(blob).into(),
+                Value::Text(String::new()).into(),
+                Value::Blob(Vec::new()).into(),
+            ],
+        };
+        let mut values = row.into_values();
+        assert_eq!(values.len(), 7);
+        assert_eq!(values.next(), Some(Value::Null));
+        assert_eq!(values.next(), Some(Value::Integer(i64::MIN)));
+        assert_eq!(values.next(), Some(Value::Real(1.25)));
+        let Some(Value::Text(text)) = values.next() else {
+            panic!("missing text")
+        };
+        assert_eq!(text, "owned metadata".repeat(100));
+        assert_eq!(
+            text.as_ptr(),
+            text_pointer,
+            "text buffer must transfer without cloning"
+        );
+        let Some(Value::Blob(blob)) = values.next() else {
+            panic!("missing blob")
+        };
+        assert_eq!(blob, vec![0, 255, 31, 128].repeat(1024));
+        assert_eq!(
+            blob.as_ptr(),
+            blob_pointer,
+            "blob buffer must transfer without cloning"
+        );
+        assert_eq!(values.next(), Some(Value::Text(String::new())));
+        assert_eq!(values.next(), Some(Value::Blob(Vec::new())));
+        assert_eq!(values.len(), 0);
+        assert_eq!(values.next(), None);
     }
 }

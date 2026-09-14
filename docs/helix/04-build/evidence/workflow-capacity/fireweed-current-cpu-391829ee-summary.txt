@@ -1,0 +1,36 @@
+total 540506
+  6.91%   37365 _mi_page_malloc_zero
+  5.90%   31874 turso_core::vdbe::execute::op_column
+  4.95%   26734 libc::__memcmp_avx2_movbe
+  4.70%   25403 <turso_core::vdbe::Program>::normal_step
+  4.53%   24477 libc::__memcpy_avx_unaligned_erms
+  3.10%   16769 turso_core::types::compare_records_generic::<&turso_core::types::ValueRef, core::iter::adapters::peekable::Peekable<core::slice::iter::Iter<turso_core::types::ValueRef>>>
+  2.93%   15831 <turso_core::storage::btree::BTreeCursor>::move_to
+  2.90%   15680 <turso_core::storage::btree::BTreeCursor>::indexbtree_move_to_internal
+  2.60%   14042 <turso_core::storage::btree::BTreeCursor>::indexbtree_seek_internal
+  2.09%   11322 mi_free
+  1.76%    9536 <turso_core::storage::page_cache::PageCache>::get
+  1.70%    9175 libc::__memcpy_avx_unaligned
+  1.56%    8436 <turso_core::storage::pager::Pager>::read_page
+  1.56%    8405 <turso_core::types::immutable_record::ImmutableRecord>::from_registers::<core::slice::iter::Iter<turso_core::vdbe::Register>, &[turso_core::vdbe::Register]>
+  1.37%    7415 <turso_core::types::RecordCompare>::compare::<&turso_core::types::ValueRef, core::slice::iter::Iter<turso_core::types::ValueRef>, &[turso_core::types::ValueRef]>
+  1.32%    7142 <turso_core::storage::btree::BTreeCursor as turso_core::storage::btree::CursorTrait>::seek
+  1.08%    5812 turso_core::vdbe::execute::op_copy
+  1.04%    5618 fireweed_workload::campaign::initial_body
+  1.02%    5510 <turso_core::connection::Connection>::should_interrupt_for_progress
+  0.93%    5034 core::ptr::drop_glue::<turso_core::vdbe::ActiveOpState>
+  0.88%    4737 <alloc::collections::btree::map::BTreeMap<_, _, _> as core::clone::Clone>::clone::clone_subtree::<alloc::string::String, fireweed_core::domain::MetadataValue, alloc::alloc::Global>
+  0.87%    4700 turso_core::vdbe::execute::op_comparison
+  0.87%    4679 <turso_core::storage::btree::PageStack>::unpin_all_and_clear_slots
+  0.86%    4628 mi_theap_malloc_aligned
+  0.85%    4586 turso_core::storage::sqlite3_ondisk::read_btree_cell
+  0.67%    3624 <alloc::collections::btree::map::IntoIter<alloc::string::String, fireweed_core::domain::MetadataValue>>::dying_next
+  0.66%    3589 turso_core::vdbe::execute::op_variable
+  0.66%    3546 <arc_swap::debt::Debt>::pay_all::<core::option::Option<alloc::sync::Arc<turso_core::storage::pager::Page>>, <arc_swap::strategy::hybrid::HybridStrategy<arc_swap::strategy::hybrid::DefaultConfig> as arc_swap::strategy::sealed::InnerStrategy<core::option::Option<alloc::sync::Arc<turso_core::storage::pager::Page>>>>::wait_for_readers::{closure#0}>::{closure#0}
+  0.63%    3429 <turso_core::storage::btree::BTreeCursor>::balance_non_root
+  0.60%    3219 <turso_core::storage::btree::BTreeCursor as turso_core::storage::btree::CursorTrait>::record
+  0.57%    3094 <&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>> as serde_core::ser::Serializer>::serialize_str
+  0.55%    2979 _mi_page_free_collect_partly
+  0.55%    2956 turso_core::vdbe::execute::apply_affinity_char
+  0.54%    2944 turso_core::types::compare_records_generic::<turso_core::types::ValueRef, core::iter::adapters::map::Map<core::slice::iter::Iter<turso_core::vdbe::Register>, turso_core::vdbe::registers_to_ref_values::{closure#0}>>
+  0.54%    2927 fireweed_engine::async_composed::validate_purge_plan

@@ -1,0 +1,9 @@
+     Locking 4 packages to latest compatible versions
+      Adding turso_core v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_core)
+      Adding turso_sdk_kit v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sdk_kit)
+      Adding turso_sync_engine v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sync_engine)
+      Adding turso_sync_sdk_kit v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sync_sdk_kit)
+error: failed to download `aws-lc-rs v1.16.3`
+
+Caused by:
+  attempting to make an HTTP request, but --offline was specified

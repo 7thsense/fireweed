@@ -248,11 +248,7 @@ async fn one_row(
     let Some(row) = rows.next().await.map_err(storage)? else {
         return Ok(None);
     };
-    let mut values = Vec::with_capacity(row.column_count());
-    for index in 0..row.column_count() {
-        values.push(row.get_value(index).map_err(storage)?);
-    }
-    Ok(Some(values))
+    Ok(Some(row.into_values().collect()))
 }
 
 async fn one_outcome_row(
@@ -267,11 +263,7 @@ async fn one_outcome_row(
     let Some(row) = rows.next().await.map_err(outcome_read_error)? else {
         return Ok(None);
     };
-    let mut values = Vec::with_capacity(row.column_count());
-    for index in 0..row.column_count() {
-        values.push(row.get_value(index).map_err(outcome_read_error)?);
-    }
-    Ok(Some(values))
+    Ok(Some(row.into_values().collect()))
 }
 
 async fn query_value_rows(
@@ -288,11 +280,7 @@ async fn query_value_rows(
     let mut rows = statement.query(params).await.map_err(outcome_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(outcome_read_error)? {
-        let mut values = Vec::with_capacity(row.column_count());
-        for index in 0..row.column_count() {
-            values.push(row.get_value(index).map_err(outcome_read_error)?);
-        }
-        collected.push(values);
+        collected.push(row.into_values().collect());
     }
     trace_sql(
         query.as_ref(),
@@ -496,11 +484,7 @@ async fn validation_rows_by_item(
     let mut by_item = HashMap::with_capacity(ids.len());
     while let Some(row) = rows.next().await.map_err(storage)? {
         let item_id = ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?;
-        let mut values = Vec::with_capacity(row.column_count().saturating_sub(1));
-        for index in 1..row.column_count() {
-            values.push(row.get_value(index).map_err(storage)?);
-        }
-        by_item.insert(item_id, values);
+        by_item.insert(item_id, row.into_values().skip(1).collect());
     }
     trace_sql(&query, bind_count, by_item.len(), started.elapsed());
     Ok(by_item)
@@ -2269,11 +2253,7 @@ async fn query_driver_value_rows(
     let mut rows = statement.query(params).await.map_err(driver_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(driver_read_error)? {
-        let mut values = Vec::with_capacity(row.column_count());
-        for index in 0..row.column_count() {
-            values.push(row.get_value(index).map_err(driver_read_error)?);
-        }
-        collected.push(values);
+        collected.push(row.into_values().collect());
     }
     trace_sql(
         query.as_ref(),

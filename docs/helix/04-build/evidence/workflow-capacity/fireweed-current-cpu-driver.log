@@ -1,0 +1,2 @@
+sampler_pid 1175146 prefix /tmp/fireweed-current-cpu-391829ee
+exit 0 root_requires_owned_cleanup /home/erik/Projects/fireweed/target/workflow-capacity/cpu-profile-391829ee-ejbhzpy7
