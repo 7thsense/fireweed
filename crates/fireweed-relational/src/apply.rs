@@ -37,6 +37,99 @@ const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
+/// SQL used by the adapter for bounded resolved replacement writes.
+/// Exposed for native query-plan qualification of the executed statement.
+pub fn clearing_item_replacements_sql(row_count: usize) -> String {
+    let values_sql = vec!["(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; row_count].join(",");
+    format!(
+        "WITH incoming(item_id,state,priority,priority_sort,not_before,eligible_since,fields,metadata,\
+             entity_document,index_fields,new_version,terminal_at,terminal_epoch,expected_version,claimed_here,keeps_payload) \
+             AS (VALUES {values_sql}) UPDATE fireweed_items SET \
+             lifecycle_state=incoming.state,priority=incoming.priority,priority_sort=incoming.priority_sort,\
+             not_before=incoming.not_before,eligible_since=incoming.eligible_since,\
+             payload=CASE WHEN incoming.keeps_payload THEN fireweed_items.payload ELSE NULL END,\
+             fields=incoming.fields,metadata=incoming.metadata,entity_document=incoming.entity_document,\
+             index_fields=incoming.index_fields,lease_token_hash=NULL,lease_expires_at=NULL,worker_id=NULL,fenced=0,\
+             item_version=incoming.new_version,terminal_at=incoming.terminal_at,terminal_command_epoch=incoming.terminal_epoch,\
+             updated_at=?,last_command_sequence=?,retry_count=retry_count+incoming.claimed_here \
+             FROM incoming WHERE fireweed_items.rowid IN ( \
+             SELECT target.rowid FROM incoming CROSS JOIN fireweed_items target \
+             INDEXED BY sqlite_autoindex_fireweed_items_1 \
+             ON target.tenant_id=? AND target.queue_id=? AND target.item_id=incoming.item_id) \
+             AND fireweed_items.item_id=incoming.item_id \
+             AND fireweed_items.item_version=incoming.expected_version \
+             AND (incoming.claimed_here=0 OR (lifecycle_state='Pending' AND superseded=0))"
+    )
+}
+
+/// Apply independent lease-clearing replacements in bounded VALUES chunks.
+/// Every row keeps its version and fused-claim guard. A short update is an error;
+/// the owning apply transaction rolls back this chunk and all preceding chunks.
+fn apply_clearing_item_replacements(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    definition: &QueueDefinition,
+    position: &CommandPosition,
+    seq: u64,
+    now: UtcTimestamp,
+    items: &[fireweed_engine::ResolvedItemMutation],
+    fused_claims: Option<&HashSet<ItemId>>,
+) -> EngineResult<()> {
+    const ROW_BINDS: usize = 16;
+    let (tenant, queue) = parts(shard);
+    let now_n = ts_nanos(now);
+    for chunk in items.chunks(bind_chunk_size(ROW_BINDS, 4)) {
+        let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + 4);
+        for item in chunk {
+            let values = item
+                .action
+                .replacement_values()
+                .ok_or(EngineError::Conflict)?;
+            if !values.invalidate_lease {
+                return Err(EngineError::Conflict);
+            }
+            let claimed_here =
+                i64::from(fused_claims.is_some_and(|ids| ids.contains(&item.item_id)));
+            let terminal = matches!(values.state, ItemState::Complete | ItemState::Failed);
+            params.extend([
+                item.item_id.to_string().into(),
+                state_str(values.state).into(),
+                values.priority.as_ref().map(to_json).transpose()?.into(),
+                elig_sort(&values.priority, &definition.priority_model).into(),
+                values.not_before.map(ts_nanos).into(),
+                ts_nanos(values.eligible_since).into(),
+                fields_to_json(&values.fields)?.into(),
+                metadata_to_json(&values.metadata)?.into(),
+                values
+                    .entity_document
+                    .as_ref()
+                    .map(to_json)
+                    .transpose()?
+                    .into(),
+                fireweed_engine::index_fields::encode_index_fields_blob(&values.index_fields)?
+                    .into(),
+                (values.item_version as i64).into(),
+                terminal.then_some(now_n).into(),
+                terminal.then_some(position.backend_epoch as i64).into(),
+                (values.item_version.saturating_sub(1 + claimed_here as u64) as i64).into(),
+                claimed_here.into(),
+                item.action.keeps_payload().into(),
+            ]);
+        }
+        params.extend([
+            now_n.into(),
+            (seq as i64).into(),
+            RelValue::Text(tenant.clone()),
+            RelValue::Text(queue.clone()),
+        ]);
+        let changed = crate::rel_exec(tx, &clearing_item_replacements_sql(chunk.len()), params)?;
+        if changed != chunk.len() {
+            return Err(EngineError::Conflict);
+        }
+    }
+    Ok(())
+}
+
 fn request_expires_at(
     queues: &HashMap<QueueKey, QueueDefinition>,
     shard: &QueueKey,
@@ -6126,7 +6219,38 @@ fn apply_command_sql_with_claims(
             let batch_auxiliary = c.items.iter().all(|item| {
                 item.action.replacement_values().is_some() && distinct.insert(item.item_id)
             });
-            for item in &c.items {
+            // Only independent lease-clearing rows can share this guarded write.
+            // Typed indexes/group summaries and ordered repeated IDs retain the
+            // sequential lowering below.
+            let batch_replacements = batch_auxiliary
+                && typed_indexes.is_empty()
+                && !grouped_shards.contains(shard)
+                && c.items.iter().all(|item| {
+                    item.action
+                        .replacement_values()
+                        .is_some_and(|values| values.invalidate_lease)
+                });
+            if batch_replacements {
+                apply_clearing_item_replacements(
+                    tx,
+                    shard,
+                    queues.get(shard).ok_or(EngineError::NotFound)?,
+                    position,
+                    seq,
+                    now,
+                    &c.items,
+                    fused_claims,
+                )?;
+                token_ops.extend(
+                    c.items.iter().map(|item| TokenOp::Clear(shard.clone(), item.item_id)),
+                );
+            }
+            let sequential_items = if batch_replacements {
+                &[][..]
+            } else {
+                c.items.as_slice()
+            };
+            for item in sequential_items {
                 let item_id = item.item_id.to_string();
                 match &item.action {
                     ResolvedItemMutationAction::Purge => {

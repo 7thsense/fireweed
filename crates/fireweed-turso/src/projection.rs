@@ -4623,7 +4623,9 @@ mod push_batch_lowering_tests {
     }
 
     #[test]
-    fn mutation_round_trips_scale_by_bind_chunks_not_input_cardinality() {
+    fn legacy_batch_helper_chunk_arithmetic_stays_bounded() {
+        // This checks helper sizing only, not executed SQL. The resolved-item
+        // replacement test below exercises actual statement counts and plans.
         #[derive(Debug, PartialEq, Eq)]
         struct RoundTrips {
             push_identity_reads: usize,
@@ -5430,6 +5432,261 @@ mod item_mutation_tests {
             response_payload: serde_json::to_string(&response).unwrap(),
         });
         command
+    }
+
+    #[tokio::test]
+    async fn clearing_replacements_batch_real_sql_and_rollback_late_conflicts() {
+        const N: usize = 1_000;
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let fast = TursoRelational::in_memory().await.unwrap();
+        let sequential = TursoRelational::in_memory().await.unwrap();
+        let mut pushed: Vec<_> = (1_000..1_000 + N)
+            .map(|i| {
+                let mut row = item(&i.to_string(), &i.to_string(), i as i64);
+                row.payload = Some(Bytes::from(format!("old-{i}")));
+                row
+            })
+            .collect();
+        let sentinel = item("999999", "sequential-sentinel", 0);
+        pushed.push(sentinel.clone());
+        for store in [&fast, &sequential] {
+            AsyncProjectionStore::ensure_shard(store, definition.clone())
+                .await
+                .unwrap();
+            AsyncProjectionStore::apply_live(
+                store,
+                vec![CommandPosition::new(shard.clone(), 0, 0)],
+                vec![envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: pushed.clone(),
+                    }),
+                    pushed.iter().map(|row| row.item_id).collect(),
+                )],
+            )
+            .await
+            .unwrap();
+        }
+        let plan = fast
+            .query(
+                format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    fireweed_relational::clearing_item_replacements_sql(56)
+                ),
+                vec![Value::Null; 900],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = plan
+            .iter()
+            .map(|row| match &row.values[3] {
+                Value::Text(text) => text.as_str(),
+                other => panic!("unexpected query plan: {other:?}"),
+            })
+            .collect();
+        eprintln!("batched replacement plan: {details:?}");
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.starts_with("SEARCH target ")
+                    && detail.contains("tenant_id=? AND queue_id=? AND item_id=?")),
+            "target discovery must seek complete item keys: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.starts_with("SEARCH fireweed_items ")
+                    && detail.contains("INTEGER PRIMARY KEY")
+                    && detail.contains("rowid=?")),
+            "bounded writes must seek discovered rowids, never scan the resident queue: {details:?}"
+        );
+        let mutations: Vec<_> = pushed[..N]
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let mut mutation = replacement(row, 2, b"new");
+                let ResolvedItemMutationAction::Replace(mut values) = mutation.action else {
+                    unreachable!()
+                };
+                values.invalidate_lease = true;
+                values.state = match i % 3 {
+                    0 => ItemState::Pending,
+                    1 => ItemState::Complete,
+                    _ => ItemState::Failed,
+                };
+                values.priority = Some(fireweed_core::PriorityValue::Int64(-(i as i64)));
+                values.payload = (i % 3 == 2).then(|| Bytes::from(format!("new-{i}")));
+                mutation.action = if i % 3 == 0 {
+                    ResolvedItemMutationAction::ReplaceKeepingPayload(values)
+                } else {
+                    ResolvedItemMutationAction::Replace(values)
+                };
+                mutation
+            })
+            .collect();
+        let image_sql = "SELECT * FROM fireweed_items WHERE item_id<>'999999' ORDER BY item_id";
+        let before: Vec<_> = fast
+            .query(image_sql, vec![])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect();
+        // Both failure cases occur after multiple complete SQL chunks. Neither
+        // row writes nor bearer deletions nor cursor advancement may escape.
+        for missing in [false, true] {
+            let mut invalid = mutations.clone();
+            if missing {
+                invalid[N - 1].item_id = fireweed_core::ItemId::new("888888").unwrap();
+            } else {
+                let ResolvedItemMutationAction::ReplaceKeepingPayload(values) =
+                    &mut invalid[N - 1].action
+                else {
+                    unreachable!()
+                };
+                values.item_version += 1;
+            }
+            let error = AsyncProjectionStore::apply_live(
+                &fast,
+                vec![CommandPosition::new(shard.clone(), 0, 1)],
+                vec![mutation_envelope(invalid, "batch-conflict", 700)],
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, fireweed_engine::EngineError::Conflict));
+            let after: Vec<_> = fast
+                .query(image_sql, vec![])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.values)
+                .collect();
+            assert_eq!(after, before);
+            assert_eq!(
+                AsyncProjectionStore::recovery_high_water(&fast, shard.clone())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .sequence,
+                0
+            );
+        }
+        // A distinct lease-preserving sentinel forces the existing sequential
+        // path for the reference vector. Compare every persisted main-row column.
+        let mut reference = mutations.clone();
+        reference.push(replacement(&sentinel, 2, b"sentinel"));
+        AsyncProjectionStore::apply_live(
+            &sequential,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![mutation_envelope(reference, "batch-valid", 701)],
+        )
+        .await
+        .unwrap();
+        let command = mutation_envelope(mutations, "batch-valid", 701);
+        AsyncProjectionStore::apply_live(
+            &fast,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![command.clone()],
+        )
+        .await
+        .unwrap();
+        let shape = fast.last_apply_statement_shape().unwrap();
+        eprintln!("batched replacement statements: {shape:?}");
+        assert!(
+            shape.write_statement_count < 100,
+            "1,000 independent replacements must use bounded SQL batches: {shape:?}"
+        );
+        assert!(shape.max_bind_count <= fireweed_relational::SQLITE_BIND_CAP);
+        for sql in [
+            image_sql,
+            "SELECT * FROM fireweed_item_payloads WHERE item_id<>'999999' ORDER BY item_id",
+            "SELECT * FROM fireweed_item_gates WHERE item_id<>'999999' ORDER BY item_id,gate_key",
+        ] {
+            let actual: Vec<_> = fast
+                .query(sql, vec![])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.values)
+                .collect();
+            let expected: Vec<_> = sequential
+                .query(sql, vec![])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.values)
+                .collect();
+            assert_eq!(actual, expected, "{sql}");
+        }
+        let metrics = fast.server_metrics(&shard).await.unwrap();
+        assert_eq!(
+            (
+                metrics.pending,
+                metrics.leased,
+                metrics.complete,
+                metrics.failed
+            ),
+            (335, 0, 333, 333)
+        );
+        let committed: Vec<_> = fast
+            .query(image_sql, vec![])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect();
+        let mut conflicting_receipt = command.clone();
+        conflicting_receipt.request_fingerprint = Some(999);
+        let QueueCommand::MutateItems(mutations) = &mut conflicting_receipt.command else {
+            unreachable!()
+        };
+        for mutation in &mut mutations.items {
+            match &mut mutation.action {
+                ResolvedItemMutationAction::Replace(values)
+                | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
+                    values.item_version += 1
+                }
+                _ => unreachable!(),
+            }
+        }
+        let error = AsyncProjectionStore::apply_live(
+            &fast,
+            vec![CommandPosition::new(shard.clone(), 0, 2)],
+            vec![conflicting_receipt],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            fireweed_engine::EngineError::RequestIdConflict
+        ));
+        let after: Vec<_> = fast
+            .query(image_sql, vec![])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect();
+        assert_eq!(
+            after, committed,
+            "receipt conflict must roll back all row updates"
+        );
+        assert_eq!(
+            AsyncProjectionStore::recovery_high_water(&fast, shard.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence,
+            1
+        );
+        AsyncProjectionStore::apply_recovery(
+            &fast,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![command],
+        )
+        .await
+        .unwrap();
+        assert_eq!(fast.server_metrics(&shard).await.unwrap(), metrics);
     }
 
     #[tokio::test]

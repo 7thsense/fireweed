@@ -37,7 +37,7 @@ async fn gated_pair() -> Pair {
 }
 
 #[tokio::test]
-async fn sqlite_and_turso_lifecycle_have_zero_observable_mismatch() {
+async fn two_turso_instances_replay_lifecycle_identically() {
     let pair = Pair::memory().await;
     let id = ItemId::new("101").unwrap();
     let expected = [
@@ -219,7 +219,7 @@ async fn generated_rich_history_has_exact_projection_image_and_read_parity() {
 }
 
 #[tokio::test]
-async fn sqlite_and_turso_rollback_the_same_conflicting_batch_without_cursor_drift() {
+async fn two_turso_instances_rollback_conflicting_batches_without_cursor_drift() {
     let pair = Pair::memory().await;
     let ids = [ItemId::new("111").unwrap(), ItemId::new("112").unwrap()];
     let command = envelope(

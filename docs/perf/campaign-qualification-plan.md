@@ -1,5 +1,58 @@
 # Campaign qualification and performance plan
 
+2026-09-14 exact claim-tail metrics candidate: clean `387f0c82` completed the
+canonical six-cycle disk workload at **7,899.88 recipients/sec**, 760.03 seconds.
+All non-throughput qualification gates passed, including all 384 campaign/cycle
+progress checks; worst p95 was 0.7363 seconds. Overall throughput and every cycle's
+slowest-campaign equivalent throughput failed. This is not a qualification pass.
+The previous 4 KiB/one-worker disk run was 8,520.83/sec with three progress failures.
+This single serial comparison shows a reporting improvement with lower measured
+throughput, not an overall speedup or a precise causal regression estimate.
+
+CPU cost was 0.98098 ms/recipient, mean occupancy 7.74 logical CPUs, peak RSS
+10.45 GiB, process output 12,398.53 bytes/recipient, and authoritative log bytes
+1,834.83/recipient. Host writes were 24.09 GiB at 32.58 MiB/sec; request latency
+and busy percentage do not establish an intrinsic SSD ceiling. Raw/summary/device
+artifacts use `fireweed-campaign-387f0c82-claim-metrics-w1-six*`. All projection file
+compression properties were captured before removing the private run directory.
+
+The unchanged 90 ms native reader deadline passed in the optimized release suite:
+all 44 tests passed in 2.76 seconds. The prior debug failures remain preserved;
+release validation does not erase them. Logs are `fireweed-claim-metrics-native-release.log`
+and `fireweed-claim-metrics-release-build.log`.
+
+The next code change targets a concrete unbatched operation: resolved `MutateItems`
+currently runs the main guarded UPDATE once per recipient. Payload and gate work
+is already batched. The older round-trip arithmetic test does not execute this
+path and cannot prove bounded SQL execution. A new native 1,000-row test executes
+the real adapter, limits observed statement counts, compares all main/payload/gate
+columns with the existing sequential path, and checks rollback for a late version
+conflict, missing row, and request-receipt conflict. The proposed fast path is
+limited to distinct, lease-clearing replacements without grouping or typed indexes.
+Other vectors preserve their ordered path. The new test failed on the original
+code with 1,022 writes for 1,000 replacements, demonstrating the missing batching.
+
+The first VALUES UPDATE draft used 40 writes and passed row/rollback checks, but
+its real Turso plan searched only `(tenant_id,queue_id)` and then scanned incoming
+rows. Debug test time was 25.87 s. An item-ID IN restriction still failed the
+full-key plan assertion and was not retained. The corrected statement discovers
+rowids with incoming-first, full-key indexed seeks, then updates by integer
+primary key; Turso also indexes the incoming item IDs. It passes both plan
+assertions, issues 40 writes (maximum 900 binds), preserves every persisted
+main/payload/gate column versus the sequential lowering, and passes late missing
+row, version conflict, receipt conflict and covered-replay checks. Debug test time
+was 8.16 s. These times are diagnostic, not campaign capacity or a speedup over
+the old code (whose test stopped at the statement-count failure). Logs are
+`fireweed-batched-replacements-{before,after,plan,keyed,rowids}.log`.
+
+The arithmetic-only helper test is renamed to describe its scope. Two legacy
+test names claiming SQLite/Turso comparison are corrected: their fixtures both
+instantiate Turso, so they establish repeatability, not independent-engine parity.
+The new batching test deliberately forces the existing sequential lowering in its
+reference vector with a lease-preserving sentinel. The black-box campaign oracle
+and public API recovery tests remain the workflow correctness evidence. Full
+release validation is running; campaign performance has not yet been measured.
+
 2026-09-14 one-second claim-join experiment rejected: clean `1879ecc6`
 completed the canonical six-cycle disk run at **8,151.94 recipients/sec** in
 736.54 seconds, versus 8,520.83/sec in the preceding uninstrumented 500 ms run.

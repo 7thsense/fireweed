@@ -1,0 +1,244 @@
+warning: methods `move_to_root` and `indexbtree_move_to_unpacked` are never used
+    --> vendor/turso_core/storage/btree.rs:1463:8
+     |
+ 841 | impl BTreeCursor {
+     | ---------------- methods in this implementation
+...
+1463 |     fn move_to_root(&mut self) -> Result<Option<Completion>> {
+     |        ^^^^^^^^^^^^
+...
+1749 |     fn indexbtree_move_to_unpacked(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:499:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+499 |     pub step_fn: StepFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+    = note: `#[warn(unpredictable_function_pointer_comparisons)]` on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:500:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+500 |     pub finalize_fn: FinalizeFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:501:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+501 |     pub aggregate_destructor: Option<ContextDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:502:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+502 |     pub value_destructor: Option<ValueDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor/turso_core/vector/operations/text.rs:67:56
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector> {
+   |                                                        ^^^^            ^^^^^^ the same lifetime is hidden here
+   |                                                        |
+   |                                                        the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector<'_>> {
+   |                                                                              ++++
+
+warning: `turso_core` (lib) generated 6 warnings (run `cargo fix --lib -p turso_core` to apply 1 suggestion)
+warning: unused import: `DatabaseRowMutation`
+  --> vendor/turso_sync_engine/src/database_sync_operations.rs:37:55
+   |
+37 |         parse_bin_record, Coro, DatabasePullRevision, DatabaseRowMutation,
+   |                                                       ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling fireweed-relational v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-relational)
+warning: `turso_sync_engine` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_engine` to apply 1 suggestion)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor/turso_sync_sdk_kit/src/sync_engine_io.rs:211:14
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<SyncEngineIoCompletionInner<TBytes>>> {
+    |              ^^^^^ the lifetime is elided here   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<'_, SyncEngineIoCompletionInner<TBytes>>> {
+    |                                                             +++
+
+warning: `turso_sync_sdk_kit` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_sdk_kit` to apply 1 suggestion)
+   Compiling fireweed-turso v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-turso)
+warning: function `cohort_id_for` is never used
+   --> crates/fireweed-turso/src/projection.rs:400:4
+    |
+400 | fn cohort_id_for(group_key: &str, now: i64) -> String {
+    |    ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cohort_retention_until` is never used
+   --> crates/fireweed-turso/src/projection.rs:404:4
+    |
+404 | fn cohort_retention_until(definition: &QueueDefinition, now: i64) -> i64 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_UNBLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:435:7
+    |
+435 | const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CURSOR_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:438:7
+    |
+438 | const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:439:7
+    |
+439 | const API001_UPDATE_CHUNK: usize = 89; // tenant + queue + 89 * 10 row binds = 892
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_GATE_DELETE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:440:7
+    |
+440 | const API001_GATE_DELETE_CHUNK: usize = 898; // tenant + queue + 898 item binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_typed_unique_conflicts` is never used
+   --> crates/fireweed-turso/src/projection.rs:517:10
+    |
+517 | async fn check_typed_unique_conflicts(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:562:10
+    |
+562 | async fn insert_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `delete_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:597:10
+    |
+597 | async fn delete_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `replace_typed_indexes_for_entity` is never used
+   --> crates/fireweed-turso/src/projection.rs:613:10
+    |
+613 | async fn replace_typed_indexes_for_entity(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `upsert_cohorts` is never used
+   --> crates/fireweed-turso/src/projection.rs:722:10
+    |
+722 | async fn upsert_cohorts(
+    |          ^^^^^^^^^^^^^^
+
+warning: function `cohort_item_ids` is never used
+   --> crates/fireweed-turso/src/projection.rs:900:10
+    |
+900 | async fn cohort_item_ids(
+    |          ^^^^^^^^^^^^^^^
+
+warning: function `groups_for_items` is never used
+   --> crates/fireweed-turso/src/projection.rs:938:10
+    |
+938 | async fn groups_for_items(
+    |          ^^^^^^^^^^^^^^^^
+
+warning: function `cohort_state` is never used
+    --> crates/fireweed-turso/src/projection.rs:1367:10
+     |
+1367 | async fn cohort_state(
+     |          ^^^^^^^^^^^^
+
+warning: function `append_item_ids` is never used
+    --> crates/fireweed-turso/src/projection.rs:1387:4
+     |
+1387 | fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `execute_for_items` is never used
+    --> crates/fireweed-turso/src/projection.rs:1391:10
+     |
+1391 | async fn execute_for_items<F>(
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: function `update_item_schedules` is never used
+    --> crates/fireweed-turso/src/projection.rs:1418:10
+     |
+1418 | async fn update_item_schedules(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retry_info_by_item` is never used
+    --> crates/fireweed-turso/src/projection.rs:1454:10
+     |
+1454 | async fn retry_info_by_item(
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `extend_claim_by_query_replays` is never used
+    --> crates/fireweed-turso/src/projection.rs:1484:10
+     |
+1484 | async fn extend_claim_by_query_replays(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fireweed-turso` (lib test) generated 19 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.29s
+     Running unittests src/lib.rs (target/debug/deps/fireweed_turso-238e78627f6b1516)
+
+running 1 test
+test projection::item_mutation_tests::clearing_replacements_batch_real_sql_and_rollback_late_conflicts ... batched replacement plan: ["LIST SUBQUERY 1", "SCAN incoming", "SEARCH fireweed_items USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=?)", "SCAN incoming"]
+
+thread 'projection::item_mutation_tests::clearing_replacements_batch_real_sql_and_rollback_late_conflicts' (1152597) panicked at crates/fireweed-turso/src/projection.rs:5477:9:
+bounded writes must seek complete item keys, never scan the resident queue: ["LIST SUBQUERY 1", "SCAN incoming", "SEARCH fireweed_items USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=?)", "SCAN incoming"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    projection::item_mutation_tests::clearing_replacements_batch_real_sql_and_rollback_late_conflicts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 2.21s
+
+error: test failed, to rerun pass `-p fireweed-turso --lib`

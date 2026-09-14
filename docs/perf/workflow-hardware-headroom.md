@@ -1,5 +1,15 @@
 # Workflow capacity versus hardware cost
 
+2026-09-14 claim-tail metrics run (`387f0c82`): 7,899.88 recipients/sec;
+all non-throughput gates passed, but every throughput gate failed. Its measured
+0.98098 CPU-ms/recipient implies **9.81 / 12.26 CPU-seconds per second** at
+10k / 12.5k recipients/sec if per-recipient cost stays constant. Host writes of
+24.09 GiB over six million recipients imply approximately **41.1 / 51.4 MiB/sec**
+at those targets. These are resource demands, not throughput ceilings; contention,
+SMT scaling and the serial parts of the pipeline remain unmodeled. The run is a
+reporting improvement, not a throughput improvement over the prior 8,520.83/sec
+control. The next optimization targets the per-recipient guarded UPDATE loop.
+
 2026-09-14 write attribution on the full disk workload recorded **55.13 GB of
 requested WAL writes**, **5.91 GB of main-file writes**, and **0.49 GB of temporary
 file writes** over six million recipients. Time inside those VFS calls totaled
