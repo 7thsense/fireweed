@@ -3617,6 +3617,8 @@ pub struct MetricsMembershipRow {
 /// Counters, applied frontier and addressed row/key presence from one SQL snapshot.
 #[derive(Debug)]
 pub struct MetricsMembershipSnapshot {
+    /// Present even before sequence zero applies; absent cursors cannot prove genesis.
+    pub cursor_epoch: Option<u64>,
     pub metrics: QueueMetrics,
     pub position: Option<CommandPosition>,
     pub rows: std::collections::HashMap<ItemId, MetricsMembershipRow>,

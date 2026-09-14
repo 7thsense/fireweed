@@ -4006,7 +4006,9 @@ impl DerivedObjectLogTursoBackend {
                             return Ok(metrics);
                         }
                     }
-                    let membership = coordinator.retained_membership_tail(applied, target).await?;
+                }
+                if let Some(target) = &target {
+                    let membership = coordinator.retained_membership_tail(applied.as_ref(), target).await?;
                     mark(7);
                     if let Some(tail) = membership {
                         use fireweed_objectlog::RetainedMembershipChange;
@@ -4019,7 +4021,7 @@ impl DerivedObjectLogTursoBackend {
                         let snapshot = self.projection.server_metrics_with_membership_committed(shard, &identities).await?;
                         mark(8);
                         if let Some(metrics) = snapshot.and_then(|snapshot|
-                            fold_membership_metrics(snapshot, applied, target, &tail)) {
+                            fold_membership_metrics(snapshot, applied.as_ref(), target, &tail)) {
                             coordinator.ensure_healthy(shard)?;
                             if trace { eprintln!("metrics_read path=membership phases_us={phases:?}"); }
                             return Ok(metrics);
@@ -5733,7 +5735,7 @@ mod s4b_lifecycle {
 #[cfg(feature = "objectlog")]
 fn fold_membership_metrics(
     mut snapshot: fireweed_turso::MetricsMembershipSnapshot,
-    base: &CommandPosition,
+    base: Option<&CommandPosition>,
     target: &CommandPosition,
     tail: &[(
         CommandPosition,
@@ -5741,25 +5743,29 @@ fn fold_membership_metrics(
     )],
 ) -> Option<QueueMetrics> {
     use fireweed_objectlog::RetainedMembershipChange;
-    let applied = snapshot.position.as_ref()?;
-    if applied.queue != base.queue
-        || applied.backend_epoch != base.backend_epoch
-        || applied.sequence < base.sequence
-        || target.queue != base.queue
-        || target.backend_epoch != base.backend_epoch
-    {
-        return None;
-    }
-    if position_covers(Some(applied), target) {
-        return Some(snapshot.metrics);
-    }
-    let mut next = applied.sequence.checked_add(1)?;
+    let base_next = match base {
+        Some(base) if base.queue == target.queue && base.backend_epoch == target.backend_epoch =>
+            base.sequence.checked_add(1)?,
+        None if target.backend_epoch == 0 => 0,
+        _ => return None,
+    };
+    if snapshot.cursor_epoch != Some(target.backend_epoch) { return None; }
+    let applied = snapshot.position.as_ref();
+    let mut next = match applied {
+        Some(applied) if applied.queue == target.queue && applied.backend_epoch == target.backend_epoch =>
+            applied.sequence.checked_add(1)?,
+        None => 0,
+        _ => return None,
+    };
+    if next < base_next { return None; }
+    if position_covers(applied, target) { return Some(snapshot.metrics); }
+    let snapshot_next = next;
     for (position, change) in tail {
-        if position.sequence <= applied.sequence {
+        if position.sequence < snapshot_next {
             continue;
         }
-        if position.queue != base.queue
-            || position.backend_epoch != base.backend_epoch
+        if position.queue != target.queue
+            || position.backend_epoch != target.backend_epoch
             || position.sequence != next
             || position.sequence > target.sequence
         {
@@ -5910,6 +5916,8 @@ mod s3c_activation {
             let definition = qdef("membership-tail");
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             backend.create_queue(definition).await.unwrap();
+            let coordinator = backend.async_apply.as_ref().unwrap().clone();
+            coordinator.pause();
             backend
                 .push(
                     &shard,
@@ -5919,9 +5927,18 @@ mod s3c_activation {
                 )
                 .await
                 .unwrap();
+            let metrics = tokio::time::timeout(Duration::from_millis(250), backend.metrics(&shard))
+                .await.expect("genesis push counts do not wait for paused apply").unwrap();
+            assert_eq!(metrics.pending, 2);
+            let (sql, cursor) = backend.projection.server_metrics_with_position_committed(&shard).await.unwrap();
+            assert_eq!(sql.pending, 0);
+            assert_eq!(cursor, None);
+            assert_eq!(coordinator.snapshot(&shard).await.applied_high_water, None);
+            // A metrics read is not a physical apply barrier. Row reads still are.
+            assert!(tokio::time::timeout(Duration::from_millis(50), backend.peek(&shard, 10)).await.is_err());
+            coordinator.resume();
             let initial = backend.peek(&shard, 10).await.unwrap();
             assert_eq!(initial.len(), 2);
-            let coordinator = backend.async_apply.as_ref().unwrap().clone();
             coordinator.pause();
             let before = coordinator.snapshot(&shard).await.applied_high_water;
             backend
@@ -6003,6 +6020,7 @@ mod s3c_activation {
         let push = |n| Change::Push(vec![(id(n), ClientItemKey::new(format!("k{n}")).unwrap())]);
         let snapshot = |sequence, pending, rows: Vec<(ItemId, Option<ItemState>, bool, bool)>| {
             MetricsMembershipSnapshot {
+                cursor_epoch: Some(0),
                 metrics: QueueMetrics {
                     pending,
                     ..Default::default()
@@ -6023,6 +6041,17 @@ mod s3c_activation {
                     .collect(),
             }
         };
+        let genesis_tail = vec![(pos(0), push(0)), (pos(1), push(1))];
+        for epoch in [None, Some(1), Some(0)] {
+            let mut s = snapshot(0, 0, vec![(id(0), None, false, false), (id(1), None, false, false)]);
+            s.position = None;
+            s.cursor_epoch = epoch;
+            let result = fold_membership_metrics(s, None, &pos(1), &genesis_tail);
+            if epoch == Some(0) { assert_eq!(result.unwrap().pending, 2); }
+            else { assert!(result.is_none()); }
+        }
+        let s = snapshot(0, 1, vec![(id(0), Some(ItemState::Pending), false, true), (id(1), None, false, false)]);
+        assert_eq!(fold_membership_metrics(s, None, &pos(1), &genesis_tail).unwrap().pending, 2);
         let tail = vec![(pos(1), push(1)), (pos(2), push(2))];
         // Apply advanced while row presence was being read. The first push is
         // already represented in both the SQL counter and the existing row.
@@ -6035,7 +6064,7 @@ mod s3c_activation {
             ],
         );
         assert_eq!(
-            fold_membership_metrics(s, &pos(0), &pos(2), &tail)
+            fold_membership_metrics(s, Some(&pos(0)), &pos(2), &tail)
                 .unwrap()
                 .pending,
             2
@@ -6049,18 +6078,18 @@ mod s3c_activation {
                     (id(2), None, false, false),
                 ],
             );
-            assert!(fold_membership_metrics(s, &pos(0), &pos(2), &tail).is_none());
+            assert!(fold_membership_metrics(s, Some(&pos(0)), &pos(2), &tail).is_none());
         }
         assert!(
             fold_membership_metrics(
                 snapshot(0, 0, vec![(id(2), None, false, false)]),
-                &pos(0),
+                Some(&pos(0)),
                 &pos(2),
                 &tail[1..]
             )
             .is_none()
         );
-        assert!(fold_membership_metrics(snapshot(0, 0, vec![]), &pos(1), &pos(2), &tail).is_none());
+        assert!(fold_membership_metrics(snapshot(0, 0, vec![]), Some(&pos(1)), &pos(2), &tail).is_none());
         let purge = vec![(pos(1), Change::Purge(vec![id(1), id(2), id(3)]))];
         let s = snapshot(
             0,
@@ -6072,13 +6101,13 @@ mod s3c_activation {
             ],
         );
         assert_eq!(
-            fold_membership_metrics(s, &pos(0), &pos(1), &purge)
+            fold_membership_metrics(s, Some(&pos(0)), &pos(1), &purge)
                 .unwrap()
                 .pending,
             0
         );
         let s = snapshot(0, 0, vec![(id(1), Some(ItemState::Pending), false, false)]);
-        assert!(fold_membership_metrics(s, &pos(0), &pos(1), &purge).is_none());
+        assert!(fold_membership_metrics(s, Some(&pos(0)), &pos(1), &purge).is_none());
         let mut all_states = snapshot(0, 1, vec![
             (id(1), Some(ItemState::Pending), false, false),
             (id(2), Some(ItemState::Leased), false, false),
@@ -6089,13 +6118,13 @@ mod s3c_activation {
         all_states.metrics.complete = 1;
         all_states.metrics.failed = 1;
         all_states.metrics.resident_terminal_count = 2;
-        let all_purged = fold_membership_metrics(all_states, &pos(0), &pos(1),
+        let all_purged = fold_membership_metrics(all_states, Some(&pos(0)), &pos(1),
             &[(pos(1), Change::Purge((1..=4).map(id).collect()))]).unwrap();
         assert_eq!((all_purged.pending, all_purged.leased, all_purged.complete,
             all_purged.failed, all_purged.resident_terminal_count), (0,0,0,0,0));
         // A snapshot that already covers the target needs no retained rows.
         assert_eq!(
-            fold_membership_metrics(snapshot(3, 7, vec![]), &pos(0), &pos(2), &tail)
+            fold_membership_metrics(snapshot(3, 7, vec![]), Some(&pos(0)), &pos(2), &tail)
                 .unwrap()
                 .pending,
             7

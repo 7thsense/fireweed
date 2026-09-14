@@ -1,0 +1,8 @@
+{
+  "projection_root": "/home/erik/Projects/fireweed/target/workflow-capacity/compressed-a17af0fc-membership-trace-w2-one-geqwdfp_",
+  "property": "compression=zstd\n",
+  "only_new_private_projection_directory_changed": true,
+  "runtime_environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  }
+}

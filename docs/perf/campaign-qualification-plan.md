@@ -2045,3 +2045,38 @@ is attributed to this review.
 No benchmark or host mutation ran during this follow-up. The prepared identical-
 binary storage control remains pending the previously requested root-device
 maintenance approval; elapsed time or automatic goal continuation is not consent.
+
+### First-cycle membership trace and genesis follow-up
+
+The same `cd5db494` release binary (SHA-256
+`f1b0db63ddd7af1bb64e5ec41d45e5161f7aab76316193ca255ecd3c9b7e4c81`),
+run from clean `a17af0fc` with two workers and metrics tracing, completed one
+million-recipient cycle at 12,928.60/sec. This is diagnostic only: one cycle,
+tracing enabled, and reporting p95 reached 1.184 seconds. It does not meet the
+repeatability or reporting gates.
+
+The 4,213 reporting reads included 1,251 coverage fallbacks. Of 133 reads over
+one second, 129 were dominated by coverage waits. The 290 successful membership
+reads had total p95 743.955 ms, of which membership SQL p95 was 710.361 ms;
+returning thousands of addressed identities is not negligible under load.
+Coverage fallback phase timings show no membership SQL executed. They do not
+by themselves distinguish initial cursors, unsupported tails, identity limits,
+or pruning. Source inspection establishes that an initial `None` applied cursor
+could not attempt the membership path at all.
+
+The next change permits that initial tail only for epoch zero, contiguous
+retained positions starting at zero, and an actual SQL cursor row whose epoch
+matches. Missing cursors, foreign epochs, gaps and conflicts still use the
+coverage barrier. Physical row reads remain coverage barriers; the public test
+pauses apply before the first push and verifies these separate contracts.
+Evidence is archived under `fireweed-campaign-a17af0fc-membership-trace-w2-one*`
+and `fireweed-membership-trace-v2-summary.json` in the workflow-capacity evidence
+directory. No device or host settings were changed.
+
+The genesis change passed 279 release library checks (150 Fireweed, 77
+object-log, 52 native Turso), including the paused initial-push test. One
+existing direct object-log commit test remains ignored; two live S3 endpoint
+tests are explicitly filtered because this environment has no configured
+endpoint. The four focused membership checks also passed. Logs are archived as
+`fireweed-genesis-membership-tests.log` and `fireweed-genesis-library-tests.log`.
+No sustained performance improvement is claimed before the next full run.

@@ -2252,6 +2252,8 @@ pub(crate) async fn server_metrics_with_membership_on(
             nonnegative_u64(integer(&values[4])? - 1, "applied sequence")?,
         ))
     };
+    let cursor_epoch = optional_integer(&values[5])?
+        .map(|epoch| nonnegative_u64(epoch, "assignment epoch")).transpose()?;
     let mut presence = std::collections::HashMap::new();
     for values in rows {
         let Some(id) = optional_text(&values[6])? else {
@@ -2272,6 +2274,7 @@ pub(crate) async fn server_metrics_with_membership_on(
         );
     }
     Ok(Some(crate::MetricsMembershipSnapshot {
+        cursor_epoch,
         metrics,
         position,
         rows: presence,

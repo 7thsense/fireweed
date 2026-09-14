@@ -574,16 +574,22 @@ where
     /// No payloads or authoritative side counters are retained by this read.
     pub async fn retained_membership_tail(
         &self,
-        applied: &CommandPosition,
+        applied: Option<&CommandPosition>,
         target: &CommandPosition,
     ) -> EngineResult<Option<Vec<(CommandPosition, RetainedMembershipChange)>>> {
         self.ensure_healthy(&target.queue)?;
-        if applied.queue != target.queue
-            || applied.backend_epoch != target.backend_epoch
-            || !matches!(target.sequence.checked_sub(applied.sequence), Some(1..=16))
-        {
+        let start = match applied {
+            Some(applied) if applied.queue == target.queue
+                && applied.backend_epoch == target.backend_epoch => {
+                    let Some(start) = applied.sequence.checked_add(1) else { return Ok(None); };
+                    start
+                }
+            None if target.backend_epoch == 0 => 0,
+            _ => return Ok(None),
+        };
+        let Some(count @ 1..=16) = target.sequence.checked_sub(start).and_then(|n| n.checked_add(1)) else {
             return Ok(None);
-        }
+        };
         let state = self.inner.state.lock().await;
         let mut entries = Vec::new();
         let mut remaining = 8192_usize;
@@ -599,7 +605,7 @@ where
             }
             for (position, envelope) in batch.positions.iter().zip(&batch.commands) {
                 if position.backend_epoch != target.backend_epoch
-                    || position.sequence <= applied.sequence
+                    || position.sequence < start
                     || position.sequence > target.sequence
                 {
                     continue;
@@ -634,11 +640,11 @@ where
             }
         }
         entries.sort_by_key(|(position, _)| position.sequence);
-        if entries.len() as u64 != target.sequence - applied.sequence
+        if entries.len() as u64 != count
             || entries
                 .iter()
                 .enumerate()
-                .any(|(i, (position, _))| position.sequence != applied.sequence + 1 + i as u64)
+                .any(|(i, (position, _))| position.sequence != start + i as u64)
         {
             return Ok(None);
         }
@@ -1721,9 +1727,16 @@ mod tests {
             let mut state = coordinator_ref.inner.state.lock().await;
             state.entries = batches.into_iter().map(ApplyEntry::Ready).collect();
         };
+        let mut genesis = batches[0].clone();
+        genesis.positions = vec![pos(0)];
+        install(vec![genesis.clone()]).await;
+        assert_eq!(coordinator.retained_membership_tail(None, &pos(0)).await.unwrap().unwrap().len(), 1);
+        assert!(coordinator.retained_membership_tail(None, &pos(1)).await.unwrap().is_none());
+        assert!(coordinator.retained_membership_tail(None, &CommandPosition::new(shard(), 1, 0)).await.unwrap().is_none());
         install(vec![batches[1].clone(), batches[0].clone()]).await;
+        assert!(coordinator.retained_membership_tail(None, &pos(2)).await.unwrap().is_none());
         let tail = coordinator
-            .retained_membership_tail(&pos(0), &pos(2))
+            .retained_membership_tail(Some(&pos(0)), &pos(2))
             .await
             .unwrap()
             .unwrap();
@@ -1734,7 +1747,7 @@ mod tests {
         for target in [pos(3), pos(17), CommandPosition::new(shard(), 1, 2)] {
             assert!(
                 coordinator
-                    .retained_membership_tail(&pos(0), &target)
+                    .retained_membership_tail(Some(&pos(0)), &target)
                     .await
                     .unwrap()
                     .is_none()
@@ -1745,7 +1758,7 @@ mod tests {
         install(duplicate).await;
         assert!(
             coordinator
-                .retained_membership_tail(&pos(0), &pos(2))
+                .retained_membership_tail(Some(&pos(0)), &pos(2))
                 .await
                 .unwrap()
                 .is_none()
@@ -1758,7 +1771,7 @@ mod tests {
         install(mixed).await;
         assert!(
             coordinator
-                .retained_membership_tail(&pos(0), &pos(2))
+                .retained_membership_tail(Some(&pos(0)), &pos(2))
                 .await
                 .unwrap()
                 .is_none()
@@ -1771,7 +1784,7 @@ mod tests {
         install(large).await;
         assert!(
             coordinator
-                .retained_membership_tail(&pos(0), &pos(2))
+                .retained_membership_tail(Some(&pos(0)), &pos(2))
                 .await
                 .unwrap()
                 .is_none()
@@ -1779,14 +1792,14 @@ mod tests {
         install(vec![batches[1].clone()]).await;
         assert!(
             coordinator
-                .retained_membership_tail(&pos(0), &pos(2))
+                .retained_membership_tail(Some(&pos(0)), &pos(2))
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(
             coordinator
-                .retained_membership_tail(&pos(1), &pos(2))
+                .retained_membership_tail(Some(&pos(1)), &pos(2))
                 .await
                 .unwrap()
                 .is_some()

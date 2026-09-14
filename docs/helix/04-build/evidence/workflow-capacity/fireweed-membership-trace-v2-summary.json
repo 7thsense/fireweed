@@ -1,0 +1,226 @@
+{
+  "all": {
+    "count": 4213,
+    "total_ms_percentiles": {
+      "0.5": 0.289,
+      "0.9": 588.46,
+      "0.95": 805.776,
+      "0.99": 1804.344,
+      "1": 4736.136
+    },
+    "phase_sum_s": {
+      "high_water": 5.900072,
+      "first_admission": 0.008109,
+      "snapshot_sql": 0.902523,
+      "claim_tail": 3.049061,
+      "coverage": 686.801257,
+      "second_admission": 0.024768,
+      "final_sql": 0.322535,
+      "membership_tail": 3.365397,
+      "membership_sql": 97.347005
+    },
+    "phase_p95_ms": {
+      "high_water": 0.009,
+      "first_admission": 0.003,
+      "snapshot_sql": 0.312,
+      "claim_tail": 0.193,
+      "coverage": 794.622,
+      "second_admission": 0.002,
+      "final_sql": 0.164,
+      "membership_tail": 0.76,
+      "membership_sql": 179.296
+    },
+    "dominant_phase_counts": {
+      "high_water": 74,
+      "snapshot_sql": 2067,
+      "coverage": 1251,
+      "membership_sql": 286,
+      "membership_tail": 1,
+      "claim_tail": 534
+    }
+  },
+  "by_path": {
+    "claims": {
+      "count": 872,
+      "total_ms_percentiles": {
+        "0.5": 0.287,
+        "0.9": 0.485,
+        "0.95": 1.44,
+        "0.99": 5.493,
+        "1": 45.032
+      },
+      "phase_sum_s": {
+        "high_water": 0.006079,
+        "first_admission": 0.001779,
+        "snapshot_sql": 0.180917,
+        "claim_tail": 0.273801,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0,
+        "membership_tail": 0.0,
+        "membership_sql": 0.0
+      },
+      "phase_p95_ms": {
+        "high_water": 0.009,
+        "first_admission": 0.003,
+        "snapshot_sql": 0.237,
+        "claim_tail": 0.44,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0,
+        "membership_tail": 0.0,
+        "membership_sql": 0.0
+      },
+      "dominant_phase_counts": {
+        "claim_tail": 531,
+        "snapshot_sql": 340,
+        "high_water": 1
+      }
+    },
+    "covered": {
+      "count": 1800,
+      "total_ms_percentiles": {
+        "0.5": 0.117,
+        "0.9": 0.198,
+        "0.95": 0.682,
+        "0.99": 119.942,
+        "1": 546.863
+      },
+      "phase_sum_s": {
+        "high_water": 5.874339,
+        "first_admission": 0.003286,
+        "snapshot_sql": 0.401054,
+        "claim_tail": 0.0,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0,
+        "membership_tail": 0.0,
+        "membership_sql": 0.0
+      },
+      "phase_p95_ms": {
+        "high_water": 0.021,
+        "first_admission": 0.003,
+        "snapshot_sql": 0.319,
+        "claim_tail": 0.0,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0,
+        "membership_tail": 0.0,
+        "membership_sql": 0.0
+      },
+      "dominant_phase_counts": {
+        "high_water": 73,
+        "snapshot_sql": 1727
+      }
+    },
+    "fallback": {
+      "count": 1251,
+      "total_ms_percentiles": {
+        "0.5": 412.921,
+        "0.9": 1018.593,
+        "0.95": 1466.353,
+        "0.99": 3437.015,
+        "1": 4736.136
+      },
+      "phase_sum_s": {
+        "high_water": 0.018238,
+        "first_admission": 0.002505,
+        "snapshot_sql": 0.246362,
+        "claim_tail": 0.89755,
+        "coverage": 686.801257,
+        "second_admission": 0.024768,
+        "final_sql": 0.322535,
+        "membership_tail": 0.211224,
+        "membership_sql": 0.0
+      },
+      "phase_p95_ms": {
+        "high_water": 0.008,
+        "first_admission": 0.003,
+        "snapshot_sql": 0.298,
+        "claim_tail": 0.025,
+        "coverage": 1466.085,
+        "second_admission": 0.003,
+        "final_sql": 0.765,
+        "membership_tail": 0.002,
+        "membership_sql": 0.0
+      },
+      "dominant_phase_counts": {
+        "coverage": 1251
+      }
+    },
+    "membership": {
+      "count": 290,
+      "total_ms_percentiles": {
+        "0.5": 321.474,
+        "0.9": 627.369,
+        "0.95": 743.955,
+        "0.99": 1047.959,
+        "1": 1366.434
+      },
+      "phase_sum_s": {
+        "high_water": 0.001416,
+        "first_admission": 0.000539,
+        "snapshot_sql": 0.07419,
+        "claim_tail": 1.87771,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0,
+        "membership_tail": 3.154173,
+        "membership_sql": 97.347005
+      },
+      "phase_p95_ms": {
+        "high_water": 0.007,
+        "first_admission": 0.003,
+        "snapshot_sql": 1.262,
+        "claim_tail": 0.006,
+        "coverage": 0.0,
+        "second_admission": 0.0,
+        "final_sql": 0.0,
+        "membership_tail": 41.246,
+        "membership_sql": 710.361
+      },
+      "dominant_phase_counts": {
+        "membership_sql": 286,
+        "membership_tail": 1,
+        "claim_tail": 3
+      }
+    }
+  },
+  "over_1_second": {
+    "count": 133,
+    "total_ms_percentiles": {
+      "0.5": 1395.509,
+      "0.9": 3401.732,
+      "0.95": 3755.224,
+      "0.99": 4666.687,
+      "1": 4736.136
+    },
+    "phase_sum_s": {
+      "high_water": 0.006488,
+      "first_admission": 0.000299,
+      "snapshot_sql": 0.043911,
+      "claim_tail": 1.778756,
+      "coverage": 237.192777,
+      "second_admission": 0.021089,
+      "final_sql": 0.026176,
+      "membership_tail": 0.625331,
+      "membership_sql": 3.304017
+    },
+    "phase_p95_ms": {
+      "high_water": 0.013,
+      "first_admission": 0.005,
+      "snapshot_sql": 0.996,
+      "claim_tail": 0.044,
+      "coverage": 3754.467,
+      "second_admission": 0.003,
+      "final_sql": 0.459,
+      "membership_tail": 6.772,
+      "membership_sql": 0.0
+    },
+    "dominant_phase_counts": {
+      "coverage": 129,
+      "claim_tail": 1,
+      "membership_sql": 3
+    }
+  }
+}

@@ -1,0 +1,372 @@
+   Compiling turso_core v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_core)
+   Compiling fireweed-objectlog v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-objectlog)
+warning: methods `move_to_root` and `indexbtree_move_to_unpacked` are never used
+    --> vendor/turso_core/storage/btree.rs:1463:8
+     |
+ 841 | impl BTreeCursor {
+     | ---------------- methods in this implementation
+...
+1463 |     fn move_to_root(&mut self) -> Result<Option<Completion>> {
+     |        ^^^^^^^^^^^^
+...
+1749 |     fn indexbtree_move_to_unpacked(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:499:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+499 |     pub step_fn: StepFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+    = note: `#[warn(unpredictable_function_pointer_comparisons)]` on by default
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:500:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+500 |     pub finalize_fn: FinalizeFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:501:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+501 |     pub aggregate_destructor: Option<ContextDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: function pointer comparisons do not produce meaningful results since their addresses are not guaranteed to be unique
+   --> vendor/turso_core/types.rs:502:5
+    |
+494 | #[derive(Debug, Clone, PartialEq)]
+    |                        --------- in this derive macro expansion
+...
+502 |     pub value_destructor: Option<ValueDestructor>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: the address of the same function can vary between different codegen units
+    = note: furthermore, different functions could have the same address after being merged together
+    = note: for more information visit <https://doc.rust-lang.org/nightly/core/ptr/fn.fn_addr_eq.html>
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor/turso_core/vector/operations/text.rs:67:56
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector> {
+   |                                                        ^^^^            ^^^^^^ the same lifetime is hidden here
+   |                                                        |
+   |                                                        the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+67 | pub fn vector_from_text(vector_type: VectorType, text: &str) -> Result<Vector<'_>> {
+   |                                                                              ++++
+
+   Compiling turso_sync_engine v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sync_engine)
+warning: unused import: `DatabaseRowMutation`
+  --> vendor/turso_sync_engine/src/database_sync_operations.rs:37:55
+   |
+37 |         parse_bin_record, Coro, DatabasePullRevision, DatabaseRowMutation,
+   |                                                       ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `turso_sync_engine` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_engine` to apply 1 suggestion)
+warning: `turso_core` (lib) generated 6 warnings (run `cargo fix --lib -p turso_core` to apply 1 suggestion)
+   Compiling turso_sdk_kit v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sdk_kit)
+   Compiling turso_sync_sdk_kit v0.7.2 (/home/erik/Projects/fireweed/vendor/turso_sync_sdk_kit)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor/turso_sync_sdk_kit/src/sync_engine_io.rs:211:14
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<SyncEngineIoCompletionInner<TBytes>>> {
+    |              ^^^^^ the lifetime is elided here   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+211 |     fn inner(&self) -> turso_sync_engine::Result<MutexGuard<'_, SyncEngineIoCompletionInner<TBytes>>> {
+    |                                                             +++
+
+warning: `turso_sync_sdk_kit` (lib) generated 1 warning (run `cargo fix --lib -p turso_sync_sdk_kit` to apply 1 suggestion)
+   Compiling turso v0.7.2 (/home/erik/Projects/fireweed/vendor/turso)
+   Compiling fireweed-turso v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed-turso)
+warning: function `cohort_id_for` is never used
+   --> crates/fireweed-turso/src/projection.rs:388:4
+    |
+388 | fn cohort_id_for(group_key: &str, now: i64) -> String {
+    |    ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cohort_retention_until` is never used
+   --> crates/fireweed-turso/src/projection.rs:392:4
+    |
+392 | fn cohort_retention_until(definition: &QueueDefinition, now: i64) -> i64 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PUSH_ITEM_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:410:7
+    |
+410 | const PUSH_ITEM_CHUNK: usize = 47; // 47 * 19 binds = 893
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `PUSH_GATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:411:7
+    |
+411 | const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_READ_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:418:7
+    |
+418 | const COHORT_READ_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_GENERATION_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:419:7
+    |
+419 | const COHORT_GENERATION_WRITE_CHUNK: usize = 90; // 90 * 10 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `COHORT_ACTIVE_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:420:7
+    |
+420 | const COHORT_ACTIVE_WRITE_CHUNK: usize = 224; // tenant + queue + 224 * 4 updates = 898
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SCHEDULE_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:421:7
+    |
+421 | const SCHEDULE_UPDATE_CHUNK: usize = 299; // tenant + queue + 299 * 3 updates = 899
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_BLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:422:7
+    |
+422 | const GATE_BLOCK_WRITE_CHUNK: usize = 300; // 300 * 3 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GATE_UNBLOCK_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:423:7
+    |
+423 | const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SIDE_RECORD_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:424:7
+    |
+424 | const SIDE_RECORD_WRITE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `KEY_RETENTION_WRITE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:425:7
+    |
+425 | const KEY_RETENTION_WRITE_CHUNK: usize = 180; // 180 * 5 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CURSOR_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:426:7
+    |
+426 | const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_UPDATE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:427:7
+    |
+427 | const API001_UPDATE_CHUNK: usize = 89; // tenant + queue + 89 * 10 row binds = 892
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `API001_GATE_DELETE_CHUNK` is never used
+   --> crates/fireweed-turso/src/projection.rs:428:7
+    |
+428 | const API001_GATE_DELETE_CHUNK: usize = 898; // tenant + queue + 898 item binds = 900
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_typed_unique_conflicts` is never used
+   --> crates/fireweed-turso/src/projection.rs:501:10
+    |
+501 | async fn check_typed_unique_conflicts(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:546:10
+    |
+546 | async fn insert_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `delete_typed_index_rows` is never used
+   --> crates/fireweed-turso/src/projection.rs:581:10
+    |
+581 | async fn delete_typed_index_rows(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `replace_typed_indexes_for_entity` is never used
+   --> crates/fireweed-turso/src/projection.rs:597:10
+    |
+597 | async fn replace_typed_indexes_for_entity(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `upsert_cohorts` is never used
+   --> crates/fireweed-turso/src/projection.rs:706:10
+    |
+706 | async fn upsert_cohorts(
+    |          ^^^^^^^^^^^^^^
+
+warning: function `cohort_item_ids` is never used
+   --> crates/fireweed-turso/src/projection.rs:884:10
+    |
+884 | async fn cohort_item_ids(
+    |          ^^^^^^^^^^^^^^^
+
+warning: function `groups_for_items` is never used
+   --> crates/fireweed-turso/src/projection.rs:922:10
+    |
+922 | async fn groups_for_items(
+    |          ^^^^^^^^^^^^^^^^
+
+warning: function `cohort_state` is never used
+    --> crates/fireweed-turso/src/projection.rs:1351:10
+     |
+1351 | async fn cohort_state(
+     |          ^^^^^^^^^^^^
+
+warning: function `append_item_ids` is never used
+    --> crates/fireweed-turso/src/projection.rs:1371:4
+     |
+1371 | fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `execute_for_items` is never used
+    --> crates/fireweed-turso/src/projection.rs:1375:10
+     |
+1375 | async fn execute_for_items<F>(
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: function `update_item_schedules` is never used
+    --> crates/fireweed-turso/src/projection.rs:1402:10
+     |
+1402 | async fn update_item_schedules(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retry_info_by_item` is never used
+    --> crates/fireweed-turso/src/projection.rs:1438:10
+     |
+1438 | async fn retry_info_by_item(
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `extend_claim_by_query_replays` is never used
+    --> crates/fireweed-turso/src/projection.rs:1468:10
+     |
+1468 | async fn extend_claim_by_query_replays(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_item_claim_ids_on` is never used
+    --> crates/fireweed-turso/src/projection.rs:2381:14
+     |
+2381 | pub async fn select_item_claim_ids_on(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fireweed-turso` (lib) generated 29 warnings
+   Compiling fireweed v0.31.27 (/home/erik/Projects/fireweed/crates/fireweed)
+warning: unused import: `DEFAULT_BLOCKING_AXIS_IN_FLIGHT`
+  --> crates/fireweed/src/turso_compose.rs:31:5
+   |
+31 |     DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DispatchError, DurabilityClass, EngineError, EngineResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `RequestId`
+    --> crates/fireweed/src/lib.rs:7123:68
+     |
+7123 |         LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy, RequestId, ResponseBarrier,
+     |                                                                    ^^^^^^^^^
+
+warning: function `objectlog_recover_definitions` is never used
+    --> crates/fireweed/src/lib.rs:2864:4
+     |
+2864 | fn objectlog_recover_definitions(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `objectlog_high_water` is never used
+    --> crates/fireweed/src/lib.rs:2872:4
+     |
+2872 | fn objectlog_high_water(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `s3_provider_from_composed` is never used
+    --> crates/fireweed/src/lib.rs:6435:4
+     |
+6435 | fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3ComposedProvider> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `test_buffered_group_commit_commands` is never used
+    --> crates/fireweed/src/facade.rs:1092:19
+     |
+1030 | impl Fireweed {
+     | ------------- method in this implementation
+...
+1092 |     pub(crate) fn test_buffered_group_commit_commands(&self) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `map_turso_storage` is never used
+   --> crates/fireweed/src/turso_compose.rs:131:4
+    |
+131 | fn map_turso_storage(error: impl std::fmt::Display) -> EngineError {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: struct `FrozenClock` is never constructed
+    --> crates/fireweed/src/lib.rs:7154:12
+     |
+7154 |     struct FrozenClock {
+     |            ^^^^^^^^^^^
+
+warning: `fireweed-turso` (lib test) generated 19 warnings (19 duplicates)
+warning: `fireweed` (lib test) generated 8 warnings (run `cargo fix --lib -p fireweed --tests` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 4m 42s
+     Running unittests src/lib.rs (target/release/deps/fireweed-4072912da899d9ba)
+
+running 1 test
+test turso_compose::s3c_activation::membership_metrics_rebases_and_rejects_conflicts_gaps_and_underflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/fireweed_objectlog-e636efbc347add09)
+
+running 1 test
+test async_projection_apply::tests::membership_tail_requires_complete_unique_bounded_single_family ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/fireweed_turso-db03909f0c6db4c7)
+
+running 2 tests
+test projection::item_mutation_tests::metrics_membership_snapshot_checks_ids_and_active_keys_together ... ok
+test projection::item_mutation_tests::metrics_membership_uses_full_key_seeks_at_its_identity_bound ... 8192 membership identities read in 35.625955ms; plan=["SEARCH q USING INDEX sqlite_autoindex_queues_1 (tenant=? AND queue=?)", "SEARCH c USING INDEX sqlite_autoindex_relational_cursor_1 (tenant=? AND queue=?) LEFT-JOIN", "SCAN json_each AS incoming", "SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?) LEFT-JOIN", "SEARCH k USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=? AND client_item_key=?) LEFT-JOIN"]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.06s
+
