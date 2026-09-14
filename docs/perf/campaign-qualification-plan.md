@@ -1,5 +1,45 @@
 # Campaign qualification and performance plan
 
+2026-09-14 one-second claim-join experiment rejected: clean `1879ecc6`
+completed the canonical six-cycle disk run at **8,151.94 recipients/sec** in
+736.54 seconds, versus 8,520.83/sec in the preceding uninstrumented 500 ms run.
+It failed overall throughput, cycles 1–5 throughput, and eight campaign progress
+checks (worst p95 1.409 s). Correctness, due-time, WAL, database and RSS gates
+passed. CPU cost fell to 0.97611 ms/recipient, but wall time increased 4.55%.
+One serial pair does not establish a precise regression magnitude; it provides
+no reason to retain the longer delay. Restore 500 ms, keeping the regression for
+follow-ups arriving just before the original deadline. All acceptance gates stay
+unchanged.
+
+Host writes were 25.09 GiB at 35.03 MiB/sec; these are host-wide measurements,
+not a physical device ceiling. Raw, summary, device and provenance artifacts use
+`fireweed-campaign-1879ecc6-join1s-w1-six*`. Projection file compression properties
+were captured before removing the private run directory.
+
+The next code candidate avoids forcing intermediate claim projection writes for
+progress counts: one SQL statement reads exact lifecycle counters and their
+applied cursor, then only a complete bounded tail of distinct authoritative
+claims may adjust Pending/Leased counts. Counts come from the same SQL snapshot;
+no coordinator watermark is substituted. Missing/pruned entries, gaps, epoch
+changes, historical claims, repeated IDs, mixed mutations and arithmetic overflow
+fall back to the coverage barrier. No extra workflow records or durability changes
+are introduced. The paused-apply integration regression verifies exact claimed
+counts without advancing SQL, and verifies that a mixed claim/completion tail
+still waits. All nine activation tests, 76 local object-log tests, six campaign
+tests (53.22 s), and four recovery tests (2.45 s) pass. Existing retained-tail
+regressions cover gaps, missing entries, repeated IDs, historical authority,
+epoch changes, bounds and poison. Native metrics tests also verify legacy missing
+cursors and decode `(next_seq=8, epoch=2)` as applied position `(7,2)`.
+
+The broader native debug suite passed 43/44 tests. Its existing live-writer
+reader-pool latency test failed at 110.246 ms against 90 ms, then failed in
+isolation at 114.544 ms. It does not call the new metrics method. These failures
+are preserved in `fireweed-claim-metrics-native.log` and `-reader-rerun.log`;
+no test deadline is changed and no clean native-suite pass is claimed. Release
+validation of the same deadline is pending. The next six-cycle capacity run is
+conditional on passing the release native suite, followed by a normal release
+workload build. No performance gain is yet claimed.
+
 2026-09-14 completed write-attribution run: clean `b9dd17ef` used the full
 six-cycle disk workload with apply/log/VFS tracing enabled. It completed at
 8,627.19 recipients/sec in 695.96 process seconds, costing 1.00353 CPU-ms per

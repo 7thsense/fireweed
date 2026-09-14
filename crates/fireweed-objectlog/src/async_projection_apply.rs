@@ -996,12 +996,10 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 }
 
 /// Briefly join a follow-up that invalidates the claimed leases before applying
-/// intermediate Leased rows. Disk-backed append can take hundreds of milliseconds
-/// under concurrent writes. The sustained trace also found many 500 ms windows
-/// expiring before the durable follow-up, causing intermediate lease writes.
-/// Allow one second in the background; coverage waiters still bypass the delay,
-/// and notifications cannot restart the original deadline.
-const CLAIM_COMPLETE_JOIN_MS: u64 = 1_000;
+/// intermediate Leased rows. Coverage waiters bypass this bounded background
+/// delay, and notifications cannot restart the original deadline. The one-second
+/// experiment did not improve sustained throughput; retain the 500 ms bound.
+const CLAIM_COMPLETE_JOIN_MS: u64 = 500;
 
 fn queue_has_coverage_waiter<P: AsyncProjectionStore + 'static>(
     inner: &CoordinatorInner<P>,
@@ -2050,11 +2048,11 @@ mod tests {
         else {
             panic!("claim should await its follow-up");
         };
-        let late = now + Duration::from_millis(750);
+        let late = now + Duration::from_millis(CLAIM_COMPLETE_JOIN_MS - 1);
         let WorkerSelection::WaitUntil(unchanged_deadline) =
             select_worker_generation(&state, &mut joins, late, |_| false)
         else {
-            panic!("do not materialize the claim at the old 500 ms boundary");
+            panic!("do not materialize the claim before its original deadline");
         };
         assert_eq!(unchanged_deadline, deadline);
         let mut followup = ready_on(shard(), 2, 2, 1, 1, 0);

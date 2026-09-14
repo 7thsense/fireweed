@@ -6,9 +6,9 @@ file writes** over six million recipients. Time inside those VFS calls totaled
 669/93/3.8 seconds respectively, overlapping across stores. These are neither
 NAND bytes nor device-service times; creation/removal of temporary files is not
 timed. The traced run is diagnostic only. The [qualification plan](campaign-qualification-plan.md)
-contains raw provenance, apply/log timings and the proposed one-second background
-claim-join experiment. It targets redundant intermediate lease writes while
-preserving immediate coverage-waiter bypass and all qualification gates. This
+contains raw provenance and apply/log timings. The one-second background
+claim-join experiment subsequently completed at 8,151.94/sec and failed its
+throughput and progress gates; the window is restored to 500 ms. This
 does not change the fixed 10k/12.5k targets or establish an intrinsic SSD ceiling.
 
 2026-09-13: no SSD maintenance was performed. It is no longer a dependency for

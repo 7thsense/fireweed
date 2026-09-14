@@ -2171,6 +2171,46 @@ pub(crate) async fn server_metrics_on(
     Ok(metrics)
 }
 
+/// Read lifecycle counters and their applied frontier in one SQL statement.
+/// Keeping these in the same snapshot is required before folding a durable log tail.
+pub(crate) async fn server_metrics_with_position_on(
+    connection: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<(QueueMetrics, Option<CommandPosition>)> {
+    let rows = query_value_rows(
+        connection,
+        "SELECT q.resident_pending,q.resident_leased,q.resident_complete,q.resident_failed,\
+         c.next_seq,c.assignment_epoch FROM queues q LEFT JOIN relational_cursor c \
+         ON c.tenant=q.tenant AND c.queue=q.queue WHERE q.tenant=?1 AND q.queue=?2",
+        vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ],
+    )
+    .await?;
+    let Some(values) = rows.first() else {
+        return Ok((QueueMetrics::default(), None));
+    };
+    let mut metrics = QueueMetrics {
+        pending: nonnegative_u64(integer(&values[0])?, "pending count")?,
+        leased: nonnegative_u64(integer(&values[1])?, "leased count")?,
+        complete: nonnegative_u64(integer(&values[2])?, "complete count")?,
+        failed: nonnegative_u64(integer(&values[3])?, "failed count")?,
+        ..QueueMetrics::default()
+    };
+    metrics.resident_terminal_count = metrics.complete.saturating_add(metrics.failed);
+    let position = if matches!(values[4], Value::Null) || integer(&values[4])? <= 0 {
+        None
+    } else {
+        Some(CommandPosition::new(
+            shard.clone(),
+            nonnegative_u64(integer(&values[5])?, "assignment epoch")?,
+            nonnegative_u64(integer(&values[4])? - 1, "applied sequence")?,
+        ))
+    };
+    Ok((metrics, position))
+}
+
 pub(crate) async fn push_idempotency_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -6020,5 +6060,21 @@ mod metrics_query_tests {
             ),
             (2, 3, 4, 5, 9)
         );
+        let (snapshot, cursor) = store
+            .server_metrics_with_position_committed(&shard)
+            .await
+            .unwrap();
+        assert_eq!(snapshot, metrics);
+        assert_eq!(cursor, None, "legacy row has no applied cursor");
+        store.execute(
+            "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq,assignment_epoch) \
+             VALUES('tenant','queue',8,0,2)", vec![],
+        ).await.unwrap();
+        let (snapshot, cursor) = store
+            .server_metrics_with_position_committed(&shard)
+            .await
+            .unwrap();
+        assert_eq!(snapshot, metrics);
+        assert_eq!(cursor, Some(CommandPosition::new(shard, 2, 7)));
     }
 }

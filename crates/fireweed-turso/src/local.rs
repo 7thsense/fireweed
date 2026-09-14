@@ -15,7 +15,7 @@ use fireweed_core::{
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    BatchUpdateSnapshotItem, Claimed, ClaimedItem, EngineError, EngineResult, IdempotencyDecision,
+    BatchUpdateSnapshotItem, Claimed, ClaimedItem, CommandPosition, EngineError, EngineResult, IdempotencyDecision,
     ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage, PushFingerprint,
     QueueKey, QueueMetrics,
 };
@@ -986,6 +986,20 @@ impl TursoRelational {
         self.with_outcome_connection(|connection| {
             let shard = shard.clone();
             Box::pin(async move { crate::projection::server_metrics_on(connection, &shard).await })
+        })
+        .await
+    }
+
+    /// Exact counters and the frontier they cover, read from one SQL snapshot.
+    pub async fn server_metrics_with_position_committed(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<(QueueMetrics, Option<CommandPosition>)> {
+        self.with_outcome_connection(|connection| {
+            let shard = shard.clone();
+            Box::pin(async move {
+                crate::projection::server_metrics_with_position_on(connection, &shard).await
+            })
         })
         .await
     }

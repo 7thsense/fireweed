@@ -3939,6 +3939,48 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn committed_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        if let Some(coordinator) = &self.async_apply {
+            coordinator.ensure_healthy(shard)?;
+            let target = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?;
+            // Release the snapshot and read slot before a fallback coverage wait.
+            // Counts and SQL frontier must never be read separately.
+            {
+                let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
+                let (mut metrics, applied) = self
+                    .projection
+                    .server_metrics_with_position_committed(shard)
+                    .await?;
+                if target
+                    .as_ref()
+                    .is_none_or(|target| position_covers(applied.as_ref(), target))
+                {
+                    coordinator.ensure_healthy(shard)?;
+                    return Ok(metrics);
+                }
+                if let (Some(applied), Some(target)) = (&applied, &target) {
+                    if let Some(claims) = coordinator.retained_claim_tail(applied, target).await? {
+                        // Authoritative claims require every distinct named row to
+                        // transition Pending -> Leased. The validator rejects gaps,
+                        // duplicate IDs, historical claims and every other mutation.
+                        // Pruning during the snapshot read safely falls back.
+                        let count = claims.iter().try_fold(0_u64, |n, claim| {
+                            n.checked_add(u64::try_from(claim.item_ids.len()).ok()?)
+                        });
+                        if let Some((pending, leased)) = count.and_then(|n| {
+                            Some((
+                                metrics.pending.checked_sub(n)?,
+                                metrics.leased.checked_add(n)?,
+                            ))
+                        }) {
+                            metrics.pending = pending;
+                            metrics.leased = leased;
+                            coordinator.ensure_healthy(shard)?;
+                            return Ok(metrics);
+                        }
+                    }
+                }
+            }
+        }
         let _permit = self.acquire_outcome_read(shard).await?;
         self.projection.server_metrics_committed(shard).await
     }
@@ -5799,6 +5841,34 @@ mod s3c_activation {
                 serde_json::to_value(&retained).unwrap(),
                 serde_json::to_value(&tail).unwrap()
             );
+            let metrics = tokio::time::timeout(Duration::from_millis(250), backend.metrics(&shard))
+                .await
+                .expect("durable claim counts must not wait for paused SQL apply")
+                .unwrap();
+            assert_eq!(
+                (
+                    metrics.pending,
+                    metrics.leased,
+                    metrics.complete,
+                    metrics.failed
+                ),
+                (0, 2, 0, 0)
+            );
+            let (sql_metrics, sql_position) = backend
+                .projection
+                .server_metrics_with_position_committed(&shard)
+                .await
+                .unwrap();
+            assert_eq!((sql_metrics.pending, sql_metrics.leased), (2, 0));
+            assert_eq!(sql_position.as_ref(), Some(&applied));
+            assert_eq!(
+                coordinator
+                    .snapshot(&shard)
+                    .await
+                    .applied_high_water
+                    .as_ref(),
+                Some(&applied)
+            );
             let mut invalid = page.entries.clone();
             invalid[0].0.sequence += 1;
             assert!(
@@ -5904,6 +5974,12 @@ mod s3c_activation {
             assert!(
                 !worker.is_finished(),
                 "response must still cover the mutation before releasing fence"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), backend.metrics(&shard),)
+                    .await
+                    .is_err(),
+                "a mixed claim/mutation tail must retain the coverage barrier"
             );
             coordinator.resume();
             let response = worker.await.unwrap().unwrap();

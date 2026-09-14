@@ -1,0 +1,162 @@
+{
+  "head": "1879ecc65c68bdfa59156cdf663c869a0a6584c7",
+  "binary_sha256": "b6d25843e7ece8566de282b46cbe6aab8fa3e1d214d26d16b418d28dd06d96b3",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 8151.941448437759,
+  "process_wall_s": 736.5383905919734,
+  "cpu_ms_per_recipient": 0.9761119121666667,
+  "mean_cpu_occupancy": 7.951617387238775,
+  "output_bytes_per_recipient": 12541.620906666667,
+  "logical_log_bytes_per_recipient": 1834.826792,
+  "peak_rss_gib": 10.48501205444336,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 91.842520553,
+      "load_s": 6.71291149,
+      "prepare_s": 42.908605137,
+      "delivery_s": 30.717045799,
+      "verify_s": 0.547572625,
+      "purge_s": 7.824725893,
+      "progress_p95_s": 1.409069827,
+      "due_to_claim_max_us": 8108782
+    },
+    {
+      "wall_s": 125.945838054,
+      "load_s": 22.446042164,
+      "prepare_s": 39.795280023,
+      "delivery_s": 55.68106181,
+      "verify_s": 0.544334413,
+      "purge_s": 7.517495481,
+      "progress_p95_s": 0.658729928,
+      "due_to_claim_max_us": 29721566
+    },
+    {
+      "wall_s": 112.21862027,
+      "load_s": 26.159504819,
+      "prepare_s": 43.949467697,
+      "delivery_s": 35.0630466,
+      "verify_s": 0.54228155,
+      "purge_s": 6.519431789,
+      "progress_p95_s": 0.770407779,
+      "due_to_claim_max_us": 9757752
+    },
+    {
+      "wall_s": 146.400324818,
+      "load_s": 25.676779042,
+      "prepare_s": 42.105126714,
+      "delivery_s": 70.64309506,
+      "verify_s": 0.577738344,
+      "purge_s": 7.014150685,
+      "progress_p95_s": 0.686390733,
+      "due_to_claim_max_us": 34881437
+    },
+    {
+      "wall_s": 116.495546949,
+      "load_s": 25.053560904,
+      "prepare_s": 42.698944571,
+      "delivery_s": 41.226717114,
+      "verify_s": 0.623606851,
+      "purge_s": 6.989428576,
+      "progress_p95_s": 0.555272811,
+      "due_to_claim_max_us": 9711647
+    },
+    {
+      "wall_s": 136.761911993,
+      "load_s": 46.475335465,
+      "prepare_s": 48.721186077,
+      "delivery_s": 34.036640444,
+      "verify_s": 0.548114922,
+      "purge_s": 6.926198031,
+      "progress_p95_s": 0.928335578,
+      "due_to_claim_max_us": 9927556
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 8151.941448437759,
+      "required": 10000
+    },
+    {
+      "name": "s4_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.051264714,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s9_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.250284478,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s12_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.02479846,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s15_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.005820364,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s16_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.073407704,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s24_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.016339011,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s29_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.258817883,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s31_c0_cycle0_progress",
+      "passed": false,
+      "actual": 1.409069827,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7939.920964845573,
+      "required": 10000
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8911.177107631356,
+      "required": 10000
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6830.5859378602245,
+      "required": 10000
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8584.019099354802,
+      "required": 10000
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7311.977329266819,
+      "required": 10000
+    }
+  ]
+}
