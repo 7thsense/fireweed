@@ -1,5 +1,19 @@
 # Campaign qualification and performance plan
 
+The 224-row replacement candidate (`86ddc211`) is **not retained**. Its clean
+64-store/two-worker million-row cycle reached 13,356.81 recipients/sec and
+0.97154 CPU-ms/recipient, effectively unchanged from the 56-row direct-join
+result (13,339.15 and 0.97226). Peak RSS was 15.33 versus 14.00 GiB.
+The native SQL timing gain did not carry through to the production retained-VM
+execution path. This serial comparison does not establish a small causal
+effect; it supplies no compelling workflow gain for the larger adapter bound.
+All workload assertions completed and reporting p95 was 0.517 seconds, but
+a single cycle does not qualify. The four code files are restored to their
+previous validated state. Evidence uses `fireweed-campaign-replacement-batch224-s64-w2-one*`.
+Next is a six-cycle I/O attribution run on the retained direct-join code, using
+existing VFS aggregate tracing plus a temporary process-local slow-write
+interposer. No device settings or checkpoint thresholds change.
+
 The current candidate uses **224-row native Turso replacement statements**
 (3,588 binds) through an adapter-specific `RelTx` bound. The portable default
 remains 56 rows/900 binds; unrelated operations keep their existing budgets.

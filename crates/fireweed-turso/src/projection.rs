@@ -1568,10 +1568,6 @@ impl RelTx for ObservedTursoRel<'_> {
         true
     }
 
-    fn clearing_item_replacement_batch(&self) -> usize {
-        self.inner.clearing_item_replacement_batch()
-    }
-
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
         let started = Instant::now();
         let result = self.inner.execute(sql, params);
@@ -6190,10 +6186,10 @@ mod item_mutation_tests {
                 format!(
                     "EXPLAIN QUERY PLAN {}",
                     fireweed_relational::clearing_item_replacements_sql(
-                        crate::tx::TURSO_CLEARING_ITEM_REPLACEMENT_BATCH,
+                        fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH,
                     )
                 ),
-                vec![Value::Null; 16 * crate::tx::TURSO_CLEARING_ITEM_REPLACEMENT_BATCH + 4],
+                vec![Value::Null; 16 * fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH + 4],
             )
             .await
             .unwrap();
@@ -6324,11 +6320,7 @@ mod item_mutation_tests {
             shape.write_statement_count < 100,
             "1,000 independent replacements must use bounded SQL batches: {shape:?}"
         );
-        assert_eq!(
-            shape.max_bind_count,
-            16 * crate::tx::TURSO_CLEARING_ITEM_REPLACEMENT_BATCH + 4,
-            "native replacements must exercise their qualified batch bound"
-        );
+        assert!(shape.max_bind_count <= fireweed_relational::SQLITE_BIND_CAP);
         for sql in [
             image_sql,
             "SELECT * FROM fireweed_item_payloads WHERE item_id<>'999999' ORDER BY tenant_id,queue_id,item_id",

@@ -25,7 +25,7 @@ pub use crate::RELATIONAL_BATCH as SQLITE_BATCH;
 
 const TYPED_INDEX_CHECK_CHUNK: usize = 1_000;
 const TYPED_INDEX_INSERT_CHUNK: usize = 1_500;
-/// Conservative portable bind budget. Adapter-qualified replacement writes may use a larger bound.
+/// Turso/SQLite default variable limit. VALUES and IN-list chunks must stay at or under this.
 pub const SQLITE_BIND_CAP: usize = 900;
 
 fn bind_chunk_size(per_row: usize, extra: usize) -> usize {
@@ -37,8 +37,8 @@ const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
-/// Portable replacement batch: sixteen row binds and four shared binds fit
-/// 56 replacements under the 900-bind budget. Native adapters may qualify more.
+/// Sixteen row binds and four shared binds fit 56 replacements under the
+/// 900-bind ceiling. A 16-row cap increased measured campaign CPU and wall time.
 pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 56;
 
 /// SQL used by the adapter for bounded resolved replacement writes.
@@ -84,7 +84,7 @@ fn apply_clearing_item_replacements(
     const ROW_BINDS: usize = 16;
     let (tenant, queue) = parts(shard);
     let now_n = ts_nanos(now);
-    for chunk in items.chunks(tx.clearing_item_replacement_batch().max(1)) {
+    for chunk in items.chunks(bind_chunk_size(ROW_BINDS, 4).min(CLEARING_ITEM_REPLACEMENT_BATCH)) {
         let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + 4);
         for item in chunk {
             let values = item
