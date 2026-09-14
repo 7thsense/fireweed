@@ -1,0 +1,10 @@
+{
+  "source_base": "4f534dc42005936395791ab6fa28284437ff5228",
+  "candidate": "owned selected claim buffers and early exclusion; source committed with this artifact",
+  "SOURCE_DATE_EPOCH": "1789179522",
+  "CARGO_BUILD_JOBS": "8",
+  "binary_sha256": "394027dc95a89e23dd57feaebf437091ba5aec430ff65edfd7103e7392d479c7",
+  "release_checks_passed": 309,
+  "ignored": 1,
+  "unconfigured_live_s3_exclusions": 2
+}

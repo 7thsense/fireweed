@@ -213,30 +213,41 @@ fn take_optional_blob(value: Value) -> EngineResult<Option<Vec<u8>>> {
     }
 }
 
-fn class_s_item_from_turso_row(
-    row: &Row,
+// Consume selected row buffers instead of cloning each Text/Blob through get_value.
+// Excluded IDs need no carrier decoding; their cursor/eligibility was handled by the caller.
+fn class_s_item_from_owned_values(
+    mut values: impl Iterator<Item = Value>,
     lease_expires_at: i64,
-) -> EngineResult<ClassSClaimedItem> {
-    Ok(ClassSClaimedItem {
-        item_id: take_text(row.get_value(0).map_err(driver_read_error)?)?,
-        client_item_key: take_text(row.get_value(1).map_err(driver_read_error)?)?,
-        payload: take_optional_blob(row.get_value(2).map_err(driver_read_error)?)?,
-        item_version: take_integer(row.get_value(3).map_err(driver_read_error)?)? + 1,
-        retry_count: take_integer(row.get_value(4).map_err(driver_read_error)?)? + 1,
+    exclude: &HashSet<ItemId>,
+) -> EngineResult<Option<(ItemId, ClassSClaimedItem)>> {
+    let mut next = || {
+        values
+            .next()
+            .ok_or_else(|| storage("missing claimed-item column"))
+    };
+    let item_id = take_text(next()?)?;
+    let id = ItemId::new(&item_id).map_err(storage)?;
+    if exclude.contains(&id) {
+        return Ok(None);
+    }
+    let item = ClassSClaimedItem {
+        item_id,
+        client_item_key: take_text(next()?)?,
+        payload: take_optional_blob(next()?)?,
+        item_version: take_integer(next()?)? + 1,
+        retry_count: take_integer(next()?)? + 1,
         lease_expires_at,
-        priority: take_optional_text(row.get_value(5).map_err(driver_read_error)?)?,
-        group_key: take_optional_text(row.get_value(6).map_err(driver_read_error)?)?,
-        not_before: take_optional_integer(row.get_value(7).map_err(driver_read_error)?)?,
-        fields_json: take_optional_text(row.get_value(8).map_err(driver_read_error)?)?
-            .unwrap_or_else(|| "{}".into()),
-        metadata_json: take_optional_text(row.get_value(9).map_err(driver_read_error)?)?
-            .unwrap_or_else(|| "{}".into()),
-        max_attempts: take_optional_integer(row.get_value(10).map_err(driver_read_error)?)?
-            .unwrap_or(0),
-        entity_document: take_optional_text(row.get_value(11).map_err(driver_read_error)?)?,
-        index_fields: take_optional_blob(row.get_value(12).map_err(driver_read_error)?)?,
+        priority: take_optional_text(next()?)?,
+        group_key: take_optional_text(next()?)?,
+        not_before: take_optional_integer(next()?)?,
+        fields_json: take_optional_text(next()?)?.unwrap_or_else(|| "{}".into()),
+        metadata_json: take_optional_text(next()?)?.unwrap_or_else(|| "{}".into()),
+        max_attempts: take_optional_integer(next()?)?.unwrap_or(0),
+        entity_document: take_optional_text(next()?)?,
+        index_fields: take_optional_blob(next()?)?,
         gate_keys: Vec::new(),
-    })
+    };
+    Ok(Some((id, item)))
 }
 
 async fn one_row(
@@ -2585,11 +2596,13 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let item = class_s_item_from_turso_row(&row, expires)?;
-                let id = ItemId::new(&item.item_id).map_err(storage)?;
-                if exclude_set.contains(&id) {
+                let Some((id, item)) = class_s_item_from_owned_values(
+                    row.into_values(),
+                    expires,
+                    &exclude_set,
+                )? else {
                     continue;
-                }
+                };
                 ids.push(id);
                 carriers.push(item);
                 if ids.len() == max {
@@ -2639,11 +2652,13 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let item = class_s_item_from_turso_row(&row, expires)?;
-                let id = ItemId::new(&item.item_id).map_err(storage)?;
-                if exclude_set.contains(&id) {
+                let Some((id, item)) = class_s_item_from_owned_values(
+                    row.into_values(),
+                    expires,
+                    &exclude_set,
+                )? else {
                     continue;
-                }
+                };
                 ids.push(id);
                 carriers.push(item);
                 if ids.len() == max {
@@ -7014,5 +7029,82 @@ mod metrics_query_tests {
             .unwrap();
         assert_eq!(snapshot, metrics);
         assert_eq!(cursor, Some(CommandPosition::new(shard, 2, 7)));
+    }
+}
+
+#[cfg(test)]
+mod owned_claim_decode_tests {
+    use super::*;
+
+    #[test]
+    fn owned_claim_decode_transfers_buffers_and_preserves_values() {
+        let id = ItemId::mint(1, 0, 7);
+        let payload = vec![3_u8; 1024];
+        let fields = String::from("{\"field\":\"value\"}");
+        let metadata = String::from("{\"color\":\"blue\"}");
+        let payload_ptr = payload.as_ptr();
+        let fields_ptr = fields.as_ptr();
+        let metadata_ptr = metadata.as_ptr();
+        let values = vec![
+            Value::Text(id.to_string()),
+            Value::Text("key".into()),
+            Value::Blob(payload),
+            Value::Integer(3),
+            Value::Integer(2),
+            Value::Null,
+            Value::Null,
+            Value::Integer(10),
+            Value::Text(fields),
+            Value::Text(metadata),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Integer(123),
+        ];
+        let (decoded_id, item) =
+            class_s_item_from_owned_values(values.into_iter(), 99, &HashSet::new())
+                .unwrap()
+                .unwrap();
+        assert_eq!(decoded_id, id);
+        assert_eq!(item.payload.as_ref().unwrap().as_ptr(), payload_ptr);
+        assert_eq!(item.fields_json.as_ptr(), fields_ptr);
+        assert_eq!(item.metadata_json.as_ptr(), metadata_ptr);
+        assert_eq!(item.payload.unwrap(), vec![3_u8; 1024]);
+        assert_eq!(
+            (item.item_version, item.retry_count, item.lease_expires_at),
+            (4, 3, 99)
+        );
+        assert_eq!(item.not_before, Some(10));
+        assert_eq!(item.max_attempts, 0);
+        assert!(
+            item.priority.is_none() && item.group_key.is_none() && item.entity_document.is_none()
+        );
+        assert!(item.index_fields.is_none() && item.gate_keys.is_empty());
+    }
+
+    #[test]
+    fn excluded_claim_rows_do_not_decode_bodies_and_selected_rows_validate_columns() {
+        let id = ItemId::mint(1, 0, 7);
+        let mut first = true;
+        let values = std::iter::from_fn(|| {
+            assert!(first, "excluded row decoded its body");
+            first = false;
+            Some(Value::Text(id.to_string()))
+        });
+        assert!(
+            class_s_item_from_owned_values(values, 99, &HashSet::from([id]))
+                .unwrap()
+                .is_none()
+        );
+        for values in [
+            vec![],
+            vec![Value::Integer(1)],
+            vec![Value::Text(id.to_string())],
+            vec![Value::Text(id.to_string()), Value::Integer(3)],
+        ] {
+            assert!(
+                class_s_item_from_owned_values(values.into_iter(), 99, &HashSet::new()).is_err()
+            );
+        }
     }
 }

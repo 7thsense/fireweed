@@ -1,5 +1,16 @@
 # Campaign qualification and performance plan
 
+The next candidate consumes owned claim-row buffers in the actual FIFO/priority
+claim path, rather than cloning payload/fields/metadata through `get_value`.
+It checks exclusion immediately after decoding the ID; cursor and eligibility
+handling stay before that check. Selected rows preserve versions, attempts,
+defaults, payloads and all metadata. Tests assert original buffer addresses
+survive decoding and an excluded row does not consume its body iterator.
+All **309 release checks passed**, with one existing ignored test and the same
+two unconfigured live-S3 exclusions. A same-layout, clean 64-store/two-worker
+single-cycle comparison follows; throughput benefit is not yet established.
+Evidence uses `fireweed-owned-claim-*`.
+
 Clean six-cycle lifecycle run (`ea40bd7c`, runtime `264d9a3c`, 64 stores/two
 workers): **10,067.49 recipients/sec**, 596.52 seconds, **not qualified**.
 Every reporting check passed, worst p95 0.253 seconds. Five cycles missed
