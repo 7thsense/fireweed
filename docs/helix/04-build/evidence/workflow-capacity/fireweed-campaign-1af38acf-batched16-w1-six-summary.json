@@ -1,0 +1,150 @@
+{
+  "head": "1af38acf80583c724ea0faf275558930b80abb2a",
+  "binary_sha256": "7be3c34f9aa33419bcc91a496d86fcf732482ef759b80d4830ebfb88d8b013d6",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 7428.07189054366,
+  "process_wall_s": 808.1132466690033,
+  "cpu_ms_per_recipient": 1.1314403716666666,
+  "mean_cpu_occupancy": 8.400607536112538,
+  "output_bytes_per_recipient": 12588.578816,
+  "logical_log_bytes_per_recipient": 1834.8263958333334,
+  "peak_rss_gib": 10.86895751953125,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 90.697980102,
+      "load_s": 6.396069211,
+      "prepare_s": 41.270302753,
+      "delivery_s": 32.360794476,
+      "verify_s": 0.693216426,
+      "purge_s": 6.3004288729999995,
+      "progress_p95_s": 1.187056151,
+      "due_to_claim_max_us": 9010014
+    },
+    {
+      "wall_s": 134.03239913,
+      "load_s": 20.087625729,
+      "prepare_s": 51.617852277,
+      "delivery_s": 37.380985368,
+      "verify_s": 0.609614669,
+      "purge_s": 23.942436818,
+      "progress_p95_s": 0.73094619,
+      "due_to_claim_max_us": 10424385
+    },
+    {
+      "wall_s": 132.4320337,
+      "load_s": 34.384032622,
+      "prepare_s": 53.960057339,
+      "delivery_s": 36.693867172,
+      "verify_s": 0.648315888,
+      "purge_s": 6.81339998,
+      "progress_p95_s": 1.079755209,
+      "due_to_claim_max_us": 9660083
+    },
+    {
+      "wall_s": 153.886066302,
+      "load_s": 27.256708364,
+      "prepare_s": 50.485823174,
+      "delivery_s": 67.581686694,
+      "verify_s": 0.605922719,
+      "purge_s": 8.101759372,
+      "progress_p95_s": 0.646872276,
+      "due_to_claim_max_us": 27635841
+    },
+    {
+      "wall_s": 128.443413892,
+      "load_s": 31.42127824,
+      "prepare_s": 51.631475188,
+      "delivery_s": 37.901044279,
+      "verify_s": 0.542422683,
+      "purge_s": 6.633694694,
+      "progress_p95_s": 1.040609581,
+      "due_to_claim_max_us": 10273124
+    },
+    {
+      "wall_s": 161.624650224,
+      "load_s": 32.91296539,
+      "prepare_s": 82.068084164,
+      "delivery_s": 39.042027381,
+      "verify_s": 0.569284923,
+      "purge_s": 6.956968962,
+      "progress_p95_s": 0.596427546,
+      "due_to_claim_max_us": 9743342
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 7428.07189054366,
+      "required": 10000
+    },
+    {
+      "name": "s1_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.187056151,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s2_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.022138699,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s10_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.111358698,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "s19_c1_cycle0_progress",
+      "passed": false,
+      "actual": 1.077568534,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7460.88264099552,
+      "required": 10000
+    },
+    {
+      "name": "s7_c1_cycle2_progress",
+      "passed": false,
+      "actual": 1.079755209,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7551.043143121346,
+      "required": 10000
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6498.314136105794,
+      "required": 10000
+    },
+    {
+      "name": "s24_c1_cycle4_progress",
+      "passed": false,
+      "actual": 1.040609581,
+      "required": "p95 <=1s; >=0.5 reads/s"
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 7785.52959391781,
+      "required": 10000
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6187.175029391079,
+      "required": 10000
+    }
+  ]
+}

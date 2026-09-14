@@ -1,0 +1,396 @@
+{
+  "diagnostic": true,
+  "purpose": "parallel preallocated private-file direct writes; not a workflow, COW overwrite simulation, or intrinsic SSD maximum",
+  "head": "1af38acf80583c724ea0faf275558930b80abb2a",
+  "dirty": "",
+  "root": "/home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x",
+  "jobs": 32,
+  "block_bytes": 1048576,
+  "bytes_per_job": 268435456,
+  "preallocation_excluded_from_write_rate": true,
+  "fdatasync_included_in_write_rate": true,
+  "changes_from_prior_reference": [
+    "32 streams instead of 1",
+    "1 MiB calls instead of 16 MiB",
+    "preallocated instead of grow-on-write"
+  ],
+  "mount": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "preallocation_s": 1.1496357650030404,
+  "attributes": [
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-0.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-1.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-2.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-3.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-4.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-5.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-6.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-7.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-8.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-9.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-10.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-11.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-12.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-13.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-14.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-15.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-16.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-17.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-18.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-19.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-20.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-21.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-22.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-23.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-24.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-25.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-26.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-27.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-28.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-29.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-30.bin",
+    "---------------C------ /home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x/writer-31.bin"
+  ],
+  "direct_io_flag_verified": true,
+  "bytes": 8589934592,
+  "wall_s": 201.8687558620004,
+  "write_started_monotonic_s": 416563.814861739,
+  "write_finished_monotonic_s": 416765.683617601,
+  "mib_s": 40.580821757281434,
+  "user_cpu_s": 0.22589599999999999,
+  "system_cpu_s": 1.671984,
+  "streams": [
+    {
+      "job": 0,
+      "bytes": 268435456,
+      "fdatasync_s": 1.7541547309956513,
+      "write_calls": 256,
+      "write_p50_s": 0.7722553859930485,
+      "write_p95_s": 1.1710155670298263,
+      "write_p99_s": 1.3444188890280202,
+      "write_max_s": 1.7480617900146171
+    },
+    {
+      "job": 1,
+      "bytes": 268435456,
+      "fdatasync_s": 0.6895551470224746,
+      "write_calls": 256,
+      "write_p50_s": 0.7714535970008001,
+      "write_p95_s": 1.211762472987175,
+      "write_p99_s": 1.5308399940258823,
+      "write_max_s": 2.0524271960020997
+    },
+    {
+      "job": 2,
+      "bytes": 268435456,
+      "fdatasync_s": 1.6403537319856696,
+      "write_calls": 256,
+      "write_p50_s": 0.769341753970366,
+      "write_p95_s": 1.2193089570500888,
+      "write_p99_s": 1.4495006559882313,
+      "write_max_s": 2.2630367659730837
+    },
+    {
+      "job": 3,
+      "bytes": 268435456,
+      "fdatasync_s": 1.144853996054735,
+      "write_calls": 256,
+      "write_p50_s": 0.7691938420175575,
+      "write_p95_s": 1.2171869080048054,
+      "write_p99_s": 1.3618828490143642,
+      "write_max_s": 1.5440524910227396
+    },
+    {
+      "job": 4,
+      "bytes": 268435456,
+      "fdatasync_s": 2.4160181659972295,
+      "write_calls": 256,
+      "write_p50_s": 0.7773933929856867,
+      "write_p95_s": 1.144486171018798,
+      "write_p99_s": 1.288125918013975,
+      "write_max_s": 1.8184561380185187
+    },
+    {
+      "job": 5,
+      "bytes": 268435456,
+      "fdatasync_s": 1.2742113239946775,
+      "write_calls": 256,
+      "write_p50_s": 0.784130212967284,
+      "write_p95_s": 1.1058039519703016,
+      "write_p99_s": 1.3929054799955338,
+      "write_max_s": 1.5285574029549025
+    },
+    {
+      "job": 6,
+      "bytes": 268435456,
+      "fdatasync_s": 1.5403686600038782,
+      "write_calls": 256,
+      "write_p50_s": 0.7759382669464685,
+      "write_p95_s": 1.1287352630170062,
+      "write_p99_s": 1.46750725194579,
+      "write_max_s": 1.9082871149876155
+    },
+    {
+      "job": 7,
+      "bytes": 268435456,
+      "fdatasync_s": 2.8497893769526854,
+      "write_calls": 256,
+      "write_p50_s": 0.7746351360110566,
+      "write_p95_s": 1.1066498860018328,
+      "write_p99_s": 1.2510670609772205,
+      "write_max_s": 1.336867436999455
+    },
+    {
+      "job": 8,
+      "bytes": 268435456,
+      "fdatasync_s": 1.9599949849653058,
+      "write_calls": 256,
+      "write_p50_s": 0.7716664039762691,
+      "write_p95_s": 1.096372860018164,
+      "write_p99_s": 1.3147213439806364,
+      "write_max_s": 2.289547249034513
+    },
+    {
+      "job": 9,
+      "bytes": 268435456,
+      "fdatasync_s": 2.235400908975862,
+      "write_calls": 256,
+      "write_p50_s": 0.7810923359938897,
+      "write_p95_s": 1.1263620959944092,
+      "write_p99_s": 1.3049770159996115,
+      "write_max_s": 2.0869148419587873
+    },
+    {
+      "job": 10,
+      "bytes": 268435456,
+      "fdatasync_s": 1.6542766589554958,
+      "write_calls": 256,
+      "write_p50_s": 0.7734404940274544,
+      "write_p95_s": 1.104995711997617,
+      "write_p99_s": 1.2860239389701746,
+      "write_max_s": 1.9202600329881534
+    },
+    {
+      "job": 11,
+      "bytes": 268435456,
+      "fdatasync_s": 0.2914741970016621,
+      "write_calls": 256,
+      "write_p50_s": 0.7763781340327114,
+      "write_p95_s": 1.1592440039967187,
+      "write_p99_s": 1.3568286369554698,
+      "write_max_s": 2.059510744002182
+    },
+    {
+      "job": 12,
+      "bytes": 268435456,
+      "fdatasync_s": 0.45299223699839786,
+      "write_calls": 256,
+      "write_p50_s": 0.7721641260432079,
+      "write_p95_s": 1.2242788669536822,
+      "write_p99_s": 1.4287792019895278,
+      "write_max_s": 1.890344274987001
+    },
+    {
+      "job": 13,
+      "bytes": 268435456,
+      "fdatasync_s": 1.578287590004038,
+      "write_calls": 256,
+      "write_p50_s": 0.7679631740320474,
+      "write_p95_s": 1.1519084030296654,
+      "write_p99_s": 1.374489290989004,
+      "write_max_s": 2.3602998110000044
+    },
+    {
+      "job": 14,
+      "bytes": 268435456,
+      "fdatasync_s": 2.06849236600101,
+      "write_calls": 256,
+      "write_p50_s": 0.7614340250147507,
+      "write_p95_s": 1.1583155679982156,
+      "write_p99_s": 1.3507874170318246,
+      "write_max_s": 1.3998389519983903
+    },
+    {
+      "job": 15,
+      "bytes": 268435456,
+      "fdatasync_s": 3.296378887956962,
+      "write_calls": 256,
+      "write_p50_s": 0.7732964990427718,
+      "write_p95_s": 1.1221700260066427,
+      "write_p99_s": 1.357606541016139,
+      "write_max_s": 1.553303508029785
+    },
+    {
+      "job": 16,
+      "bytes": 268435456,
+      "fdatasync_s": 2.3083426879602484,
+      "write_calls": 256,
+      "write_p50_s": 0.7694002509815618,
+      "write_p95_s": 1.1356103160069324,
+      "write_p99_s": 1.232174611010123,
+      "write_max_s": 1.607288189989049
+    },
+    {
+      "job": 17,
+      "bytes": 268435456,
+      "fdatasync_s": 1.834523752972018,
+      "write_calls": 256,
+      "write_p50_s": 0.7679261510493234,
+      "write_p95_s": 1.2126065409975126,
+      "write_p99_s": 1.3983172019943595,
+      "write_max_s": 1.6272564540267922
+    },
+    {
+      "job": 18,
+      "bytes": 268435456,
+      "fdatasync_s": 0.7948689099866897,
+      "write_calls": 256,
+      "write_p50_s": 0.7757963769836351,
+      "write_p95_s": 1.1857124699745327,
+      "write_p99_s": 1.425549098988995,
+      "write_max_s": 1.9587928170221858
+    },
+    {
+      "job": 19,
+      "bytes": 268435456,
+      "fdatasync_s": 1.1712519470020197,
+      "write_calls": 256,
+      "write_p50_s": 0.7698326560202986,
+      "write_p95_s": 1.190044188988395,
+      "write_p99_s": 1.4114767569699325,
+      "write_max_s": 1.8877084890264086
+    },
+    {
+      "job": 20,
+      "bytes": 268435456,
+      "fdatasync_s": 0.5602062690304592,
+      "write_calls": 256,
+      "write_p50_s": 0.77787835203344,
+      "write_p95_s": 1.1534604789922014,
+      "write_p99_s": 1.389807154017035,
+      "write_max_s": 1.5823833009926602
+    },
+    {
+      "job": 21,
+      "bytes": 268435456,
+      "fdatasync_s": 0.6627539970213547,
+      "write_calls": 256,
+      "write_p50_s": 0.7657323110033758,
+      "write_p95_s": 1.1644500599941239,
+      "write_p99_s": 1.3993968950235285,
+      "write_max_s": 2.0848750980221666
+    },
+    {
+      "job": 22,
+      "bytes": 268435456,
+      "fdatasync_s": 0.09118850302184,
+      "write_calls": 256,
+      "write_p50_s": 0.7834227790008299,
+      "write_p95_s": 1.217074671993032,
+      "write_p99_s": 1.5667052009957843,
+      "write_max_s": 1.9153602459700778
+    },
+    {
+      "job": 23,
+      "bytes": 268435456,
+      "fdatasync_s": 0.07111498300218955,
+      "write_calls": 256,
+      "write_p50_s": 0.7650611459976062,
+      "write_p95_s": 1.2289434960111976,
+      "write_p99_s": 1.4635898600099608,
+      "write_max_s": 1.8781483399798162
+    },
+    {
+      "job": 24,
+      "bytes": 268435456,
+      "fdatasync_s": 0.6071507119922899,
+      "write_calls": 256,
+      "write_p50_s": 0.7759955379879102,
+      "write_p95_s": 1.2149131190381013,
+      "write_p99_s": 1.5521933650015853,
+      "write_max_s": 1.7594275870360434
+    },
+    {
+      "job": 25,
+      "bytes": 268435456,
+      "fdatasync_s": 0.9630692530190572,
+      "write_calls": 256,
+      "write_p50_s": 0.7730275799985975,
+      "write_p95_s": 1.1850684779928997,
+      "write_p99_s": 1.3611523910076357,
+      "write_max_s": 1.5862406910164282
+    },
+    {
+      "job": 26,
+      "bytes": 268435456,
+      "fdatasync_s": 0.21449839597335085,
+      "write_calls": 256,
+      "write_p50_s": 0.7837939069722779,
+      "write_p95_s": 1.1728238689829595,
+      "write_p99_s": 1.478375704959035,
+      "write_max_s": 1.9957944370107725
+    },
+    {
+      "job": 27,
+      "bytes": 268435456,
+      "fdatasync_s": 1.3754854070139118,
+      "write_calls": 256,
+      "write_p50_s": 0.772465095971711,
+      "write_p95_s": 1.1504840420093387,
+      "write_p99_s": 1.3413049000082538,
+      "write_max_s": 1.5624548449995928
+    },
+    {
+      "job": 28,
+      "bytes": 268435456,
+      "fdatasync_s": 0.31798480299767107,
+      "write_calls": 256,
+      "write_p50_s": 0.780708491045516,
+      "write_p95_s": 1.1645620769704692,
+      "write_p99_s": 1.3736171299824491,
+      "write_max_s": 1.9947976489784196
+    },
+    {
+      "job": 29,
+      "bytes": 268435456,
+      "fdatasync_s": 3.0420085629448295,
+      "write_calls": 256,
+      "write_p50_s": 0.7685699660214595,
+      "write_p95_s": 1.1459866620134562,
+      "write_p99_s": 1.428375011018943,
+      "write_max_s": 1.5736805719789118
+    },
+    {
+      "job": 30,
+      "bytes": 268435456,
+      "fdatasync_s": 0.16887676599435508,
+      "write_calls": 256,
+      "write_p50_s": 0.768711534969043,
+      "write_p95_s": 1.2805497020017356,
+      "write_p99_s": 1.592842924001161,
+      "write_max_s": 2.4223358430317603
+    },
+    {
+      "job": 31,
+      "bytes": 268435456,
+      "fdatasync_s": 0.09680661896709353,
+      "write_calls": 256,
+      "write_p50_s": 0.7797554950229824,
+      "write_p95_s": 1.2369962490047328,
+      "write_p99_s": 1.3509950609877706,
+      "write_max_s": 2.3204420640249737
+    }
+  ],
+  "block_sha256": "7a63a0d3b744b30b6f1f663ebcd9372bda796fb5461b3aed5cd35e39aeb39524",
+  "first_last_blocks_verified": true,
+  "completed": true,
+  "private_files_removed": true
+}

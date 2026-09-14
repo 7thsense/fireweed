@@ -1,0 +1,130 @@
+"""Private-file parallel direct-write diagnostic; never campaign qualification."""
+import concurrent.futures
+import fcntl
+import hashlib
+import json
+import mmap
+import os
+from pathlib import Path
+import resource
+import shutil
+import subprocess
+import threading
+import time
+import tempfile
+
+base = Path('/home/erik/Projects/fireweed/target/workflow-capacity').resolve()
+repo = base.parent.parent
+jobs = 32
+block_bytes = 1024 * 1024
+bytes_per_job = 256 * 1024 * 1024
+root = Path(tempfile.mkdtemp(prefix='parallel-write-headroom-', dir=base))
+assert root.parent == base and root.name.startswith('parallel-write-headroom-')
+report = {
+    'diagnostic': True,
+    'purpose': 'parallel preallocated private-file direct writes; not a workflow, COW overwrite simulation, or intrinsic SSD maximum',
+    'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
+    'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True),
+    'root': str(root), 'jobs': jobs, 'block_bytes': block_bytes,
+    'bytes_per_job': bytes_per_job, 'preallocation_excluded_from_write_rate': True,
+    'fdatasync_included_in_write_rate': True,
+    'changes_from_prior_reference': ['32 streams instead of 1', '1 MiB calls instead of 16 MiB', 'preallocated instead of grow-on-write'],
+    'mount': json.loads(subprocess.check_output(['findmnt', '--json', '--target', str(root)])),
+}
+handles = []
+paths = []
+try:
+    if report['mount']['filesystems'][0]['fstype'] != 'btrfs':
+        raise RuntimeError('diagnostic must use the same Btrfs storage path')
+    if report['dirty']:
+        raise RuntimeError('requires a clean checkout for diagnostic provenance')
+    prepared = time.monotonic()
+    attributes = []
+    for job in range(jobs):
+        path = root / f'writer-{job}.bin'
+        path.touch()
+        # A file-local attribute on new owned files, matching the earlier
+        # calibration. No mount, device, encryption, or discard setting changes.
+        subprocess.run(['chattr', '+C', str(path)], check=True)
+        attribute = subprocess.check_output(['lsattr', '-d', str(path)], text=True).strip()
+        if 'C' not in attribute.split()[0]:
+            raise RuntimeError('private file did not retain NOCOW attribute')
+        attributes.append(attribute)
+        fd = os.open(path, os.O_WRONLY | os.O_DIRECT)
+        handles.append(fd)
+        paths.append(path)
+        if not fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_DIRECT:
+            raise RuntimeError('O_DIRECT missing from opened descriptor')
+        os.posix_fallocate(fd, 0, bytes_per_job)
+        os.fdatasync(fd)
+    report['preallocation_s'] = time.monotonic() - prepared
+    report['attributes'] = attributes
+    report['direct_io_flag_verified'] = True
+    buffer = mmap.mmap(-1, block_bytes)
+    buffer[:] = os.urandom(block_bytes)
+    expected = hashlib.sha256(buffer).hexdigest()
+    barrier = threading.Barrier(jobs + 1)
+
+    def write_stream(job):
+        fd = handles[job]
+        durations = []
+        barrier.wait()
+        began = time.monotonic()
+        for offset in range(0, bytes_per_job, block_bytes):
+            if time.monotonic() - began > 480:
+                raise TimeoutError('bounded direct-write stream exceeded 480 seconds')
+            before_write = time.monotonic()
+            written = os.pwrite(fd, buffer, offset)
+            if written != block_bytes:
+                raise RuntimeError(f'short direct write: {written}')
+            durations.append(time.monotonic() - before_write)
+        before_sync = time.monotonic()
+        os.fdatasync(fd)
+        sync_s = time.monotonic() - before_sync
+        durations.sort()
+        return {
+            'job': job, 'bytes': bytes_per_job, 'fdatasync_s': sync_s,
+            'write_calls': len(durations),
+            'write_p50_s': durations[(len(durations)-1)*50//100],
+            'write_p95_s': durations[(len(durations)-1)*95//100],
+            'write_p99_s': durations[(len(durations)-1)*99//100],
+            'write_max_s': durations[-1],
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(write_stream, job) for job in range(jobs)]
+        before_cpu = resource.getrusage(resource.RUSAGE_SELF)
+        started = time.monotonic()
+        barrier.wait()
+        observations = [future.result() for future in futures]
+        wall_s = time.monotonic() - started
+        after_cpu = resource.getrusage(resource.RUSAGE_SELF)
+    report.update({
+        'bytes': jobs * bytes_per_job, 'wall_s': wall_s,
+        'write_started_monotonic_s': started,
+        'write_finished_monotonic_s': started + wall_s,
+        'mib_s': jobs * bytes_per_job / 2**20 / wall_s,
+        'user_cpu_s': after_cpu.ru_utime - before_cpu.ru_utime,
+        'system_cpu_s': after_cpu.ru_stime - before_cpu.ru_stime,
+        'streams': observations, 'block_sha256': expected,
+    })
+    for path in paths:
+        with path.open('rb') as source:
+            if hashlib.sha256(source.read(block_bytes)).hexdigest() != expected:
+                raise RuntimeError('first-block verification failed')
+            source.seek(bytes_per_job - block_bytes)
+            if hashlib.sha256(source.read(block_bytes)).hexdigest() != expected:
+                raise RuntimeError('last-block verification failed')
+    report['first_last_blocks_verified'] = True
+    report['completed'] = True
+except Exception as error:
+    report['completed'] = False
+    report['error'] = repr(error)
+finally:
+    for fd in handles:
+        os.close(fd)
+    assert root.parent == base and root.name.startswith('parallel-write-headroom-')
+    shutil.rmtree(root)
+    report['private_files_removed'] = True
+    print(json.dumps(report, indent=2), flush=True)
+raise SystemExit(0 if report['completed'] else 1)

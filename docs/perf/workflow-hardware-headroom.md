@@ -8,14 +8,35 @@ worker/campaign, 1,000-row storage batches, six million complete recipients):
 | `daa0dd77`, cached single-row writes | 8,520.83 | 1.03661 | 3 | No |
 | `387f0c82`, exact claim-tail metrics | 7,899.88 | 0.98098 | 0 | No |
 | `4256e0c0`, guarded replacement batches | 8,355.53 | 1.04291 | 2 | No |
+| `1af38acf`, rejected 16-row chunks | 7,428.07 | 1.13144 | 6 | No |
 
 These are serial candidate observations, not replicated causal comparisons.
-The latest cost implies **10.43 / 13.04 CPU-seconds per second** and approximately
+The retained 56-row candidate cost implies **10.43 / 13.04 CPU-seconds per second** and approximately
 **42.8 / 53.5 MiB/sec of host writes** at the unchanged 10k / 12.5k targets,
 assuming constant per-recipient costs. Those are demands, not proven ceilings.
 Reducing SQL call count from 1,022 to 40 per thousand replacements has not by
-itself met the end-to-end target. The next experiment reduces generated SQL chunk
-size and strengthens the concurrent progress oracle.
+itself met the end-to-end target. Reducing generated SQL chunks to 16 rows
+increased CPU cost and reduced measured throughput; the cap is restored to 56.
+The stronger concurrent progress-count oracle remains.
+
+A separate clean `1af38acf` parallel direct-write diagnostic measured **40.58
+MiB/sec** for 8 GiB over 201.87 seconds on the same Btrfs storage path. It used
+32 preallocated private NOCOW files, verified O_DIRECT, 1 MiB incompressible
+writes, and included final fdatasync. Preallocation and verification were
+excluded. Process CPU was 1.90 seconds; sampled whole-host busy CPU occupancy
+was 0.24 CPUs. The device recorded 40.71 MiB/sec and 336.84 write IOPS with mean
+123.77 KiB requests. This is numerical evidence of a slow observed storage path
+independent of Fireweed SQL; it does **not** identify an intrinsic SSD limit,
+TRIM cause, or need for new hardware. No system settings changed.
+
+At the retained candidate's measured write cost, 10k/12.5k recipients/sec demand
+42.8/53.5 MiB/sec, about 1.05/1.32 times this diagnostic rate. That comparison
+shows why storage-path delays deserve measurement, but the diagnostic's large
+preallocated NOCOW writes differ from compressed projection/checkpoint and log
+traffic. It is not a workflow upper bound. Code can still reduce CPU and write
+amplification; maintenance is not a prerequisite. Full scripts and measurements
+are archived alongside the campaign evidence, as detailed in the
+[qualification plan](campaign-qualification-plan.md).
 
 2026-09-14 claim-tail metrics run (`387f0c82`): 7,899.88 recipients/sec;
 all non-throughput gates passed, but every throughput gate failed. Its measured

@@ -37,9 +37,9 @@ const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
-/// Keep the generated VALUES program small; the bind ceiling is a safety bound,
-/// not necessarily the most efficient execution size.
-pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 16;
+/// Sixteen row binds and four shared binds fit 56 replacements under the
+/// 900-bind ceiling. A 16-row cap increased measured campaign CPU and wall time.
+pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 56;
 
 /// SQL used by the adapter for bounded resolved replacement writes.
 /// Exposed for native query-plan qualification of the executed statement.

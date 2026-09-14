@@ -1,0 +1,31 @@
+diagnostic_exit 0
+{
+  "diagnostic": true,
+  "purpose": "parallel preallocated private-file direct writes; not a workflow, COW overwrite simulation, or intrinsic SSD maximum",
+  "head": "1af38acf80583c724ea0faf275558930b80abb2a",
+  "dirty": "",
+  "root": "/home/erik/Projects/fireweed/target/workflow-capacity/parallel-write-headroom-nm3g5v7x",
+  "jobs": 32,
+  "block_bytes": 1048576,
+  "bytes_per_job": 268435456,
+  "preallocation_excluded_from_write_rate": true,
+  "fdatasync_included_in_write_rate": true,
+  "changes_from_prior_reference": [
+    "32 streams instead of 1",
+    "1 MiB calls instead of 16 MiB",
+    "preallocated instead of grow-on-write"
+  ],
+  "preallocation_s": 1.1496357650030404,
+  "direct_io_flag_verified": true,
+  "bytes": 8589934592,
+  "wall_s": 201.8687558620004,
+  "write_started_monotonic_s": 416563.814861739,
+  "write_finished_monotonic_s": 416765.683617601,
+  "mib_s": 40.580821757281434,
+  "user_cpu_s": 0.22589599999999999,
+  "system_cpu_s": 1.671984,
+  "block_sha256": "7a63a0d3b744b30b6f1f663ebcd9372bda796fb5461b3aed5cd35e39aeb39524",
+  "first_last_blocks_verified": true,
+  "completed": true,
+  "private_files_removed": true
+}

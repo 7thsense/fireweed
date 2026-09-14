@@ -1,5 +1,43 @@
 # Campaign qualification and performance plan
 
+2026-09-14 16-row replacement experiment rejected: clean `1af38acf` completed
+all six canonical disk cycles at **7,428.07 recipients/sec** in 808.11 seconds,
+compared with 8,355.53/sec for 56-row batches. CPU cost rose from 1.04291 to
+1.13144 ms/recipient (+8.5%); throughput fell 11.1%. Peak RSS was 10.87 GiB.
+Overall throughput, cycles 1–5 throughput, and six progress checks failed;
+all other gates passed. The strengthened concurrent resident/acknowledged-terminal
+count assertions passed throughout. These are serial observations, not a
+replicated causal estimate, but provide no reason to retain the smaller cap.
+The code restores 56-row chunks and keeps the stronger progress oracle. All
+70 release checks pass after restoration: native SQL/rollback, adapter/history,
+WAL/free-page, campaign, primitive CLI and recovery suites. The log is
+`fireweed-restored-batches-release-validation.log`.
+
+Process output was 12,588.58 bytes/recipient; logical log output remained
+1,834.83 bytes/recipient. Host writes were 25.35 GiB, 32.23 MiB/sec, over the
+sampled process window. Raw results, device samples, summaries, build log and
+compression-property readbacks are archived under
+`fireweed-campaign-1af38acf-batched16-w1-six*`; the owned projection root was
+removed after property capture. Child execution succeeded; qualification failed.
+
+A separate clean-HEAD storage-path diagnostic then wrote 8 GiB through 32
+preallocated private files, using verified O_DIRECT and 1 MiB incompressible
+writes, with final fdatasync included: **201.87 seconds, 40.58 MiB/sec**.
+Preallocation (1.15 s) and first/last-block verification were outside the timer.
+Process CPU was 1.90 CPU-seconds total. Timed-window device samples recorded
+40.71 MiB/sec, 336.84 write IOPS at 123.77 KiB/request, and 0.24 host busy CPUs.
+This reproduces the earlier slow storage path without Fireweed SQL or a
+single-writer bottleneck. It does not prove the intrinsic SSD maximum or its
+cause. The 32-stream count, call size and preallocation all differ from the
+prior reference; this is not a single-variable causal comparison. No device,
+mount, encryption or discard settings changed. New owned files used the same
+file-local NOCOW attribute as the prior diagnostic and were removed afterward.
+Scripts, full results and device accounting are archived under
+`fireweed-parallel-headroom*` and `fireweed-parallel-write-headroom.py.txt`.
+This is diagnostic evidence only and does not qualify the workflow or change
+its fixed 10k/12.5k targets. Next work returns to the code's measured SQL and
+write amplification costs; SSD maintenance remains unnecessary for continuing.
+
 2026-09-14 bounded replacement batching: clean `4256e0c0` completed six disk
 cycles at **8,355.53 recipients/sec** in 718.50 seconds. This is 5.8% above the
 preceding claim-metrics run, but CPU cost increased 6.3% to 1.04291 ms/recipient

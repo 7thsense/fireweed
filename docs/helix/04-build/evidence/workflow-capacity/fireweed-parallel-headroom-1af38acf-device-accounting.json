@@ -1,0 +1,21 @@
+{
+  "schema": "workflow-device-accounting/v1",
+  "device": "nvme0n1",
+  "host_wide_not_process_attribution": true,
+  "startup_tail_omitted": true,
+  "sampled_seconds": 201.06946976098698,
+  "write_iops": 336.83880541640093,
+  "read_iops": 0.02984043279734239,
+  "write_mib_per_second": 40.712763403269925,
+  "write_kib_per_request": 123.76801322938815,
+  "mean_write_request_ms": 776.331236711552,
+  "mean_read_request_ms": 139.66666666666666,
+  "weighted_mean_inflight": 261.56314562582276,
+  "max_sampled_inflight_not_peak_bound": 717,
+  "busy_percent_not_capacity_utilization": 99.99926902826734,
+  "flush_iops": 0.0944947038582509,
+  "mean_flush_request_ms": 640.1052631578947,
+  "discard_iops": 0.0,
+  "discarded_gib": 0.0,
+  "source": "/tmp/fireweed-parallel-headroom-1af38acf-write-window.jsonl"
+}

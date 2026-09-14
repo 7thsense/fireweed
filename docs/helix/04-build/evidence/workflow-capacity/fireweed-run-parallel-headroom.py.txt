@@ -1,0 +1,25 @@
+import json, subprocess
+from pathlib import Path
+base=Path('/tmp/fireweed-parallel-headroom-1af38acf')
+stop=Path(str(base)+'.stop'); stop.unlink(missing_ok=True)
+pidfile=Path(str(base)+'.pid'); pidfile.unlink(missing_ok=True)
+monitor=subprocess.Popen(['python3','/tmp/fireweed-device-monitor-v3.py',str(base)+'-device.jsonl',str(stop),str(pidfile)])
+try:
+    with Path(str(base)+'.json').open('w') as output:
+        child=subprocess.Popen(['python3','/tmp/fireweed-parallel-write-headroom.py'],stdout=output)
+        pidfile.write_text(str(child.pid))
+        rc=child.wait()
+finally:
+    stop.touch(); monitor.wait(timeout=5)
+print('diagnostic_exit',rc,flush=True)
+r=json.loads(Path(str(base)+'.json').read_text())
+if r.get('completed'):
+    rows=[json.loads(x) for x in Path(str(base)+'-device.jsonl').read_text().splitlines()]
+    active=[x for x in rows if r['write_started_monotonic_s'] <= x['monotonic_s'] <= r['write_finished_monotonic_s']]
+    p=Path(str(base)+'-write-window.jsonl')
+    p.write_text(''.join(json.dumps(x)+'\n' for x in active))
+    if len(active)>1:
+        with Path(str(base)+'-device-summary.json').open('w') as output:
+            subprocess.run(['python3','/tmp/fireweed-device-summary-v3.py',str(p)],stdout=output,check=True)
+    print(json.dumps({k:v for k,v in r.items() if k not in ['streams','attributes','mount']},indent=2),flush=True)
+raise SystemExit(rc)
