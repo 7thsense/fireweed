@@ -15,13 +15,151 @@ type Counts = [i64; 4];
 // None means the command can affect rows beyond explicitly addressed IDs.
 type Scope = Option<BTreeSet<ItemId>>;
 
-pub(crate) struct MetricsDelta(Vec<(QueueKey, Scope, Counts)>);
+pub(crate) struct MetricsDelta(Vec<(QueueKey, Scope, Counts, Option<Counts>)>);
+
+/// An optimization of the SQL transaction's counters, never a log-tail read.
+/// Every position must be new and contiguous from the writer's cursor snapshot.
+enum FinalEffect {
+    UnresolvedClaim,
+    Resolved(Option<usize>),
+}
+
+enum AfterPlan {
+    FreshPush(Counts),
+    FinalRows(BTreeMap<ItemId, Option<usize>>),
+}
+
+fn fresh_after_plan(
+    queue: &QueueKey,
+    positions: &[CommandPosition],
+    commands: &[CommandEnvelope],
+    cursor_seeds: &std::collections::HashMap<QueueKey, i64>,
+) -> Option<AfterPlan> {
+    let mut next = *cursor_seeds.get(queue)?;
+    let mut effects: BTreeMap<ItemId, FinalEffect> = BTreeMap::new();
+    let mut pushes = false;
+    let mut other_rows = false;
+    for (position, envelope) in positions.iter().zip(commands) {
+        if position.queue != *queue {
+            continue;
+        }
+        if i64::try_from(position.sequence).ok()? != next {
+            return None;
+        }
+        next = next.checked_add(1)?;
+        match &envelope.command {
+            QueueCommand::Push(command) => {
+                if other_rows {
+                    return None;
+                }
+                pushes = true;
+                for item in &command.items {
+                    // Repeated IDs would normally fail INSERT; keep these on
+                    // the existing measured-row path instead of relying on it.
+                    if effects
+                        .insert(item.item_id, FinalEffect::Resolved(Some(0)))
+                        .is_some()
+                    {
+                        return None;
+                    }
+                }
+            }
+            QueueCommand::Claim(command) => {
+                if pushes {
+                    return None;
+                }
+                other_rows = true;
+                for id in &command.item_ids {
+                    // A claim may be conditional. A later guarded replacement
+                    // or purge must establish the final state for this ID.
+                    effects.insert(*id, FinalEffect::UnresolvedClaim);
+                }
+            }
+            QueueCommand::MutateItems(command) => {
+                if pushes {
+                    return None;
+                }
+                other_rows = true;
+                for item in &command.items {
+                    let state = match &item.action {
+                        fireweed_engine::ResolvedItemMutationAction::Purge => None,
+                        fireweed_engine::ResolvedItemMutationAction::Replace(values)
+                        | fireweed_engine::ResolvedItemMutationAction::ReplaceKeepingPayload(
+                            values,
+                        ) => Some(match values.state {
+                            fireweed_core::ItemState::Pending => 0,
+                            fireweed_core::ItemState::Leased => 1,
+                            fireweed_core::ItemState::Complete => 2,
+                            fireweed_core::ItemState::Failed => 3,
+                        }),
+                    };
+                    effects.insert(item.item_id, FinalEffect::Resolved(state));
+                }
+            }
+            QueueCommand::PurgeItems(command) => {
+                if pushes {
+                    return None;
+                }
+                other_rows = true;
+                for id in &command.item_ids {
+                    effects.insert(*id, FinalEffect::Resolved(None));
+                }
+            }
+            // Keep every other command family on the established SQL path.
+            _ => return None,
+        }
+    }
+    if pushes {
+        return Some(AfterPlan::FreshPush([
+            i64::try_from(effects.len()).ok()?,
+            0,
+            0,
+            0,
+        ]));
+    }
+    let final_rows: Option<BTreeMap<_, _>> = effects
+        .into_iter()
+        .map(|(id, effect)| match effect {
+            FinalEffect::UnresolvedClaim => None,
+            FinalEffect::Resolved(state) => Some((id, state)),
+        })
+        .collect();
+    Some(AfterPlan::FinalRows(final_rows?))
+}
+
+impl AfterPlan {
+    fn after(&self, before: Counts, scope: &Scope) -> Option<Counts> {
+        match self {
+            Self::FreshPush(after) => Some(*after),
+            Self::FinalRows(rows) => {
+                let ids = scope.as_ref()?;
+                if rows.len() != ids.len() || !rows.keys().eq(ids.iter()) {
+                    return None;
+                }
+                // Purge removes all explicitly addressed rows, including
+                // missing/superseded ones. Replacements preserve supersession,
+                // so only infer their contribution when every row was active.
+                let all_purged = rows.values().all(Option::is_none);
+                let active = before.into_iter().try_fold(0i64, i64::checked_add);
+                if !all_purged && active != i64::try_from(ids.len()).ok() {
+                    return None;
+                }
+                let mut after = [0i64; 4];
+                for state in rows.values().flatten() {
+                    after[*state] = after[*state].checked_add(1)?;
+                }
+                Some(after)
+            }
+        }
+    }
+}
 
 impl MetricsDelta {
     pub(crate) fn capture(
         tx: &impl RelTx,
         positions: &[CommandPosition],
         commands: &[CommandEnvelope],
+        cursor_seeds: &std::collections::HashMap<QueueKey, i64>,
     ) -> EngineResult<Self> {
         let mut scopes: BTreeMap<QueueKey, Scope> = BTreeMap::new();
         for (position, envelope) in positions.iter().zip(commands) {
@@ -64,15 +202,26 @@ impl MetricsDelta {
         }
         let mut captured = Vec::with_capacity(scopes.len());
         for (queue, scope) in scopes {
-            let before = counts(tx, &queue, &scope)?;
-            captured.push((queue, scope, before));
+            let plan = fresh_after_plan(&queue, positions, commands, cursor_seeds);
+            let before = if matches!(plan, Some(AfterPlan::FreshPush(_))) {
+                // Ordinary INSERT fails on any existing row/key; only a
+                // successful SQL apply will reach counter application.
+                [0; 4]
+            } else {
+                counts(tx, &queue, &scope)?
+            };
+            let known_after = plan.and_then(|plan| plan.after(before, &scope));
+            captured.push((queue, scope, before, known_after));
         }
         Ok(Self(captured))
     }
 
     pub(crate) fn apply(self, tx: &impl RelTx) -> EngineResult<()> {
-        for (queue, scope, before) in self.0 {
-            let after = counts(tx, &queue, &scope)?;
+        for (queue, scope, before, known_after) in self.0 {
+            let after = match known_after {
+                Some(after) => after,
+                None => counts(tx, &queue, &scope)?,
+            };
             let delta = std::array::from_fn::<_, 4, _>(|i| after[i] - before[i]);
             if delta == [0; 4] {
                 continue;
@@ -233,15 +382,15 @@ mod tests {
             let rel = TursoRel(&hop);
             let before = counts(&rel, &q, &s)?;
             rel.execute("INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority_sort,item_version,last_command_sequence,created_at,updated_at,max_attempts,created_seq) VALUES('t','q',?1,?1,'Pending',X'00',1,1,1,1,5,1)", &[id.to_string().into()])?;
-            MetricsDelta(vec![(q.clone(), s.clone(), before)]).apply(&rel)?;
+            MetricsDelta(vec![(q.clone(), s.clone(), before, None)]).apply(&rel)?;
             assert_eq!(counts(&rel, &q, &None)?, [1, 0, 0, 0]);
             assert_eq!(rel.query(READ_SQL, &["t".into(), "q".into()])?[0].get::<i64>(0)?, 1);
             // Missing ID and repeated/no-op apply contribute no phantom count.
             let before = counts(&rel, &q, &s)?;
-            MetricsDelta(vec![(q.clone(), s.clone(), before)]).apply(&rel)?;
+            MetricsDelta(vec![(q.clone(), s.clone(), before, None)]).apply(&rel)?;
             let before = counts(&rel, &q, &s)?;
             rel.execute("UPDATE fireweed_items SET lifecycle_state='Leased'", &[])?;
-            MetricsDelta(vec![(q.clone(), s.clone(), before)]).apply(&rel)?;
+            MetricsDelta(vec![(q.clone(), s.clone(), before, None)]).apply(&rel)?;
             let actual = rel.query(READ_SQL, &["t".into(), "q".into()])?;
             assert_eq!(actual[0].get::<i64>(0)?, 0);
             assert_eq!(actual[0].get::<i64>(1)?, 1);
@@ -257,7 +406,7 @@ mod tests {
             let rel = TursoRel(&hop);
             let before = counts(&rel, &queue, &scope)?;
             rel.execute("DELETE FROM fireweed_items", &[])?;
-            MetricsDelta(vec![(queue, scope, before)]).apply(&rel)?;
+            MetricsDelta(vec![(queue, scope, before, None)]).apply(&rel)?;
             assert_eq!(
                 rel.query(READ_SQL, &["t".into(), "q".into()])?[0].get::<i64>(1)?,
                 0

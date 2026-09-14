@@ -237,11 +237,11 @@ impl TursoBatchUpdateStatementShape {
         }
     }
 
-    pub(crate) fn record(&mut self, sql: &str, bind_count: usize) {
+    pub(crate) fn record(&mut self, sql: &str, bind_count: usize, is_write: bool) {
         self.statement_count += 1;
         self.max_bind_count = self.max_bind_count.max(bind_count);
         let normalized = sql.trim_start().to_ascii_uppercase();
-        if normalized.starts_with("SELECT") {
+        if !is_write {
             self.read_statement_count += 1;
         } else {
             self.write_statement_count += 1;

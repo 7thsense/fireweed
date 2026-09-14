@@ -1530,12 +1530,13 @@ fn record_statement(
     shape: Option<&Arc<std::sync::Mutex<TursoBatchUpdateStatementShape>>>,
     sql: &str,
     bind_count: usize,
+    is_write: bool,
 ) {
     if let Some(shape) = shape {
         shape
             .lock()
             .expect("Turso statement-shape mutex poisoned")
-            .record(sql, bind_count);
+            .record(sql, bind_count, is_write);
     }
 }
 
@@ -1572,7 +1573,7 @@ impl RelTx for ObservedTursoRel<'_> {
             .expect("Turso RelTx phase mutex poisoned");
         phases.update_side_us = phases.update_side_us.saturating_add(elapsed);
         drop(phases);
-        record_statement(self.statement_shape.as_ref(), sql, params.len());
+        record_statement(self.statement_shape.as_ref(), sql, params.len(), true);
         result
     }
 
@@ -1591,15 +1592,15 @@ impl RelTx for ObservedTursoRel<'_> {
             .lock()
             .expect("Turso RelTx phase mutex poisoned");
         let normalized = sql.trim_start().to_ascii_uppercase();
-        if normalized.starts_with("UPDATE")
-            || (normalized.starts_with("WITH") && normalized.contains(" UPDATE "))
-        {
+        let is_write = normalized.starts_with("UPDATE")
+            || (normalized.starts_with("WITH") && normalized.contains(" UPDATE "));
+        if is_write {
             phases.update_side_us = phases.update_side_us.saturating_add(elapsed);
         } else {
             phases.row_read_us = phases.row_read_us.saturating_add(elapsed);
         }
         drop(phases);
-        record_statement(self.statement_shape.as_ref(), sql, params.len());
+        record_statement(self.statement_shape.as_ref(), sql, params.len(), is_write);
         result
     }
 }
@@ -1723,7 +1724,7 @@ async fn apply_owned(
             let floor = match floors.get(&position.queue) {
                 Some(floor) => *floor,
                 None => {
-                    record_statement(Some(&statement_shape), sql::SELECT_CURSOR, 2);
+                    record_statement(Some(&statement_shape), sql::SELECT_CURSOR, 2, false);
                     let row = one_row(
                         &transaction,
                         sql::SELECT_CURSOR,
@@ -1756,7 +1757,7 @@ async fn apply_owned(
     }
     for position in &positions {
         if !queues.contains_key(&position.queue) {
-            record_statement(Some(&statement_shape), sql::SELECT_QUEUE_DEFINITION, 2);
+            record_statement(Some(&statement_shape), sql::SELECT_QUEUE_DEFINITION, 2, false);
             let definition = definition_in_transaction(&transaction, &position.queue).await?;
             queues.insert(position.queue.clone(), definition);
         }
@@ -1789,7 +1790,7 @@ async fn apply_owned(
             statement_shape: Some(statement_shape_for_hop),
             phases: rel_phases_for_hop,
         };
-        let metrics_delta = crate::metrics::MetricsDelta::capture(&rel, &positions, &commands)?;
+        let metrics_delta = crate::metrics::MetricsDelta::capture(&rel, &positions, &commands, &cursor_seeds)?;
         let applied = fireweed_relational::apply_committed_batch_sql_with_cursor_seeds(
             &rel,
             &queues,
@@ -5412,6 +5413,223 @@ mod item_mutation_tests {
             response_payload: serde_json::to_string(&response).unwrap(),
         });
         command
+    }
+
+    #[tokio::test]
+    async fn lifecycle_shortcuts_match_measured_rows_and_replay_fallbacks() {
+        use fireweed_core::ItemId;
+        use fireweed_engine::{CommandEnvelope, PurgeItemsCommand};
+
+        async fn oracle(store: &TursoRelational, shard: &QueueKey) -> Vec<Value> {
+            let rows = store.query(
+                    "SELECT COALESCE(SUM(lifecycle_state='Pending'),0),COALESCE(SUM(lifecycle_state='Leased'),0),COALESCE(SUM(lifecycle_state='Complete'),0),COALESCE(SUM(lifecycle_state='Failed'),0) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0",
+                    vec![shard.tenant_id.as_str().into(), shard.queue_id.as_str().into()],
+                ).await.unwrap();
+            let expected = rows[0].values.clone();
+            let metrics = store.server_metrics(shard).await.unwrap();
+            let actual = vec![
+                metrics.pending,
+                metrics.leased,
+                metrics.complete,
+                metrics.failed,
+            ]
+            .into_iter()
+            .map(|n| Value::Integer(n as i64))
+            .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            actual
+        }
+
+        async fn paired(
+            fast: &TursoRelational,
+            measured: &TursoRelational,
+            shard: &QueueKey,
+            sequences: &[u64],
+            commands: Vec<CommandEnvelope>,
+            saved_reads: usize,
+        ) {
+            let positions = sequences
+                .iter()
+                .map(|seq| CommandPosition::new(shard.clone(), 0, *seq))
+                .collect::<Vec<_>>();
+            AsyncProjectionStore::apply_live(fast, positions.clone(), commands.clone())
+                .await
+                .unwrap();
+            AsyncProjectionStore::apply_recovery(measured, positions, commands)
+                .await
+                .unwrap();
+            assert_eq!(oracle(fast, shard).await, oracle(measured, shard).await);
+            let fast_shape = fast.last_apply_statement_shape().unwrap();
+            let measured_shape = measured.last_apply_statement_shape().unwrap();
+            assert_eq!(
+                measured_shape.read_statement_count,
+                fast_shape.read_statement_count + saved_reads,
+                "actual read reduction: fast={fast_shape:?}, measured={measured_shape:?}"
+            );
+            assert_eq!(
+                fast_shape.write_statement_count,
+                measured_shape.write_statement_count
+            );
+        }
+
+        fn mutations(pushed: &[fireweed_engine::PushItem], version: u64) -> CommandEnvelope {
+            let items = pushed
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let mut mutation = replacement(row, version, b"counted");
+                    let ResolvedItemMutationAction::Replace(values) = &mut mutation.action else {
+                        unreachable!()
+                    };
+                    values.invalidate_lease = true;
+                    values.state = [ItemState::Complete, ItemState::Failed, ItemState::Pending][i % 3];
+                    mutation
+                })
+                .collect::<Vec<_>>();
+            envelope(
+                QueueCommand::MutateItems(MutateItemsCommand {
+                    items,
+                    gate_changes: vec![],
+                }),
+                pushed.iter().map(|i| i.item_id).collect(),
+            )
+        }
+
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let fast = TursoRelational::in_memory().await.unwrap();
+        let measured = TursoRelational::in_memory().await.unwrap();
+        for store in [&fast, &measured] {
+            AsyncProjectionStore::ensure_shard(store, definition.clone())
+                .await
+                .unwrap();
+        }
+        let pushed = (1..=3)
+            .map(|n| item(&n.to_string(), &n.to_string(), n))
+            .collect::<Vec<_>>();
+        let push = envelope(
+            QueueCommand::Push(PushCommand {
+                items: pushed.clone(),
+            }),
+            pushed.iter().map(|i| i.item_id).collect(),
+        );
+        paired(&fast, &measured, &shard, &[0], vec![push], 2).await;
+        let first_mutation = mutations(&pushed, 2);
+        paired(
+            &fast,
+            &measured,
+            &shard,
+            &[1],
+            vec![first_mutation.clone()],
+            1,
+        )
+        .await;
+        // A fully covered replay and a covered prefix must retain measured counts.
+        paired(
+            &fast,
+            &measured,
+            &shard,
+            &[1],
+            vec![first_mutation.clone()],
+            0,
+        )
+        .await;
+        paired(
+            &fast,
+            &measured,
+            &shard,
+            &[1, 2],
+            vec![first_mutation, mutations(&pushed, 3)],
+            0,
+        )
+        .await;
+        let id = pushed[2].item_id;
+        let claim = envelope(
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![id],
+                lease_token: LeaseToken::new("counted-claim").unwrap(),
+                lease_expires_at: ts(100),
+                worker_id: None,
+                authority_first: true,
+            }),
+            vec![id],
+        );
+        paired(
+            &fast,
+            &measured,
+            &shard,
+            &[3, 4],
+            vec![claim, mutations(&pushed[2..], 5)],
+            1,
+        )
+        .await;
+        // Model a valid superseded-row fixture with consistent counters.
+        for store in [&fast, &measured] {
+            store
+                .execute(
+                    "UPDATE fireweed_items SET superseded=1 WHERE item_id=?1",
+                    vec![pushed[1].item_id.to_string().into()],
+                )
+                .await
+                .unwrap();
+            store
+                .execute(
+                    "UPDATE queues SET resident_failed=resident_failed-1 WHERE tenant=?1 AND queue=?2",
+                    vec![
+                        shard.tenant_id.as_str().into(),
+                        shard.queue_id.as_str().into(),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        paired(
+            &fast,
+            &measured,
+            &shard,
+            &[5],
+            vec![mutations(&pushed[1..2], 4)],
+            0,
+        )
+        .await;
+        let removed = vec![pushed[0].item_id, pushed[1].item_id, ItemId::from_u64(99)];
+        let purge = envelope(
+            QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: removed.clone(),
+                force: true,
+            }),
+            removed,
+        );
+        paired(&fast, &measured, &shard, &[6], vec![purge], 1).await;
+        // Same-position duplicates skip their second command, so cannot predict
+        // effects from the command list without the freshness/contiguity guard.
+        let extra = item("4", "4", 4);
+        let push = envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![extra.clone()],
+            }),
+            vec![extra.item_id],
+        );
+        let purge = envelope(
+            QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![extra.item_id],
+                force: true,
+            }),
+            vec![extra.item_id],
+        );
+        paired(&fast, &measured, &shard, &[7, 7], vec![push, purge], 0).await;
+        let before = oracle(&fast, &shard).await;
+        // A gap error must leave both counters and rows unchanged.
+        assert!(
+            AsyncProjectionStore::apply_live(
+                &fast,
+                vec![CommandPosition::new(shard.clone(), 0, 9)],
+                vec![mutations(&pushed[2..], 6)]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(oracle(&fast, &shard).await, before);
     }
 
     #[tokio::test]

@@ -1,5 +1,50 @@
 # Campaign qualification and performance plan
 
+2026-09-14 owned-row candidate: clean `f9598882` completed the canonical six-cycle
+disk workload at **8,230.52 recipients/sec**, 729.58 seconds. All non-throughput
+gates passed, including all 384 reporting checks (worst p95 0.9427 s), stronger
+concurrent count assertions, final disposition checks,
+retention, due latency, WAL bounds and memory/storage stability. Overall and
+cycles 1–5 throughput failed. CPU cost was **1.04907 ms/recipient**, peak RSS
+11.59 GiB, process output 12,426.76 bytes/recipient, logical log output
+1,834.83 bytes/recipient. Host writes were 24.91 GiB at 35.09 MiB/sec.
+
+Compared with `4256e0c0` (8,355.53/sec, 1.04291 CPU-ms/recipient, two reporting
+failures), this does not demonstrate a throughput or CPU improvement. These
+serial observations are not replicated causal estimates. The ownership change
+removes a proven redundant buffer copy but remains unqualified for performance.
+Raw/summary/device/provenance artifacts use
+`fireweed-campaign-f9598882-owned-rows-w1-six*`; compression properties were
+captured before removing the owned projection directory.
+
+The next candidate avoids the post-mutation lifecycle aggregate only when fresh,
+contiguous writer cursor positions and explicit final operations prove the result.
+Replacements additionally require the pre-mutation aggregate to prove every
+addressed row is present and unsuperseded. Unresolved claims, replay/covered
+prefixes, duplicate positions, missing/superseded replacement targets, mixed
+push/mutation batches and unsupported command families retain measured counts.
+Fresh pure inserts use their successful ordinary INSERT guarantee; pure purge
+knows its post-state is absent. Any SQL/version/receipt failure still rolls back
+before counter application. The optimization runs inside the projection
+transaction, not in public log-tail reporting.
+
+A measurement correction accompanies this: the old statement-shape observer
+classified every non-SELECT prefix as a write, including `WITH ... SELECT` reads.
+Historical 1,022/40/85 “write statement” numbers therefore include CTE reads;
+the recorded total statement counts remain valid. Explicit execution/query
+classification now records the CTE aggregate reads correctly. Do not reinterpret
+those historical labels as exact write counts. A new native comparison uses
+live apply versus the unchanged measured recovery path and an independent
+resident-row aggregate, asserting actual read reductions and replay/supersession
+fallbacks. All **72 release checks pass**: 47 native, seven adapter/history,
+one WAL/free-page, three native recovery, two workload unit, six campaign,
+two primitive CLI and four workload recovery tests. A focused native rerun
+records **41 total statements, five reads and 36 writes** for 1,000 guarded
+replacements, with a maximum of 900 binds and no broad current-row scan.
+Validation logs are `fireweed-known-after-release-validation.log` and
+`fireweed-known-after-statement-shape.log`. Sustained performance remains to
+be measured; query-count savings alone are not qualification.
+
 2026-09-14 current CPU attribution: clean `391829ee`, with normal release binary
 and explicit Btrfs log/projection roots, completed three million-recipient cycles
 under a 199 Hz user-IP sampler. It collected **540,506 samples with zero lost**.

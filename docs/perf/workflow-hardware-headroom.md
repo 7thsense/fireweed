@@ -9,8 +9,18 @@ worker/campaign, 1,000-row storage batches, six million complete recipients):
 | `387f0c82`, exact claim-tail metrics | 7,899.88 | 0.98098 | 0 | No |
 | `4256e0c0`, guarded replacement batches | 8,355.53 | 1.04291 | 2 | No |
 | `1af38acf`, rejected 16-row chunks | 7,428.07 | 1.13144 | 6 | No |
+| `f9598882`, owned row transfer | 8,230.52 | 1.04907 | 0 | No |
 
 These are serial candidate observations, not replicated causal comparisons.
+The owned-row run passes all non-throughput gates but demonstrates no throughput
+or CPU gain over the earlier 56-row candidate. Its measured cost implies
+10.49/13.11 CPU-seconds per second and approximately 42.5/53.1 MiB/sec of host
+writes at 10k/12.5k recipients/sec, assuming constant costs. These remain demands,
+not proven ceilings. The next candidate targets duplicate lifecycle aggregate
+reads. Historical SQL “write” counts included CTE reads due to an observer
+classification bug; total statement counts were unaffected. See the
+[qualification plan](campaign-qualification-plan.md) for the correction.
+
 The retained 56-row candidate cost implies **10.43 / 13.04 CPU-seconds per second** and approximately
 **42.8 / 53.5 MiB/sec of host writes** at the unchanged 10k / 12.5k targets,
 assuming constant per-recipient costs. Those are demands, not proven ceilings.
