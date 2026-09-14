@@ -1,5 +1,31 @@
 # Campaign qualification and performance plan
 
+2026-09-14 fixed-frontier full run (`d124c24b`, 32 stores, two workers per
+campaign): **10,167.33 recipients/sec**, 590.48 seconds. **All reporting and
+all other non-rate gates passed**, with worst p95 0.982 seconds. This is still
+**not qualified**: cycles 2/4/5 reached 9,913.32 / 9,298.54 / 8,970.78 equivalent
+recipients/sec. Slowest cycle times were 77.17/91.18/100.87/96.29/107.54/111.47
+seconds. CPU cost was 1.01615 ms/recipient, peak RSS 10.87 GiB, process output
+11,449.50 bytes/recipient, and sampled host writes 20.1801 GiB at 35.13 MiB/sec.
+The serial comparison with `cd5db494` observed CPU cost down 2.1%, host writes
+down 4.4%, and reporting failures down from 12 to zero; it is not a replicated
+isolated causal rate claim. Raw evidence uses `fireweed-campaign-fixed-target-w2-six*`.
+The owned projection root was removed after capturing properties.
+
+Next, compare the exact same binary with 64 physical stores and one worker per
+campaign: 128 campaign workers in both layouts, still one million recipients,
+two campaigns per store, the same handler/storage limits and every oracle.
+The strided ID distribution preserves all recipients with odd store populations.
+This starts as a one-cycle diagnostic, not qualification. Smaller store indexes
+may reduce dirty pages per transaction, but extra stores also add memory,
+coordination and tail risk; scaling is not assumed.
+
+A source-review correction: the campaign phase barrier is global
+(`Barrier(shards * CAMPAIGNS)`), enforcing full-population residence and scheduling
+before proceeding. It is not merely per-store. The shard comparison preserves
+that barrier. Independently overlapping campaigns would be an additional workload,
+not a replacement for the current bulk-residence qualification.
+
 Current candidate: metrics fallback waits for the log frontier captured at
 read entry, instead of capturing a newer frontier after the snapshot/fast-path
 attempts. A deterministic race test advances only the captured prefix while a

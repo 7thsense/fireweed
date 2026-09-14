@@ -1,0 +1,8 @@
+{
+  "projection_root": "/home/erik/Projects/fireweed/target/workflow-capacity/compressed-fixed-target-w2-six-lcy4e_vd",
+  "property": "compression=zstd\n",
+  "only_new_private_projection_directory_changed": true,
+  "runtime_environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  }
+}

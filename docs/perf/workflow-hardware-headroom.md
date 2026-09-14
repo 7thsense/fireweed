@@ -1,5 +1,16 @@
 # Workflow capacity versus hardware cost
 
+The fixed-frontier run (`d124c24b`) reached **10,167.33 recipients/sec**, with
+all non-rate gates passing but three late cycles below10k. Cost was
+1.01615 CPU-ms/recipient and 20.18009 GiB of sampled host writes per six million
+recipients. Constant-cost 10k/12.5k demands are **10.16/12.70 CPU-seconds/sec**
+and **34.44/43.05 MiB/sec** of host writes. Mean occupancy was10.33 logical CPUs;
+measured host writes averaged35.13 MiB/sec, device busy82.85%, mean write-request
+latency40.00ms. These numbers still do not establish an intrinsic SSD ceiling.
+The next same-binary control changes software sharding from32 stores ×2 workers
+per campaign to64 ×1, preserving128 total campaign workers and the full million
+rows. It tests locality and parallelism together without changing device settings.
+
 The 4 MiB checkpoint experiment (`0b85c778`) **regressed and is reverted**:
 5,847.83 recipients/sec, 1.03131 CPU-ms/recipient, 6.02 mean logical CPUs,
 7.61397 GiB of host writes for one million recipients. At that byte cost,
