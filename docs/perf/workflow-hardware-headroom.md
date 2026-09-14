@@ -1,5 +1,14 @@
 # Workflow capacity versus hardware cost
 
+The lifecycle reporting trace (`264d9a3c`, 64 stores/two workers) reduced worst
+campaign reporting p95 from 2.867 to 0.338 seconds, at 12,812.28 recipients/sec.
+Its 1.06857 CPU-ms/recipient and 2.88332 GiB host writes per million imply
+**10.69/13.36 CPU-seconds/sec** and **29.53/36.91 MiB/sec** at 10k/12.5k,
+assuming constant first-cycle costs. Mean occupancy was 13.63 logical CPUs;
+host CPU pressure was 57.21% some, versus 0.81% full I/O pressure. This is
+consistent with substantial CPU contention in this traced run, not proof of
+an SSD throughput ceiling. Clean multi-cycle costs are the next measurement.
+
 The 64-store/two-worker single-cycle control reached 13,100.43 recipients/sec
 but failed reporting latency across all campaigns. Its measured cost was
 0.97452 CPU-ms/recipient and 2.83965 GiB of host writes per million recipients.

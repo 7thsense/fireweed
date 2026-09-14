@@ -1,5 +1,22 @@
 # Campaign qualification and performance plan
 
+Lifecycle-tail metrics (`264d9a3c`), 64 stores/two workers, one traced million-row
+cycle: **12,812.28 recipients/sec**, 78.39 seconds; worst campaign reporting
+p95 **0.338 seconds** versus 2.867 seconds in the preceding same-layout run.
+The new path served 3,145 reads, p95 147 ms and maximum 323 ms. Of 8,995 total
+metrics reads, 39 fell back to coverage; 34 of these exceeded one second.
+All 128 campaign p95 values met the one-second gate. This remains a single
+traced diagnostic, not stable qualification or an isolated throughput gain.
+
+CPU cost was 1.06857 ms/recipient, mean occupancy 13.63 logical CPUs, peak RSS
+14.31 GiB, process output 9,371.31 bytes/recipient, host writes 2.88332 GiB at
+38.93 MiB/sec. More progress reads now complete during active processing, and
+tracing adds work; the higher CPU cost needs a clean comparison. The next run
+uses the exact validated binary, six cycles, no tracing and the 12.5k target.
+All workload and correctness gates remain unchanged. Evidence uses
+`fireweed-campaign-lifecycle-s64-w2-trace-one*`; the private root was removed
+after property capture.
+
 The same-binary 64-store/two-worker diagnostic (`0be1e74f`) reached
 **13,100.43 recipients/sec** for one million recipients in 76.61 seconds,
 but **all 128 campaign reporting latency gates failed**, worst p95 2.867 seconds.

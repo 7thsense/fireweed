@@ -1,0 +1,27 @@
+{
+  "head": "264d9a3cea79afc545dd17441e0a73eaee4e8af7",
+  "binary_sha256": "f8cbd4afd5d9dd65c12dfa2d87ffe75efe028101fcee1077b2926cfe1a5adb1e",
+  "diagnostics": {
+    "FIREWEED_METRICS_TRACE": "1"
+  },
+  "exit_code": 0,
+  "rate": 12812.280986320295,
+  "process_wall_s": 78.3909119029995,
+  "cpu_ms_per_recipient": 1.068568916,
+  "mean_cpu_occupancy": 13.631285694472357,
+  "output_bytes_per_recipient": 9371.312128,
+  "logical_log_bytes_per_recipient": 1802.110138,
+  "peak_rss_gib": 14.305648803710938,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 76.457219101,
+      "load_s": 9.244077994,
+      "prepare_s": 31.631077056,
+      "delivery_s": 27.162403911,
+      "verify_s": 0.259110506,
+      "purge_s": 6.035843056,
+      "progress_p95_s": 0.337593529,
+      "due_to_claim_max_us": 7491965
+    }
+  ]
+}
