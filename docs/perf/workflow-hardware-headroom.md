@@ -1,5 +1,15 @@
 # Workflow capacity versus hardware cost
 
+Direct joined replacements (`3cdfb41a`) reduced observed first-cycle CPU cost
+from 1.07716 to **0.97226 ms/recipient**, while the clean 64-store/two-worker
+rate rose from 12,478.68 to **13,339.15/sec**. First-cycle constant-cost demands
+at 10k/12.5k are **9.72/12.15 CPU-seconds/sec** and **31.45/39.31 MiB/sec** of
+host writes (3.07121 GiB/million measured). The nominal WAL windows for 64 and
+48 stores are 28 and 21 GiB respectively; these are configured bounds, not
+measurements of resident memory. The next six-cycle 48-store control tests
+whether the improved SQL and smaller layout sustain the target. No intrinsic
+SSD ceiling is inferred from these rates or byte demands.
+
 Current user-IP CPU profile (`cb9d1fe9`, runtime `d024a298`, one million rows,
 64 stores/two workers) collected **179,311 samples at 199 Hz, zero lost**.
 Largest leaf symbols: allocation 6.77%, SQL `op_column` 5.96%, VM `normal_step`

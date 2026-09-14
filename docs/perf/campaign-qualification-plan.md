@@ -1,5 +1,25 @@
 # Campaign qualification and performance plan
 
+Direct joined replacements (`3cdfb41a`), clean 64-store/two-worker single cycle:
+**13,339.15 recipients/sec**, 75.19 seconds, worst reporting p95 0.553 seconds.
+CPU cost was **0.97226 ms/recipient**, 9.7% below the preceding owned-decoder
+candidate's 1.07716; preparation fell from 34.30 to 27.52 seconds. Overall rate
+rose 6.9%. These are serial observations, not replicated causal estimates.
+Process output was 9,342.32 bytes/recipient, peak RSS 14.00 GiB, and host writes
+3.07121 GiB at 43.14 MiB/sec. The single cycle does not qualify the target.
+
+Next is a clean six-cycle **48-store/two-worker** layout comparison using the
+same binary: 96 campaigns and 192 campaign workers, still one million global
+rows, the same payloads, handler/storage batches, global phase barriers and all
+gates. It reduces the nominal aggregate 448 MiB/store WAL window from 28 to
+21 GiB relative to 64 stores. The prior 64-store six-cycle run experienced
+late reads and initial main-file checkpoint materialization in cycle 4; the
+48-store result must establish its own throughput and stability rather than
+assuming a benefit. This changes both store and total worker counts and is
+not an isolated sharding-effect claim. Evidence for the completed single cycle
+uses `fireweed-campaign-joined-replacements-s64-w2-one*`; its private root was
+removed after property capture. No host settings changed.
+
 The current native CPU profile led to a concrete bulk-update query change.
 The previous `UPDATE ... FROM` built a rowid-list subquery and a temporary
 index over incoming values. A direct `incoming CROSS JOIN target` makes one
