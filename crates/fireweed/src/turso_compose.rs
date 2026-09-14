@@ -3233,6 +3233,8 @@ pub struct DerivedObjectLogTursoBackend {
     claim_slots: ClaimDriverReadAdmission,
     shared_slots: SharedDriverReadAdmission,
     outcome_slots: OutcomeReadAdmission,
+    #[cfg(test)]
+    metrics_snapshot_hook: Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>,
     selection_fence: SelectionFence<QueueKey>,
     fence_admission: SelectionFenceAdmission,
     generation_joins: Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>,
@@ -3345,6 +3347,8 @@ impl DerivedObjectLogTursoBackend {
             claim_slots: ClaimDriverReadAdmission::default(),
             shared_slots: SharedDriverReadAdmission::default(),
             outcome_slots: OutcomeReadAdmission::default(),
+            #[cfg(test)]
+            metrics_snapshot_hook: Arc::new(Mutex::new(None)),
             selection_fence,
             fence_admission,
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
@@ -3970,6 +3974,14 @@ impl DerivedObjectLogTursoBackend {
                     .server_metrics_with_position_committed(shard)
                     .await?;
                 mark(2);
+                #[cfg(test)]
+                {
+                    let hook = self.metrics_snapshot_hook.lock().unwrap().take();
+                    if let Some((entered, release)) = hook {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                }
                 if target
                     .as_ref()
                     .is_none_or(|target| position_covers(applied.as_ref(), target))
@@ -4029,8 +4041,14 @@ impl DerivedObjectLogTursoBackend {
                     }
                 }
             }
+            // Preserve this read's entry frontier. Capturing high-water again
+            // would add later writes to the wait after the snapshot/fast paths.
+            if let Some(target) = target {
+                coordinator
+                    .wait_until_covers(shard, &target, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
+                    .await?;
+            }
         }
-        self.wait_request_entry_coverage(shard).await?;
         mark(4);
         let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
         mark(5);
@@ -5902,6 +5920,123 @@ mod s3c_activation {
                 Err(error) => panic!("concurrent push: {error:?}"),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn metrics_fallback_waits_only_for_its_captured_log_target() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let root = std::env::temp_dir().join(format!(
+                "fireweed-metrics-fixed-target-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            let backend = Arc::new(open(&root).await);
+            let definition = qdef("metrics-fixed-target");
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            backend.create_queue(definition).await.unwrap();
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default()],
+                    UtcTimestamp::new(1, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            backend.peek(&shard, 1).await.unwrap();
+            let coordinator = backend.async_apply.as_ref().unwrap().clone();
+            coordinator.pause();
+            let base = coordinator
+                .snapshot(&shard)
+                .await
+                .applied_high_water
+                .unwrap();
+            // Exceed the bounded membership shortcut so this read must use its
+            // physical coverage fallback, even when retained commands are present.
+            for _ in 0..9 {
+                backend
+                    .push(
+                        &shard,
+                        vec![PushSpec::default(); 1000],
+                        UtcTimestamp::new(2, 0).unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let target = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let page = AsyncLogStore::read_from(backend.log.as_ref(), shard.clone(), Some(base), 128)
+                .await
+                .unwrap();
+            assert_eq!(page.entries.last().unwrap().0, target);
+            let (positions, commands): (Vec<_>, Vec<_>) = page.entries.into_iter().unzip();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            *backend.metrics_snapshot_hook.lock().unwrap() = Some((entered.clone(), release.clone()));
+            let mut read = {
+                let backend = backend.clone();
+                let shard = shard.clone();
+                tokio::spawn(async move { backend.metrics(&shard).await })
+            };
+            entered.notified().await;
+            // This write arrived after the read's entry target and SQL snapshot.
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default()],
+                    UtcTimestamp::new(3, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let later = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(later.sequence > target.sequence);
+            // Deterministically advance only the captured prefix, leaving the
+            // later durable write unapplied. Background apply stays paused.
+            AsyncProjectionStore::apply_live(backend.projection.as_ref(), positions, commands)
+                .await
+                .unwrap();
+            coordinator
+                .seed_high_water(shard.clone(), Some(target.clone()))
+                .await;
+            release.notify_one();
+            let result = tokio::time::timeout(Duration::from_millis(250), &mut read).await;
+            if result.is_err() {
+                read.abort();
+            }
+            assert_eq!(
+                result
+                    .expect("metrics must not retarget to the later write")
+                    .unwrap()
+                    .unwrap()
+                    .pending,
+                9001
+            );
+            assert_eq!(
+                coordinator.snapshot(&shard).await.applied_high_water,
+                Some(target)
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), backend.peek(&shard, 1))
+                    .await
+                    .is_err(),
+                "a new physical read must still wait for the later write"
+            );
+            coordinator.resume();
+            backend.peek(&shard, 1).await.unwrap();
+            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 9002);
+            drop(coordinator);
+            drop(backend);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

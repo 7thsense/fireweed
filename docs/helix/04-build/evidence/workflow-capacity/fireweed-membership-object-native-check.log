@@ -1,0 +1,8 @@
+
+running 2 tests
+test projection::item_mutation_tests::metrics_membership_snapshot_checks_ids_and_active_keys_together ... ok
+test projection::item_mutation_tests::metrics_membership_uses_full_key_seeks_at_its_identity_bound ... 8192 membership identities read in 40.119632ms; plan=["SEARCH q USING INDEX sqlite_autoindex_queues_1 (tenant=? AND queue=?)", "SEARCH c USING INDEX sqlite_autoindex_relational_cursor_1 (tenant=? AND queue=?) LEFT-JOIN", "SCAN json_each AS incoming", "SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?) LEFT-JOIN", "SEARCH k USING INDEX fireweed_items_active_key (tenant_id=? AND queue_id=? AND client_item_key=?) LEFT-JOIN"]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.07s
+

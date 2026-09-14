@@ -5835,7 +5835,7 @@ mod item_mutation_tests {
         AsyncProjectionStore::ensure_shard(&store, definition)
             .await
             .unwrap();
-        let pushed = vec![item("1", "key-a", 1), item("2", "key-b", 2)];
+        let pushed = vec![item("1", "key-a", 1), item("2", "key-\"\\\n雪", 2)];
         AsyncProjectionStore::apply_live(
             &store,
             vec![CommandPosition::new(shard.clone(), 0, 0)],
@@ -5854,7 +5854,7 @@ mod item_mutation_tests {
                 fireweed_core::ItemId::new("3").unwrap(),
                 Some(pushed[1].client_item_key.clone()),
             ),
-            (fireweed_core::ItemId::new("4").unwrap(), None),
+            (fireweed_core::ItemId::from_u64(u64::MAX), None),
         ];
         let snapshot = store
             .server_metrics_with_membership_committed(&shard, &identities)

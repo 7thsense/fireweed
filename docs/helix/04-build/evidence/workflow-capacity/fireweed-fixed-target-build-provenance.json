@@ -1,0 +1,8 @@
+{
+  "source_date_epoch": 1789179522,
+  "binary_sha256": "5c05d4795fb36d210c8934bc85acd4296c7fc005165c32296852a88a7cc08c41",
+  "benchmark_binary_built_by_release_integration_validation": true,
+  "release_checks_passed": 305,
+  "post_validation_changes": "Rust formatting and removal of an accidental blank line only",
+  "runtime_changes": "Restore 448 MiB checkpoint window; keep original identity-pair query; reuse metrics request-entry log frontier"
+}

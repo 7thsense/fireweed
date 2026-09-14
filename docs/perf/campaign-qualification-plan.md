@@ -1,5 +1,45 @@
 # Campaign qualification and performance plan
 
+Current candidate: metrics fallback waits for the log frontier captured at
+read entry, instead of capturing a newer frontier after the snapshot/fast-path
+attempts. A deterministic race test advances only the captured prefix while a
+later durable write remains paused: metrics completes, but a new physical read
+still waits for the later write. The 448 MiB WAL window and original JSON-pair
+membership query are restored. All **305 release checks passed**, with the same
+one ignored test and two unconfigured live-S3 exclusions. The exact workload
+CLI from release validation is used for the next six-cycle, two-worker run;
+only Rust formatting followed validation. Build/test provenance is archived as
+`fireweed-fixed-target-*`.
+
+The experimental JSON-object membership rewrite is not retained. Its first
+native run caught loss of full-key index seeks and incorrect escaped-key
+matching in the native scalar JSON path. A cast plus array-wrapped client keys
+restored correctness and full-key plans, but its single 8192-identity diagnostic
+was 40.120 ms versus the earlier 35.626 ms reference, demonstrating no benefit.
+The stronger escaped-client-key and maximum-u64-ID checks remain and pass with
+the original query. Failed compile/test logs and the corrected native diagnostic
+are retained as `fireweed-membership-object-*` and
+`fireweed-fixed-target-hook-initial-build.log`; none are qualifying measurements.
+
+2026-09-14 short-checkpoint trial (`0b85c778`) **rejected**. Its single
+million-recipient cycle completed at only **5,847.83/sec** (171.28 seconds),
+with reporting p95 6.573 seconds. Process writes were 25,257.13 bytes/recipient;
+sampled host writes were 7.614 GiB at 46.07 MiB/sec. CPU cost was 1.03131
+ms/recipient, but average CPU occupancy fell to 6.02. Peak RSS fell to 7.78 GiB,
+which does not compensate for the throughput and latency regression.
+
+For context, the earlier two-worker one-cycle trace wrote 9,906.91 process
+bytes/recipient and 2.868 GiB of host data, completing at 12,928.60/sec. It had
+tracing enabled and preceded the genesis fix, so this is not a fully isolated
+comparison. Nevertheless the short-window candidate clearly fails the target
+and its write-volume reduction hypothesis. Restore 448 MiB; do not promote the
+shorter window or infer that 40.58 MiB/sec calibration is a hard device ceiling.
+The measured trial itself sustained 46.07 MiB/sec of host writes.
+
+The subsequent JSON-object query experiment was also rejected, as recorded above.
+Short-window evidence uses `fireweed-campaign-checkpoint4m-w2-one*`; the owned
+projection root was removed after capturing its properties.
+
 2026-09-14 genesis reporting fix, three-worker comparison (`dec6e387`):
 **8,637.08 recipients/sec**, 695.11 seconds, **not qualified**. Five cycle-rate
 checks and 54 reporting checks failed; all other gates passed. Slowest cycle

@@ -1,5 +1,16 @@
 # Workflow capacity versus hardware cost
 
+The 4 MiB checkpoint experiment (`0b85c778`) **regressed and is reverted**:
+5,847.83 recipients/sec, 1.03131 CPU-ms/recipient, 6.02 mean logical CPUs,
+7.61397 GiB of host writes for one million recipients. At that byte cost,
+12.5k/sec would require **97.46 MiB/sec**, versus 46.07 MiB/sec measured in this
+trial, while CPU demand would be 12.89 CPU-seconds/sec. The smaller window
+increased write work substantially; lower RSS was not a performance win.
+The observed 46.07 MiB/sec also exceeds the earlier 40.58 MiB/sec calibration:
+neither result establishes the drive's intrinsic ceiling. The appropriate
+code action is to restore the 448 MiB coalescing window, not adopt a hardware
+limit based on that calibration or weaken log durability.
+
 The latest three-worker comparison (`dec6e387`) is **not qualified**:
 8,637.08 recipients/sec, 1.20484 CPU-ms/recipient, 10.40 mean logical CPUs,
 23.38694 GiB of sampled host writes over six million recipients. Constant-cost
