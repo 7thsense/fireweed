@@ -516,12 +516,24 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             let mut samples = Vec::new();
                             while !stop.load(Ordering::SeqCst) {
                                 let from = progress_phase.load(Ordering::Relaxed);
+                                let acknowledged_terminal = counts.terminal.load(Ordering::SeqCst) as u64;
                                 let mut attempts = 0;
                                 let t = Instant::now();
                                 let m = retry(deadline, || { attempts += 1; fw.metrics(&q) }).await?;
                                 let elapsed = t.elapsed().as_secs_f64();
-                                samples.push((from, progress_phase.load(Ordering::Relaxed), elapsed, attempts));
-                                if m.pending + m.leased + m.complete + m.failed > ids.len() as u64 { return Err("progress exceeds list size".into()); }
+                                let to = progress_phase.load(Ordering::Relaxed);
+                                samples.push((from, to, elapsed, attempts));
+                                let resident = m.pending + m.leased + m.complete + m.failed;
+                                if resident > ids.len() as u64 { return Err("progress exceeds list size".into()); }
+                                // Between completed ingestion and the start of purge,
+                                // every recipient remains resident. A strong read must
+                                // also include terminal mutations acknowledged before
+                                // that read began. Crossing into purge can legitimately
+                                // reduce either count, so exclude those intervals.
+                                if (1..=3).contains(&from) && (1..=3).contains(&to) {
+                                    if resident != ids.len() as u64 { return Err("progress omitted resident recipients".into()); }
+                                    if m.complete + m.failed < acknowledged_terminal { return Err("progress omitted acknowledged terminal outcomes".into()); }
+                                }
                                 latencies.push(elapsed);
                                 tokio::time::sleep(Duration::from_millis(1000)).await;
                             }

@@ -5471,9 +5471,11 @@ mod item_mutation_tests {
             .query(
                 format!(
                     "EXPLAIN QUERY PLAN {}",
-                    fireweed_relational::clearing_item_replacements_sql(56)
+                    fireweed_relational::clearing_item_replacements_sql(
+                        fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH,
+                    )
                 ),
-                vec![Value::Null; 900],
+                vec![Value::Null; 16 * fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH + 4],
             )
             .await
             .unwrap();

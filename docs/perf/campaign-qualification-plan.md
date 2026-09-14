@@ -1,5 +1,38 @@
 # Campaign qualification and performance plan
 
+2026-09-14 bounded replacement batching: clean `4256e0c0` completed six disk
+cycles at **8,355.53 recipients/sec** in 718.50 seconds. This is 5.8% above the
+preceding claim-metrics run, but CPU cost increased 6.3% to 1.04291 ms/recipient
+and peak RSS rose to 11.38 GiB. Two progress checks failed (shard 1/campaign 1/cycle
+0: 1.1387 s; shard 12/campaign 1/cycle 4: 1.1310 s). Overall throughput and cycles
+1–5 throughput failed; all other qualification checks passed. One serial pair
+cannot establish a precise causal speedup. The candidate remains unqualified.
+
+The slow progress samples occurred during load and purge; preparation and delivery
+p95s in those two reports were below 0.21 s. Host writes were 25.09 GiB at
+35.91 MiB/sec; process output was 12,269.61 bytes/recipient and logical log output
+1,834.83 bytes/recipient. This does not demonstrate a drive ceiling. Raw/summary/
+device/provenance files use `fireweed-campaign-4256e0c0-batched-w1-six*`; compression
+properties were captured before removing the private projection directory.
+
+The next candidate caps guarded replacement VALUES chunks at 16 rows instead of
+using all 56 rows permitted by 900 binds. The purpose is to reduce generated-program
+and temporary-index cost; client/storage batch and handler limits remain unchanged.
+The actual native execution test and full-key/rowid plan assertions remain gates.
+The 16-row candidate passes those checks at 85 writes per thousand replacements;
+its 8.02-second debug regression time is essentially unchanged from the previous
+8.16 seconds and is not evidence of a sustained speedup. Full release validation
+with the stronger progress oracle is running. No campaign performance benefit has
+been measured yet. The native result is `fireweed-batched-replacements-16.log`.
+
+The concurrent progress oracle is strengthened independently: between completed
+load and the start of purge, every read must count the full resident list and
+include at least the terminal outcomes acknowledged before the read began.
+Intervals crossing into purge retain the legitimate declining-count behavior.
+The existing latency, frequency and final/window disposition gates remain intact.
+Older hardware-note text that still described a live authentication prompt and
+TRIM as a pending dependency is corrected; no maintenance was performed.
+
 2026-09-14 exact claim-tail metrics candidate: clean `387f0c82` completed the
 canonical six-cycle disk workload at **7,899.88 recipients/sec**, 760.03 seconds.
 All non-throughput qualification gates passed, including all 384 campaign/cycle

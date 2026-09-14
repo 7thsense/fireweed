@@ -37,6 +37,10 @@ const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
+/// Keep the generated VALUES program small; the bind ceiling is a safety bound,
+/// not necessarily the most efficient execution size.
+pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 16;
+
 /// SQL used by the adapter for bounded resolved replacement writes.
 /// Exposed for native query-plan qualification of the executed statement.
 pub fn clearing_item_replacements_sql(row_count: usize) -> String {
@@ -78,7 +82,7 @@ fn apply_clearing_item_replacements(
     const ROW_BINDS: usize = 16;
     let (tenant, queue) = parts(shard);
     let now_n = ts_nanos(now);
-    for chunk in items.chunks(bind_chunk_size(ROW_BINDS, 4)) {
+    for chunk in items.chunks(bind_chunk_size(ROW_BINDS, 4).min(CLEARING_ITEM_REPLACEMENT_BATCH)) {
         let mut params = Vec::with_capacity(chunk.len() * ROW_BINDS + 4);
         for item in chunk {
             let values = item

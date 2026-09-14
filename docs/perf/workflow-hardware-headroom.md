@@ -1,5 +1,22 @@
 # Workflow capacity versus hardware cost
 
+Current uninstrumented disk comparisons (32 stores, two campaigns/store, one
+worker/campaign, 1,000-row storage batches, six million complete recipients):
+
+| Candidate | Recipients/sec | CPU-ms/recipient | Progress failures | Throughput qualified |
+|---|---:|---:|---:|---|
+| `daa0dd77`, cached single-row writes | 8,520.83 | 1.03661 | 3 | No |
+| `387f0c82`, exact claim-tail metrics | 7,899.88 | 0.98098 | 0 | No |
+| `4256e0c0`, guarded replacement batches | 8,355.53 | 1.04291 | 2 | No |
+
+These are serial candidate observations, not replicated causal comparisons.
+The latest cost implies **10.43 / 13.04 CPU-seconds per second** and approximately
+**42.8 / 53.5 MiB/sec of host writes** at the unchanged 10k / 12.5k targets,
+assuming constant per-recipient costs. Those are demands, not proven ceilings.
+Reducing SQL call count from 1,022 to 40 per thousand replacements has not by
+itself met the end-to-end target. The next experiment reduces generated SQL chunk
+size and strengthens the concurrent progress oracle.
+
 2026-09-14 claim-tail metrics run (`387f0c82`): 7,899.88 recipients/sec;
 all non-throughput gates passed, but every throughput gate failed. Its measured
 0.98098 CPU-ms/recipient implies **9.81 / 12.26 CPU-seconds per second** at
@@ -96,16 +113,14 @@ The one-worker 2 KiB control costs 1.08231 CPU-ms/recipient and approximately
 fixed reporting latency but increased host writes 15.5%; this is a measured
 tradeoff, not a qualified deployment.
 
-All 32 DB/log pairs share one NVMe. Read-only checks found that the encrypted
-root mapping blocks discard/TRIM and periodic `fstrim` is disabled. That limits
-what can be concluded from the earlier 38.23 MiB/s sequential reference: it is a
-measurement of this media/configuration state, not an intrinsic device ceiling.
-The kernel documents discard blocking and its encryption-policy tradeoff;
-Kingston explains how TRIM assists reclamation. A causal performance comparison
-still requires the [reviewed one-time control](storage-trim-control.md), which
-the user has now approved. The first noninteractive invocation could not obtain
-administrator authentication; a desktop terminal is waiting at the sudo prompt.
-No completed maintenance or post-maintenance measurement is established yet.
+All 32 DB/log pairs share one NVMe. Earlier read-only checks found that the
+encrypted root mapping blocks discard/TRIM and periodic `fstrim` is disabled.
+Those observations motivated a maintenance hypothesis; they did not demonstrate
+its effect on this workload. The [proposed control](storage-trim-control.md) was
+never executed, the authentication terminal was closed, and no before/after
+maintenance measurement exists. Work proceeds on application code. The earlier
+38.23 MiB/s private-file result remains a measurement of that run and configuration;
+an intrinsic device ceiling and a causal TRIM explanation remain unproven.
 [Kernel dm-crypt documentation](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html),
 [Kingston garbage-collection discussion](https://www.kingston.com/en/blog/servers-and-data-centers/garbage-collection).
 
