@@ -1,5 +1,17 @@
 # Campaign qualification and performance plan
 
+Owned claim decoding (`d024a298`), clean 64-store/two-worker single cycle:
+**12,478.68 recipients/sec**, 80.41 seconds, reporting p95 0.327 seconds,
+CPU 1.07716 ms/recipient, mean occupancy 13.40, peak RSS 14.59 GiB.
+Process output was 9,300.37 bytes/recipient; host writes were 2.86237 GiB
+at 37.48 MiB/sec. This does **not demonstrate a throughput or CPU improvement**
+over the preceding lifecycle trace (12,812.28/sec, 1.06857 ms/recipient).
+Tracing differs and neither comparison is replicated. The buffer ownership
+property is verified by tests; a workflow performance benefit is not established.
+The next diagnostic profiles current user CPU on the same million-row layout.
+Evidence uses `fireweed-campaign-owned-claim-s64-w2-one*`; the owned root was
+removed after property capture. This is not a qualification pass.
+
 The next candidate consumes owned claim-row buffers in the actual FIFO/priority
 claim path, rather than cloning payload/fields/metadata through `get_value`.
 It checks exclusion immediately after decoding the ID; cursor and eligibility

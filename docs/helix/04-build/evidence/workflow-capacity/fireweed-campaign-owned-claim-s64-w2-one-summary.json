@@ -1,0 +1,25 @@
+{
+  "head": "d024a298e21996c3d71c3faee007d3482bf45d4b",
+  "binary_sha256": "394027dc95a89e23dd57feaebf437091ba5aec430ff65edfd7103e7392d479c7",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 12478.68281324261,
+  "process_wall_s": 80.41120968095493,
+  "cpu_ms_per_recipient": 1.077158915,
+  "mean_cpu_occupancy": 13.395631271732015,
+  "output_bytes_per_recipient": 9300.365312,
+  "logical_log_bytes_per_recipient": 1802.11372,
+  "peak_rss_gib": 14.587207794189453,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 78.716868157,
+      "load_s": 9.448000319,
+      "prepare_s": 34.30283492,
+      "delivery_s": 26.760129313,
+      "verify_s": 0.413009316,
+      "purge_s": 5.401525998,
+      "progress_p95_s": 0.327035014,
+      "due_to_claim_max_us": 6962691
+    }
+  ]
+}
