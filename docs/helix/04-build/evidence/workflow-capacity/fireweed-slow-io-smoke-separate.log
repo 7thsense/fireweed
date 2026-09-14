@@ -1,0 +1,6 @@
+fw_slow_io {"op":"pwrite","pid":1346771,"tid":1346771,"fd":3,"path":"/tmp/fireweed-io-smoke-CstT6I","bytes":4,"offset":0,"result":4,"errno":0,"unix_end_us":1789429712419797,"elapsed_us":17}
+fw_slow_io {"op":"pwritev","pid":1346771,"tid":1346771,"fd":3,"path":"/tmp/fireweed-io-smoke-CstT6I","bytes":4,"offset":4,"result":4,"errno":0,"unix_end_us":1789429712419840,"elapsed_us":4}
+fw_slow_io {"op":"fsync","pid":1346771,"tid":1346771,"fd":3,"path":"/tmp/fireweed-io-smoke-CstT6I","bytes":0,"offset":0,"result":0,"errno":0,"unix_end_us":1789429712419850,"elapsed_us":2}
+fw_slow_io {"op":"fdatasync","pid":1346771,"tid":1346771,"fd":3,"path":"/tmp/fireweed-io-smoke-CstT6I","bytes":0,"offset":0,"result":0,"errno":0,"unix_end_us":1789429712419860,"elapsed_us":2}
+fw_slow_io {"op":"pwrite","pid":1346771,"tid":1346771,"fd":-1,"path":"","bytes":1,"offset":0,"result":-1,"errno":9,"unix_end_us":1789429712419870,"elapsed_us":1}
+fw_slow_io {"op":"pwritev","pid":1346771,"tid":1346771,"fd":-1,"path":"","bytes":0,"offset":0,"result":-1,"errno":9,"unix_end_us":1789429712419879,"elapsed_us":2}

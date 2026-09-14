@@ -1,0 +1,24 @@
+{
+  "kind": "diagnostic only; not workflow qualification",
+  "threshold_us": 100000,
+  "scope": [
+    "pwrite",
+    "pwritev",
+    "fsync",
+    "fdatasync"
+  ],
+  "omitted": [
+    "ordinary write/writev",
+    "asynchronous I/O",
+    "calls shorter than threshold"
+  ],
+  "time_meaning": "caller wall time, not CPU time or physical-device service time",
+  "output": "separate append-only file, avoiding interference with campaign stderr records",
+  "compiler": "cc (GCC) 16.2.1 20260810",
+  "compile_command": "cc -shared -fPIC -O2 -Wall -Wextra -Werror fireweed-slow-io.c -o fireweed-slow-io.so -ldl -pthread",
+  "source_sha256": "07c73cfee8b47bac6989b481ea2a8293fa9b9b6f14689d393030a98511ccf3a0",
+  "shared_object_sha256": "b9c15d9edb407114ab8f0eaf108068e33f9af5ecc7990785210befd7ab5a70a4",
+  "smoke": "C test passed data, scatter-write, sync and EBADF passthrough; six JSON events verified at zero threshold",
+  "retained_runtime_source_commit": "3cdfb41a",
+  "source_equivalence": "git diff --exit-code 3cdfb41a HEAD -- crates passed"
+}
