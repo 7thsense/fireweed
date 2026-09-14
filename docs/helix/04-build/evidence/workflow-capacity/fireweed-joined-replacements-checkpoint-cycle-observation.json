@@ -1,0 +1,91 @@
+{
+  "source": "fireweed-campaign-joined-replacements-s48-w2-six.json",
+  "scope": "one end-of-cycle observation per physical store; campaign 0 only",
+  "inference": "main-file materialization and WAL restart match slow cycles; not timestamped checkpoint duration attribution",
+  "cycles": [
+    {
+      "cycle": 0,
+      "stores_with_materialized_main": 0,
+      "projection_bytes": {
+        "min": 4096,
+        "median": 4096.0,
+        "max": 4096
+      },
+      "projection_wal_bytes": {
+        "min": 147978072,
+        "median": 160035252.0,
+        "max": 171548592
+      }
+    },
+    {
+      "cycle": 1,
+      "stores_with_materialized_main": 0,
+      "projection_bytes": {
+        "min": 4096,
+        "median": 4096.0,
+        "max": 4096
+      },
+      "projection_wal_bytes": {
+        "min": 314866912,
+        "median": 325764312.0,
+        "max": 344555632
+      }
+    },
+    {
+      "cycle": 2,
+      "stores_with_materialized_main": 48,
+      "projection_bytes": {
+        "min": 41029632,
+        "median": 41199616.0,
+        "max": 41349120
+      },
+      "projection_wal_bytes": {
+        "min": 4000552,
+        "median": 17149532.0,
+        "max": 497255192
+      }
+    },
+    {
+      "cycle": 3,
+      "stores_with_materialized_main": 48,
+      "projection_bytes": {
+        "min": 41029632,
+        "median": 41199616.0,
+        "max": 41349120
+      },
+      "projection_wal_bytes": {
+        "min": 152744912,
+        "median": 176943732.0,
+        "max": 228260392
+      }
+    },
+    {
+      "cycle": 4,
+      "stores_with_materialized_main": 48,
+      "projection_bytes": {
+        "min": 41029632,
+        "median": 41199616.0,
+        "max": 41349120
+      },
+      "projection_wal_bytes": {
+        "min": 326394672,
+        "median": 347666232.0,
+        "max": 406833552
+      }
+    },
+    {
+      "cycle": 5,
+      "stores_with_materialized_main": 48,
+      "projection_bytes": {
+        "min": 41062400,
+        "median": 41207808.0,
+        "max": 41349120
+      },
+      "projection_wal_bytes": {
+        "min": 31452112,
+        "median": 57006412.0,
+        "max": 119566552
+      }
+    }
+  ]
+}

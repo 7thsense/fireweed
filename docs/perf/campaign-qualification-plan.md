@@ -3,7 +3,7 @@
 The completed six-cycle direct-join run (runtime `3cdfb41a`, 48 stores, two
 workers/campaign) reached **9,845.15 recipients/sec** over 609.89 seconds.
 All non-throughput gates passed, including reporting p95 (worst 0.521 seconds),
-physical projection-size stability, recovery/correctness checks exercised by
+physical projection-size stability, correctness checks exercised by
 the workload, retention and sampled WAL bounds. Overall and five cycle rate
 gates failed at 12.5k; three cycles also fell below 10k. This is not qualification.
 CPU cost was 1.03450 ms/recipient and peak RSS 13.40 GiB. Cycle 2 purge took
@@ -11,6 +11,14 @@ CPU cost was 1.03450 ms/recipient and peak RSS 13.40 GiB. Cycle 2 purge took
 seconds otherwise. The forced TRUNCATE workaround is bypassed for this
 NORMAL-accounting configuration. Native auto-checkpoint executes inside commit;
 its timing is a hypothesis for these stalls, not an established cause.
+End-of-cycle file observations strengthen that timing hypothesis: all 48 main
+files are 4 KiB through cycle 1 and approximately 39.3 MiB after cycle 2.
+Median WAL length rises from 152.6 to 310.7 MiB, drops to 16.4 MiB in cycle 2,
+then grows to 331.6 MiB before dropping to 54.4 MiB in cycle 5. These are
+one observation per physical store (campaign 0), not timestamped checkpoint
+durations. The two slow cycles coincide with checkpoint/restart activity;
+causal duration attribution still needs traces. The derived evidence is
+`fireweed-joined-replacements-checkpoint-cycle-observation.json`.
 No device ceiling or hardware replacement conclusion follows from this run.
 Evidence uses `fireweed-campaign-joined-replacements-s48-w2-six*`; properties
 were captured before removing its private projection root. The next code
