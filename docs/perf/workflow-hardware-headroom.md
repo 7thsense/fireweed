@@ -1,5 +1,28 @@
 # Workflow capacity versus hardware cost
 
+A clean 64-store sustained run (`a3b24317`, runtime `8a12e2de`) failed during
+cycle five with a **30-second object-log post-position produce timeout**.
+This is a failed reliability run, not a throughput qualification. Its last
+21.708 measured process-active seconds show a concrete storage-path stall:
+
+- 16.06 MiB/sec writes, 267.55 write requests/sec, 61.46 KiB/request.
+- 1,035.87 ms mean completed write-request latency; approximately 277.6 I/O
+  requests in progress from the device's weighted I/O time.
+- 99.46% device busy, application CPU occupancy 0.967 cores, host full I/O
+  pressure 74.38%. NVMe flush requests averaged 26.83 ms at 0.83/sec.
+
+These are host NVMe block counters, not exclusive process attribution or an
+intrinsic SSD ceiling. They establish a low-service, deep-queue interval while
+the application mostly waited. Five projection main files were materialized at
+the last completed cycle; 37 were materialized at failure. The overlap makes
+checkpoint scheduling a concrete hypothesis to test, not proof that changing
+checkpoint policy will fix it. The next code experiment spreads large projection
+checkpoint windows across configured paths, preserving the 448 MiB upper budget,
+log durability barriers and timeout. CPU-only napkin extrapolation does not
+predict this tail. Do not divide the failed run's total bytes/CPU by its four
+completed million-row cycles: those totals also contain partial fifth-cycle work.
+Raw and windowed evidence uses `fireweed-campaign-retained-partial-keys-s64-w2-six*`.
+
 A same-filesystem publication protocol diagnostic wrote identical 390 MiB
 streams with 48 threads, in immutable/append/append/immutable order. Rates were
 373.03 / 48.35 / 91.32 / 31.03 MiB/sec. Immutable publication used 6,144 timed

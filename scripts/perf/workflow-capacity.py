@@ -160,6 +160,17 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     if qualification_requested:
         from workflow_capacity_gate import qualify
         report["qualification"] = qualify(report, campaign_target=campaign_target)
+    if child.returncode != 0:
+        if data_directory is not None:
+            # Move the failed run out of TemporaryDirectory's cleanup path.
+            # Keep the authoritative log for recovery / timeout investigation;
+            # successful runs retain the existing automatic cleanup behavior.
+            retained_root = Path(tempfile.mkdtemp(prefix="failed-run-", dir=capacity_base))
+            data_root.rename(retained_root)
+            report["original_data_root"] = str(data_root)
+            report["retained_data_root"] = str(retained_root)
+        else:
+            report["retained_data_root"] = str(data_root)
     print(json.dumps(report, indent=2))
     if data_directory is not None:
         data_directory.cleanup()

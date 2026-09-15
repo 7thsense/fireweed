@@ -1,0 +1,16 @@
+test_failed_automatic_root_survives_process_exit (artifact_tests.CapacityArtifactsTests.test_failed_automatic_root_survives_process_exit) ... FAIL
+
+======================================================================
+FAIL: test_failed_automatic_root_survives_process_exit (artifact_tests.CapacityArtifactsTests.test_failed_automatic_root_survives_process_exit)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/erik/Projects/fireweed/scripts/perf/test_workflow_capacity_artifacts.py", line 48, in test_failed_automatic_root_survives_process_exit
+    self.assertTrue((root / "log-marker").is_file(), "failed run log was deleted")
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : failed run log was deleted
+
+----------------------------------------------------------------------
+Ran 1 test in 0.136s
+
+FAILED (failures=1)
+Old harness loses failure-root evidence as expected; current harness passes.

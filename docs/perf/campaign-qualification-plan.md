@@ -1,5 +1,34 @@
 # Campaign qualification and performance plan
 
+The retained-code 64-store six-cycle attempt (`a3b24317`, runtime `8a12e2de`)
+**failed during cycle five**, after 388.40 process seconds, with an object-log
+post-position produce timeout. Four completed cycles had gate-derived rates
+14,142 / 12,288 / 11,677 / 11,301 recipients/sec and reporting p95 maxima
+0.733 / 0.239 / 0.251 / 0.298 seconds. These partial results do not qualify
+10k or 12.5k. The projection root is intentionally retained for investigation;
+the old harness deleted its log root, so log-based postmortem recovery from this
+particular run is unavailable. Raw reports, failure analysis and device windows
+are archived as `fireweed-campaign-retained-partial-keys-s64-w2-six*`.
+
+The final measured 21.7 seconds had 99.46% device busy, 1.04-second mean write
+request latency and roughly one application CPU core active. Main-file
+materialization increased from five stores at the last completed cycle to 37
+at failure. The next bounded code experiment spreads rebuildable-projection
+checkpoint budgets across 192–448 MiB using a reproducible hash of the configured
+path. This keeps large coalescing windows and the existing upper bound while
+reducing identical checkpoint triggers. It can increase main-file write volume;
+only sustained measurement can decide whether the tradeoff is beneficial.
+Standalone projection behavior and the 512 MiB observed-WAL gate stay intact.
+A single cycle would not adequately exercise this policy, so validation proceeds
+to a full sustained run after the release checks.
+
+The capacity harness now preserves an automatically-created log root when the
+child fails and reports its retained path. Explicit roots remain at their
+requested path; successful automatic roots are still cleaned. A subprocess
+regression demonstrates the old harness deleting the failed-run log; all nine
+capacity artifact/gate Python tests pass with the fix. Post-position errors also
+retain their shard identity in the surfaced error, aiding the next investigation.
+
 The column-position cache candidates are **rejected and removed**. A fresh
 baseline/candidate/candidate/baseline comparison used the exact preserved
 pre-cache CLI (`7297c9fc...`, runtime `8a12e2de`) and wider-record candidate
