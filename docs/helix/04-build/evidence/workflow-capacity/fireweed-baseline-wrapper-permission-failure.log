@@ -1,0 +1,37 @@
+Traceback (most recent call last):
+  File "/tmp/fireweed-baseline-capacity.py", line 109, in <module>
+    child = subprocess.Popen(command, cwd=repo, stdout=stdout, stderr=stderr)
+  File "/usr/lib/python3.14/subprocess.py", line 1039, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        pass_fds, cwd, env,
+                        ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+                        gid, gids, uid, umask,
+                        ^^^^^^^^^^^^^^^^^^^^^^
+                        start_new_session, process_group)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/subprocess.py", line 1990, in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+PermissionError: [Errno 13] Permission denied: '/tmp/fireweed-stack-symfs/home/erik/Projects/fireweed/target/release/fireweed-workload'
+runner_exit 1
+Traceback (most recent call last):
+  File "/tmp/fireweed-campaign-summary.py", line 3, in <module>
+    r = json.loads(Path(sys.argv[1]).read_text())
+  File "/usr/lib/python3.14/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.14/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+Traceback (most recent call last):
+  File "/tmp/fireweed-run-baseline-campaign.py", line 29, in <module>
+    with Path(str(base)+suffix).open('w') as output: subprocess.run(['python3',script,arg],stdout=output,check=True)
+                                                     ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['python3', '/tmp/fireweed-campaign-summary.py', '/tmp/fireweed-campaign-column-baseline-s64-w2-one.json']' returned non-zero exit status 1.

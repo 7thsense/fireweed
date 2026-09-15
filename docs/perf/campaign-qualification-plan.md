@@ -1,5 +1,24 @@
 # Campaign qualification and performance plan
 
+The column-position cache candidates are **rejected and removed**. A fresh
+baseline/candidate/candidate/baseline comparison used the exact preserved
+pre-cache CLI (`7297c9fc...`, runtime `8a12e2de`) and wider-record candidate
+(`91145cb7...`, runtime `12d21797`). Mean CPU cost was 1.02211 versus
+1.01354 ms/recipient: only 0.84% lower, with individual rates ranging from
+11,014 to 13,640/sec. This does not establish a useful, repeatable gain.
+All owned roots remained present until the four timings finished, then were
+archived and removed. Baseline wrapper provenance explicitly identifies its
+runtime source and prevents qualification of the diagnostic override.
+
+Runtime sources under `crates/`, `vendor/`, and Cargo manifests/lock are now
+byte-for-byte back at the validated `8a12e2de` baseline. Its exact previously
+validated CLI is restored; this rollback does not claim a new build or new
+310-test run. The experimental patches and their 312 passing checks remain
+in history, with raw comparison evidence in `fireweed-column-cache-abba-*`
+and `fireweed-campaign-{column-baseline,wide-column-cache}-s64-w2-*`.
+Next is a clean sustained 64-store run of the retained fixes; the fixed
+10k/12.5k targets and every correctness/reporting/storage gate remain intact.
+
 The all-record column-position cache (`c67da262`) passed **312 release checks**
 (four ignored diagnostics, two unconfigured live-S3 exclusions), but its clean
 64-store first cycle did **not** demonstrate a workflow gain: 13,749.57/sec,

@@ -1,0 +1,48 @@
+{
+  "order": "baseline/candidate/candidate/baseline",
+  "baseline_runtime_source_commit": "8a12e2de",
+  "candidate_runtime_source_commit": "12d21797",
+  "qualification": false,
+  "all_owned_roots_retained_through_all_four_measurements": true,
+  "runs": [
+    {
+      "tag": "column-baseline-s64-w2-one",
+      "binary_sha256": "7297c9fc18783b0c54eafc811cb0faa2ed91d20cfd12ac9643c34117571d1b0a",
+      "rate": 11621.550802099127,
+      "cpu_ms_per_recipient": 0.9890473850000001,
+      "peak_rss_gib": 14.172218322753906,
+      "host_written_gib": 2.824962615966797,
+      "progress_p95_s": 0.257416864
+    },
+    {
+      "tag": "wide-column-cache-s64-w2-one",
+      "binary_sha256": "91145cb7415ac4148516f7f55bf4fd45e12db0bde74c56f143492b6521f8c493",
+      "rate": 13639.595680473918,
+      "cpu_ms_per_recipient": 0.9850763360000001,
+      "peak_rss_gib": 13.232540130615234,
+      "host_written_gib": 2.749481201171875,
+      "progress_p95_s": 0.383326611
+    },
+    {
+      "tag": "wide-column-cache-s64-w2-repeat",
+      "binary_sha256": "91145cb7415ac4148516f7f55bf4fd45e12db0bde74c56f143492b6521f8c493",
+      "rate": 11361.599043269049,
+      "cpu_ms_per_recipient": 1.041996903,
+      "peak_rss_gib": 14.251827239990234,
+      "host_written_gib": 2.693767547607422,
+      "progress_p95_s": 0.427766501
+    },
+    {
+      "tag": "column-baseline-s64-w2-repeat",
+      "binary_sha256": "7297c9fc18783b0c54eafc811cb0faa2ed91d20cfd12ac9643c34117571d1b0a",
+      "rate": 11014.27967165599,
+      "cpu_ms_per_recipient": 1.0551763630000002,
+      "peak_rss_gib": 13.522502899169922,
+      "host_written_gib": 2.6139793395996094,
+      "progress_p95_s": 0.273025644
+    }
+  ],
+  "baseline_mean_cpu_ms_per_recipient": 1.0221118740000001,
+  "candidate_mean_cpu_ms_per_recipient": 1.0135366195,
+  "candidate_cpu_change_percent": -0.838974159104644
+}

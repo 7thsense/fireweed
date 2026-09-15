@@ -1,0 +1,2 @@
+runner_exit 1
+artifacts /tmp/fireweed-campaign-column-baseline-s64-w2-one projection_root /home/erik/Projects/fireweed/target/workflow-capacity/compressed-column-baseline-s64-w2-one-86k593s6
