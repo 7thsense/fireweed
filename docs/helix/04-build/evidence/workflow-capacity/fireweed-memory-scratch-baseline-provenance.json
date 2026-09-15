@@ -1,0 +1,11 @@
+{
+  "purpose": "unqualified same-workload binary comparison; repository head is harness head, runtime source is explicit below",
+  "runtime_source_commit": "8a12e2de",
+  "binary_sha256": "7297c9fc18783b0c54eafc811cb0faa2ed91d20cfd12ac9643c34117571d1b0a",
+  "baseline_is_exact_archived_pre_cache_cli": true,
+  "harness_changes": [
+    "repository root constant because wrapper lives in /tmp",
+    "binary path selects preserved baseline; all workload/measurement code unchanged"
+  ],
+  "wrapper_sha256": "597d4e783548e65d013120e2bbb87909853b1d539d62424cf45238ade132bb95"
+}

@@ -1,0 +1,34 @@
+{
+  "head": "ea4805cce964cfac1ab41d953f7f6b20f32459ff",
+  "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+  "diagnostics": {},
+  "exit_code": 0,
+  "rate": 13715.874026543042,
+  "process_wall_s": 73.26253052195534,
+  "cpu_ms_per_recipient": 0.927935622,
+  "mean_cpu_occupancy": 12.665896405556397,
+  "output_bytes_per_recipient": 9371.078656,
+  "logical_log_bytes_per_recipient": 1802.104839,
+  "peak_rss_gib": 12.994544982910156,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 71.859363528,
+      "load_s": 12.398447618,
+      "prepare_s": 26.178561689,
+      "delivery_s": 25.351473241,
+      "verify_s": 0.356270875,
+      "purge_s": 5.774261705,
+      "progress_p95_s": 0.429674195,
+      "due_to_claim_max_us": 6108656
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "complete_campaign_reports",
+      "passed": false,
+      "actual": null,
+      "required": null
+    }
+  ]
+}

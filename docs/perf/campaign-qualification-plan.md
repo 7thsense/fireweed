@@ -1,5 +1,18 @@
 # Campaign qualification and performance plan
 
+The SQL scratch candidate (`ea4805cc`, CLI `be319723...`) advances to sustained
+validation after the ordered baseline/candidate/candidate/baseline comparison.
+Rates were 13,718 / 13,716 / 13,722 / 12,061 recipients/sec; CPU-ms per
+recipient were 0.95736 / 0.92794 / 0.94777 / 1.03116. Mean CPU cost fell
+5.67%, with both candidate values below both controls; control variability
+limits causal precision. Candidate peak RSS was 12.99/13.09 GiB versus
+13.91/13.25 GiB for controls. All children passed workflow correctness,
+but these single-cycle trials do not qualify throughput or long-run stability.
+The exact preserved baseline binary was an explicit unqualified source
+override; all private projection roots were kept until timing finished, then
+archived and removed. Evidence: `fireweed-memory-scratch-comparison.json`
+and `fireweed-campaign-{memory-scratch,scratch-baseline}-*`.
+
 The native-memory SQL scratch candidate passes **311 release checks**, with
 four ignored diagnostics and two unconfigured live-S3 exclusions. Log-backed
 connections select and verify `temp_store=MEMORY`; standalone defaults stay
