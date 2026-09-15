@@ -237,6 +237,11 @@ OBJECT_LOG_FLUSH_RUNTIME_THREADS=1 python3 scripts/perf/workflow-capacity.py --q
 ```
 
 The first target is 10k complete recipients/sec; `--stretch` enforces 12.5k.
+For the current repeated qualification recipe (two million-resident-row,
+eight-cycle campaigns and two varied-payload primitive runs, sequentially),
+use `bash scripts/perf/qualify-workflow-capacity.sh NEW_OUTPUT_DIRECTORY`
+from the repository root. The inherited `OBJECT_LOG_FLUSH_RUNTIME_THREADS`
+setting is recorded with each result; use the same setting for all attempts.
 Both require exact independent dispositions, per-campaign fair-share throughput,
 maximum due-to-claim delay of 60s, progress p95 ≤1s, RSS/projection stability and
 sampled WAL ≤512 MiB/store. Historical schema v4/v5 reports and dirty source no

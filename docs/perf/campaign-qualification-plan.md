@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+## Memory-attributed repeat and runtime control (2026-09-15)
+
+The unchanged 64-store/eight-cycle campaign with external memory sampling
+passes every 10k and 12.5k gate at **14,393 recipients/sec**, slowest cycle
+**12,776/sec**, peak RSS **18.79 GiB**. There are 527 memory samples without
+errors or PID identity changes. Process swap stays zero, major faults total
+one, and host available memory remains above 37.8 GiB. RSS drops occur in
+anonymous memory; this run does not support blaming swap or host memory
+shortage. It does not retroactively prove the cause of the earlier failed run.
+Evidence: `fireweed-campaign-trim-memory-s64-w2-eight*` and its summary.
+
+Two of the three repaired full runs now pass, but one late-cycle failure and
+the narrow final-cycle margin warrant improving consistency. The next control
+sets only `OBJECT_LOG_FLUSH_RUNTIME_THREADS=1`, retaining 64 stores, two
+workers/campaign, eight in-flight log flushes/store, all durability barriers,
+and the entire eight-cycle workload. The current default is eight runtime
+workers/store (512 workers across the test), versus 64 with this setting.
+Earlier pre-repair evidence showed a modest benefit; it must be remeasured.
+
+The checked-in `qualify-workflow-capacity.sh` now runs two representative
+million-row eight-cycle campaigns at the stretch target plus two varied-body
+primitive runs, replacing its stale generic 500k-row recipe. It records the
+inherited runtime setting and preserves a failed attempt even if later runs
+succeed. CLI/source changes are not needed for the runtime control.
+
 ## Current status: post-TRIM repeat still misses stability (2026-09-15)
 
 The unchanged CLI `be319723...` passes every 10k and 12.5k gate in its first

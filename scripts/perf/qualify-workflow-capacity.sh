@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Repeat the qualified public-API workloads without overlapping capacity runs.
+# Repeat representative campaign and primitive qualification without overlap.
+# OBJECT_LOG_FLUSH_RUNTIME_THREADS, when supplied, is inherited by all four runs
+# and recorded by workflow-capacity.py. Do not change it between attempts.
 set -euo pipefail
 
 if [[ $# != 1 ]]; then
@@ -12,22 +14,24 @@ mkdir -- "$1"
 qualification_output=$(cd -- "$1" && pwd)
 qualification_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 cd -- "$qualification_repo"
-cargo build --release -p fireweed-workload
+cargo build --locked --release -p fireweed-workload
 
 qualification_failed=0
 for attempt in 1 2; do
-  printf 'Workflow qualification %s/2\n' "$attempt" >&2
+  printf 'Campaign qualification %s/2 (12.5k recipients/sec)\n' "$attempt" >&2
   if ! python3 scripts/perf/workflow-capacity.py \
-    --profile mutable --items 500000 --batch 1000 --purge-batch 8000 \
-    --shards 32 --workers 8 --load-workers 4 --recycle --cycles 6 \
-    --deadline-seconds 1200 --qualify \
-    > "$qualification_output/workflow-$attempt.json"; then
+    --profile campaign --campaign-metadata --campaign-timestamp-priority \
+    --items 1000000 --batch 1000 --purge-batch 8000 \
+    --shards 64 --workers 2 --load-workers 2 --recycle --cycles 8 \
+    --deadline-seconds 1800 --stretch \
+    > "$qualification_output/campaign-$attempt.json"; then
     qualification_failed=1
   fi
   printf 'Primitive qualification %s/2\n' "$attempt" >&2
   if ! python3 scripts/perf/workflow-capacity.py \
-    --profile primitives --items 1000000 --batch 1000 --shards 32 \
-    --workers 8 --deadline-seconds 900 --qualify \
+    --profile primitives --primitive-varied-payload \
+    --items 1000000 --batch 1000 --shards 32 \
+    --deadline-seconds 900 --qualify \
     > "$qualification_output/primitives-$attempt.json"; then
     qualification_failed=1
   fi
