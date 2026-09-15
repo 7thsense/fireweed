@@ -3123,19 +3123,6 @@ pub(crate) async fn verify_committed_reader_settings(
     Ok(())
 }
 
-/// Give independently opened projections different checkpoint windows. Large
-/// identical windows align their first main-file writes under uniform shard
-/// workloads. Keep 192–448 MiB of coalescing and the existing upper bound.
-/// FNV-1a makes the policy reproducible from the configured path without a
-/// global counter, random generator, persisted state, or host setting.
-fn projection_checkpoint_budget(path: &Path) -> i64 {
-    let hash = path.as_os_str().as_encoded_bytes().iter().fold(
-        0xcbf29ce484222325u64,
-        |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3),
-    );
-    (192 + (hash % 257) as i64) * 1024 * 1024
-}
-
 async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Result<i64> {
     if !config.rebuildable_io {
         return Ok(1_000);
@@ -3148,7 +3135,7 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
             "invalid projection page size {page_size}"
         )));
     }
-    Ok(projection_checkpoint_budget(config.path()) / page_size)
+    Ok(448 * 1024 * 1024 / page_size)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3559,29 +3546,11 @@ async fn scalar_i64(connection: &Connection, sql: &str) -> Result<i64> {
 mod projection_checkpoint_config_tests {
     use super::*;
 
-    #[test]
-    fn shard_checkpoint_windows_are_bounded_and_spread() {
-        let budgets: std::collections::BTreeSet<_> = (0..64)
-            .map(|shard| {
-                let path = PathBuf::from(format!("/projection/shard-{shard}/projection.db"));
-                let budget = projection_checkpoint_budget(&path);
-                assert_eq!(budget, projection_checkpoint_budget(&path));
-                assert!((192 * 1024 * 1024..=448 * 1024 * 1024).contains(&budget));
-                assert_eq!(budget % (1024 * 1024), 0);
-                budget
-            })
-            .collect();
-        assert!(budgets.len() >= 32, "checkpoint windows must not collapse into a herd");
-        assert!(*budgets.first().unwrap() <= 224 * 1024 * 1024);
-        assert!(*budgets.last().unwrap() >= 416 * 1024 * 1024);
-    }
-
     #[tokio::test]
     async fn new_and_existing_files_use_their_actual_page_size() {
         let root = tempfile::tempdir().unwrap();
-        let new_path = root.path().join("new.db");
         let new = TursoRelational::open(
-            TursoConfig::local(&new_path).with_log_backed_projection(),
+            TursoConfig::local(root.path().join("new.db")).with_log_backed_projection(),
         )
         .await
         .unwrap();
@@ -3591,7 +3560,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            projection_checkpoint_budget(&new_path) / 4096
+            114_688
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));
@@ -3611,7 +3580,7 @@ mod projection_checkpoint_config_tests {
                     .unwrap();
             }
             let existing =
-                TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
+                TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
                     .await
                     .unwrap();
             assert_eq!(existing.wal_truncate_min_bytes, page_size as u64 * 1024);
@@ -3620,7 +3589,7 @@ mod projection_checkpoint_config_tests {
                 scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                     .await
                     .unwrap(),
-                projection_checkpoint_budget(&path) / page_size
+                448 * 1024 * 1024 / page_size
             );
         }
         let standalone = TursoRelational::in_memory().await.unwrap();

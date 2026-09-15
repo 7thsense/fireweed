@@ -1,0 +1,286 @@
+{
+  "qualification": false,
+  "error": "Error: Storage(\"object-log post-position ambiguous: object-log post-position produce timed out; shard=QueueKey { tenant_id: TenantId(\\\"workflow\\\"), queue_id: QueueId(\\\"campaign-1\\\") }\")",
+  "process_wall_s": 380.1655831899843,
+  "completed_cycles": [
+    {
+      "cycle": 0,
+      "reports": 128,
+      "max_wall_s": 79.819241686,
+      "gate_cycle_rate": 12528.307446641607,
+      "progress_p95_max_s": 0.333004287,
+      "materialized_main_files_at_cycle_end": 0
+    },
+    {
+      "cycle": 1,
+      "reports": 128,
+      "max_wall_s": 104.817006675,
+      "gate_cycle_rate": 9540.436535271818,
+      "progress_p95_max_s": 0.224829248,
+      "materialized_main_files_at_cycle_end": 9
+    }
+  ],
+  "projection_files": {
+    "shard-0": {
+      "main_bytes": 4096,
+      "wal_bytes": 315793912
+    },
+    "shard-1": {
+      "main_bytes": 30953472,
+      "wal_bytes": 71931112
+    },
+    "shard-10": {
+      "main_bytes": 4096,
+      "wal_bytes": 302914792
+    },
+    "shard-11": {
+      "main_bytes": 30953472,
+      "wal_bytes": 83075712
+    },
+    "shard-12": {
+      "main_bytes": 4096,
+      "wal_bytes": 309399672
+    },
+    "shard-13": {
+      "main_bytes": 4096,
+      "wal_bytes": 290933832
+    },
+    "shard-14": {
+      "main_bytes": 4096,
+      "wal_bytes": 301423352
+    },
+    "shard-15": {
+      "main_bytes": 4096,
+      "wal_bytes": 302473952
+    },
+    "shard-16": {
+      "main_bytes": 4096,
+      "wal_bytes": 302263832
+    },
+    "shard-17": {
+      "main_bytes": 4096,
+      "wal_bytes": 307726952
+    },
+    "shard-18": {
+      "main_bytes": 4096,
+      "wal_bytes": 304327952
+    },
+    "shard-19": {
+      "main_bytes": 4096,
+      "wal_bytes": 303850032
+    },
+    "shard-2": {
+      "main_bytes": 4096,
+      "wal_bytes": 309407912
+    },
+    "shard-20": {
+      "main_bytes": 30883840,
+      "wal_bytes": 58017872
+    },
+    "shard-21": {
+      "main_bytes": 4096,
+      "wal_bytes": 303314432
+    },
+    "shard-22": {
+      "main_bytes": 30875648,
+      "wal_bytes": 16624232
+    },
+    "shard-23": {
+      "main_bytes": 4096,
+      "wal_bytes": 308369672
+    },
+    "shard-24": {
+      "main_bytes": 4096,
+      "wal_bytes": 301163792
+    },
+    "shard-25": {
+      "main_bytes": 30949376,
+      "wal_bytes": 52785472
+    },
+    "shard-26": {
+      "main_bytes": 4096,
+      "wal_bytes": 308691032
+    },
+    "shard-27": {
+      "main_bytes": 4096,
+      "wal_bytes": 317870392
+    },
+    "shard-28": {
+      "main_bytes": 4096,
+      "wal_bytes": 307817592
+    },
+    "shard-29": {
+      "main_bytes": 4096,
+      "wal_bytes": 308316112
+    },
+    "shard-3": {
+      "main_bytes": 4096,
+      "wal_bytes": 304163152
+    },
+    "shard-30": {
+      "main_bytes": 4096,
+      "wal_bytes": 305427992
+    },
+    "shard-31": {
+      "main_bytes": 4096,
+      "wal_bytes": 300001952
+    },
+    "shard-32": {
+      "main_bytes": 30896128,
+      "wal_bytes": 74184752
+    },
+    "shard-33": {
+      "main_bytes": 4096,
+      "wal_bytes": 313247752
+    },
+    "shard-34": {
+      "main_bytes": 4096,
+      "wal_bytes": 299161472
+    },
+    "shard-35": {
+      "main_bytes": 4096,
+      "wal_bytes": 311216592
+    },
+    "shard-36": {
+      "main_bytes": 30920704,
+      "wal_bytes": 24530512
+    },
+    "shard-37": {
+      "main_bytes": 4096,
+      "wal_bytes": 297974912
+    },
+    "shard-38": {
+      "main_bytes": 30879744,
+      "wal_bytes": 1104192
+    },
+    "shard-39": {
+      "main_bytes": 4096,
+      "wal_bytes": 302272072
+    },
+    "shard-4": {
+      "main_bytes": 4096,
+      "wal_bytes": 301316232
+    },
+    "shard-40": {
+      "main_bytes": 30826496,
+      "wal_bytes": 10786192
+    },
+    "shard-41": {
+      "main_bytes": 31121408,
+      "wal_bytes": 32086592
+    },
+    "shard-42": {
+      "main_bytes": 4096,
+      "wal_bytes": 317009312
+    },
+    "shard-43": {
+      "main_bytes": 30826496,
+      "wal_bytes": 306000672
+    },
+    "shard-44": {
+      "main_bytes": 30838784,
+      "wal_bytes": 58734752
+    },
+    "shard-45": {
+      "main_bytes": 30961664,
+      "wal_bytes": 54993792
+    },
+    "shard-46": {
+      "main_bytes": 4096,
+      "wal_bytes": 311105352
+    },
+    "shard-47": {
+      "main_bytes": 4096,
+      "wal_bytes": 308328472
+    },
+    "shard-48": {
+      "main_bytes": 4096,
+      "wal_bytes": 293879632
+    },
+    "shard-49": {
+      "main_bytes": 4096,
+      "wal_bytes": 313927552
+    },
+    "shard-5": {
+      "main_bytes": 31064064,
+      "wal_bytes": 68260192
+    },
+    "shard-50": {
+      "main_bytes": 4096,
+      "wal_bytes": 305489792
+    },
+    "shard-51": {
+      "main_bytes": 4096,
+      "wal_bytes": 306309672
+    },
+    "shard-52": {
+      "main_bytes": 30920704,
+      "wal_bytes": 1091832
+    },
+    "shard-53": {
+      "main_bytes": 30822400,
+      "wal_bytes": 85761952
+    },
+    "shard-54": {
+      "main_bytes": 4096,
+      "wal_bytes": 313939912
+    },
+    "shard-55": {
+      "main_bytes": 31072256,
+      "wal_bytes": 50025072
+    },
+    "shard-56": {
+      "main_bytes": 4096,
+      "wal_bytes": 301085512
+    },
+    "shard-57": {
+      "main_bytes": 30859264,
+      "wal_bytes": 28304432
+    },
+    "shard-58": {
+      "main_bytes": 4096,
+      "wal_bytes": 292346992
+    },
+    "shard-59": {
+      "main_bytes": 4096,
+      "wal_bytes": 296738912
+    },
+    "shard-6": {
+      "main_bytes": 4096,
+      "wal_bytes": 307516832
+    },
+    "shard-60": {
+      "main_bytes": 4096,
+      "wal_bytes": 308365552
+    },
+    "shard-61": {
+      "main_bytes": 4096,
+      "wal_bytes": 300928952
+    },
+    "shard-62": {
+      "main_bytes": 4096,
+      "wal_bytes": 307829952
+    },
+    "shard-63": {
+      "main_bytes": 30867456,
+      "wal_bytes": 29808232
+    },
+    "shard-7": {
+      "main_bytes": 4096,
+      "wal_bytes": 306878232
+    },
+    "shard-8": {
+      "main_bytes": 30973952,
+      "wal_bytes": 54149192
+    },
+    "shard-9": {
+      "main_bytes": 4096,
+      "wal_bytes": 306832912
+    }
+  },
+  "materialized_main_files_at_failure": 20,
+  "retained_projection_root": "/home/erik/Projects/fireweed/target/workflow-capacity/compressed-staggered-checkpoints-s64-w2-six-9eo2im6l",
+  "authoritative_log_root_was_deleted_by_old_harness": false,
+  "retained_data_root": "/home/erik/Projects/fireweed/target/workflow-capacity/failed-run-xk7sac3j",
+  "cleanup_status": "projection root intentionally retained for failure investigation"
+}

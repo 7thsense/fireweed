@@ -1,5 +1,31 @@
 # Campaign qualification and performance plan
 
+The staggered-checkpoint candidate (`3b8f1036`) is **rejected and reverted**.
+It failed naturally during cycle three with another 30-second post-position
+produce timeout, after 380.17 process seconds. The planned early-stop command
+found the process already gone and sent no signal. Completed cycle rates were
+12,528 and 9,540 recipients/sec; reporting p95 was 0.333/0.225 seconds. There
+is no complete six-cycle throughput or reliability pass. Twenty main databases
+had materialized at failure, versus nine after the last completed cycle.
+
+A recorded 29.053-second interval had 5.675 MiB/sec writes, 121.1 completed
+write requests/sec, 1.926-second mean write latency, 233.3 mean outstanding I/O
+requests, 99.46% device busy and 2.27 application CPU cores active. Spreading
+checkpoints did not resolve the storage-path stall. The exact interval was
+reconstructed from archived device samples; it is a diagnostic interval, not
+a hardware maximum or a whole-run average. Both failed roots are retained:
+`failed-run-xk7sac3j` (authoritative log) and the corresponding
+`compressed-staggered-checkpoints-s64-w2-six-*` projection root under
+`target/workflow-capacity`. Evidence uses
+`fireweed-campaign-staggered-checkpoints-s64-w2-six*`.
+
+The 448 MiB checkpoint policy is restored. **310 release checks pass**, with
+three ignored diagnostics and the same two unconfigured live-S3 exclusions.
+The failed-run preservation and surfaced shard identity fixes remain. A faster
+execution location has been requested for an identical workload comparison;
+local code review and failure analysis can continue while that information is
+pending. The 10k/12.5k goals remain unmet.
+
 The retained-code 64-store six-cycle attempt (`a3b24317`, runtime `8a12e2de`)
 **failed during cycle five**, after 388.40 process seconds, with an object-log
 post-position produce timeout. Four completed cycles had gate-derived rates

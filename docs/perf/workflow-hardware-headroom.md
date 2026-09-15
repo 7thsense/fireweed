@@ -1,5 +1,15 @@
 # Workflow capacity versus hardware cost
 
+Spreading checkpoint windows across 192–448 MiB did not fix the stall. The
+candidate failed during cycle three; its observed 29.053-second interval had
+**5.675 MiB/sec writes, 121.1 write requests/sec, 1.926-second write latency,
+233.3 outstanding I/O requests and 99.46% device busy**. Application CPU was
+2.27 cores. The experiment is reverted. These counters demonstrate a storage-path
+bottleneck during the observed interval; they do not establish the SSD's intrinsic
+maximum or make a claim about TRIM. An identical run on a faster execution
+location is the next hardware comparison. Failed roots and raw device evidence
+are preserved under `fireweed-campaign-staggered-checkpoints-s64-w2-six*`.
+
 A clean 64-store sustained run (`a3b24317`, runtime `8a12e2de`) failed during
 cycle five with a **30-second object-log post-position produce timeout**.
 This is a failed reliability run, not a throughput qualification. Its last
