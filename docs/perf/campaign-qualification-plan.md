@@ -1,5 +1,24 @@
 # Campaign qualification and performance plan
 
+Ready-manifest grouping (`2f992d3d`), clean 64-store/two-worker single cycle:
+**13,546.96 recipients/sec**, 74.06 seconds, CPU 0.96188 ms/recipient, peak
+RSS 13.79 GiB, reporting p95 0.565 seconds. Compared with the prior direct-join
+observation (13,339.15/sec, 0.97226 ms), this is a modest serial improvement,
+not replicated qualification. There were **5,498 data objects and 5,219
+manifests**: 5.07% fewer manifests than one per object, or an estimated 2.54%
+fewer data/manifest sync barriers (21,434 versus 21,992), excluding other
+metadata publications. Host writes were 2.76691 GiB at 39.31 MiB/sec.
+
+The small grouping opportunity has a concrete scheduling explanation to test:
+`finish_flush_work` performs the durable manifest commit synchronously on the
+same loop that dispatches uploads. Producers queued during a slow commit
+cannot start their PUTs until it returns. Next is a gated regression proving
+that stall, followed by one ordered commit worker while the upload dispatcher
+continues. Ordering, memory bounds, failure handling and drain must remain
+covered. No full qualification is claimed for the grouping-only candidate.
+Evidence uses `fireweed-campaign-ready-manifests-s64-w2-one*`; its owned root
+was removed after property capture.
+
 The ready-manifest grouping candidate passed **309 Fireweed release checks**
 and **39 focused object-log checks**. Only built-in sequencers that explicitly
 opt in can receive several already-durable objects in one atomic commit.

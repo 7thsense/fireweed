@@ -1,0 +1,10 @@
+{
+  "data_objects": 5498,
+  "manifests": 5219,
+  "mean_objects_per_manifest": 1.0534585169572714,
+  "manifest_reduction": 0.05074572571844305,
+  "data_plus_manifest_sync_estimate": 21434,
+  "one_manifest_per_object_sync_estimate": 21992,
+  "estimated_sync_reduction": 0.02537286285922158,
+  "excludes": "initialization and repeated mutable metadata publications"
+}
