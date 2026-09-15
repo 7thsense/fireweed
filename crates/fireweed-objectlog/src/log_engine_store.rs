@@ -210,8 +210,10 @@ impl PackedAppendError {
     pub fn into_engine(self) -> EngineError {
         match self {
             Self::BeforePosition(error) => error,
-            Self::PostPositionAmbiguous { reason, .. } => {
-                EngineError::Storage(format!("object-log post-position ambiguous: {reason}"))
+            Self::PostPositionAmbiguous { shard, reason } => {
+                EngineError::Storage(format!(
+                    "object-log post-position ambiguous: {reason}; shard={shard:?}"
+                ))
             }
         }
     }
