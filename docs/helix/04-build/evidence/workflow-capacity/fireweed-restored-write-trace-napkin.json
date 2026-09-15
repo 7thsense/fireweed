@@ -1,0 +1,27 @@
+{
+  "source": "restored-runtime six-cycle instrumented diagnostic; no qualification",
+  "complete_recipients": 6000000,
+  "cpu_ms_per_recipient": 1.0377358961666667,
+  "host_write_bytes_per_recipient": 3290.865664,
+  "projection_wal_requested_bytes_per_recipient": 7751.481296,
+  "projection_main_requested_bytes_per_recipient": 384.91067733333335,
+  "log_command_bytes_per_recipient": 1831.393957,
+  "targets": {
+    "10000": {
+      "cpu_seconds_per_second": 10.377358961666667,
+      "host_write_MiB_per_second": 31.384140625,
+      "projection_wal_logical_MiB_per_second": 73.92388626098632
+    },
+    "12500": {
+      "cpu_seconds_per_second": 12.971698702083335,
+      "host_write_MiB_per_second": 39.23017578125,
+      "projection_wal_logical_MiB_per_second": 92.40485782623291
+    }
+  },
+  "limitations": [
+    "Constant-cost extrapolation, not measured hardware ceilings.",
+    "Host device bytes include other host traffic; VFS requested bytes are logical and include shutdown.",
+    "Temporary files were on tmpfs and are excluded from device-write interpretation.",
+    "Tracing changes runtime costs; several cycles failed the fixed throughput floors."
+  ]
+}

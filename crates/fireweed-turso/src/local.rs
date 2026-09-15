@@ -3163,6 +3163,11 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
         .await?;
     // Negative cache_size is KiB. 128 MiB is a cache cap, not an O(N) working set.
     connection.pragma_update("cache_size", "-131072").await?;
+    if config.rebuildable_io {
+        // SQL intermediates are statement-local scratch, not projection state.
+        // Avoid creating a filesystem temp database for every bounded batch.
+        connection.pragma_update("temp_store", "MEMORY").await?;
+    }
     // Coalesce repeated page versions before writing the rebuildable main DB.
     // Preserve the upstream 1,000-frame policy for standalone projections.
     let checkpoint_frames = checkpoint_frames(connection, config).await?;
@@ -3233,6 +3238,11 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
         )));
     }
     let expected_checkpoint_frames = checkpoint_frames(connection, config).await?;
+    if config.rebuildable_io && scalar_i64(connection, "PRAGMA temp_store").await? != 2 {
+        return Err(TursoRelationalError::Configuration(
+            "log-backed SQL scratch must use memory temp storage".into(),
+        ));
+    }
     let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     if checkpoint_frames != expected_checkpoint_frames {
         return Err(TursoRelationalError::Configuration(format!(
@@ -3545,6 +3555,46 @@ async fn scalar_i64(connection: &Connection, sql: &str) -> Result<i64> {
 #[cfg(test)]
 mod projection_checkpoint_config_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn log_backed_connections_use_memory_scratch_with_file_backed_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("scratch.db");
+        let store = TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
+            .await
+            .unwrap();
+        let writer = store.writer.lock().await;
+        let reader = store.reader.lock().await;
+        let pooled = store
+            .borrow_committed_driver_connection()
+            .await
+            .unwrap()
+            .unwrap();
+        let recovery = TransientRecoveryReader::open(&store.database, &store.config)
+            .await
+            .unwrap();
+        for connection in [&*writer, &*reader, &*pooled, recovery.connection()] {
+            assert_eq!(
+                scalar_i64(connection, "PRAGMA temp_store").await.unwrap(),
+                2
+            );
+            assert_eq!(
+                scalar_text(connection,
+                    "SELECT group_concat(v, ',') FROM (WITH input(v) AS (VALUES (3),(1),(3),(2)) SELECT DISTINCT v FROM input ORDER BY v)")
+                    .await.unwrap(),
+                "1,2,3",
+            );
+        }
+        assert!(path.metadata().unwrap().len() > 0);
+        assert!(path.with_extension("db-wal").metadata().unwrap().len() > 0);
+        let standalone = TursoRelational::in_memory().await.unwrap();
+        assert_eq!(
+            scalar_i64(&*standalone.writer.lock().await, "PRAGMA temp_store")
+                .await
+                .unwrap(),
+            0
+        );
+    }
 
     #[tokio::test]
     async fn new_and_existing_files_use_their_actual_page_size() {

@@ -1,5 +1,26 @@
 # Campaign qualification and performance plan
 
+The native-memory SQL scratch candidate passes **311 release checks**, with
+four ignored diagnostics and two unconfigured live-S3 exclusions. Log-backed
+connections select and verify `temp_store=MEMORY`; standalone defaults stay
+unchanged. A regression checks writer, serving, pooled-driver and transient
+recovery connections, independently verifies sorted/distinct results, and
+checks that the main database and WAL remain files. This removes filesystem
+scratch creation, not persistent projection storage. Performance remains
+unestablished; native memory temp storage disables sorter spilling, so
+representative memory stability is a retention requirement, and arbitrary
+unbounded SQL is not justified by this workload.
+
+The completed trace updates the constant-cost napkin estimate: 1.03774 CPU-ms
+and about 3,291 host-device write bytes per recipient imply **12.97 CPU-s/s
+and 39.23 MiB/sec host writes at 12,500 recipients/sec** (10.38 CPU-s/s and
+31.38 MiB/sec at 10k). Projection WAL logical writes alone are 7,751 bytes
+per recipient, implying 92.4 MiB/sec at 12.5k before filesystem compression.
+Logical VFS bytes, log command bytes and physical host bytes must not be
+added together or treated as interchangeable. These are workload-cost
+extrapolations, not device ceilings; raw inputs and caveats are in
+`fireweed-restored-write-trace-napkin.json`.
+
 A six-cycle trace of the restored runtime (`6e257bfe`, CLI `66b85c4a...`)
 completed successfully in 598.12 seconds at **10,040 recipients/sec overall**,
 but does **not** qualify: diagnostic tracing was enabled, three cycles were
