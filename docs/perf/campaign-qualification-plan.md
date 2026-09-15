@@ -1,5 +1,20 @@
 # Campaign qualification and performance plan
 
+The all-record column-position cache (`c67da262`) passed **312 release checks**
+(four ignored diagnostics, two unconfigured live-S3 exclusions), but its clean
+64-store first cycle did **not** demonstrate a workflow gain: 13,749.57/sec,
+0.96637 CPU-ms/recipient, 14.13 GiB peak RSS and 0.541-second reporting p95.
+The preceding partial-index candidate observed 14,287.40/sec and 0.94561 ms.
+All single-cycle application checks completed; the qualification report correctly
+rejected the insufficient cycle count. Evidence uses
+`fireweed-campaign-column-cache-s64-w2-one*`; the owned root was removed.
+
+A focused parsing diagnostic showed a roughly one-third reduction for 20-column
+records, but no reliable improvement for eight-column records. The next bounded
+candidate leaves short index records and column zero on the original decoding
+path, using the cache only for wider records. It still needs full validation and
+campaign measurement. No sustained performance improvement is claimed.
+
 The durable publication comparison did not establish a preferred protocol:
 immutable runs differed by 12x (373.03 versus 31.03 MiB/sec), with append
 runs at 48.35 and 91.32 MiB/sec. Identical streams were verified. This is
