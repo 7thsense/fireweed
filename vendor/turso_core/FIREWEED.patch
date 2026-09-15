@@ -366,3 +366,144 @@
          idx_phase_ctxs.push(IndexUpdatePhaseCtx {
              idx_cursor_id: *idx_cursor_id,
              record_reg: *record_reg,
+--- a/types.rs
++++ b/types.rs
+@@ -959,6 +959,7 @@
+ 
+ mod immutable_record {
+     use super::*;
++    use std::sync::atomic::{AtomicU64, Ordering};
+ 
+     /// This struct serves the purpose of not allocating multiple vectors of bytes if not needed.
+     /// A value in a record that has already been serialized can stay serialized and what this struct offsers
+@@ -971,6 +972,10 @@
+         //
+         // payload is the std::vec::Vec<u8> but in order to use Register which holds ImmutableRecord as a Value - we store std::vec::Vec<u8> as Value::Blob
+         payload: Value,
++        // Last requested column and its header/data offsets. One atomic snapshot
++        // permits concurrent immutable readers without publishing mixed offsets.
++        // Zero means uncached; large offsets simply use the uncached path.
++        column_position: AtomicU64,
+     }
+ 
+     // SAFETY: all ImmutableRecord instances are intended to be used in a single thread
+@@ -982,6 +987,7 @@
+         fn clone(&self) -> Self {
+             Self {
+                 payload: self.payload.clone(),
++                column_position: AtomicU64::new(0),
+             }
+         }
+     }
+@@ -1316,6 +1322,61 @@
+             iter(self.get_payload())
+         }
+ 
++        /// Start at a column without reparsing earlier serial types when the
++        /// previous access was to this or an earlier column of the same record.
++        /// No decoded values or borrowed pointers are retained in the cache.
++        #[inline]
++        pub fn iter_at_column(&self, column: usize) -> Result<ValueIterator<'_>> {
++            let iter = self.iter()?;
++            let initial_header = iter.header_section_ref();
++            let initial_data = iter.data_section_ref();
++            let cached = self.column_position.load(Ordering::Relaxed);
++            let cached_column = (cached >> 48) as usize;
++            let mut remaining = column;
++            if cached != 0 && cached_column <= column {
++                let header_offset = ((cached >> 32) & 0xffff) as usize;
++                let data_offset = (cached & 0xffff_ffff) as usize;
++                iter.set_header_section(&initial_header[header_offset..]);
++                iter.set_data_section(&initial_data[data_offset..]);
++                remaining -= cached_column;
++            }
++            let mut header = iter.header_section_ref();
++            let mut data = iter.data_section_ref();
++            for _ in 0..remaining {
++                if header.is_empty() {
++                    // Missing columns retain the caller's DEFAULT/NULL behavior.
++                    iter.set_header_section(header);
++                    iter.set_data_section(data);
++                    return Ok(iter);
++                }
++                let (serial_type, bytes_read) = read_varint(header)?;
++                let size = get_serial_type_size(serial_type)?;
++                if size > data.len() {
++                    return Err(LimboError::Corrupt(
++                        "Data section too small for indicated serial type size".into(),
++                    ));
++                }
++                header = &header[bytes_read..];
++                data = &data[size..];
++            }
++            let header_offset = initial_header.len() - header.len();
++            let data_offset = initial_data.len() - data.len();
++            if column <= u16::MAX as usize
++                && header_offset <= u16::MAX as usize
++                && data_offset <= u32::MAX as usize
++            {
++                self.column_position.store(
++                    ((column as u64) << 48)
++                        | ((header_offset as u64) << 32)
++                        | data_offset as u64,
++                    Ordering::Relaxed,
++                );
++            }
++            iter.set_header_section(header);
++            iter.set_data_section(data);
++            Ok(iter)
++        }
++
+         #[inline]
+         /// Returns true if the record contains any NULL values.
+         /// This is an optimization that only examines the header (serial types)
+@@ -1396,12 +1457,14 @@
+             payload.try_reserve_exact(payload_capacity)?;
+             Ok(Self {
+                 payload: Value::Blob(payload),
++                column_position: AtomicU64::new(0),
+             })
+         }
+ 
+         pub const fn from_bin_record(payload: std::vec::Vec<u8>) -> Self {
+             Self {
+                 payload: Value::Blob(payload),
++                column_position: AtomicU64::new(0),
+             }
+         }
+ 
+@@ -1500,6 +1563,7 @@
+             writer.assert_finish_capacity();
+             Ok(Self {
+                 payload: Value::Blob(buf),
++                column_position: AtomicU64::new(0),
+             })
+         }
+ 
+@@ -1521,6 +1585,7 @@
+ 
+         #[inline]
+         pub const fn as_blob_mut(&mut self) -> &mut std::vec::Vec<u8> {
++            self.column_position = AtomicU64::new(0);
+             match &mut self.payload {
+                 Value::Blob(b) => b,
+                 _ => panic!("payload must be a blob"),
+--- a/vdbe/execute.rs
++++ b/vdbe/execute.rs
+@@ -1878,14 +1878,14 @@
+                                 break 'outer;
+                             };
+ 
+-                            let mut payload_iterator = record.iter()?;
++                            let mut payload_iterator = record.iter_at_column(*column)?;
+ 
+                             // Parse the header for serial types incrementally until we have the target column
+                             // Use nth_into_register to write directly to the register without
+                             // creating intermediate ValueRef allocations
+ 
+                             match payload_iterator
+-                                .nth_into_register(*column, &mut state.registers[*dest])
++                                .nth_into_register(0, &mut state.registers[*dest])
+                             {
+                                 Some(result) => {
+                                     result?;

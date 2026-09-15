@@ -1878,14 +1878,14 @@ pub fn op_column(
                                 break 'outer;
                             };
 
-                            let mut payload_iterator = record.iter()?;
+                            let mut payload_iterator = record.iter_at_column(*column)?;
 
                             // Parse the header for serial types incrementally until we have the target column
                             // Use nth_into_register to write directly to the register without
                             // creating intermediate ValueRef allocations
 
                             match payload_iterator
-                                .nth_into_register(*column, &mut state.registers[*dest])
+                                .nth_into_register(0, &mut state.registers[*dest])
                             {
                                 Some(result) => {
                                     result?;

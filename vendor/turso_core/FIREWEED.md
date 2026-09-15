@@ -70,3 +70,15 @@ old-row predicate. This also fixes erroneous evaluation errors for unused keys,
 such as `abs(-9223372036854775808)` on a row outside an expression index.
 The native regression covers predicate transitions, uniqueness rollback and
 index integrity, with the same case checked against SQLite.
+
+B-tree Column reads reuse the last requested column's header/data position on
+an immutable record. Increasing or repeated column reads avoid rescanning the
+whole serial-type prefix. The bounded eight-byte atomic snapshot contains only
+offsets and a column ordinal, not pointers or decoded values; concurrent readers
+can safely replace it. Mutable-payload access clears it before changes, and
+large offsets fall back to parsing. Storage encoding, default-column handling,
+log durability and projection synchronization are unchanged. Native regression
+coverage compares cached and uncached reads over varied data and access orders,
+checks buffer reuse, concurrent readers and oversized headers, and preserves
+errors on truncated/reserved-serial-type records. The ignored parsing diagnostic
+is not workflow qualification.
