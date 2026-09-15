@@ -1,0 +1,9 @@
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.05s
+     Running unittests src/lib.rs (target/object-log-tests/debug/deps/object_log-a836cc0b3060d1d0)
+
+running 1 test
+test engine::ready_commit_group_tests::uploads_continue_while_the_ordered_manifest_commit_is_blocked ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+

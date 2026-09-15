@@ -184,6 +184,11 @@ struct FlushWork<M> {
     put_result: Option<Result<Duration, ObjectLogError>>,
 }
 
+struct CommitJob {
+    task: TokioJoinHandle<usize>,
+    first_seq: u64,
+}
+
 enum TakeBatch<M> {
     Batch(Vec<Pending<M>>),
     Empty,
@@ -709,11 +714,14 @@ fn flush_loop<S>(
         .unwrap_or(0);
     let mut pending: VecDeque<FlushWork<S::Meta>> = VecDeque::new();
     let mut active_puts = 0usize;
+    let mut committing: Option<CommitJob> = None;
     let mut shutdown = false;
 
     loop {
         while !shutdown && active_puts < max_inflight {
-            let wait_for_more = pending.is_empty();
+            // Poll the commit job even with no queued uploads: it owns bytes
+            // whose release may be needed to admit the next producer.
+            let wait_for_more = pending.is_empty() && committing.is_none();
             match take_batch(&shared, config, wait_for_more) {
                 TakeBatch::Batch(batch) => {
                     counter += 1;
@@ -750,15 +758,62 @@ fn flush_loop<S>(
             made_progress = true;
         }
 
-        while let Some(work) = take_ready_commit_group(&mut pending, commit_group_limit) {
-            let released = finish_flush_work(&shared, &blob, &sequencer, work);
-            let mut q = shared.queue.lock().expect("poisoned");
-            q.bytes_in_use = q.bytes_in_use.saturating_sub(released);
-            shared.cv.notify_all();
+        if committing
+            .as_ref()
+            .is_some_and(|job| job.task.is_finished())
+        {
+            let job = committing.take().expect("completed commit exists");
+            match rt.block_on(job.task) {
+                Ok(released) => {
+                    let mut q = shared.queue.lock().expect("poisoned");
+                    q.bytes_in_use = q.bytes_in_use.saturating_sub(released);
+                    shared.cv.notify_all();
+                }
+                Err(error) => {
+                    abort_failed_commit_worker(
+                        &shared,
+                        &mut pending,
+                        job.first_seq,
+                        ObjectLogError::Sequencer(format!("commit worker failed: {error}")),
+                    );
+                    return;
+                }
+            }
             made_progress = true;
         }
 
-        if pending.is_empty() {
+        if committing.is_none() {
+            if let Some(work) = take_ready_commit_group(&mut pending, commit_group_limit) {
+                if max_inflight == 1 {
+                    // Preserve the low-overhead single-flight path.
+                    let released = finish_flush_work(&shared, &blob, &sequencer, work);
+                    let mut q = shared.queue.lock().expect("poisoned");
+                    q.bytes_in_use = q.bytes_in_use.saturating_sub(released);
+                    shared.cv.notify_all();
+                } else {
+                    // One ordered committer; uploads can progress during its
+                    // durable manifest I/O. Bytes remain charged until completion.
+                    let first_seq = work
+                        .batch
+                        .iter()
+                        .map(|p| p.seq)
+                        .min()
+                        .unwrap_or(work.max_seq);
+                    let shared = shared.clone();
+                    let blob = blob.clone();
+                    let sequencer = sequencer.clone();
+                    committing = Some(CommitJob {
+                        task: rt.spawn_blocking(move || {
+                            finish_flush_work(&shared, &blob, &sequencer, work)
+                        }),
+                        first_seq,
+                    });
+                }
+                made_progress = true;
+            }
+        }
+
+        if pending.is_empty() && committing.is_none() {
             {
                 let mut q = shared.queue.lock().expect("poisoned");
                 if q.items.is_empty() && q.bytes_in_use == 0 {
@@ -785,6 +840,42 @@ fn flush_loop<S>(
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+}
+
+/// A panicked committer cannot safely resume sequencing. Close admission and
+/// fail queued callers/barriers rather than leaving them waiting on a dead job.
+fn abort_failed_commit_worker<M>(
+    shared: &Arc<Shared<M>>,
+    pending: &mut VecDeque<FlushWork<M>>,
+    first_seq: u64,
+    error: ObjectLogError,
+) {
+    for mut work in pending.drain(..) {
+        if let Some(put) = work.put.take() {
+            put.abort();
+        }
+        send_storage_error(&mut work.responders, error.clone());
+    }
+    // Recover a poisoned guard only to close the engine, never to resume writes.
+    let mut q = shared
+        .queue
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    q.shutdown = true;
+    q.first_failed.get_or_insert((first_seq, error.clone()));
+    for mut item in q.items.drain(..) {
+        if let Some(tx) = item.responder.take() {
+            let _ = tx.send(Err(error.clone()));
+        }
+    }
+    q.bytes = 0;
+    // Keep outstanding bytes conservatively charged until the failed engine
+    // and any cancelled upload tasks are dropped.
+    for (_, tx) in q.flush_waiters.drain(..) {
+        let _ = tx.send(Err(error.clone()));
+    }
+    q.force_flush = false;
+    shared.cv.notify_all();
 }
 
 /// Combine only an already-ready contiguous success prefix. Never wait to fill
@@ -968,7 +1059,9 @@ fn notify_flush_waiters<M>(q: &mut Queue<M>) {
     let mut i = 0;
     while i < q.flush_waiters.len() {
         let barrier = q.flush_waiters[i].0;
-        let failure = q.first_failed.as_ref()
+        let failure = q
+            .first_failed
+            .as_ref()
             .filter(|(sequence, _)| *sequence <= barrier)
             .map(|(_, error)| error.clone());
         if barrier <= done || failure.is_some() {
@@ -1097,7 +1190,12 @@ where
     S::Meta: Send + 'static,
 {
     let release_bytes = work.bytes;
-    let first_seq = work.batch.iter().map(|pending| pending.seq).min().unwrap_or(work.max_seq);
+    let first_seq = work
+        .batch
+        .iter()
+        .map(|pending| pending.seq)
+        .min()
+        .unwrap_or(work.max_seq);
     // Durable-then-sequence: the object PUT may have overlapped later PUTs, but
     // sequencer commits are still completed in object creation order.
     // Grouped put_ms is the largest observed member PUT duration, not a sum.
@@ -1120,7 +1218,10 @@ where
     };
 
     // Media ops for the data object put.
-    let mut media_ops = blob.take_media_op_stats().map(|s| s.media_ops).unwrap_or(work.data_objects as u64); // fallback: 1 per successful put
+    let mut media_ops = blob
+        .take_media_op_stats()
+        .map(|s| s.media_ops)
+        .unwrap_or(work.data_objects as u64); // fallback: 1 per successful put
 
     // Signal Durable-level waiters now (after PUT, before commit).
     send_durable_acks(&mut work.responders);
@@ -1351,24 +1452,23 @@ mod ready_commit_group_tests {
         entered: std::sync::mpsc::SyncSender<()>,
         release: Mutex<Option<oneshot::Receiver<()>>>,
         fail: bool,
+        panic_on_commit: bool,
     }
 
     #[async_trait]
     impl BlobStore for GatedManifestStore {
         async fn put(&self, key: &str, value: Bytes) -> Result<(), ObjectLogError> {
             if key.starts_with("manifest/") {
-                let release = self
-                    .release
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .expect("one grouped manifest");
-                self.entered.send(()).unwrap();
-                release.await.unwrap();
-                if self.fail {
-                    return Err(ObjectLogError::StorageUnavailable(
-                        "manifest failure".into(),
-                    ));
+                let release = self.release.lock().unwrap().take();
+                if let Some(release) = release {
+                    self.entered.send(()).unwrap();
+                    release.await.unwrap();
+                    assert!(!self.panic_on_commit, "injected commit panic");
+                    if self.fail {
+                        return Err(ObjectLogError::StorageUnavailable(
+                            "manifest failure".into(),
+                        ));
+                    }
                 }
             }
             self.inner.put(key, value).await
@@ -1404,6 +1504,7 @@ mod ready_commit_group_tests {
                 entered: entered_tx,
                 release: Mutex::new(Some(release_rx)),
                 fail,
+                panic_on_commit: false,
             });
             let sequencer = Arc::new(
                 ManifestSequencer::open(blob.clone(), "manifest/")
@@ -1508,5 +1609,305 @@ mod ready_commit_group_tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uploads_continue_while_the_ordered_manifest_commit_is_blocked() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = oneshot::channel();
+        let blob: Arc<dyn BlobStore> = Arc::new(GatedManifestStore {
+            inner: MemoryBlobStore::new(),
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+            fail: false,
+            panic_on_commit: false,
+        });
+        let sequencer = Arc::new(
+            ManifestSequencer::open(blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let mut config = FlushConfig::default();
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let engine = Arc::new(LogEngine::new(blob.clone(), sequencer, config, "data/"));
+        let first = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .produce(
+                        PartitionKey("p".into()),
+                        Bytes::from_static(b"first"),
+                        1,
+                        (),
+                        Durability::Sequenced,
+                    )
+                    .await
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        for n in 1..4 {
+            engine
+                .produce(
+                    PartitionKey("p".into()),
+                    Bytes::from(format!("later-{n}")),
+                    1,
+                    (),
+                    Durability::Buffered,
+                )
+                .await
+                .unwrap();
+        }
+        let upload_progress = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if blob.list("data/").await.unwrap().len() == 4 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let early_ack = first.is_finished();
+        // Always release before assertions so a failed regression can drain.
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        engine.flush().await.unwrap();
+        let rows = engine
+            .fetch(&PartitionKey("p".into()), 0, 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.base_offset).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        drop(engine);
+        assert!(
+            !early_ack,
+            "sequenced acknowledgement preceded manifest durability"
+        );
+        assert!(
+            upload_progress,
+            "blocked manifest prevented independent data uploads"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commit_completion_releases_admission_bytes_without_more_uploads() {
+        let blob: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+        let sequencer = Arc::new(
+            ManifestSequencer::open(blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let mut config = FlushConfig::default();
+        config.max_bytes = 4;
+        config.max_buffered_bytes = 4;
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let engine = LogEngine::new(blob, sequencer, config, "data/");
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"full"),
+                1,
+                (),
+                Durability::Sequenced,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while engine.buffer_stats().bytes_in_use != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("completed committer stranded admission bytes");
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"next"),
+                1,
+                (),
+                Durability::Sequenced,
+            )
+            .await
+            .unwrap();
+        engine.flush().await.unwrap();
+        assert_eq!(
+            engine
+                .fetch(&PartitionKey("p".into()), 0, 100)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_drains_a_blocked_committer_and_queued_buffered_work() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = oneshot::channel();
+        let blob: Arc<dyn BlobStore> = Arc::new(GatedManifestStore {
+            inner: MemoryBlobStore::new(),
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+            fail: false,
+            panic_on_commit: false,
+        });
+        let sequencer = Arc::new(
+            ManifestSequencer::open(blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let mut config = FlushConfig::default();
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let engine = LogEngine::new(blob.clone(), sequencer, config, "data/");
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"first"),
+                1,
+                (),
+                Durability::Buffered,
+            )
+            .await
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"second"),
+                1,
+                (),
+                Durability::Buffered,
+            )
+            .await
+            .unwrap();
+        let shared = engine.shared.clone();
+        let dropping = tokio::task::spawn_blocking(move || drop(engine));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !shared.queue.lock().unwrap().shutdown {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let premature = dropping.is_finished();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), dropping)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!premature, "shutdown returned before manifest durability");
+        let reopened = Arc::new(
+            ManifestSequencer::open(blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let engine = LogEngine::new(blob, reopened, config, "data/");
+        let rows = engine
+            .fetch(&PartitionKey("p".into()), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.payload.as_ref()).collect::<Vec<_>>(),
+            vec![b"first".as_slice(), b"second".as_slice()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicked_committer_closes_admission_and_fails_flush() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = oneshot::channel();
+        let blob: Arc<dyn BlobStore> = Arc::new(GatedManifestStore {
+            inner: MemoryBlobStore::new(),
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+            fail: false,
+            panic_on_commit: true,
+        });
+        let sequencer = Arc::new(
+            ManifestSequencer::open(blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let mut config = FlushConfig::default();
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let engine = Arc::new(LogEngine::new(blob, sequencer, config, "data/"));
+        let first = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .produce(
+                        PartitionKey("p".into()),
+                        Bytes::from_static(b"first"),
+                        1,
+                        (),
+                        Durability::Sequenced,
+                    )
+                    .await
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"later"),
+                1,
+                (),
+                Durability::Buffered,
+            )
+            .await
+            .unwrap();
+        let flushing = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.flush().await })
+        };
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), flushing)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !engine.shared.queue.lock().unwrap().shutdown {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            engine
+                .produce(
+                    PartitionKey("p".into()),
+                    Bytes::from_static(b"rejected"),
+                    1,
+                    (),
+                    Durability::Buffered
+                )
+                .await
+                .is_err()
+        );
+        assert!(engine.flush().await.is_err());
     }
 }

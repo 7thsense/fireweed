@@ -1,0 +1,19 @@
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.03s
+     Running unittests src/lib.rs (target/object-log-tests/debug/deps/object_log-a836cc0b3060d1d0)
+
+running 1 test
+
+thread 'engine::ready_commit_group_tests::uploads_continue_while_the_ordered_manifest_commit_is_blocked' (1368950) panicked at src/engine.rs:1548:9:
+blocked manifest prevented independent data uploads
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test engine::ready_commit_group_tests::uploads_continue_while_the_ordered_manifest_commit_is_blocked ... FAILED
+
+failures:
+
+failures:
+    engine::ready_commit_group_tests::uploads_continue_while_the_ordered_manifest_commit_is_blocked
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.01s
+
+error: test failed, to rerun pass `--lib`

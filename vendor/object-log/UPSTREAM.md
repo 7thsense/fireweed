@@ -33,6 +33,16 @@ error, durability and recovery tests before workflow measurements.
   acknowledgements while manifest publication is gated, manifest failure,
   replayed exact locations, and concurrent public produces followed by reopen.
 
+- With concurrent uploads enabled, one blocking commit job owns the ordered
+  ready group while the dispatcher continues admitting and polling uploads.
+  Aggregate byte admission remains charged through commit completion; shutdown
+  drains uploads and the committer. A panicked committer closes admission and
+  rejects outstanding barriers. Single-flight configurations retain inline commit.
+- A gated regression failed before this change because a blocked first manifest
+  prevented three later data uploads. It now passes without early sequenced
+  acknowledgement. Additional tests cover release of admission bytes with no
+  further upload queued, draining buffered work on shutdown and commit panic.
+
 ## Reproduce focused tests
 
 From the Fireweed repository root, seed the ignored standalone test lockfile

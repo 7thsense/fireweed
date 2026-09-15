@@ -1,5 +1,15 @@
 # Campaign qualification and performance plan
 
+The upload-dispatch stall is now reproduced and fixed in code. A gated first
+manifest prevented three subsequent uploads in the original dispatcher; the
+regression failed before the change and passes with one ordered blocking commit
+job running alongside upload dispatch. All 43 focused object-log tests pass,
+including byte-admission release with no further upload, shutdown drain, and
+commit panic. Durable publication barriers and the workload gates are unchanged.
+All 309 Fireweed release checks also pass (two ignored diagnostics and two
+unconfigured live-S3 checks excluded). The same 64-store/two-worker single-cycle
+comparison follows; this is not yet evidence of a workflow capacity gain.
+
 Ready-manifest grouping (`2f992d3d`), clean 64-store/two-worker single cycle:
 **13,546.96 recipients/sec**, 74.06 seconds, CPU 0.96188 ms/recipient, peak
 RSS 13.79 GiB, reporting p95 0.565 seconds. Compared with the prior direct-join
