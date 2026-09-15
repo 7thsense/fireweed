@@ -1,0 +1,11 @@
+{
+  "runtime_source_commit": "3cdfb41a",
+  "build_command": "cargo build --locked --release -p fireweed -p fireweed-objectlog -p fireweed-turso -p fireweed-workload",
+  "source_date_epoch": "1789179522",
+  "binary_sha256": "338b79da9c8923b2951b6ab83ee050eb743f4972ecd1a949f5081a2a0c492bf3",
+  "interposer_sha256": "b9c15d9edb407114ab8f0eaf108068e33f9af5ecc7990785210befd7ab5a70a4",
+  "slow_threshold_us": 100000,
+  "slow_output": "/tmp/fireweed-campaign-direct-join-io-s48-w2-six-slow-io.jsonl",
+  "qualification": "diagnostic, not a clean capacity pass",
+  "created_unix_s": 1789429817.7783048
+}

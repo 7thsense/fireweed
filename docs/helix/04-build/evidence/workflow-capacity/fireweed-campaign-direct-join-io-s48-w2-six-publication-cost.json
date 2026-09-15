@@ -1,0 +1,40 @@
+{
+  "projection_vfs_aggregate": {
+    "temporary": {
+      "calls": 464764,
+      "requested_bytes": 1903673344,
+      "elapsed_us": 23910249,
+      "max_us": 30975,
+      "over_1ms": 4422,
+      "over_10ms": 194,
+      "over_100ms": 0,
+      "errors": 0
+    },
+    "main_or_other": {
+      "calls": 44220,
+      "requested_bytes": 4223836160,
+      "elapsed_us": 268302931,
+      "max_us": 2861773,
+      "over_1ms": 2478,
+      "over_10ms": 1586,
+      "over_100ms": 400,
+      "errors": 0
+    },
+    "wal": {
+      "calls": 26982,
+      "requested_bytes": 47402252608,
+      "elapsed_us": 919327324,
+      "max_us": 3507202,
+      "over_1ms": 12381,
+      "over_10ms": 3691,
+      "over_100ms": 1084,
+      "errors": 0
+    }
+  },
+  "log_files_at_end": 62550,
+  "caveats": "Rough publication-count estimate assumes final files are objects published once. It is not a complete syscall count; overwritten metadata and deleted files are omitted. VFS durations overlap across threads and include scheduling.",
+  "estimated_syncs_if_each_final_file_published_once": 125100,
+  "file_count_estimated_syncs_per_recipient": 0.02085,
+  "file_count_estimated_syncs_per_s_at_10k": 208.5,
+  "file_count_estimated_syncs_per_s_at_12_5k": 260.625
+}

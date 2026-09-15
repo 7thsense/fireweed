@@ -1,5 +1,34 @@
 # Campaign qualification and performance plan
 
+The retained-code six-cycle I/O diagnostic (source `3cdfb41a`, binary
+`338b79da…`, 48 stores/two workers) completed at **10,584.67 recipients/sec**
+in 567.21 seconds. It is not qualification: tracing was enabled, throughput
+failed, and cycles 3/5 fell below 10k. All other workload/resource gates passed.
+No device settings or checkpoint thresholds changed. The standalone release
+build command and binary hash are recorded separately from prior test builds.
+
+The process-local trace recorded **43,713 log sync calls >=100 ms**, with
+15,209 summed overlapping seconds and a 5.605-second maximum. By comparison,
+400 long main-file writes summed to 232.01 seconds and 1,083 long WAL writes
+to 825.70 seconds. Existing VFS counters independently found 400/1,084 such
+main/WAL calls; total VFS write time was 268.30/919.33 seconds respectively.
+Temporary-file writes added 23.91 seconds, none >=100 ms. These are caller
+wall times including scheduling, not device service times; parallel durations
+must not be added to process elapsed time. A store with one slow log sync can
+still have other uploads in flight. No sync/write errors were observed.
+
+Source inspection explains four durability barriers per sealed object:
+LocalBlobStore writes a temp file, fdatasyncs, renames, and fsyncs its directory;
+ManifestSequencer repeats that publication for the commit manifest. Concurrent
+object uploads are available, but the flush loop sequences each completed
+object separately, even if multiple ordered uploads are already ready. The
+next candidate combines only that ready contiguous success prefix into one
+manifest, preserving existing ordering, format and durable acknowledgement
+rules. It must test unfinished/failed puts, manifest failures and recovery.
+Evidence uses `fireweed-campaign-direct-join-io-s48-w2-six*`; the interposer
+source, smoke tests and parser are also archived. The owned projection root
+was removed only after file-property capture.
+
 The 224-row replacement candidate (`86ddc211`) is **not retained**. Its clean
 64-store/two-worker million-row cycle reached 13,356.81 recipients/sec and
 0.97154 CPU-ms/recipient, effectively unchanged from the 56-row direct-join

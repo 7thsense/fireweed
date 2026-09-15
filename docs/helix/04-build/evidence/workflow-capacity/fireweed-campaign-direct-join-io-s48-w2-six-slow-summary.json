@@ -1,0 +1,170 @@
+{
+  "pid": 1347335,
+  "events": 45196,
+  "invalid_lines": 0,
+  "meaning": "completed calls >= threshold only; caller wall time, not device service time; sums overlap across threads; a store with one slow log sync may still have other puts in flight",
+  "by_class": {
+    "log": {
+      "calls": 43713,
+      "summed_overlapping_wall_s": 15209.023909,
+      "max_call_s": 5.604878,
+      "requested_mib": 0.0,
+      "errors": 0,
+      "ops": {
+        "fdatasync": 24497,
+        "fsync": 19216
+      }
+    },
+    "main": {
+      "calls": 400,
+      "summed_overlapping_wall_s": 232.01095,
+      "max_call_s": 2.861702,
+      "requested_mib": 573.69140625,
+      "errors": 0,
+      "ops": {
+        "pwritev": 345,
+        "pwrite": 55
+      }
+    },
+    "wal": {
+      "calls": 1083,
+      "summed_overlapping_wall_s": 825.701027,
+      "max_call_s": 3.507145,
+      "requested_mib": 3342.427604675293,
+      "errors": 0,
+      "ops": {
+        "pwritev": 1079,
+        "pwrite": 4
+      }
+    }
+  },
+  "max_simultaneously_blocked_projection_stores": 47,
+  "seconds_with_at_least_n_stores_in_long_projection_writes": {
+    "1": 82.88038229942322,
+    "8": 45.635448694229126,
+    "16": 25.70477557182312,
+    "24": 14.912309885025024,
+    "32": 8.363038539886475,
+    "40": 6.377465009689331
+  },
+  "max_stores_with_slow_log_sync_in_flight": 48,
+  "seconds_with_at_least_n_stores_having_a_slow_log_sync_in_flight": {
+    "1": 390.3623206615448,
+    "8": 311.98231077194214,
+    "16": 262.53634810447693,
+    "24": 227.98099493980408,
+    "32": 193.51984977722168,
+    "40": 151.48251509666443,
+    "48": 112.13694167137146
+  },
+  "longest_calls": [
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 23,
+      "bytes": 0,
+      "elapsed_us": 5604878,
+      "unix_end_us": 1789430078353375,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 6,
+      "bytes": 0,
+      "elapsed_us": 5595421,
+      "unix_end_us": 1789430078353516,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 21,
+      "bytes": 0,
+      "elapsed_us": 5595410,
+      "unix_end_us": 1789430078353351,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 34,
+      "bytes": 0,
+      "elapsed_us": 5594389,
+      "unix_end_us": 1789430078353543,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 32,
+      "bytes": 0,
+      "elapsed_us": 5593351,
+      "unix_end_us": 1789430078353462,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 33,
+      "bytes": 0,
+      "elapsed_us": 5592101,
+      "unix_end_us": 1789430078353528,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 30,
+      "bytes": 0,
+      "elapsed_us": 5591081,
+      "unix_end_us": 1789430078353420,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 16,
+      "bytes": 0,
+      "elapsed_us": 5573982,
+      "unix_end_us": 1789430078353565,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 32,
+      "bytes": 0,
+      "elapsed_us": 5302906,
+      "unix_end_us": 1789430078353260,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 25,
+      "bytes": 0,
+      "elapsed_us": 5295389,
+      "unix_end_us": 1789430078353501,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 26,
+      "bytes": 0,
+      "elapsed_us": 5294537,
+      "unix_end_us": 1789430078353440,
+      "result": 0
+    },
+    {
+      "op": "fdatasync",
+      "class": "log",
+      "shard": 19,
+      "bytes": 0,
+      "elapsed_us": 5291386,
+      "unix_end_us": 1789430078353304,
+      "result": 0
+    }
+  ]
+}

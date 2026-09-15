@@ -1,5 +1,24 @@
 # Workflow capacity versus hardware cost
 
+The retained-code I/O diagnostic identifies **durability-publication latency**
+as a material cost that bandwidth-only math missed. Its 43,713 log syncs
+lasting at least 100 ms had 15,209 summed overlapping caller-seconds, maximum
+5.605 seconds. Projection main/WAL long writes were far fewer (400/1,083),
+with 232/826 overlapping seconds. This does not prove an intrinsic SSD ceiling:
+filesystem publication, scheduling and competing writes contribute to those
+wall times. Local publication plus its manifest requires four durable barriers
+per sealed object. The final 62,550 log files suggest roughly 125,100 file/dir
+syncs if each was published once: about **209/261 syncs/sec at 10k/12.5k**,
+before repeated metadata publications. This is a file-count model, not a
+complete syscall count.
+
+Measured CPU cost was 1.01778 ms/recipient; host writes were 20.60377 GiB
+for six million recipients. Constant-cost demands at 10k/12.5k are therefore
+**10.18/12.72 CPU-seconds/sec** and **35.16/43.95 MiB/sec writes**. The run
+observed 37.34 MiB/sec and 80.25% device busy time; neither establishes the
+drive hardware maximum. The concrete code opportunity is to combine already
+durable ready uploads into fewer manifest publications, preserving barriers.
+
 Six-cycle direct-join costs (48 stores, runtime `3cdfb41a`) were **1.03450
 CPU-ms/recipient**, 21.31616 GiB host writes and 0.01965 GiB host reads for
 six million recipients. Constant-cost demand at 10k/12.5k is **10.345/12.931

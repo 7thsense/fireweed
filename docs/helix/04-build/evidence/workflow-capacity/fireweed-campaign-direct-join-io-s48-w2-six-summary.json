@@ -1,0 +1,123 @@
+{
+  "head": "ed74b547ddd8b66376b7f5c45fba27cad67273e1",
+  "binary_sha256": "338b79da9c8923b2951b6ab83ee050eb743f4972ecd1a949f5081a2a0c492bf3",
+  "diagnostics": {
+    "LD_PRELOAD": "/tmp/fireweed-slow-io.so",
+    "FIREWEED_PROJECTION_IO_TRACE": "1"
+  },
+  "exit_code": 0,
+  "rate": 10584.672396813085,
+  "process_wall_s": 567.2108574039885,
+  "cpu_ms_per_recipient": 1.0177774551666665,
+  "mean_cpu_occupancy": 10.766128065582159,
+  "output_bytes_per_recipient": 11032.487253333333,
+  "logical_log_bytes_per_recipient": 1832.9178618333333,
+  "peak_rss_gib": 13.712356567382812,
+  "phase_maxima_not_additive": [
+    {
+      "wall_s": 68.654027854,
+      "load_s": 9.278347683,
+      "prepare_s": 26.459049824,
+      "delivery_s": 23.754002934,
+      "verify_s": 0.405112762,
+      "purge_s": 7.25486124,
+      "progress_p95_s": 0.632713748,
+      "due_to_claim_max_us": 6300480
+    },
+    {
+      "wall_s": 80.32486682,
+      "load_s": 19.81123978,
+      "prepare_s": 29.562790506,
+      "delivery_s": 23.752895972,
+      "verify_s": 0.402331333,
+      "purge_s": 6.545777491,
+      "progress_p95_s": 0.229339422,
+      "due_to_claim_max_us": 6552388
+    },
+    {
+      "wall_s": 89.37417312,
+      "load_s": 19.81055487,
+      "prepare_s": 30.798674973,
+      "delivery_s": 26.975489871,
+      "verify_s": 0.529813634,
+      "purge_s": 11.028304342,
+      "progress_p95_s": 0.254201693,
+      "due_to_claim_max_us": 6809424
+    },
+    {
+      "wall_s": 109.445614374,
+      "load_s": 33.429650797,
+      "prepare_s": 36.519786533,
+      "delivery_s": 31.149342443,
+      "verify_s": 0.422644451,
+      "purge_s": 7.47965487,
+      "progress_p95_s": 0.21568081,
+      "due_to_claim_max_us": 7538256
+    },
+    {
+      "wall_s": 91.712765083,
+      "load_s": 19.590421682,
+      "prepare_s": 35.076721229,
+      "delivery_s": 29.119864526,
+      "verify_s": 0.40806379,
+      "purge_s": 6.851611313,
+      "progress_p95_s": 0.25004689,
+      "due_to_claim_max_us": 7291764
+    },
+    {
+      "wall_s": 122.465639925,
+      "load_s": 23.026139695,
+      "prepare_s": 31.952930259,
+      "delivery_s": 47.826879786,
+      "verify_s": 0.359314704,
+      "purge_s": 18.10009812,
+      "progress_p95_s": 0.241101605,
+      "due_to_claim_max_us": 28433880
+    }
+  ],
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "no_external_io_override",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 10584.672396813085,
+      "required": 12500
+    },
+    {
+      "name": "cycle_1_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 12448.648091017152,
+      "required": 12500
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 11188.198615918003,
+      "required": 12500
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9137.250548776383,
+      "required": 12500
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10902.909743208142,
+      "required": 12500
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 8165.0330706014975,
+      "required": 12500
+    }
+  ]
+}
