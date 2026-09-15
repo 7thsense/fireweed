@@ -1,0 +1,49 @@
+{
+  "date": "2026-09-15",
+  "kernel": {
+    "exit": 0,
+    "stdout": "7.2.3-arch1-3\n",
+    "stderr": ""
+  },
+  "btrfs_device_stats": {
+    "exit": 0,
+    "stdout": "[/dev/mapper/root].write_io_errs    0\n[/dev/mapper/root].read_io_errs     0\n[/dev/mapper/root].flush_io_errs    0\n[/dev/mapper/root].corruption_errs  0\n[/dev/mapper/root].generation_errs  0\n",
+    "stderr": ""
+  },
+  "btrfs_usage": {
+    "exit": 0,
+    "stdout": "Overall:\n    Device size:\t\t 474.92GiB\n    Device allocated:\t\t 168.02GiB\n    Device unallocated:\t\t 306.90GiB\n    Device missing:\t\t     0.00B\n    Device slack:\t\t     0.00B\n    Used:\t\t\t 145.24GiB\n    Free (estimated):\t\t 325.05GiB\t(min: 171.60GiB)\n    Free (statfs, df):\t\t 325.05GiB\n    Data ratio:\t\t\t      1.00\n    Metadata ratio:\t\t      2.00\n    Global reserve:\t\t 475.17MiB\t(used: 0.00B)\n    Multiple profiles:\t\t        no\n\nData,single: Size:158.01GiB, Used:139.86GiB (88.51%)\n\nMetadata,DUP: Size:5.00GiB, Used:2.69GiB (53.82%)\n\nSystem,DUP: Size:8.00MiB, Used:48.00KiB (0.59%)\n\n",
+    "stderr": "WARNING: cannot read detailed chunk info, per-device usage will not be shown, run as root\n"
+  },
+  "block_devices": {
+    "exit": 0,
+    "stdout": "NAME        TYPE  TRAN MODEL                     SIZE FSTYPE      MOUNTPOINTS\nsda         disk  sata Samsung SSD 860 EVO 1TB 931.5G             \n\u251c\u2500sda1      part                                  16M             \n\u251c\u2500sda2      part                               930.1G BitLocker   \n\u251c\u2500sda3      part                                 686M ntfs        \n\u251c\u2500sda4      part                                 178M vfat        \n\u2514\u2500sda5      part                                 531M ntfs        \nzram0       disk                                62.2G swap        [SWAP]\nnvme0n1     disk  nvme KINGSTON OM8PCP3512F-AB 476.9G             \n\u251c\u2500nvme0n1p1 part  nvme                             2G vfat        /boot\n\u2514\u2500nvme0n1p2 part  nvme                         474.9G crypto_LUKS \n  \u2514\u2500root    crypt                              474.9G btrfs       /home\n                                                                  /var/cache/pacman/pkg\n                                                                  /var/log\n                                                                  /\n",
+    "stderr": ""
+  },
+  "packages": {
+    "exit": 0,
+    "stdout": "linux 7.2.3.arch1-3\nlinux-firmware 20260810-2\nbtrfs-progs 7.1-1\n",
+    "stderr": ""
+  },
+  "affected_file": {
+    "exit": 0,
+    "stdout": "inode=8721967 size=286924184 modified=2026-09-10 02:50:50.660631409 -0400 file=target/debug/deps/differential-ccf77c21858d741e\n",
+    "stderr": ""
+  },
+  "error_count_at_capture": 86083,
+  "first_error": "Sep 10 02:50:50 forseti kernel: BTRFS error (device dm-0): root 257 ino 8721967 folio 178978816 is fixup with an empty fixup bitmap",
+  "last_error": "Sep 15 14:24:53 forseti kernel: BTRFS error (device dm-0): root 257 ino 8721967 folio 178978816 is fixup with an empty fixup bitmap",
+  "nvme_sysfs": {
+    "current_link_speed": "8.0 GT/s PCIe",
+    "current_link_width": "4",
+    "max_link_speed": "8.0 GT/s PCIe",
+    "max_link_width": "4",
+    "power/control": "on"
+  },
+  "limitations": [
+    "No SMART/controller error log: tools absent and administrator authentication unavailable.",
+    "Cannot yet attribute measured throughput loss to the Btrfs defect.",
+    "Live configured package-mirror probe returned HTTP 403; cached linux package version remains 7.2.3.arch1-3.",
+    "No kernel update, reboot, SSD tuning, filesystem repair, or additional write benchmark performed."
+  ]
+}

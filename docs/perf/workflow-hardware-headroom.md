@@ -1,5 +1,11 @@
 # Workflow capacity versus hardware cost
 
+**New diagnostic finding:** the running Linux 7.2.3 kernel is repeatedly
+logging a Btrfs writeback error matching an upstream fix in 7.2.4. See
+[local machine diagnosis](local-machine-diagnosis.md) before interpreting
+the measurements below as a clean hardware baseline. The effect on throughput
+has not yet been isolated.
+
 ## 2026-09-15: local recheck; another host is not a prerequisite
 
 The 39.33 MiB/sec figure is projected **workload demand** at 12.5k
