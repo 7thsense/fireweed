@@ -71,8 +71,9 @@ such as `abs(-9223372036854775808)` on a row outside an expression index.
 The native regression covers predicate transitions, uniqueness rollback and
 index integrity, with the same case checked against SQLite.
 
-B-tree Column reads reuse the last requested column's header/data position on
-an immutable record. Increasing or repeated column reads avoid rescanning the
+B-tree Column reads of wider records reuse the last requested column's
+header/data position on an immutable record. Column zero and records with at
+most 16 serial-type header bytes retain the original uncached decoding path. Increasing or repeated column reads avoid rescanning the
 whole serial-type prefix. The bounded eight-byte atomic snapshot contains only
 offsets and a column ordinal, not pointers or decoded values; concurrent readers
 can safely replace it. Mutable-payload access clears it before changes, and

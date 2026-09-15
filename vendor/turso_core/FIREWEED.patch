@@ -490,20 +490,31 @@
                  _ => panic!("payload must be a blob"),
 --- a/vdbe/execute.rs
 +++ b/vdbe/execute.rs
-@@ -1878,14 +1878,14 @@
-                                 break 'outer;
+@@ -1879,13 +1879,21 @@
                              };
  
--                            let mut payload_iterator = record.iter()?;
-+                            let mut payload_iterator = record.iter_at_column(*column)?;
- 
-                             // Parse the header for serial types incrementally until we have the target column
-                             // Use nth_into_register to write directly to the register without
-                             // creating intermediate ValueRef allocations
- 
+                             let mut payload_iterator = record.iter()?;
+-
+-                            // Parse the header for serial types incrementally until we have the target column
+-                            // Use nth_into_register to write directly to the register without
+-                            // creating intermediate ValueRef allocations
+-
++                            // Short index records and the first column need little
++                            // prefix decoding; leave them on the uncached fast path.
++                            let skip_columns = if *column > 0
++                                && payload_iterator.header_section_ref().len() > 16
++                            {
++                                payload_iterator = record.iter_at_column(*column)?;
++                                0
++                            } else {
++                                *column
++                            };
++
++                            // Write directly to the register, preserving its
++                            // existing text/blob allocation when possible.
                              match payload_iterator
 -                                .nth_into_register(*column, &mut state.registers[*dest])
-+                                .nth_into_register(0, &mut state.registers[*dest])
++                                .nth_into_register(skip_columns, &mut state.registers[*dest])
                              {
                                  Some(result) => {
                                      result?;
