@@ -1,0 +1,19 @@
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.72s
+     Running tests/engine.rs (target/object-log-tests/debug/deps/engine-cc9e70632977f2d6)
+
+running 1 test
+
+thread 'flush_preserves_failed_manifest_prefix_after_producer_completion' (1352697) panicked at tests/engine.rs:1149:9:
+flush hid a failed manifest for Buffered
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test flush_preserves_failed_manifest_prefix_after_producer_completion ... FAILED
+
+failures:
+
+failures:
+    flush_preserves_failed_manifest_prefix_after_producer_completion
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test engine`

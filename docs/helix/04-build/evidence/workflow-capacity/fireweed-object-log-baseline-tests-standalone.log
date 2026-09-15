@@ -1,0 +1,106 @@
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.52
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.2
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling syn v2.0.117
+   Compiling bitflags v2.13.0
+   Compiling autocfg v1.5.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.9.5
+   Compiling fastrand v2.4.1
+   Compiling serde_json v1.0.150
+   Compiling serde v1.0.228
+   Compiling thiserror v2.0.18
+   Compiling once_cell v1.21.4
+   Compiling tempfile v3.27.0
+   Compiling wait-timeout v0.2.1
+   Compiling bytes v1.12.1
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling ppv-lite86 v0.2.21
+   Compiling tokio-macros v2.7.0
+   Compiling memchr v2.8.2
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling itoa v1.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling tokio v1.52.3
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling async-trait v0.1.89
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.11
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+   Compiling proptest v1.11.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.33s
+     Running unittests src/lib.rs (target/object-log-tests/debug/deps/object_log-a836cc0b3060d1d0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/blob.rs (target/object-log-tests/debug/deps/blob-0e97894c91a35cb3)
+
+running 5 tests
+test memory_put_reports_zero_media_ops ... ok
+test memory_blob_store_conforms ... ok
+test local_put_reports_two_media_ops ... ok
+test local_blob_store_put_is_durable_and_readable_across_instances ... ok
+test local_blob_store_conforms ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/engine.rs (target/object-log-tests/debug/deps/engine-cc9e70632977f2d6)
+
+running 19 tests
+test headroom_allows_fast_single_produce ... ok
+test pipeline_snapshot_exposes_budget_defaults ... ok
+test put_count_independent_of_partition_count ... ok
+test reopen_does_not_overwrite_sealed_data_objects ... ok
+test sequenced_implies_durable ... ok
+test concurrent_producers_get_dense_contiguous_offsets ... ok
+test commit_failure_orphans_object_and_retry_is_exactly_once ... ok
+test idempotent_retry_does_not_duplicate ... ok
+test produce_fetch_round_trip ... ok
+test reap_orphans_deletes_unreferenced_data_objects ... ok
+test multiplexed_commit_is_all_or_nothing ... ok
+test fetch_stream_stops_on_visitor_error ... ok
+test fetch_stream_visits_batches_in_order ... ok
+test truncate_before_deletes_dead_objects ... ok
+test transient_range_failure_is_retried_on_fetch ... ok
+test transient_put_failure_is_retried_before_ack ... ok
+test fail_closed_rejects_when_budget_starved ... ok
+test put_failure_yields_no_ack_no_offset ... ok
+test per_producer_send_order_is_contiguous_on_shared_partition ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+     Running tests/manifest.rs (target/object-log-tests/debug/deps/manifest-f2a4d630ce701bf2)
+
+running 2 tests
+test manifest_snapshot_lists_partitions_and_entries ... ok
+test manifest_index_survives_restart ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/sequencer_conformance.rs (target/object-log-tests/debug/deps/sequencer_conformance-43709b4f6d76a941)
+
+running 3 tests
+test sequencer_err_commits_nothing_template ... ok
+test in_memory_sequencer_conforms ... ok
+test manifest_sequencer_conforms ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -11,3 +11,13 @@ storage-format migration or relaxed durability barrier is intended.
 The sibling object-log checkout and Cargo's source cache are not modified.
 Local implementation changes must be recorded below and covered by ordering,
 error, durability and recovery tests before workflow measurements.
+
+## Local changes
+
+- Retain the earliest failed PUT/manifest enqueue position for cumulative
+  flush barriers. Barriers before that position can succeed; covering barriers
+  return the original failure even if later appends succeed. Producer error
+  handling, offset assignment and on-disk formats are unchanged.
+- Root Cargo.lock changes only the object-log source from its pinned Git entry
+  to this path. Standalone tests use an ignored local lockfile and a separate
+  target directory to avoid changing Fireweed build artifacts.

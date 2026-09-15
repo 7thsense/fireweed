@@ -1,5 +1,18 @@
 # Campaign qualification and performance plan
 
+Object-log v0.3.1 is now vendored from pinned commit `dcd37c0e…` for a
+reviewable publication-path change; upstream licenses and provenance are
+retained, and neither the Cargo cache nor sibling checkout was modified.
+Its unchanged focused baseline passed 29 tests. Before grouping commits, a
+new regression reproduced a false-success `flush()` after manifest failure.
+The fix retains the earliest failed enqueue position: covering barriers fail
+even after later successful appends, while earlier barriers can still succeed.
+Producer acknowledgements, offset assignment and storage format are unchanged.
+All **31 focused tests passed**, including Buffered/Durable/Sequenced failure
+cases, a settled PUT failure and the earlier/later barrier boundary. Full
+Fireweed integration validation will accompany the ready-group candidate;
+these focused tests are not a capacity measurement.
+
 The retained-code six-cycle I/O diagnostic (source `3cdfb41a`, binary
 `338b79da…`, 48 stores/two workers) completed at **10,584.67 recipients/sec**
 in 567.21 seconds. It is not qualification: tracing was enabled, throughput

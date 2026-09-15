@@ -196,8 +196,10 @@ struct Queue<M> {
     shutdown: bool,
     /// Next seq to assign on enqueue.
     next_seq: u64,
-    /// Highest seq fully sealed (put + sequencer commit finished).
+    /// Highest settled enqueue sequence; failures are retained separately.
     completed_through: u64,
+    /// Earliest failed enqueue prefix. A later success cannot make it durable.
+    first_failed: Option<(u64, ObjectLogError)>,
     /// When true, take_batch flushes even if under size/linger.
     force_flush: bool,
     /// Waiters: (barrier_seq inclusive, responder).
@@ -264,6 +266,7 @@ where
                 shutdown: false,
                 next_seq: 1, // first enqueued batch gets seq 1
                 completed_through: 0,
+                first_failed: None,
                 force_flush: false,
                 flush_waiters: Vec::new(),
                 last_enqueue: None,
@@ -390,7 +393,10 @@ where
     ///
     /// Use after [`Durability::Buffered`] produces to wait for durable PUT (and
     /// sequencing) of that prior work. Concurrent produces enqueued after this
-    /// call are not required to finish. Empty buffer returns immediately.
+    /// call are not required to finish. An empty successful buffer returns immediately.
+    /// A failed PUT or commit remains an error for every barrier covering that
+    /// enqueue prefix, even after later appends succeed. Reopen the engine to
+    /// establish a new prefix from its successfully committed index.
     pub async fn flush(&self) -> Result<(), ObjectLogError> {
         let rx = {
             let mut q = self.shared.queue.lock().expect("poisoned");
@@ -402,6 +408,11 @@ where
                 return Ok(());
             }
             let barrier = q.next_seq - 1;
+            if let Some((sequence, error)) = &q.first_failed {
+                if *sequence <= barrier {
+                    return Err(error.clone());
+                }
+            }
             if q.completed_through >= barrier && q.items.is_empty() && q.bytes_in_use == 0 {
                 return Ok(());
             }
@@ -917,9 +928,13 @@ fn notify_flush_waiters<M>(q: &mut Queue<M>) {
     let done = q.completed_through;
     let mut i = 0;
     while i < q.flush_waiters.len() {
-        if q.flush_waiters[i].0 <= done {
+        let barrier = q.flush_waiters[i].0;
+        let failure = q.first_failed.as_ref()
+            .filter(|(sequence, _)| *sequence <= barrier)
+            .map(|(_, error)| error.clone());
+        if barrier <= done || failure.is_some() {
             let (_, tx) = q.flush_waiters.swap_remove(i);
-            let _ = tx.send(Ok(()));
+            let _ = tx.send(failure.map_or(Ok(()), Err));
         } else {
             i += 1;
         }
@@ -1042,6 +1057,7 @@ where
     S::Meta: Send + 'static,
 {
     let release_bytes = work.bytes;
+    let first_seq = work.batch.iter().map(|pending| pending.seq).min().unwrap_or(work.max_seq);
     // Durable-then-sequence: the object PUT may have overlapped later PUTs, but
     // sequencer commits are still completed in object creation order.
     let timing = std::env::var("OLOG_DEBUG_FLUSH_TIMING").is_ok();
@@ -1055,15 +1071,8 @@ where
             if done >= q.completed_through {
                 q.completed_through = done;
             }
-            let mut i = 0;
-            while i < q.flush_waiters.len() {
-                if q.flush_waiters[i].0 <= done {
-                    let (_, tx) = q.flush_waiters.swap_remove(i);
-                    let _ = tx.send(Err(e.clone()));
-                } else {
-                    i += 1;
-                }
-            }
+            q.first_failed.get_or_insert((first_seq, e));
+            notify_flush_waiters(&mut q);
             shared.cv.notify_all();
             return release_bytes;
         }
@@ -1092,6 +1101,7 @@ where
     // Clear stats again so sequencer durable work (e.g. ManifestSequencer put)
     // on the shared store is counted into the same budget.
     let _ = blob.take_media_op_stats();
+    let mut commit_error = None;
     match sequencer.commit(&commit_batches) {
         Ok(outcomes) => {
             if let Some(commit_started) = commit_started {
@@ -1131,7 +1141,8 @@ where
             if let Some(s) = blob.take_media_op_stats() {
                 media_ops = media_ops.saturating_add(s.media_ops);
             }
-            send_storage_error(&mut work.responders, e);
+            send_storage_error(&mut work.responders, e.clone());
+            commit_error = Some(e);
         }
     }
 
@@ -1141,6 +1152,9 @@ where
     }
     {
         let mut q = shared.queue.lock().expect("poisoned");
+        if let Some(error) = commit_error {
+            q.first_failed.get_or_insert((first_seq, error));
+        }
         if work.max_seq >= q.completed_through {
             q.completed_through = work.max_seq;
         }
@@ -1149,4 +1163,38 @@ where
     shared.cv.notify_all();
 
     release_bytes
+}
+
+#[cfg(test)]
+mod flush_barrier_tests {
+    use super::*;
+
+    #[test]
+    fn failure_only_rejects_barriers_covering_its_enqueue_position() {
+        let error = ObjectLogError::Sequencer("manifest failed".into());
+        let mut queue = Queue::<()> {
+            items: VecDeque::new(),
+            bytes: 0,
+            bytes_in_use: 1,
+            shutdown: false,
+            next_seq: 4,
+            completed_through: 2,
+            first_failed: Some((2, error.clone())),
+            force_flush: true,
+            flush_waiters: Vec::new(),
+            last_enqueue: None,
+            oldest_enqueue: None,
+        };
+        let mut receivers = Vec::new();
+        for barrier in [1, 2, 3] {
+            let (tx, rx) = oneshot::channel();
+            queue.flush_waiters.push((barrier, tx));
+            receivers.push(rx);
+        }
+        notify_flush_waiters(&mut queue);
+        assert_eq!(receivers[0].try_recv().unwrap(), Ok(()));
+        assert_eq!(receivers[1].try_recv().unwrap(), Err(error.clone()));
+        assert_eq!(receivers[2].try_recv().unwrap(), Err(error));
+        assert!(queue.flush_waiters.is_empty());
+    }
 }
