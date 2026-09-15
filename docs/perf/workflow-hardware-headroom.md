@@ -1,13 +1,68 @@
 # Workflow capacity versus hardware cost
 
+## 2026-09-15: local recheck; another host is not a prerequisite
+
+The 39.33 MiB/sec figure is projected **workload demand** at 12.5k
+recipients/sec, not measured device capacity. Requiring an SSH host to continue
+was unjustified. Local investigation can and must continue. The underlying
+cause of sustained storage-path slowdowns remains unresolved; neither TRIM nor
+an intrinsic SSD bandwidth limit has been established.
+
+Fresh 512 MiB private-file sequential tests on the unchanged project Btrfs
+mount measured 874.64 and 741.36 MiB/sec with buffered 1 MiB writes, and
+886.20 MiB/sec with O_DIRECT requested. All include final fdatasync and
+first/last-block verification. Host device counters recorded approximately
+514–526 MiB of writes per test, so the reported rates are not merely dirty
+page-cache acceptance rates. These short tests establish burst headroom, not
+sustained throughput. Compression can affect direct-I/O handling on Btrfs;
+O_DIRECT requested on the normal mount is not proof of a raw-device bypass.
+
+A separate 128-operation diagnostic writing and synchronizing each 4 KiB
+block measured median 2.55 ms/operation and 1.52 MiB/sec. This illustrates
+synchronization cost for that serial access pattern; it is not a Fireweed
+transaction benchmark or its throughput ceiling.
+
+Repeating the archived original 8 GiB diagnostic exactly (private NOCOW file,
+16 MiB incompressible blocks, O_DIRECT, final fdatasync) measured 44.99 MiB/sec
+in 182.10 seconds. Individual GiB segments ranged from 30.92 to 106.42 MiB/sec.
+This reproduces a slow sustained path independently of Fireweed, while the
+short tests show that approximately 39 MiB/sec is not a universal device limit.
+No system setting was changed; NOCOW applied only to that private test file.
+
+The equally sized normal-filesystem buffered test measured **38.51 MiB/sec**
+in 212.73 seconds, including 5.50 seconds of final fdatasync. It ran immediately
+after the direct NOCOW test; the order is not a controlled isolation of filesystem
+policy. During an 18.69-second interval, host device writes averaged 35.84
+MiB/sec, 288.95 requests/sec, 342.66 ms/request, and 99.99% busy. All 15 process
+wait-channel samples were `balance_dirty_pages`. NVMe temperature samples rose
+from 67.85 to 68.85 C; this does not establish thermal throttling. Buffered
+projection writes can therefore block on writeback even when their explicit
+sync method is a no-op. The current projection adapter already omits sync;
+the authoritative local log retains file and directory synchronization.
+
+These results distinguish short-burst throughput, sustained writeback, and
+per-operation synchronization. They do not isolate the cause of the sustained
+slowdown, establish a hardware maximum, or qualify Fireweed. Continue locally
+by attributing campaign time and writes to log publication, projection WAL,
+checkpointing, and CPU/SQL work, then measure code changes against the same
+representative workflow. Do not require another host or change SSD settings.
+
+Scripts and raw results are archived under
+`docs/helix/04-build/evidence/workflow-capacity/` as
+`fireweed-local-storage-check*`, `fireweed-repeat-original-sequential*`,
+`fireweed-repeat-normal-sequential*`, and `fireweed-normal-sequential-samples.json`.
+All owned test data files were verified and removed. The tests used no raw-device
+writes, no additional disk, no SSH host, and no Fireweed code changes.
+
+
 Spreading checkpoint windows across 192–448 MiB did not fix the stall. The
 candidate failed during cycle three; its observed 29.053-second interval had
 **5.675 MiB/sec writes, 121.1 write requests/sec, 1.926-second write latency,
 233.3 outstanding I/O requests and 99.46% device busy**. Application CPU was
 2.27 cores. The experiment is reverted. These counters demonstrate a storage-path
 bottleneck during the observed interval; they do not establish the SSD's intrinsic
-maximum or make a claim about TRIM. An identical run on a faster execution
-location is the next hardware comparison. Failed roots and raw device evidence
+maximum or make a claim about TRIM. A different host could provide an optional comparison; it is not required
+for continued local investigation. Failed roots and raw device evidence
 are preserved under `fireweed-campaign-staggered-checkpoints-s64-w2-six*`.
 
 A clean 64-store sustained run (`a3b24317`, runtime `8a12e2de`) failed during

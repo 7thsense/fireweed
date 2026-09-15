@@ -1,0 +1,57 @@
+{
+  "note": "Private fresh files on unchanged project Btrfs mount; repeated incompressible 1MiB buffer; device counters host-wide; no raw device writes or host tuning.",
+  "results": [
+    {
+      "name": "buffered-1MiB-final-sync",
+      "bytes": 536870912,
+      "seconds": 0.5853815979789943,
+      "write_loop_seconds": 0.3653173149796203,
+      "final_sync_seconds": 0.22006428299937397,
+      "MiB_per_second": 874.6431417859031,
+      "operation_p50_ms": 0.23327296366915107,
+      "operation_max_ms": 8.15239903749898,
+      "device_written_MiB": 513.85546875,
+      "device_busy_seconds": 0.557,
+      "verified_first_last": true
+    },
+    {
+      "name": "direct-1MiB-final-sync",
+      "bytes": 536870912,
+      "seconds": 0.5777500119875185,
+      "write_loop_seconds": 0.5710458609974012,
+      "final_sync_seconds": 0.006704150990117341,
+      "MiB_per_second": 886.19643336513,
+      "operation_p50_ms": 1.0009779944084585,
+      "operation_max_ms": 17.106936022173613,
+      "device_written_MiB": 513.66015625,
+      "device_busy_seconds": 0.488,
+      "verified_first_last": true
+    },
+    {
+      "name": "buffered-4KiB-sync-each",
+      "bytes": 524288,
+      "seconds": 0.3295269660302438,
+      "write_loop_seconds": 0.3295217280392535,
+      "final_sync_seconds": 5.237990990281105e-06,
+      "MiB_per_second": 1.5173265060016676,
+      "operation_p50_ms": 2.5546879624016583,
+      "operation_max_ms": 3.0314999748952687,
+      "device_written_MiB": 18.75,
+      "device_busy_seconds": 0.273,
+      "verified_first_last": true
+    },
+    {
+      "name": "buffered-1MiB-final-sync-repeat",
+      "bytes": 536870912,
+      "seconds": 0.6906198780052364,
+      "write_loop_seconds": 0.40329840598860756,
+      "final_sync_seconds": 0.28732147201662883,
+      "MiB_per_second": 741.3629643543477,
+      "operation_p50_ms": 0.24703197414055467,
+      "operation_max_ms": 14.005244011059403,
+      "device_written_MiB": 525.71484375,
+      "device_busy_seconds": 0.636,
+      "verified_first_last": true
+    }
+  ]
+}

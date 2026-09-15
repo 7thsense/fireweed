@@ -17,9 +17,13 @@ The eight-million-recipient campaign passes every non-throughput gate, but
 about 3,299 host-write bytes per recipient. At 12.5k, constant-cost demand
 is **12.61 CPU-s/s and 39.33 MiB/sec host writes**. That does not establish
 a hardware ceiling. The earlier write trace measured projection WAL calls
-as long as 4.45 seconds, even though projection sync is omitted. A controlled
-comparison on another storage path or execution host remains the next
-necessary diagnostic; no suitable location has been supplied. The other
+as long as 4.45 seconds, even though projection sync is omitted. Local rechecks
+now show 741–886 MiB/sec short sequential bursts but
+38.5–45.0 MiB/sec sustained 8 GiB writes. The normal buffered test was observed
+waiting in `balance_dirty_pages`. These distinguish burst bandwidth from
+sustained writeback without establishing the cause. Another host is not a
+prerequisite: continue local code and I/O attribution. See the dated recheck in
+`workflow-hardware-headroom.md` and its archived scripts/results. The other
 local disk is an unmounted BitLocker system volume and has not been used.
 No SSD/host options were changed, and no release or push was performed.
 
@@ -38,10 +42,8 @@ while both sustained performance goals remain unmet.
 Raw evidence uses `fireweed-campaign-memory-scratch-s64-w2-eight*`,
 including a reproducibly selected high-latency device window. The next
 verification is the pair of million-row varied-body primitive benchmarks on
-the same candidate. A controlled run on another storage path/execution host
-remains necessary to separate the observed storage-path delays from an
-intrinsic implementation or device ceiling; an execution location has been
-requested and has not been supplied. No host SSD settings were changed.
+the same candidate. The earlier requirement for another storage path/execution host is withdrawn;
+the local recheck above supersedes that proposed blocker. No host SSD settings were changed.
 
 The native-memory scratch six-cycle run completed correctly at **10,900
 recipients/sec overall** (551.01 seconds, 1.02868 CPU-ms/recipient, 16.20 GiB
@@ -177,10 +179,8 @@ a hardware maximum or a whole-run average. Both failed roots are retained:
 
 The 448 MiB checkpoint policy is restored. **310 release checks pass**, with
 three ignored diagnostics and the same two unconfigured live-S3 exclusions.
-The failed-run preservation and surfaced shard identity fixes remain. A faster
-execution location has been requested for an identical workload comparison;
-local code review and failure analysis can continue while that information is
-pending. The 10k/12.5k goals remain unmet.
+The failed-run preservation and surfaced shard identity fixes remain. An alternate execution location was previously requested, but is not a
+prerequisite; local code review and failure analysis can continue. The 10k/12.5k goals remain unmet.
 
 The retained-code 64-store six-cycle attempt (`a3b24317`, runtime `8a12e2de`)
 **failed during cycle five**, after 388.40 process seconds, with an object-log
