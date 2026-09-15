@@ -26,7 +26,7 @@ members = [
     "crates/fireweed-sim-support",
     "crates/fireweed-workload",
 ]
-exclude = ["vendor/turso_core", "vendor/turso", "vendor/turso_sdk_kit", "vendor/turso_sync_sdk_kit", "vendor/turso_sync_engine"]
+exclude = ["vendor/object-log", "vendor/turso_core", "vendor/turso", "vendor/turso_sdk_kit", "vendor/turso_sync_sdk_kit", "vendor/turso_sync_engine"]
 resolver = "3"
 
 [workspace.package]
@@ -51,3 +51,6 @@ axon""", tag = "v0.3.2" }
 # Keep a portable target CPU and the default unwind/error-checking policies.
 lto = "thin"
 codegen-units = 1
+
+[patch."https://github.com/7thsense/object-log.git"]
+object-log = { path = "vendor/object-log" }
