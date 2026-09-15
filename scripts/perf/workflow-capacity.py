@@ -105,8 +105,8 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     started = time.monotonic()
     projection_root = (Path(args[args.index("--projection-root") + 1]).resolve()
                        if "--projection-root" in args else data_root)
-    monitor = WalMonitor(projection_root)
     child = subprocess.Popen(command, cwd=repo, stdout=stdout, stderr=stderr)
+    monitor = WalMonitor(projection_root, pid=child.pid)
     monitor.start()
     try:
         _, status_code, usage = os.wait4(child.pid, 0)

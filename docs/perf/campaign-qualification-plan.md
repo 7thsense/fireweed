@@ -14,6 +14,14 @@ See [disk baseline and napkin math](disk-baseline-and-napkin-math.md) for the
 local triage, verified discard repair, and updated CPU/write cost model.
 The entries below are retained history and their superseded next steps.
 
+The capacity harness now samples child RSS, anonymous/file memory, swap,
+minor/major faults, and host available/cache/dirty memory once per second in
+the existing external WAL-monitor thread. This does not alter the workload,
+database connections, CLI binary, or acceptance gates. All 14 Python capacity
+tests pass, including proc field indexing and child-exit races. The next
+unchanged eight-cycle run uses those counters to explain the final-cycle RSS
+drop before choosing a cache or allocator change.
+
 Current retained code: native-memory SQL scratch (`ea4805cc`), with **311
 release checks and nine capacity-harness checks passing**. Both million-row
 varied-body primitive runs on CLI `be319723...` pass the three 10k floors:
