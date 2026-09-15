@@ -1,0 +1,29 @@
+{
+  "purpose": "same-filesystem durable publication protocol comparison, not workflow qualification or an SSD ceiling",
+  "root": "/home/erik/Projects/fireweed/target/workflow-capacity/publication-protocol-mhvicw9j",
+  "threads": 48,
+  "iterations_per_thread": 32,
+  "payload_bytes": 262144,
+  "manifest_bytes": 4096,
+  "order": [
+    "immutable",
+    "append",
+    "append",
+    "immutable"
+  ],
+  "binary_sha256": "efeddf294e55b8eac6f241ea0b4bb4a3ff24a12973707d9b2a475c67690bd16f",
+  "source_sha256": "e99f3f41c7012bf7e623934641b936376cd7b877d68ce676dc8d3e412cae4505",
+  "mount": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "directory_compression": "",
+  "append_setup_includes_durable_segment_creation_before_timed_loop": true,
+  "all_mode_roots_retained_until_all_timed_runs_finish": true
+}

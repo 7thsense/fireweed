@@ -1,5 +1,12 @@
 # Campaign qualification and performance plan
 
+The durable publication comparison did not establish a preferred protocol:
+immutable runs differed by 12x (373.03 versus 31.03 MiB/sec), with append
+runs at 48.35 and 91.32 MiB/sec. Identical streams were verified. This is
+neither workflow qualification nor evidence of an SSD ceiling. Next work
+returns to the measured projection CPU hot paths; the fixed sustained
+10k/12.5k targets remain unmet.
+
 The two-cycle 48-store DWARF profile (`2eabe833`, runtime `8a12e2de`)
 completed at 8,400.17 recipients/sec. It is diagnostic, not qualification.
 There were 79,941 CPU samples and zero recorded losses. Offline fixes for

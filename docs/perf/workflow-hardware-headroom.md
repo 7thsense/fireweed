@@ -1,5 +1,16 @@
 # Workflow capacity versus hardware cost
 
+A same-filesystem publication protocol diagnostic wrote identical 390 MiB
+streams with 48 threads, in immutable/append/append/immutable order. Rates were
+373.03 / 48.35 / 91.32 / 31.03 MiB/sec. Immutable publication used 6,144 timed
+file/directory syncs; append used 3,072, plus durable segment creation before
+timing. All four streams matched by SHA-256. The enormous within-protocol
+variation prevents attributing a gain to append publication or treating any
+observation as a hardware ceiling. No log-layout rewrite is justified by this
+comparison. No filesystem settings were changed. Source, setup costs, device
+samples, provenance and results are archived as `fireweed-publication-protocol*`
+and `fireweed-run-publication-protocol.py`; the owned root was removed.
+
 Skipping unused partial-index keys (`8a12e2de`) lowered observed first-cycle
 CPU cost to 0.94561 ms/recipient at 14,287.40 recipients/sec. Constant-cost
 demand at 10k/12.5k is 9.46/11.82 CPU-seconds/sec and 27.63/34.54 MiB/sec
