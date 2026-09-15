@@ -1,5 +1,17 @@
 # Campaign qualification and performance plan
 
+The six-cycle readable-index candidate was **rejected early after cycle two**:
+all 96 second-cycle campaign reports were present, with a maximum active wall
+time of 102.956 seconds. That bounds global cycle throughput below 9,713/sec,
+already violating both the 10k floor and 12.5k stretch target. The process was
+then deliberately terminated (exit -15); no six-cycle rate or qualification
+is claimed. Cycle-one maximum wall was 73.468 seconds; worst reporting p95
+was 0.309/0.245 seconds in cycles one/two. The publication-path fixes have not
+resolved sustained capacity. Partial reports, reason, device observations and
+runner output are archived as `fireweed-campaign-readable-manifests-s48-w2-six*`.
+The owned root was removed. Next is a retained-statement diagnostic comparing
+projection point UPDATEs with the current bounded VALUES/join replacement path.
+
 Readable committed index (`6ae766a6`), clean 64-store/two-worker single cycle:
 **13,418.17 recipients/sec**, 74.81 seconds, CPU 0.97445 ms/recipient, peak
 RSS 14.40 GiB, reporting p95 0.523 seconds. This is slightly slower than the

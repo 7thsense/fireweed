@@ -1,0 +1,35 @@
+{
+  "head": "7489e1519c063778a942c9689b9405e4c7dadf4c",
+  "binary_sha256": "45c996a86a1e6fca1d1c11c1e5346790765800acee24df10794a871d2ba4a7e0",
+  "diagnostics": {},
+  "exit_code": -15,
+  "rate": null,
+  "process_wall_s": 205.2858085439657,
+  "qualification_passed": false,
+  "failed_checks": [
+    {
+      "name": "successful_correctness_run",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "filesystem_log_and_turso",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "physical_sharding",
+      "passed": false,
+      "actual": null,
+      "required": null
+    },
+    {
+      "name": "supported_qualification_profile",
+      "passed": false,
+      "actual": null,
+      "required": null
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "projection_root": "/home/erik/Projects/fireweed/target/workflow-capacity/compressed-readable-manifests-s48-w2-six-0xlrqzpj",
+  "property": "compression=zstd\n",
+  "only_new_private_projection_directory_changed": true,
+  "runtime_environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  }
+}
