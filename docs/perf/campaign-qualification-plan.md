@@ -1,5 +1,25 @@
 # Campaign qualification and performance plan
 
+The eight-cycle run (`b33e8806`, runtime `ea4805cc`, CLI `be319723...`)
+completed eight million recipient lifecycles at **11,358/sec overall** in
+705.07 seconds, using 1.00848 CPU-ms/recipient and peaking at 16.36 GiB RSS.
+**Every non-throughput gate passed**, including independent outcomes,
+reporting, due latency, sampled WAL bounds, RSS stability, materialized
+checkpoints, and main-file stability across all 64 stores. Throughput remains
+unqualified: the slowest cycle was 8,887/sec, and the overall rate was below
+12.5k. The first three cycle-equivalent rates passed 12.5k; a later load
+phase took 40.20 seconds. This validates bounded behavior for the measured
+workflow, not arbitrary unbounded SQL. The CPU improvement is retained,
+while both sustained performance goals remain unmet.
+
+Raw evidence uses `fireweed-campaign-memory-scratch-s64-w2-eight*`,
+including a reproducibly selected high-latency device window. The next
+verification is the pair of million-row varied-body primitive benchmarks on
+the same candidate. A controlled run on another storage path/execution host
+remains necessary to separate the observed storage-path delays from an
+intrinsic implementation or device ceiling; an execution location has been
+requested and has not been supplied. No host SSD settings were changed.
+
 The native-memory scratch six-cycle run completed correctly at **10,900
 recipients/sec overall** (551.01 seconds, 1.02868 CPU-ms/recipient, 16.20 GiB
 peak RSS). It does not qualify either goal: cycle five fell to 7,766/sec,
