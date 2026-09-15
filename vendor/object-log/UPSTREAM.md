@@ -43,6 +43,15 @@ error, durability and recovery tests before workflow measurements.
   acknowledgement. Additional tests cover release of admission bytes with no
   further upload queued, draining buffered work on shutdown and commit panic.
 
+- Manifest publication uses a separate mutation-order mutex. Planning and
+  publishing the durable index take the index mutex briefly; serialization and
+  durable blob publication do not. Committed reads can proceed with the previous
+  index, and failed publication exposes no new entries. Retention mutations
+  acquire the mutation-order mutex before the index mutex, preserving ordering.
+- The gated reader regression fails on the prior code and passes for successful
+  and failed publication. Tests also cover concurrent direct commits, offset
+  assignment and retention while publication is blocked.
+
 ## Reproduce focused tests
 
 From the Fireweed repository root, seed the ignored standalone test lockfile

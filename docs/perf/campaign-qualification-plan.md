@@ -1,5 +1,13 @@
 # Campaign qualification and performance plan
 
+The manifest reader regression reproduced blocking of already committed index
+reads during a new durable publication. A separate mutation-order mutex now
+serializes commits and retention while short index locks expose only the last
+durable state. All 45 focused log tests pass, including publication failure,
+reopen and direct concurrent commits with retention. All 309 Fireweed release
+checks pass (two ignored diagnostics, two unconfigured live-S3 checks excluded).
+The same single-cycle comparison follows; no capacity gain is assumed.
+
 Ordered upload dispatch (`bd2a1f25`), clean 64-store/two-worker single cycle:
 **13,652.15 recipients/sec**, 73.53 seconds, CPU 0.97332 ms/recipient, peak
 RSS 14.26 GiB, reporting p95 0.478 seconds. The rate difference from grouping

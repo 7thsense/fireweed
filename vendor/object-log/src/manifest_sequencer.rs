@@ -39,6 +39,8 @@ pub struct ManifestSequencer {
     // `Option` so `Drop` can `shutdown_background()` — dropping a `Runtime` inside
     // an async context (e.g. an `Arc` last-ref drop in a `#[tokio::test]`) panics.
     rt: Option<Runtime>,
+    // Serialize mutations across publication without blocking committed reads.
+    commit_order: Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -86,6 +88,7 @@ impl ManifestSequencer {
             blob,
             prefix,
             rt: Some(rt),
+            commit_order: Mutex::new(()),
             inner: Mutex::new(Inner {
                 parts,
                 counter: keys.len() as u64,
@@ -166,7 +169,8 @@ impl Sequencer for ManifestSequencer {
         &self,
         batches: &[CommitBatch<'_, ()>],
     ) -> Result<Vec<CommitOutcome>, ObjectLogError> {
-        let mut st = self.inner.lock().expect("poisoned");
+        let _commit = self.commit_order.lock().expect("poisoned");
+        let st = self.inner.lock().expect("poisoned");
         // Plan the assignment without mutating the index yet.
         let mut local_next: HashMap<PartitionKey, i64> = HashMap::new();
         let mut planned: Vec<(PartitionKey, IndexEntry)> = Vec::with_capacity(batches.len());
@@ -191,6 +195,10 @@ impl Sequencer for ManifestSequencer {
 
         // Persist the manifest durably BEFORE the index becomes visible.
         let counter = st.counter + 1;
+        // Readers keep seeing the last durable index while this publication
+        // waits. The commit-order guard prevents another mutation invalidating
+        // the planned offsets or manifest key.
+        drop(st);
         let key = format!("{}{:020}", self.prefix, counter);
         let bytes = serde_json::to_vec(&ManifestRecord {
             entries: planned.clone(),
@@ -201,7 +209,8 @@ impl Sequencer for ManifestSequencer {
             .expect("runtime present until drop")
             .block_on(self.blob.put(&key, Bytes::from(bytes)))?;
 
-        // Apply.
+        // Publish the complete index change only after durable success.
+        let mut st = self.inner.lock().expect("poisoned");
         for (pkey, entry) in planned {
             let p = st.parts.entry(pkey).or_default();
             let end = entry.base_offset + entry.record_count as i64;
@@ -255,6 +264,7 @@ impl Sequencer for ManifestSequencer {
         partition: &PartitionKey,
         offset: i64,
     ) -> Result<Vec<String>, ObjectLogError> {
+        let _commit = self.commit_order.lock().expect("poisoned");
         let mut st = self.inner.lock().expect("poisoned");
         let mut dropped: Vec<String> = Vec::new();
         match st.parts.get_mut(partition) {

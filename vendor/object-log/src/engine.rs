@@ -1910,4 +1910,198 @@ mod ready_commit_group_tests {
         );
         assert!(engine.flush().await.is_err());
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_reads_continue_during_new_manifest_publication() {
+        for fail in [false, true] {
+            let memory = MemoryBlobStore::new();
+            let seed_blob: Arc<dyn BlobStore> = Arc::new(memory.clone());
+            let seed_sequencer = Arc::new(
+                ManifestSequencer::open(seed_blob.clone(), "manifest/")
+                    .await
+                    .unwrap(),
+            );
+            let mut config = FlushConfig::default();
+            config.max_batches = 1;
+            config.max_inflight_flushes = 4;
+            config.linger = Duration::ZERO;
+            config.budget.enabled = false;
+            let seed = LogEngine::new(seed_blob, seed_sequencer, config, "data/");
+            seed.produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"committed"),
+                1,
+                (),
+                Durability::Sequenced,
+            )
+            .await
+            .unwrap();
+            drop(seed);
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = oneshot::channel();
+            let blob: Arc<dyn BlobStore> = Arc::new(GatedManifestStore {
+                inner: memory,
+                entered: entered_tx,
+                release: Mutex::new(Some(release_rx)),
+                fail,
+                panic_on_commit: false,
+            });
+            let sequencer = Arc::new(
+                ManifestSequencer::open(blob.clone(), "manifest/")
+                    .await
+                    .unwrap(),
+            );
+            let engine = Arc::new(LogEngine::new(
+                blob.clone(),
+                sequencer.clone(),
+                config,
+                "data/",
+            ));
+            let producing = {
+                let engine = engine.clone();
+                tokio::spawn(async move {
+                    engine
+                        .produce(
+                            PartitionKey("p".into()),
+                            Bytes::from_static(b"new"),
+                            1,
+                            (),
+                            Durability::Sequenced,
+                        )
+                        .await
+                })
+            };
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let mut reading = tokio::task::spawn_blocking(move || {
+                let p = PartitionKey("p".into());
+                (
+                    sequencer.high_watermark(&p).unwrap(),
+                    sequencer.lookup(&p, 0).unwrap(),
+                    sequencer.snapshot(),
+                )
+            });
+            let observed = tokio::time::timeout(Duration::from_secs(1), &mut reading).await;
+            let early_ack = producing.is_finished();
+            // Release even on regression failure so all worker threads can drain.
+            release_tx.send(()).unwrap();
+            let outcome = producing.await.unwrap();
+            assert_eq!(outcome.is_err(), fail);
+            let reads_progressed = observed.is_ok();
+            let (watermark, entries, snapshot) = match observed {
+                Ok(result) => result.unwrap(),
+                Err(_) => reading.await.unwrap(),
+            };
+            assert!(!early_ack);
+            assert!(
+                reads_progressed,
+                "durable manifest publication blocked committed index reads"
+            );
+            assert_eq!(watermark, 1);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(snapshot.manifest_count, 1);
+            let rows = engine
+                .fetch(&PartitionKey("p".into()), 0, 100)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), if fail { 1 } else { 2 });
+            assert_eq!(rows[0].payload.as_ref(), b"committed");
+            drop(engine);
+            let reopened = Arc::new(
+                ManifestSequencer::open(blob.clone(), "manifest/")
+                    .await
+                    .unwrap(),
+            );
+            let engine = LogEngine::new(blob, reopened, config, "data/");
+            assert_eq!(
+                engine
+                    .fetch(&PartitionKey("p".into()), 0, 100)
+                    .await
+                    .unwrap()
+                    .len(),
+                if fail { 1 } else { 2 }
+            );
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_mutations_remain_serialized_while_readers_progress() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = oneshot::channel();
+        let blob: Arc<dyn BlobStore> = Arc::new(GatedManifestStore {
+            inner: MemoryBlobStore::new(),
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+            fail: false,
+            panic_on_commit: false,
+        });
+        let sequencer = Arc::new(ManifestSequencer::open(blob, "manifest/").await.unwrap());
+        let commit = |sequencer: Arc<ManifestSequencer>, key: &'static str| {
+            tokio::task::spawn_blocking(move || {
+                sequencer.commit(&[CommitBatch {
+                    partition: PartitionKey("p".into()),
+                    record_count: 1,
+                    location: BatchLocation {
+                        object_id: key.into(),
+                        byte_start: 0,
+                        byte_len: 1,
+                    },
+                    meta: &(),
+                }])
+            })
+        };
+        let first = commit(sequencer.clone(), "data/first");
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second = commit(sequencer.clone(), "data/second");
+        let truncating = {
+            let sequencer = sequencer.clone();
+            tokio::task::spawn_blocking(move || {
+                sequencer.truncate_before(&PartitionKey("p".into()), 1)
+            })
+        };
+        let reading = {
+            let sequencer = sequencer.clone();
+            tokio::task::spawn_blocking(move || sequencer.high_watermark(&PartitionKey("p".into())))
+        };
+        let observed = tokio::time::timeout(Duration::from_secs(1), reading).await;
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            observed.expect("committed reads blocked").unwrap().unwrap(),
+            0
+        );
+        let first = tokio::time::timeout(Duration::from_secs(5), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let dropped = tokio::time::timeout(Duration::from_secs(5), truncating)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            vec![CommitOutcome::Assigned {
+                base_offset: 0,
+                record_count: 1
+            }]
+        );
+        assert_eq!(
+            second,
+            vec![CommitOutcome::Assigned {
+                base_offset: 1,
+                record_count: 1
+            }]
+        );
+        assert_eq!(dropped, vec!["data/first".to_string()]);
+        let p = PartitionKey("p".into());
+        assert_eq!(sequencer.high_watermark(&p).unwrap(), 2);
+        assert_eq!(sequencer.log_start_offset(&p).unwrap(), 1);
+        let entries = sequencer.lookup(&p, 0).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].location.object_id, "data/second");
+        assert_eq!(sequencer.snapshot().manifest_count, 2);
+    }
 }

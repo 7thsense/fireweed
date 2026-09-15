@@ -1,0 +1,83 @@
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.25s
+     Running unittests src/lib.rs (target/object-log-tests/debug/deps/object_log-a836cc0b3060d1d0)
+
+running 9 tests
+test engine::flush_barrier_tests::failure_only_rejects_barriers_covering_its_enqueue_position ... ok
+test engine::ready_commit_group_tests::ready_groups_are_bounded_and_do_not_cross_unfinished_or_failed_puts ... ok
+test engine::ready_commit_group_tests::grouped_manifest_controls_acknowledgements_and_reopens_exact_locations ... ok
+test engine::ready_commit_group_tests::manifest_mutations_remain_serialized_while_readers_progress ... ok
+test engine::ready_commit_group_tests::panicked_committer_closes_admission_and_fails_flush ... ok
+test engine::ready_commit_group_tests::commit_completion_releases_admission_bytes_without_more_uploads ... ok
+test engine::ready_commit_group_tests::uploads_continue_while_the_ordered_manifest_commit_is_blocked ... ok
+test engine::ready_commit_group_tests::shutdown_drains_a_blocked_committer_and_queued_buffered_work ... ok
+test engine::ready_commit_group_tests::committed_reads_continue_during_new_manifest_publication ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/blob.rs (target/object-log-tests/debug/deps/blob-0e97894c91a35cb3)
+
+running 5 tests
+test memory_put_reports_zero_media_ops ... ok
+test memory_blob_store_conforms ... ok
+test local_put_reports_two_media_ops ... ok
+test local_blob_store_put_is_durable_and_readable_across_instances ... ok
+test local_blob_store_conforms ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/engine.rs (target/object-log-tests/debug/deps/engine-cc9e70632977f2d6)
+
+running 20 tests
+test headroom_allows_fast_single_produce ... ok
+test pipeline_snapshot_exposes_budget_defaults ... ok
+test put_count_independent_of_partition_count ... ok
+test reopen_does_not_overwrite_sealed_data_objects ... ok
+test concurrent_producers_get_dense_contiguous_offsets ... ok
+test sequenced_implies_durable ... ok
+test commit_failure_orphans_object_and_retry_is_exactly_once ... ok
+test produce_fetch_round_trip ... ok
+test idempotent_retry_does_not_duplicate ... ok
+test reap_orphans_deletes_unreferenced_data_objects ... ok
+test multiplexed_commit_is_all_or_nothing ... ok
+test fetch_stream_stops_on_visitor_error ... ok
+test fetch_stream_visits_batches_in_order ... ok
+test truncate_before_deletes_dead_objects ... ok
+test transient_put_failure_is_retried_before_ack ... ok
+test transient_range_failure_is_retried_on_fetch ... ok
+test fail_closed_rejects_when_budget_starved ... ok
+test flush_preserves_failed_manifest_prefix_after_producer_completion ... ok
+test put_failure_yields_no_ack_no_offset ... ok
+test per_producer_send_order_is_contiguous_on_shared_partition ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.27s
+
+     Running tests/manifest.rs (target/object-log-tests/debug/deps/manifest-f2a4d630ce701bf2)
+
+running 4 tests
+test manifest_snapshot_lists_partitions_and_entries ... ok
+test grouped_manifest_reopen_uses_data_object_counter_not_manifest_count ... ok
+test concurrent_object_uploads_preserve_acknowledged_offsets_on_reopen ... ok
+test manifest_index_survives_restart ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/perf_budget.rs (target/object-log-tests/debug/deps/perf_budget-6f7b32ef011d5692)
+
+running 4 tests
+test group_commit_reduces_put_count_under_linger ... ok
+test memory_sequenced_throughput_floor ... ok
+test linger_coalesces_pipelined_buffered_produces ... ok
+test default_config_idle_latency_budget ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/sequencer_conformance.rs (target/object-log-tests/debug/deps/sequencer_conformance-43709b4f6d76a941)
+
+running 3 tests
+test sequencer_err_commits_nothing_template ... ok
+test in_memory_sequencer_conforms ... ok
+test manifest_sequencer_conforms ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
