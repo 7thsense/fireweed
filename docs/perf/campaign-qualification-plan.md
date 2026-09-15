@@ -1,11 +1,15 @@
 # Campaign qualification and performance plan
 
-## Current status: first post-TRIM campaign qualifies (2026-09-15)
+## Current status: post-TRIM repeat still misses stability (2026-09-15)
 
 The unchanged CLI `be319723...` passes every 10k and 12.5k gate in its first
 post-repair eight-cycle million-resident-row run: 15,064 complete recipients/sec
-overall, 14,342/sec in the slowest cycle, 18.49 GiB peak RSS. Repeated campaign
-and refreshed primitive passes remain required before declaring the goal met.
+overall, 14,342/sec in the slowest cycle, 18.49 GiB peak RSS. The repeat reached
+14,096/sec overall but failed final-cycle throughput (11,548/sec) and RSS
+stability; every other gate passed. Two refreshed primitive runs pass all gates
+with insert/key-update/ID-update rates around 99k–118k/sec. The full goal remains
+unmet. Investigate late-cycle CPU and memory/cache reclamation next; do not
+weaken the stability gate or infer a new SSD ceiling.
 See [disk baseline and napkin math](disk-baseline-and-napkin-math.md) for the
 local triage, verified discard repair, and updated CPU/write cost model.
 The entries below are retained history and their superseded next steps.

@@ -133,3 +133,42 @@ not imply a 13.4x application improvement once CPU becomes limiting.
 
 Evidence: `fireweed-campaign-trim-s64-w2-eight*` and
 `fireweed-campaign-trim-summary.json` in the workflow-capacity evidence directory.
+
+## Repeatability result and next code investigation
+
+The second identical full campaign, without an intervening manual TRIM, ran at
+**14,096 recipients/sec overall**, but its final cycle reached only
+**11,548/sec** and the RSS stability gate failed. Every other check passed.
+Final-three snapshot maxima were 14.782, 11.157 and 11.983 GiB: the failure
+was a decrease/variation, not evidence of a monotonic memory leak. The overall
+peak was 17.32 GiB. Device write latency remained 3.3 ms; CPU cost was
+0.962 ms/recipient. Increased reads and memory pressure accompanied the repeat,
+but do not by themselves establish the cause of its late-cycle slowdown.
+
+Both subsequent million-row varied-payload primitive runs passed all gates:
+
+| Phase | Run 1 records/sec | Run 2 records/sec |
+|---|---:|---:|
+| Insert | 118,379 | 107,239 |
+| Enrich by key | 99,300 | 98,849 |
+| Schedule by ID | 98,586 | 102,586 |
+| Claim and complete | 74,277 | 75,345 |
+| Purge | 159,122 | 162,966 |
+
+These are 1,000-row public API batches across 32 independent stores, not
+individual unbatched request rates. The same CLI binary was used throughout;
+all write tests ran sequentially. Existing same-binary correctness tests were
+not rebuilt or rerun during these performance measurements.
+
+The repeated full-campaign goal remains **unmet**. The next bounded code
+investigation is late-cycle memory/cache reclamation and CPU cost, particularly
+preparation and delivery, while retaining the same eight-cycle workload and
+all gates. Instrument process RSS, anonymous/file memory, swap, major faults
+and pressure through the run to distinguish allocator/cache release from
+reclamation; correlate with phase timing before changing cache budgets.
+Do not weaken the RSS gate or return to speculative SSD settings.
+
+Evidence: `fireweed-campaign-trim-s64-w2-eight-repeat*`,
+`fireweed-campaign-trim-repeat-summary.json`, `fireweed-trim-primitives-{1,2}.json.gz`
+and `fireweed-trim-primitive-pair.json`. All four post-repair Fireweed runs are
+complete. Projection directories remain retained; no release or push was made.

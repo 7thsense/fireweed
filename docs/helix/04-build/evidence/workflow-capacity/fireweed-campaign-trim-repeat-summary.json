@@ -1,0 +1,60 @@
+{
+  "file": "/tmp/fireweed-campaign-trim-s64-w2-eight-repeat.json",
+  "head": "7b05db09c4c28aeded4806639cbcedc8c1dbd8fa",
+  "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+  "exit_code": 0,
+  "process_wall_s": 568.5303190719987,
+  "recipients_per_s": 14095.924113889401,
+  "cpu_s": 7695.436874000001,
+  "rss_gib": 17.32305145263672,
+  "targets": {
+    "10000": {
+      "passed": false,
+      "failed_checks": [
+        {
+          "name": "rss_stable",
+          "passed": false,
+          "actual": null,
+          "required": null
+        }
+      ],
+      "cycle_rates": [
+        16096.921236436405,
+        15206.72677573991,
+        15584.884955654117,
+        15997.43688019878,
+        13387.917013613653,
+        14822.599650490021,
+        13084.444329292104,
+        11548.372065636504
+      ]
+    },
+    "12500": {
+      "passed": false,
+      "failed_checks": [
+        {
+          "name": "cycle_7_slowest_campaign_equivalent_rate",
+          "passed": false,
+          "actual": 11548.372065636504,
+          "required": 12500
+        },
+        {
+          "name": "rss_stable",
+          "passed": false,
+          "actual": null,
+          "required": null
+        }
+      ],
+      "cycle_rates": [
+        16096.921236436405,
+        15206.72677573991,
+        15584.884955654117,
+        15997.43688019878,
+        13387.917013613653,
+        14822.599650490021,
+        13084.444329292104,
+        11548.372065636504
+      ]
+    }
+  }
+}

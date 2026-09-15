@@ -1,0 +1,28 @@
+[
+  {
+    "run": 1,
+    "qualified": true,
+    "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+    "phase_rates": {
+      "insert": 118378.8586275863,
+      "enrich_by_key": 99300.11784462338,
+      "schedule_by_id": 98585.96348451034,
+      "claim_and_complete": 74277.40274196918,
+      "purge": 159121.97335268016
+    },
+    "process_wall_s": 40.311459480999474
+  },
+  {
+    "run": 2,
+    "qualified": true,
+    "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+    "phase_rates": {
+      "insert": 107239.23470529493,
+      "enrich_by_key": 98848.53945007562,
+      "schedule_by_id": 102586.42447572529,
+      "claim_and_complete": 75345.44239795,
+      "purge": 162966.13055857853
+    },
+    "process_wall_s": 41.18862505800098
+  }
+]
