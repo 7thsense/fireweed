@@ -20,6 +20,25 @@ impl<'a> ApplyTursoRel<'a> {
             statements: Default::default(),
         }
     }
+
+    async fn statement(&self, sql: &str, param_count: usize) -> EngineResult<turso::Statement> {
+        let cached = self
+            .statements
+            .borrow()
+            .get(sql)
+            .filter(|(count, _)| *count == param_count)
+            .map(|(_, statement)| statement.clone());
+        if let Some(statement) = cached {
+            return Ok(statement);
+        }
+        let statement = self.inner.0.prepare_cached(sql).await.map_err(storage)?;
+        let mut cache = self.statements.borrow_mut();
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(sql.to_owned(), (param_count, statement.clone()));
+        Ok(statement)
+    }
 }
 
 impl RelTx for ApplyTursoRel<'_> {
@@ -33,25 +52,8 @@ impl RelTx for ApplyTursoRel<'_> {
         }
         // Keep a fixed positional-bind shape for each reused execution object.
         // The SDK resets both VM state and bindings before execute.
-        let cached = self
-            .statements
-            .borrow()
-            .get(sql)
-            .filter(|(count, _)| *count == params.len())
-            .map(|(_, statement)| statement.clone());
         block_on_local(async {
-            let mut statement = match cached {
-                Some(statement) => statement,
-                None => {
-                    let statement = self.inner.0.prepare_cached(sql).await.map_err(storage)?;
-                    let mut cache = self.statements.borrow_mut();
-                    if cache.len() >= 32 {
-                        cache.clear();
-                    }
-                    cache.insert(sql.to_owned(), (params.len(), statement.clone()));
-                    statement
-                }
-            };
+            let mut statement = self.statement(sql, params.len()).await?;
             // execute resets VM cursors before rebinding; nothing escapes the
             // apply's connection/transaction or overlaps another statement.
             statement
@@ -63,7 +65,23 @@ impl RelTx for ApplyTursoRel<'_> {
     }
 
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
-        self.inner.query(sql, params)
+        if !USE_LOCAL_RT.get() {
+            return self.inner.query(sql, params);
+        }
+        block_on_local(async {
+            let mut statement = self.statement(sql, params.len()).await?;
+            // Fully consume the cursor before another operation can reuse it.
+            // Returned values own their storage and do not retain a read snapshot.
+            let mut rows = statement
+                .query(params.iter().map(to_turso).collect::<Vec<_>>())
+                .await
+                .map_err(storage)?;
+            let mut collected = Vec::new();
+            while let Some(row) = rows.next().await.map_err(storage)? {
+                collected.push(RelRow(row.into_values().map(from_turso).collect()));
+            }
+            Ok(collected)
+        })
     }
 }
 
@@ -107,6 +125,67 @@ mod apply_statement_reuse_tests {
         drop(connection);
         drop(database);
         assert_eq!(held, expected);
+    }
+
+    #[tokio::test]
+    async fn reused_reads_see_writes_rebind_after_errors_and_release_rollback() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE read_reuse(id INTEGER PRIMARY KEY, value TEXT)",
+                (),
+            )
+            .await
+            .unwrap();
+        run_reltx_blocking(move || {
+            let plain = TursoRel(&connection);
+            plain.execute("BEGIN", &[]).unwrap();
+            let held;
+            {
+                let cached = ApplyTursoRel::new(&connection);
+                cached
+                    .execute("INSERT INTO read_reuse VALUES(1,'original')", &[])
+                    .unwrap();
+                let select = "SELECT value FROM read_reuse WHERE id=?1";
+                held = cached.query(select, &[1_i64.into()]).unwrap();
+                cached
+                    .execute("UPDATE read_reuse SET value=NULL WHERE id=1", &[])
+                    .unwrap();
+                assert_eq!(
+                    cached.query(select, &[1_i64.into()]).unwrap()[0].0,
+                    vec![RelValue::Null]
+                );
+                assert!(cached.query(select, &[2_i64.into()]).unwrap().is_empty());
+
+            }
+            plain.execute("ROLLBACK", &[]).unwrap();
+            assert_eq!(
+                plain.query("SELECT COUNT(*) FROM read_reuse", &[]).unwrap()[0]
+                    .get::<i64>(0)
+                    .unwrap(),
+                0
+            );
+            assert_eq!(held[0].0, vec![RelValue::Text("original".into())]);
+            // Turso may abort the transaction on an evaluation error. Test VM
+            // reset separately, without assuming a transaction remains active.
+            {
+                let cached = ApplyTursoRel::new(&connection);
+                let expression = "SELECT abs(?1)";
+                assert!(
+                    cached
+                        .query(expression, &[RelValue::Integer(i64::MIN)])
+                        .is_err()
+                );
+                assert_eq!(
+                    cached.query(expression, &[(-7_i64).into()]).unwrap()[0]
+                        .get::<i64>(0)
+                        .unwrap(),
+                    7
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]

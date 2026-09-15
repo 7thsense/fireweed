@@ -1,5 +1,15 @@
 # Campaign qualification and performance plan
 
+The apply-read statement reuse candidate passes **311 release checks**, with
+four ignored diagnostics and the same two unconfigured live-S3 exclusions.
+Read queries now share the existing bounded statement cache with writes only
+inside one owned apply transaction; rows are fully consumed into owned values.
+The new regression covers read-after-write visibility, NULL/empty rebinding,
+returned-value ownership, rollback, and VM reuse after an evaluation error.
+Its initial combined error/rollback check incorrectly assumed Turso kept an
+explicit transaction open after integer overflow; normal rollback and error
+reset are now checked separately. Performance is not yet established.
+
 A retained-statement diagnostic with 20,000 resident rows rejected a simpler
 replacement UPDATE without the extra target alias: native EXPLAIN chose a
 queue-prefix search followed by scanning the incoming batch, rather than
