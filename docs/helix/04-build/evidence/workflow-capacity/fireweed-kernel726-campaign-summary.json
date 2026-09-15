@@ -1,0 +1,84 @@
+{
+  "kernel": "7.2.6-arch2-1",
+  "report_head": "c5d3a92f87fd009009cf351603971f8b2d1503d8",
+  "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+  "process_wall_s": 802.7590816899999,
+  "recipients_per_s": 9971.457105971129,
+  "cpu_ms_per_recipient": 1.04242989575,
+  "peak_rss_gib": 16.886314392089844,
+  "failed_checks": [
+    {
+      "name": "overall_campaign_recipients_per_s",
+      "passed": false,
+      "actual": 9971.457105971129,
+      "required": 12500
+    },
+    {
+      "name": "cycle_2_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 11296.196439254265,
+      "required": 12500
+    },
+    {
+      "name": "cycle_3_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10541.594391686722,
+      "required": 12500
+    },
+    {
+      "name": "cycle_4_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9113.106981989236,
+      "required": 12500
+    },
+    {
+      "name": "cycle_5_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 10342.06855289539,
+      "required": 12500
+    },
+    {
+      "name": "cycle_6_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 9469.152373843186,
+      "required": 12500
+    },
+    {
+      "name": "cycle_7_slowest_campaign_equivalent_rate",
+      "passed": false,
+      "actual": 6902.512467841881,
+      "required": 12500
+    }
+  ],
+  "device": {
+    "sampled_active_s": 801.035919491,
+    "host_wide_not_process_attribution": true,
+    "host_written_gib": 24.643166542053223,
+    "host_write_mib_s": 31.502460657566086,
+    "host_read_gib": 0.15214157104492188,
+    "device_busy_percent": 86.14095613071353,
+    "mean_write_request_ms": 58.283788395717174,
+    "process_cpu_s": 8327.32,
+    "startup_tail_omitted": true,
+    "host_cpu_s_per_wall_s": {
+      "user": 9.089055587702395,
+      "nice": 0.0,
+      "system": 2.0698322755033813,
+      "idle": 2.638083946775801,
+      "iowait": 2.2066925552142616,
+      "irq": 0.0,
+      "softirq": 0.002946184986934928,
+      "steal": 0.0
+    },
+    "host_busy_cpu_s_per_wall_s": 11.161834048192713,
+    "host_pressure_percent": {
+      "cpu_some": 47.00542408126437,
+      "cpu_full": 0.0,
+      "io_some": 31.1033078464591,
+      "io_full": 15.98825506868409,
+      "memory_some": 0.07405548060528203,
+      "memory_full": 0.039837164880542585
+    }
+  },
+  "projection_root_retained": "/home/erik/Projects/fireweed/target/workflow-capacity/compressed-kernel726-s64-w2-eight-w7__7h9k"
+}

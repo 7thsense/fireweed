@@ -89,3 +89,19 @@ The existing CLI retains SHA256
 An unchanged 64-store, two-worker, eight-cycle stretch campaign was started
 under tag `kernel726-s64-w2-eight`; its outcome must be inspected before any
 qualification claim. No throughput gate or application code was changed.
+
+The eight-cycle campaign has now completed: child exit 0, **9,971.46 complete
+recipients/sec**, 802.76 seconds process wall time, **1.04243 CPU-ms/recipient**,
+and peak RSS **16.89 GiB**. All non-throughput qualification checks passed;
+the slowest cycle was **6,902.51/sec**. Both the sustained 10k and 12.5k goals
+remain unmet. Host-wide writes were 24.64 GiB (31.50 MiB/sec), with 58.28 ms
+mean completed write-request latency. No Btrfs errors were observed in the new
+boot's journal after the run. Fixing the recurring kernel error was insufficient
+to meet the performance target; it must not be presented as the sole cause.
+
+The archived `fireweed-kernel726-campaign-summary.json` lists every failed gate.
+Raw campaign, monitor, and provenance reports are archived with the same tag.
+The successful run's projection root is retained for further inspection; its
+path is recorded in the summary. The application's automatic successful-run
+log cleanup remains unchanged. Future code experiments should compare against
+this fixed-kernel baseline with the same original-row workflow and gates.
