@@ -1,0 +1,50 @@
+{
+  "classes": {
+    "temporary": {
+      "files": 463230,
+      "calls": 463230,
+      "requested_bytes": 1897390080,
+      "elapsed_us": 21524459,
+      "over_1ms": 4018,
+      "over_10ms": 201,
+      "over_100ms": 0,
+      "errors": 0,
+      "max_us": 43193,
+      "single_4k_write_files": 463230,
+      "write_call_wall_s_sum": 21.524459,
+      "logical_requested_GiB": 1.7670822143554688
+    },
+    "main_or_other": {
+      "files": 64,
+      "calls": 42318,
+      "requested_bytes": 2309464064,
+      "elapsed_us": 60158866,
+      "over_1ms": 1580,
+      "over_10ms": 1040,
+      "over_100ms": 118,
+      "errors": 0,
+      "max_us": 1965675,
+      "single_4k_write_files": 0,
+      "write_call_wall_s_sum": 60.158866,
+      "logical_requested_GiB": 2.1508560180664062
+    },
+    "wal": {
+      "files": 64,
+      "calls": 28008,
+      "requested_bytes": 46508887776,
+      "elapsed_us": 1535748929,
+      "over_1ms": 13400,
+      "over_10ms": 4617,
+      "over_100ms": 1502,
+      "errors": 0,
+      "max_us": 4452607,
+      "single_4k_write_files": 0,
+      "write_call_wall_s_sum": 1535.748929,
+      "logical_requested_GiB": 43.31477710604668
+    }
+  },
+  "scope": "all instrumented file lifetimes through shutdown; elapsed is summed across threads and may include overlapping waits",
+  "temporary_filesystem": "/tmp is tmpfs; temporary bytes are not NVMe device writes",
+  "empty_record_claim_retracted": true,
+  "qualification": false
+}

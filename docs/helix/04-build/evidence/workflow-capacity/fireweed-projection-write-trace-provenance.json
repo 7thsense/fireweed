@@ -1,0 +1,9 @@
+{
+  "purpose": "attribute sustained stalls to projection VFS write classes; not workflow qualification",
+  "runtime_source_commit": "6e257bfe90381e6edf11a2b7011c0b260a0943d8",
+  "binary_sha256": "66b85c4a8235d4e2dcee998baadbe79b47c4d7c461c6bfa32536670b422b8338",
+  "runtime_environment": {
+    "FIREWEED_PROJECTION_IO_TRACE": "1"
+  },
+  "instrumentation": "existing synchronous Unix pwrite/pwritev wall-time counters; includes wait, not CPU or physical-device service time"
+}

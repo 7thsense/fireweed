@@ -1,5 +1,29 @@
 # Campaign qualification and performance plan
 
+A six-cycle trace of the restored runtime (`6e257bfe`, CLI `66b85c4a...`)
+completed successfully in 598.12 seconds at **10,040 recipients/sec overall**,
+but does **not** qualify: diagnostic tracing was enabled, three cycles were
+below 10k, all six were below 12.5k, and shard 57 missed projection stability.
+WAL and reporting gates passed. Summed VFS write-call wall time across threads
+was **1,535.75 seconds for projection WAL**, 60.16 seconds for main files,
+and 21.52 seconds for temporary files. The largest WAL call took 4.453 seconds.
+These overlapping lifecycle totals include shutdown and are neither CPU time
+nor physical-device service time. They weaken the case for focusing exclusively
+on checkpoint write admission. Host device writes averaged 31.63 MiB/sec
+(18.39 GiB total), with 48.90 ms mean write-request latency.
+
+The trace also found **463,230 temporary files, each written exactly once for
+4 KiB** (1.767 GiB requested). An initial live interpretation that these were
+empty trace records was wrong and is explicitly retracted. They are native
+SQL intermediates created eagerly by `TempFile::with_temp_store` and
+`OpenEphemeral`; `/tmp` is tmpfs here, so they are not SSD write traffic.
+The next bounded experiment uses native memory scratch for log-backed SQL
+connections, measuring CPU and resident-memory stability. The projection
+database and WAL remain files. Native MEMORY temp storage disables sorter
+spill limits, so memory behavior and the typed workload bounds must be
+reviewed before retention. Evidence uses
+`fireweed-campaign-retained-write-trace-s64-w2-six*`.
+
 The apply-read reuse candidate (`cf4e26f8`) is **rejected and removed**.
 The ordered baseline/candidate/candidate/baseline million-recipient runs
 measured 13,599 / 13,752 / 11,871 / 12,706 recipients/sec and
