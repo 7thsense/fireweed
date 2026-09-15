@@ -1,5 +1,19 @@
 # Campaign qualification and performance plan
 
+Ordered upload dispatch (`bd2a1f25`), clean 64-store/two-worker single cycle:
+**13,652.15 recipients/sec**, 73.53 seconds, CPU 0.97332 ms/recipient, peak
+RSS 14.26 GiB, reporting p95 0.478 seconds. The rate difference from grouping
+alone (13,546.96/sec) is under 1%, with slightly higher CPU cost; this does
+not establish a throughput improvement or sustained qualification. The
+regression proves upload progress during manifest I/O, but it is insufficient
+to explain the remaining multi-cycle shortfall. Evidence uses
+`fireweed-campaign-dispatch-manifests-s64-w2-one*`.
+
+Next candidate: the manifest sequencer holds its index mutex across durable
+publication, blocking reads of already committed entries. Prove that behavior
+with a gated reader test, then separate ordered publication from index access
+without exposing uncommitted entries or changing mutation ordering.
+
 The upload-dispatch stall is now reproduced and fixed in code. A gated first
 manifest prevented three subsequent uploads in the original dispatcher; the
 regression failed before the change and passes with one ordered blocking commit
