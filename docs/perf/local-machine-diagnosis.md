@@ -243,4 +243,51 @@ Evidence in the workflow-capacity directory: `fireweed-nvme-trace.py` (collector
 analysis with pairing and loss assertions). The test is complete. A useful next
 discriminator is the same sustained workload through an independent filesystem
 or OS on this controller, followed by a different drive if necessary. Repeating
-the same Python/dd comparison or changing TRIM does not answer that question.
+the same Python/dd comparison does not answer that question. The original
+claim here that changing TRIM would not help discriminate was wrong; see below.
+
+### Confirmed blocked discard and recovery (2026-09-15)
+
+Forseti's physical NVMe advertised discard, but its encrypted root mapping
+advertised zero discard capability. The weekly fstrim timer was disabled.
+This established a currently blocked discard path, not proof of its complete
+historical state. Baldr, running encrypted Btrfs/zstd on a Toshiba 1 TB NVMe,
+completed the same direct 8 GiB test at 858.89 MiB/sec; Eldir's encrypted ext4
+Samsung 860 SATA storage achieved 426.92 MiB/sec. All tests were sequential.
+Bragi/Sindri were unreachable and further remote testing was abandoned at the
+user's direction. Baldr's buffered result was 2008.86 MiB/sec including
+fdatasync; these single-pass cross-machine results are not device ratings.
+
+Applied `cryptsetup refresh --allow-discards --persistent root`, then
+`fstrim -v /home`, and enabled `fstrim.timer`. The LUKS2 metadata readback
+contains `allow-discards`, and the active mapping exposes discard. The physical
+NVMe counters increased by 89,411 discard commands and 682,805,776 sectors:
+**349,596,557,312 bytes (325.6 GiB)**, exactly matching fstrim's reported ranges.
+These counters verify requests reaching the device, not internal flash erasure.
+
+After approximately 70+ seconds without another benchmark, the unchanged
+original direct Python test achieved **900.327 MiB/sec in 9.099 seconds**, versus
+67.138 MiB/sec in 122.016 seconds in the preceding traced run (**13.41x**).
+All eight GiB segments remained between 897 and 936 MiB/sec. The subsequent
+unchanged buffered test achieved **737.659 MiB/sec in 11.105 seconds**, including
+0.189 seconds of final fdatasync. Both verified their first/last blocks and
+deleted their private files. This strongly supports blocked discard as a major
+cause of the prior sustained collapse. One recovered pair does not establish
+long-running workflow capacity or isolate every influence of idle/cache state.
+
+Only after both measurements completed, enabled `discard=async` in the four
+root-filesystem fstab entries and remounted the filesystem with that option.
+Readback confirms it active; the previous fstab is backed up at
+`/etc/fstab.fireweed-before-async-1789504574`. Weekly TRIM remains a backstop.
+For this repeated create/delete workload, background discard avoids relying
+solely on a weekly batch. Btrfs batches and throttles asynchronous discard;
+see [Btrfs trim documentation](https://btrfs.readthedocs.io/en/latest/Trim.html).
+No CPU, encryption workqueue, or SSD power setting was changed.
+
+Evidence: `fireweed-trim-recovery.json`, `fireweed-post-trim-{direct,buffered}.json`,
+the two `fireweed-enable-*` scripts, `fireweed-remote-sequential.py`,
+`fireweed-baldr-{direct,buffered}.json`, and `fireweed-eldir-sata-direct.json`.
+The portable remote script preserves the timed write loop, with storage-path
+and environment reporting adaptations and NOCOW applied only to Btrfs direct
+tests. The Fireweed campaign must now be remeasured under the repaired storage
+configuration; prior device-demand observations are not hardware ceilings.
