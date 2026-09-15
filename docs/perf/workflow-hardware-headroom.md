@@ -1,5 +1,15 @@
 # Workflow capacity versus hardware cost
 
+The publication-path changes remove two demonstrated software stalls: upload
+dispatch waiting for a manifest commit, and committed index reads waiting for
+a new manifest publication. Single-cycle rates remain in the same range
+(13,547 grouping-only, 13,652 dispatch, 13,418 readable-index recipients/sec);
+these observations do not establish a sustained improvement. The readable-index
+run used 0.97445 CPU-ms/recipient and wrote 2.71894 host GiB per million.
+Constant-cost demand at 10k/12.5k is 9.74/12.18 CPU-seconds/sec and
+27.84/34.80 MiB/sec host writes. The measured 38.41 MiB/sec is not an SSD
+maximum, and this first-cycle cost must not replace six-cycle qualification.
+
 The retained-code I/O diagnostic identifies **durability-publication latency**
 as a material cost that bandwidth-only math missed. Its 43,713 log syncs
 lasting at least 100 ms had 15,209 summed overlapping caller-seconds, maximum

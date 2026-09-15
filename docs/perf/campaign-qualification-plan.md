@@ -1,5 +1,14 @@
 # Campaign qualification and performance plan
 
+Readable committed index (`6ae766a6`), clean 64-store/two-worker single cycle:
+**13,418.17 recipients/sec**, 74.81 seconds, CPU 0.97445 ms/recipient, peak
+RSS 14.40 GiB, reporting p95 0.523 seconds. This is slightly slower than the
+preceding dispatch-only observation (13,652.15/sec), so no first-cycle gain
+is established. The read-progress regression is fixed; a clean six-cycle
+48-store/two-worker run now tests whether the publication-path changes help
+the sustained slowdown. All workload gates remain in force. Evidence uses
+`fireweed-campaign-readable-manifests-s64-w2-one*`; its owned root was removed.
+
 The manifest reader regression reproduced blocking of already committed index
 reads during a new durable publication. A separate mutation-order mutex now
 serializes commits and retention while short index locks expose only the last

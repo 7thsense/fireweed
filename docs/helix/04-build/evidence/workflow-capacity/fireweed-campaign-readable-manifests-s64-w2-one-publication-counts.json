@@ -1,0 +1,9 @@
+{
+  "data_objects": 5532,
+  "manifests": 5329,
+  "objects_per_manifest": 1.0380934509288797,
+  "estimated_data_and_manifest_sync_barriers": 21722,
+  "one_manifest_per_object_barriers": 22128,
+  "manifest_reduction_fraction": 0.03669558929862615,
+  "sync_barrier_reduction_fraction": 0.01834779464931313
+}
