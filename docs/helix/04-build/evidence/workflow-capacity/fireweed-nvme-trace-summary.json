@@ -1,0 +1,56 @@
+{
+  "events": 134934,
+  "pairs": 67467,
+  "duplicate_setup": 0,
+  "unmatched_completion": 0,
+  "pending_at_end": 0,
+  "write_commands": 67150,
+  "write_bytes": 8615579648,
+  "write_latency_ms": {
+    "mean": 119.9742373492167,
+    "p50": 86.6650000007212,
+    "p95": 281.25399999953515,
+    "p99": 495.8120000001145,
+    "max": 6330.848000000515
+  },
+  "write_outstanding_union_s": 120.91968900000575,
+  "summed_write_latency_s": 8056.270037999901,
+  "errors_or_retries": 0,
+  "benchmark": {
+    "bytes": 8589934592,
+    "wall_s": 122.01644558699991,
+    "mib_s": 67.13849072221136,
+    "user_cpu_s": 0.016432999999999996,
+    "system_cpu_s": 0.829711
+  },
+  "gib_chunks_mib_s": [
+    917.7351809262126,
+    510.5030218680507,
+    41.25489273072148,
+    43.82679988956558,
+    57.6300773887939,
+    61.17875099439869,
+    54.42432484588459,
+    59.14086023589288
+  ],
+  "slowest_commands": [
+    {
+      "start": 4927.766707,
+      "seconds": 6.330848000000515,
+      "setup": "nsid=1, flags=0x0, meta=0x0, cmd=(nvme_cmd_write slba=360689408, len=255, ctrl=0x0, dsmgmt=0, reftag=0)",
+      "completion": "res=0x0, retries=0, flags=0x0, status=0x0"
+    },
+    {
+      "start": 4927.766669,
+      "seconds": 6.281582999999955,
+      "setup": "nsid=1, flags=0x0, meta=0x0, cmd=(nvme_cmd_write slba=360688896, len=255, ctrl=0x0, dsmgmt=0, reftag=0)",
+      "completion": "res=0x0, retries=0, flags=0x0, status=0x0"
+    },
+    {
+      "start": 4927.766638,
+      "seconds": 6.23189900000034,
+      "setup": "nsid=1, flags=0x0, meta=0x0, cmd=(nvme_cmd_write slba=360683008, len=255, ctrl=0x0, dsmgmt=0, reftag=0)",
+      "completion": "res=0x0, retries=0, flags=0x0, status=0x0"
+    }
+  ]
+}

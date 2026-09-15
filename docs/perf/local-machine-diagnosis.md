@@ -199,3 +199,48 @@ Evidence: `fireweed-dd-recheck.py`, `fireweed-dd-recheck-results.json.gz`,
 `fireweed-python-after-dd-{direct,buffered}.json`, and
 `fireweed-dd-python-comparison.json` in the workflow-capacity evidence directory.
 All four new write tests are complete; no benchmark remains running.
+
+### NVMe command trace after terminal authentication (2026-09-15)
+
+One additional, sequential 8 GiB Python direct/NOCOW test completed on kernel
+7.2.6 with a private ftrace instance recording NVMe command setup and completion.
+No other benchmark ran concurrently. The workload ran as the ordinary user;
+root privileges were used for tracing and SMART reads. The instance was removed
+on completion. No filesystem, encryption, power, or SSD setting was changed.
+
+The test took **122.016 seconds, 67.138 MiB/sec**, including final fdatasync.
+Python consumed **0.846 CPU-seconds**. Successive 1 GiB segments achieved
+**917.7, 510.5, 41.3, 43.8, 57.6, 61.2, 54.4, and 59.1 MiB/sec**.
+Thus the same file and write loop demonstrate both the expected fast burst
+and the subsequent sustained slowdown.
+
+All 134,934 trace events paired into 67,467 commands without missing events,
+duplicate command IDs in flight, retries, error statuses, or buffer overruns.
+The 67,150 write commands accounted for 8,615,579,648 bytes, versus the
+benchmark's 8,589,934,592 bytes; tracing includes filesystem/background traffic.
+NVMe setup-to-completion write latency was **119.97 ms mean, 86.67 ms median,
+281.25 ms p95, 495.81 ms p99, and 6.331 seconds maximum**. At least one write
+was outstanding across a union of **120.920 seconds** of the 122.333-second
+collector window. This is overlapping elapsed time, not the sum of request
+latencies; it is also not an exact attribution of the benchmark's timed window.
+
+This establishes substantial delay after NVMe command setup, rather than merely
+inferring a device limitation from low application throughput. It does **not**
+measure flash service time alone: driver queueing, submission and completion
+handling remain included. It does not prove an SSD throughput ceiling or fully
+exonerate Btrfs/dm-crypt, which still determine the incoming request pattern.
+Python execution and compression/checksumming of this NOCOW file cannot explain
+the observed long NVMe command latencies. Cache exhaustion/internal maintenance
+is consistent with the burst-to-slow transition, but is not yet a proven cause.
+
+Temperature rose from approximately 40 to 62 C. Media errors remained zero;
+thermal-management transition count/time remained **4 / 3 seconds** before and
+after. There is no new reported thermal-management activity during this test.
+
+Evidence in the workflow-capacity directory: `fireweed-nvme-trace.py` (collector),
+`fireweed-nvme-trace-raw.tar.gz` (trace, formats, benchmark and SMART reports),
+`fireweed-nvme-trace-summary.json`, and `fireweed-nvme-trace-analyze.py` (replay
+analysis with pairing and loss assertions). The test is complete. A useful next
+discriminator is the same sustained workload through an independent filesystem
+or OS on this controller, followed by a different drive if necessary. Repeating
+the same Python/dd comparison or changing TRIM does not answer that question.
