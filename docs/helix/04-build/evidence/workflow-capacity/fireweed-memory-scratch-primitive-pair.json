@@ -1,0 +1,36 @@
+[
+  {
+    "run": 1,
+    "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+    "head": "171a1fb5baa3e1ed52d464bc35935ff4d99987fd",
+    "qualified": true,
+    "process_wall_s": 105.75361558899749,
+    "cpu_s": 542.774556,
+    "peak_rss_gib": 5.928913116455078,
+    "phase_rates": {
+      "insert": 109125.02472437502,
+      "enrich_by_key": 30540.888886246015,
+      "schedule_by_id": 42043.40161555465,
+      "claim_and_complete": 29577.07432431959,
+      "purge": 63138.80971698872
+    },
+    "body_workload": "campaign_varied"
+  },
+  {
+    "run": 2,
+    "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+    "head": "171a1fb5baa3e1ed52d464bc35935ff4d99987fd",
+    "qualified": true,
+    "process_wall_s": 140.11303638998652,
+    "cpu_s": 559.886815,
+    "peak_rss_gib": 5.323722839355469,
+    "phase_rates": {
+      "insert": 32667.092782453445,
+      "enrich_by_key": 20354.079706125936,
+      "schedule_by_id": 56868.89256578048,
+      "claim_and_complete": 30271.175249995,
+      "purge": 74794.76282301804
+    },
+    "body_workload": "campaign_varied"
+  }
+]

@@ -1,5 +1,28 @@
 # Campaign qualification and performance plan
 
+Current retained code: native-memory SQL scratch (`ea4805cc`), with **311
+release checks and nine capacity-harness checks passing**. Both million-row
+varied-body primitive runs on CLI `be319723...` pass the three 10k floors:
+inserts 109,125 / 32,667 per second; key-addressed updates 30,541 / 20,354;
+ID-addressed updates 42,043 / 56,869. Claim/completion and purge also exceed
+10k. These use 1,000-row API batches, 32 independent stores, and one
+sequential batch loop/store; they are not unbatched individual-request rates.
+All 64 DB/WAL properties per run read back zstd, with 4 KiB DB pages.
+Evidence: `fireweed-memory-scratch-primitive-pair.json` and
+`fireweed-memory-scratch-varied-primitives-*`.
+
+The eight-million-recipient campaign passes every non-throughput gate, but
+**the sustained 10k/12.5k goals remain unmet**: 11,358/sec overall and
+8,887/sec in the slowest cycle. Its untraced cost is 1.00848 CPU-ms and
+about 3,299 host-write bytes per recipient. At 12.5k, constant-cost demand
+is **12.61 CPU-s/s and 39.33 MiB/sec host writes**. That does not establish
+a hardware ceiling. The earlier write trace measured projection WAL calls
+as long as 4.45 seconds, even though projection sync is omitted. A controlled
+comparison on another storage path or execution host remains the next
+necessary diagnostic; no suitable location has been supplied. The other
+local disk is an unmounted BitLocker system volume and has not been used.
+No SSD/host options were changed, and no release or push was performed.
+
 The eight-cycle run (`b33e8806`, runtime `ea4805cc`, CLI `be319723...`)
 completed eight million recipient lifecycles at **11,358/sec overall** in
 705.07 seconds, using 1.00848 CPU-ms/recipient and peaking at 16.36 GiB RSS.

@@ -1,0 +1,22 @@
+{
+  "source": "untraced eight-cycle run, runtime ea4805cc, binary be319723...",
+  "qualification": false,
+  "recipients": 8000000,
+  "cpu_ms_per_recipient": 1.008476726,
+  "host_write_bytes_per_recipient": 3298.971648,
+  "targets": {
+    "10000": {
+      "cpu_seconds_per_second": 10.084767260000001,
+      "host_write_MiB_per_second": 31.4614453125
+    },
+    "12500": {
+      "cpu_seconds_per_second": 12.605959075000001,
+      "host_write_MiB_per_second": 39.326806640625
+    }
+  },
+  "limitations": [
+    "Constant-cost extrapolation, not measured device capacity.",
+    "Host device counters include other host traffic.",
+    "One cycle failed 10k and five cycles failed 12.5k."
+  ]
+}
