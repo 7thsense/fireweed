@@ -101,7 +101,7 @@ class QualificationTests(unittest.TestCase):
                     "claim_batches":(3*n+retries+999)//1000,"mutation_batches":(3*n+retries+999)//1000,"max_claim_batch":1000,
                     "handler_rows":[n,n,n+retries],"max_handler_batch":[500,200,500],
                     "due_to_claim_max_us":1_000_000,"wall_s":70,"progress_reads":70,"progress_p95_s":0.1,
-                    "process_rss_kib":1000,"projection_bytes":1000,"projection_wal_bytes":2000}
+                    "process_rss_kib":1000,"projection_bytes":65536,"projection_wal_bytes":2000}
                 campaigns.append({"campaign":campaign,"cycles":[copy.deepcopy(row) for _ in range(3)]})
             shards.append({"shard":shard,"campaigns":campaigns})
         report["result"]={"schema":"campaign-capacity/v3","enrichment_storage":"payload","payload_bytes":1024,"batch":1000,"purge_batch":8000,"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,"cell":"filesystem--turso","physical_shards":2,
@@ -119,6 +119,15 @@ class QualificationTests(unittest.TestCase):
                           ("purge_batches",0),("max_purge_batch",9000)]:
             broken=copy.deepcopy(report);broken["result"]["shards"][0]["campaigns"][0]["cycles"][0][key]=value
             self.assertFalse(qualify(broken)["passed"],key)
+        # A constant header-only file has not exercised checkpoint backfill,
+        # even when throughput, WAL budget, and size-range checks all pass.
+        for header_bytes in [0, 4096]:
+            unmaterialized = copy.deepcopy(report)
+            for shard in unmaterialized["result"]["shards"]:
+                for campaign in shard["campaigns"]:
+                    for row in campaign["cycles"]:
+                        row["projection_bytes"] = header_bytes
+            self.assertFalse(qualify(unmaterialized, 12500)["passed"], header_bytes)
         metadata=copy.deepcopy(report);metadata["result"]["enrichment_storage"]="row_metadata"
         for shard in metadata["result"]["shards"]:
             for campaign in shard["campaigns"]:

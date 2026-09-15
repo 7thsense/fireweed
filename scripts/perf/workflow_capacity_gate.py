@@ -175,6 +175,10 @@ def qualify(report, campaign_target=10_000):
                 check(f"shard_{index}_wal_budget", peak>0 and max([peak,*endpoints]) <= 512*1024*1024)
                 sizes = [max(campaign["cycles"][i].get("projection_bytes") or 0 for campaign in shard["campaigns"])
                          for i in range(cycles-3,cycles)]
+                # The campaign creates fresh 4 KiB-page databases. A constant
+                # header-only file is not evidence of steady checkpoint cost.
+                check(f"shard_{index}_projection_checkpoint_materialized", min(sizes)>4096,
+                      sizes, "all three final main-file snapshots >4096 bytes")
                 check(f"shard_{index}_projection_stable", min(sizes)>0 and max(sizes)/min(sizes)<=1.05)
     else:
         check("supported_qualification_profile", False, result.get("schema"))

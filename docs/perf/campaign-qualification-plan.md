@@ -1,5 +1,25 @@
 # Campaign qualification and performance plan
 
+The native-memory scratch six-cycle run completed correctly at **10,900
+recipients/sec overall** (551.01 seconds, 1.02868 CPU-ms/recipient, 16.20 GiB
+peak RSS). It does not qualify either goal: cycle five fell to 7,766/sec,
+with a 54.97-second load phase. RSS, sampled WAL and reporting gates passed.
+Host writes averaged 35.22 MiB/sec with 36.13 ms mean write-request latency.
+The apparent main-file instability was initial checkpoint materialization:
+materialized store counts were 0/0/0/7/64/64, and **all 64 main-file sizes
+were identical in the final two cycles**. Thus 57 last-three-snapshot checks
+straddled a header-only file and its first populated checkpoint.
+
+Qualification now separately requires all three final main-file snapshots
+to exceed the 4 KiB header of these fresh campaign databases. A regression
+demonstrated the old gate accepting constant header-only files; all nine
+Python capacity tests pass with the stronger check. The next 64-store run
+uses **eight cycles**, keeping every cycle in throughput/latency gates, to
+observe three snapshots after initial materialization. This lengthens the
+test; it does not omit startup or relax the 5% size/10% RSS stability rules.
+Evidence: `fireweed-campaign-memory-scratch-s64-w2-six*` and
+`fireweed-materialized-gate-{before,after}.log`.
+
 The SQL scratch candidate (`ea4805cc`, CLI `be319723...`) advances to sustained
 validation after the ordered baseline/candidate/candidate/baseline comparison.
 Rates were 13,718 / 13,716 / 13,722 / 12,061 recipients/sec; CPU-ms per
