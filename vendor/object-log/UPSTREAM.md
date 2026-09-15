@@ -21,3 +21,27 @@ error, durability and recovery tests before workflow measurements.
 - Root Cargo.lock changes only the object-log source from its pinned Git entry
   to this path. Standalone tests use an ignored local lockfile and a separate
   target directory to avoid changing Fireweed build artifacts.
+
+- Opted-in built-in sequencers can commit a bounded contiguous ready success
+  prefix of uploaded objects in one manifest. The configured maximum in-flight
+  upload count bounds each group; no extra linger is introduced. Unfinished or
+  failed PUTs stop a group. Custom sequencers default to one-object commits.
+- Group members retain their object locations, responder durability levels,
+  enqueue ordering and byte accounting. Fallback media-op accounting counts
+  each data object; debug PUT duration is the largest member observation.
+- Tests cover grouping bounds, failure boundaries, multiple partitions,
+  acknowledgements while manifest publication is gated, manifest failure,
+  replayed exact locations, and concurrent public produces followed by reopen.
+
+## Reproduce focused tests
+
+From the Fireweed repository root, seed the ignored standalone test lockfile
+from the archived lock and keep its build artifacts separate:
+
+```sh
+cp docs/helix/04-build/evidence/workflow-capacity/fireweed-object-log-test-Cargo.lock vendor/object-log/Cargo.lock
+cargo test --locked --manifest-path vendor/object-log/Cargo.toml --target-dir target/object-log-tests --lib --test engine --test manifest --test blob --test sequencer_conformance --test perf_budget
+```
+
+These library tests supplement the public Fireweed workflow and filesystem
+recovery tests; their memory-store rates are not capacity qualification.

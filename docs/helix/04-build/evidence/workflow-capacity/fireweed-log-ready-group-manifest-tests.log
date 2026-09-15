@@ -1,0 +1,12 @@
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running tests/manifest.rs (target/object-log-tests/debug/deps/manifest-f2a4d630ce701bf2)
+
+running 4 tests
+test manifest_snapshot_lists_partitions_and_entries ... ok
+test grouped_manifest_reopen_uses_data_object_counter_not_manifest_count ... ok
+test concurrent_object_uploads_preserve_acknowledged_offsets_on_reopen ... ok
+test manifest_index_survives_restart ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

@@ -1,5 +1,24 @@
 # Campaign qualification and performance plan
 
+The ready-manifest grouping candidate passed **309 Fireweed release checks**
+and **39 focused object-log checks**. Only built-in sequencers that explicitly
+opt in can receive several already-durable objects in one atomic commit.
+Custom sequencers retain one-object calls. The configured in-flight upload
+bound caps each group, and an unfinished or failed PUT stops grouping.
+No linger or storage-format change is introduced. Producer durability levels,
+per-partition offsets, object byte ranges and aggregate byte accounting remain
+covered by tests. Failed-prefix flush barriers were fixed in the preceding
+commit rather than allowing failed grouped work to appear durable.
+
+The new tests verify exact grouping bounds, failed/unfinished boundaries,
+multiple partitions, gated manifest acknowledgement timing, whole-group
+manifest failure, exact replayed locations, concurrent public produces and
+reopen, and resuming the data-object counter when it differs from the manifest
+count. The runner now counts immutable data objects and manifests after the
+timed process, allowing clean runs to demonstrate publication reduction.
+Next is the same 64-store/two-worker million-row single-cycle comparison;
+capacity benefit is not assumed from the protocol-level reduction.
+
 Object-log v0.3.1 is now vendored from pinned commit `dcd37c0e…` for a
 reviewable publication-path change; upstream licenses and provenance are
 retained, and neither the Cargo cache nor sibling checkout was modified.

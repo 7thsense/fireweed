@@ -158,6 +158,10 @@ pub struct PartitionSnapshot {
 impl Sequencer for ManifestSequencer {
     type Meta = ();
 
+    fn supports_multi_object_commit(&self) -> bool {
+        true
+    }
+
     fn commit(
         &self,
         batches: &[CommitBatch<'_, ()>],

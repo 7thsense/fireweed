@@ -147,3 +147,173 @@ async fn manifest_snapshot_lists_partitions_and_entries() {
     assert_eq!(snap.partitions[1].high_watermark, 2);
     assert!(!seq.live_object_ids().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_object_uploads_preserve_acknowledged_offsets_on_reopen() {
+    use std::collections::{HashMap, HashSet};
+    let blob: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+    let sequencer = Arc::new(
+        ManifestSequencer::open(blob.clone(), "manifest/")
+            .await
+            .unwrap(),
+    );
+    let mut config = FlushConfig::default();
+    config.max_batches = 1;
+    config.max_inflight_flushes = 4;
+    config.linger = Duration::ZERO;
+    config.budget.enabled = false;
+    let engine = Arc::new(LogEngine::new(
+        blob.clone(),
+        sequencer.clone(),
+        config,
+        "data/",
+    ));
+    let mut tasks = Vec::new();
+    for producer in 0..16 {
+        let engine = engine.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            for ordinal in 0..4 {
+                let payload = format!("{producer}:{ordinal}");
+                let result = engine
+                    .produce(
+                        pk(&format!("partition-{}", producer % 2)),
+                        Bytes::from(payload.clone()),
+                        1,
+                        (),
+                        Durability::Sequenced,
+                    )
+                    .await
+                    .unwrap();
+                assert!(result.durable && result.sequenced);
+                assert_eq!(result.base_offset, result.last_offset);
+                accepted.push((payload, result.base_offset.unwrap()));
+            }
+            accepted
+        }));
+    }
+    let mut accepted = HashMap::new();
+    for task in tasks {
+        for (payload, offset) in task.await.unwrap() {
+            assert!(accepted.insert(payload, offset).is_none());
+        }
+    }
+    engine.flush().await.unwrap();
+    drop(engine);
+    drop(sequencer);
+    let sequencer = Arc::new(
+        ManifestSequencer::open(blob.clone(), "manifest/")
+            .await
+            .unwrap(),
+    );
+    let reopened = LogEngine::new(blob.clone(), sequencer, config, "data/");
+    let mut seen = HashSet::new();
+    for partition in 0..2 {
+        let rows = reopened
+            .fetch(&pk(&format!("partition-{partition}")), 0, 65536)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 32);
+        let mut next_by_producer = HashMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            assert_eq!(row.base_offset, offset as i64);
+            let payload = std::str::from_utf8(&row.payload).unwrap();
+            assert_eq!(accepted[payload], row.base_offset);
+            assert!(seen.insert(payload.to_owned()));
+            let (producer, ordinal) = payload.split_once(':').unwrap();
+            let producer: usize = producer.parse().unwrap();
+            let ordinal: usize = ordinal.parse().unwrap();
+            assert_eq!(producer % 2, partition);
+            let next = next_by_producer.entry(producer).or_insert(0);
+            assert_eq!(ordinal, *next);
+            *next += 1;
+        }
+    }
+    assert_eq!(seen.len(), 64);
+    assert_eq!(blob.list("data/").await.unwrap().len(), 64);
+    let manifests = blob.list("manifest/").await.unwrap().len();
+    assert!((1..=64).contains(&manifests));
+}
+
+#[tokio::test]
+async fn grouped_manifest_reopen_uses_data_object_counter_not_manifest_count() {
+    use object_log::{BatchLocation, CommitBatch};
+    let blob: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+    blob.put("data/00000000000000000007", Bytes::from_static(b"first"))
+        .await
+        .unwrap();
+    blob.put("data/00000000000000000011", Bytes::from_static(b"second"))
+        .await
+        .unwrap();
+    let sequencer = Arc::new(
+        ManifestSequencer::open(blob.clone(), "manifest/")
+            .await
+            .unwrap(),
+    );
+    let commit = sequencer.clone();
+    std::thread::spawn(move || {
+        commit.commit(&[
+            CommitBatch {
+                partition: pk("p"),
+                record_count: 1,
+                location: BatchLocation {
+                    object_id: "data/00000000000000000007".into(),
+                    byte_start: 0,
+                    byte_len: 5,
+                },
+                meta: &(),
+            },
+            CommitBatch {
+                partition: pk("p"),
+                record_count: 2,
+                location: BatchLocation {
+                    object_id: "data/00000000000000000011".into(),
+                    byte_start: 0,
+                    byte_len: 6,
+                },
+                meta: &(),
+            },
+        ])
+    })
+    .join()
+    .unwrap()
+    .unwrap();
+    assert_eq!(blob.list("manifest/").await.unwrap().len(), 1);
+    drop(sequencer);
+    let sequencer = Arc::new(
+        ManifestSequencer::open(blob.clone(), "manifest/")
+            .await
+            .unwrap(),
+    );
+    let engine = LogEngine::new(blob.clone(), sequencer, FlushConfig::default(), "data/");
+    let accepted = engine
+        .produce(
+            pk("p"),
+            Bytes::from_static(b"third"),
+            1,
+            (),
+            Durability::Sequenced,
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.base_offset, Some(3));
+    assert!(
+        blob.get("data/00000000000000000012")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let rows = engine.fetch(&pk("p"), 0, 1024).await.unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.base_offset).collect::<Vec<_>>(),
+        vec![0, 1, 3]
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.payload.as_ref()).collect::<Vec<_>>(),
+        vec![
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"third".as_slice()
+        ]
+    );
+}

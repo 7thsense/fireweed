@@ -84,7 +84,7 @@ pub struct IndexEntry {
 /// task), so a blocking implementation (a `Mutex`, a SQL transaction) is fine.
 ///
 /// Contract: [`commit`](Sequencer::commit) is **atomic across the whole slice**
-/// (all batches in one object commit together or not at all), and the engine
+/// (all supplied batches commit together or not at all), and the engine
 /// presents batches for any single [`PartitionKey`] in arrival order and never
 /// splits one partition across concurrent `commit` calls.
 pub trait Sequencer: Send + Sync {
@@ -93,7 +93,16 @@ pub trait Sequencer: Send + Sync {
     /// its producer-identity fields.
     type Meta: Send + Sync;
 
-    /// Assign offsets to a just-PUT object's batches and persist the index.
+    /// Opt in to atomic commits containing already-durable batches from several
+    /// data objects, in creation order. Default preserves one-object calls for
+    /// custom sequencers that rely on that boundary.
+    fn supports_multi_object_commit(&self) -> bool {
+        false
+    }
+
+    /// Assign offsets to durably uploaded batches and persist the index.
+    /// By default these belong to one object; an opted-in implementation may
+    /// receive several objects in one ordered call.
     /// Returns one [`CommitOutcome`] per input batch, in order. Atomic: on `Err`,
     /// nothing is committed.
     fn commit(
@@ -164,6 +173,10 @@ impl InMemorySequencer {
 
 impl Sequencer for InMemorySequencer {
     type Meta = ();
+
+    fn supports_multi_object_commit(&self) -> bool {
+        true
+    }
 
     fn commit(
         &self,

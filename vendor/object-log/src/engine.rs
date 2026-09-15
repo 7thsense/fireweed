@@ -49,7 +49,8 @@ pub struct FlushConfig {
     /// any data is buffered (no co-buffer wait). Default `50ms`.
     pub linger: Duration,
     /// Max sealed objects PUT concurrently. Default **1** (single-flight bulk
-    /// path). Raise for parallel S3 PUTs.
+    /// path). Raise for parallel S3 PUTs. Also bounds ready objects per atomic
+    /// commit when the sequencer opts in to multi-object commits.
     pub max_inflight_flushes: usize,
     /// Max bytes in the mutable queue plus in-flight seals. Producers block when
     /// exceeded. Default **2 GiB**.
@@ -176,6 +177,8 @@ struct FlushWork<M> {
     bytes: usize,
     /// Highest enqueue seq included in this flush object.
     max_seq: u64,
+    /// Durable data objects represented by this ordered commit group.
+    data_objects: usize,
     put: Option<TokioJoinHandle<Result<(), ObjectLogError>>>,
     put_started: Instant,
     put_result: Option<Result<Duration, ObjectLogError>>,
@@ -683,6 +686,11 @@ fn flush_loop<S>(
     S::Meta: Send + 'static,
 {
     let max_inflight = config.max_inflight_flushes.max(1);
+    let commit_group_limit = if sequencer.supports_multi_object_commit() {
+        max_inflight
+    } else {
+        1
+    };
     let worker_threads = std::env::var("OBJECT_LOG_FLUSH_RUNTIME_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -742,11 +750,7 @@ fn flush_loop<S>(
             made_progress = true;
         }
 
-        while pending
-            .front()
-            .is_some_and(|work| work.put_result.is_some())
-        {
-            let work = pending.pop_front().expect("front exists");
+        while let Some(work) = take_ready_commit_group(&mut pending, commit_group_limit) {
             let released = finish_flush_work(&shared, &blob, &sequencer, work);
             let mut q = shared.queue.lock().expect("poisoned");
             q.bytes_in_use = q.bytes_in_use.saturating_sub(released);
@@ -781,6 +785,41 @@ fn flush_loop<S>(
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+}
+
+/// Combine only an already-ready contiguous success prefix. Never wait to fill
+/// a group or cross an unfinished/failed PUT; preserve object and batch order.
+fn take_ready_commit_group<M>(
+    pending: &mut VecDeque<FlushWork<M>>,
+    max_objects: usize,
+) -> Option<FlushWork<M>> {
+    pending.front()?.put_result.as_ref()?;
+    let mut group = pending.pop_front().expect("ready front exists");
+    if group.put_result.as_ref().is_some_and(Result::is_err) {
+        return Some(group);
+    }
+    while group.data_objects < max_objects.max(1) {
+        let Some(next) = pending.front() else { break };
+        if !next.put_result.as_ref().is_some_and(Result::is_ok)
+            || group.data_objects.saturating_add(next.data_objects) > max_objects
+        {
+            break;
+        }
+        let mut next = pending.pop_front().expect("ready successor exists");
+        group.batch.append(&mut next.batch);
+        group.locations.append(&mut next.locations);
+        group.responders.append(&mut next.responders);
+        group.bytes = group
+            .bytes
+            .checked_add(next.bytes)
+            .expect("bounded pending bytes");
+        group.max_seq = group.max_seq.max(next.max_seq);
+        group.data_objects += next.data_objects;
+        let next_elapsed = next.put_result.take().unwrap().unwrap();
+        let elapsed = group.put_result.as_mut().unwrap().as_mut().unwrap();
+        *elapsed = (*elapsed).max(next_elapsed);
+    }
+    Some(group)
 }
 
 /// How long to sleep before re-evaluating a seal decision.
@@ -1008,6 +1047,7 @@ fn prepare_flush_work<M>(
         responders,
         bytes: offset,
         max_seq,
+        data_objects: 1,
         put: None,
         put_started: Instant::now(),
         put_result: None,
@@ -1060,6 +1100,7 @@ where
     let first_seq = work.batch.iter().map(|pending| pending.seq).min().unwrap_or(work.max_seq);
     // Durable-then-sequence: the object PUT may have overlapped later PUTs, but
     // sequencer commits are still completed in object creation order.
+    // Grouped put_ms is the largest observed member PUT duration, not a sum.
     let timing = std::env::var("OLOG_DEBUG_FLUSH_TIMING").is_ok();
     let put_elapsed = match work.put_result.take().expect("put result is ready") {
         Ok(elapsed) => elapsed,
@@ -1079,12 +1120,12 @@ where
     };
 
     // Media ops for the data object put.
-    let mut media_ops = blob.take_media_op_stats().map(|s| s.media_ops).unwrap_or(1); // fallback: 1 per successful put
+    let mut media_ops = blob.take_media_op_stats().map(|s| s.media_ops).unwrap_or(work.data_objects as u64); // fallback: 1 per successful put
 
     // Signal Durable-level waiters now (after PUT, before commit).
     send_durable_acks(&mut work.responders);
 
-    // Sequence the whole object atomically.
+    // Sequence the ready group atomically, preserving each object's locations.
     let commit_batches: Vec<CommitBatch<'_, S::Meta>> = work
         .batch
         .iter()
@@ -1106,11 +1147,12 @@ where
         Ok(outcomes) => {
             if let Some(commit_started) = commit_started {
                 eprintln!(
-                    "object-log flush timing: bytes={} batches={} put_ms={} commit_ms={}",
+                    "object-log flush timing: bytes={} batches={} put_ms={} commit_ms={} objects={}",
                     work.bytes,
                     commit_batches.len(),
                     put_elapsed.as_millis(),
-                    commit_started.elapsed().as_millis()
+                    commit_started.elapsed().as_millis(),
+                    work.data_objects
                 );
             }
             if let Some(s) = blob.take_media_op_stats() {
@@ -1196,5 +1238,275 @@ mod flush_barrier_tests {
         assert_eq!(receivers[1].try_recv().unwrap(), Err(error.clone()));
         assert_eq!(receivers[2].try_recv().unwrap(), Err(error));
         assert!(queue.flush_waiters.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ready_commit_group_tests {
+    use super::*;
+    use crate::{ManifestSequencer, MemoryBlobStore};
+    use async_trait::async_trait;
+    use std::ops::Range;
+
+    fn work(
+        n: u64,
+        durability: Durability,
+    ) -> (
+        FlushWork<()>,
+        String,
+        Vec<Bytes>,
+        oneshot::Receiver<Result<AppendOutcome, ObjectLogError>>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let (mut work, key, chunks) = prepare_flush_work(
+            "data/",
+            n,
+            vec![Pending {
+                partition: PartitionKey("shared".into()),
+                record_count: 1,
+                payload: Bytes::from(format!("body-{n}")),
+                meta: (),
+                durability,
+                responder: Some(tx),
+                seq: n,
+            }],
+        );
+        work.put_result = Some(Ok(Duration::from_millis(n)));
+        (work, key, chunks, rx)
+    }
+
+    #[test]
+    fn ready_groups_are_bounded_and_do_not_cross_unfinished_or_failed_puts() {
+        let mut pending = (1..=5)
+            .map(|n| work(n, Durability::Sequenced).0)
+            .collect::<VecDeque<_>>();
+        let original_bytes: usize = pending.iter().map(|w| w.bytes).sum();
+        let mut released = 0;
+        for expected in [vec![1, 2], vec![3, 4], vec![5]] {
+            let group = take_ready_commit_group(&mut pending, 2).unwrap();
+            assert_eq!(
+                group.batch.iter().map(|p| p.seq).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(group.data_objects, expected.len());
+            assert_eq!(group.responders.len(), expected.len());
+            assert_eq!(group.max_seq, *expected.last().unwrap());
+            for (location, n) in group.locations.iter().zip(&expected) {
+                assert_eq!(location.object_id, format!("data/{n:020}"));
+                assert_eq!(location.byte_start, 0);
+                assert_eq!(location.byte_len as usize, format!("body-{n}").len());
+            }
+            released += group.bytes;
+        }
+        assert!(pending.is_empty());
+        assert_eq!(released, original_bytes);
+
+        let mut first = work(1, Durability::Sequenced).0;
+        first.put_result = None;
+        let mut pending = VecDeque::from([first, work(2, Durability::Sequenced).0]);
+        assert!(take_ready_commit_group(&mut pending, 8).is_none());
+        assert_eq!(
+            pending.len(),
+            2,
+            "a later ready PUT cannot pass an unfinished head"
+        );
+        pending[0].put_result = Some(Err(ObjectLogError::StorageUnavailable("failed PUT".into())));
+        let failed = take_ready_commit_group(&mut pending, 8).unwrap();
+        assert_eq!(failed.data_objects, 1);
+        assert!(failed.put_result.unwrap().is_err());
+        assert_eq!(pending[0].max_seq, 2);
+
+        let mut failed = work(2, Durability::Sequenced).0;
+        failed.put_result = Some(Err(ObjectLogError::StorageUnavailable("failed PUT".into())));
+        let mut pending = VecDeque::from([
+            work(1, Durability::Sequenced).0,
+            failed,
+            work(3, Durability::Sequenced).0,
+        ]);
+        assert_eq!(take_ready_commit_group(&mut pending, 8).unwrap().max_seq, 1);
+        assert_eq!(
+            pending.len(),
+            2,
+            "a success group cannot cross a failed PUT"
+        );
+        let mut pending = VecDeque::from([
+            work(1, Durability::Sequenced).0,
+            work(2, Durability::Sequenced).0,
+        ]);
+        assert_eq!(
+            take_ready_commit_group(&mut pending, 1)
+                .unwrap()
+                .data_objects,
+            1
+        );
+        assert_eq!(
+            pending.len(),
+            1,
+            "one-object sequencers retain their call boundary"
+        );
+    }
+
+    struct GatedManifestStore {
+        inner: MemoryBlobStore,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl BlobStore for GatedManifestStore {
+        async fn put(&self, key: &str, value: Bytes) -> Result<(), ObjectLogError> {
+            if key.starts_with("manifest/") {
+                let release = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one grouped manifest");
+                self.entered.send(()).unwrap();
+                release.await.unwrap();
+                if self.fail {
+                    return Err(ObjectLogError::StorageUnavailable(
+                        "manifest failure".into(),
+                    ));
+                }
+            }
+            self.inner.put(key, value).await
+        }
+        async fn get(&self, key: &str) -> Result<Option<Bytes>, ObjectLogError> {
+            self.inner.get(key).await
+        }
+        async fn get_range(
+            &self,
+            key: &str,
+            range: Range<u64>,
+        ) -> Result<Option<Bytes>, ObjectLogError> {
+            self.inner.get_range(key, range).await
+        }
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, ObjectLogError> {
+            self.inner.list(prefix).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), ObjectLogError> {
+            self.inner.delete(key).await
+        }
+        fn take_media_op_stats(&self) -> Option<crate::MediaOpStats> {
+            self.inner.take_media_op_stats()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grouped_manifest_controls_acknowledgements_and_reopens_exact_locations() {
+        for fail in [false, true] {
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = oneshot::channel();
+            let blob: Arc<dyn BlobStore> = Arc::new(GatedManifestStore {
+                inner: MemoryBlobStore::new(),
+                entered: entered_tx,
+                release: Mutex::new(Some(release_rx)),
+                fail,
+            });
+            let sequencer = Arc::new(
+                ManifestSequencer::open(blob.clone(), "manifest/")
+                    .await
+                    .unwrap(),
+            );
+            assert!(sequencer.supports_multi_object_commit());
+            let (first, first_key, first_chunks, mut sequenced_rx) = work(1, Durability::Sequenced);
+            let (mut second, second_key, second_chunks, mut durable_rx) =
+                work(2, Durability::Durable);
+            second.batch[0].partition = PartitionKey("other".into());
+            let (third, third_key, third_chunks, mut third_rx) = work(3, Durability::Sequenced);
+            blob.put_chunks(&first_key, first_chunks).await.unwrap();
+            blob.put_chunks(&second_key, second_chunks).await.unwrap();
+            blob.put_chunks(&third_key, third_chunks).await.unwrap();
+            let mut pending = VecDeque::from([first, second, third]);
+            let group = take_ready_commit_group(&mut pending, 8).unwrap();
+            let bytes = group.bytes;
+            assert_eq!(group.data_objects, 3);
+            let (flush_tx, mut flush_rx) = oneshot::channel();
+            let mut config = FlushConfig::default();
+            config.budget.enabled = false;
+            let shared: Arc<Shared<()>> = Arc::new(Shared {
+                queue: Mutex::new(Queue {
+                    items: VecDeque::new(),
+                    bytes: 0,
+                    bytes_in_use: bytes,
+                    shutdown: false,
+                    next_seq: 4,
+                    completed_through: 0,
+                    first_failed: None,
+                    force_flush: true,
+                    flush_waiters: vec![(3, flush_tx)],
+                    last_enqueue: None,
+                    oldest_enqueue: None,
+                }),
+                cv: Condvar::new(),
+                max_buffered_bytes: bytes,
+                budget: Mutex::new(BudgetRuntime::new(config.budget)),
+                flush_config: config,
+            });
+            let worker = {
+                let shared = shared.clone();
+                let blob = blob.clone();
+                let sequencer = sequencer.clone();
+                std::thread::spawn(move || finish_flush_work(&shared, &blob, &sequencer, group))
+            };
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                sequenced_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                third_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                flush_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            let durable = durable_rx.try_recv().unwrap().unwrap();
+            assert!(durable.durable && !durable.sequenced);
+            release_tx.send(()).unwrap();
+            assert_eq!(worker.join().unwrap(), bytes);
+            if fail {
+                assert!(sequenced_rx.await.unwrap().is_err());
+                assert!(third_rx.await.unwrap().is_err());
+                assert!(flush_rx.await.unwrap().is_err());
+                assert_eq!(
+                    sequencer
+                        .high_watermark(&PartitionKey("shared".into()))
+                        .unwrap(),
+                    0
+                );
+                assert!(blob.list("manifest/").await.unwrap().is_empty());
+            } else {
+                assert_eq!(sequenced_rx.await.unwrap().unwrap().base_offset, Some(0));
+                assert_eq!(third_rx.await.unwrap().unwrap().base_offset, Some(1));
+                flush_rx.await.unwrap().unwrap();
+                assert_eq!(blob.list("manifest/").await.unwrap().len(), 1);
+            }
+            assert_eq!(blob.list("data/").await.unwrap().len(), 3);
+            let reopened = ManifestSequencer::open(blob.clone(), "manifest/")
+                .await
+                .unwrap();
+            for (partition, objects) in [("shared", vec![1, 3]), ("other", vec![2])] {
+                let entries = reopened.lookup(&PartitionKey(partition.into()), 0).unwrap();
+                assert_eq!(entries.len(), if fail { 0 } else { objects.len() });
+                for (offset, (entry, object)) in entries.iter().zip(objects).enumerate() {
+                    assert_eq!(entry.base_offset, offset as i64);
+                    let loc = &entry.location;
+                    assert_eq!(loc.object_id, format!("data/{object:020}"));
+                    let body = blob
+                        .get_range(
+                            &loc.object_id,
+                            loc.byte_start as u64..(loc.byte_start + loc.byte_len) as u64,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(body, format!("body-{object}"));
+                }
+            }
+        }
     }
 }

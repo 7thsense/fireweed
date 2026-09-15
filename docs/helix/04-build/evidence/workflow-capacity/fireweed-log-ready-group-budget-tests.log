@@ -1,0 +1,12 @@
+   Compiling object-log v0.3.1 (/home/erik/Projects/fireweed/vendor/object-log)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.01s
+     Running tests/perf_budget.rs (target/object-log-tests/debug/deps/perf_budget-6f7b32ef011d5692)
+
+running 4 tests
+test group_commit_reduces_put_count_under_linger ... ok
+test memory_sequenced_throughput_floor ... ok
+test linger_coalesces_pipelined_buffered_produces ... ok
+test default_config_idle_latency_budget ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+

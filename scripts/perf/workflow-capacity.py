@@ -69,6 +69,13 @@ def storage_usage(root):
         bucket["files"] += 1
         bucket["bytes"] += stat.st_size
         bucket["allocated_bytes"] += stat.st_blocks * 512
+        # Post-run publication counts expose log grouping without tracing the
+        # timed workload. Ignore temporary files and mutable metadata keys.
+        if len(parts[-1]) == 20 and parts[-1].isdigit():
+            if len(parts) >= 5 and parts[-2] == "fwlog":
+                bucket["log_data_objects"] = bucket.get("log_data_objects", 0) + 1
+            elif len(parts) >= 6 and parts[-3:-1] == ("fwmeta", "manifest"):
+                bucket["log_manifests"] = bucket.get("log_manifests", 0) + 1
     return groups
 
 
