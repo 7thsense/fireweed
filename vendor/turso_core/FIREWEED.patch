@@ -333,3 +333,36 @@
          return Ok(());
      }
  
+--- a/translate/emitter/update.rs
++++ b/translate/emitter/update.rs
+@@ -1836,6 +1836,19 @@ fn emit_update_insns<'a>(
+             (None, None)
+         };
+ 
++        // A row outside a partial index has no new key. Skip expression
++        // evaluation and record construction as well as the constraint check;
++        // Phase 3 uses this same predicate before reading the key registers.
++        let skip_new_key = new_satisfies_where.map(|reg| {
++            let label = program.allocate_label();
++            program.emit_insn(Insn::IfNot {
++                reg,
++                target_pc: label,
++                jump_if_null: true,
++            });
++            label
++        });
++
+         // Build new index key for constraint checking and later insertion (Phase 3).
+         let num_cols = index.columns.len();
+         let idx_start_reg = program.alloc_registers(num_cols + 1);
+@@ -2027,6 +2040,10 @@ fn emit_update_insns<'a>(
+             program.preassign_label_to_next_insn(constraint_check);
+         }
+ 
++        if let Some(label) = skip_new_key {
++            program.preassign_label_to_next_insn(label);
++        }
++
+         idx_phase_ctxs.push(IndexUpdatePhaseCtx {
+             idx_cursor_id: *idx_cursor_id,
+             record_reg: *record_reg,

@@ -1,0 +1,22 @@
+{
+  "sqlite_version": "3.53.4",
+  "indexed_rows": [
+    [
+      1,
+      13
+    ],
+    [
+      4,
+      14
+    ]
+  ],
+  "rejected_row": [
+    -9223372036854775808,
+    null
+  ],
+  "integrity": [
+    [
+      "ok"
+    ]
+  ]
+}

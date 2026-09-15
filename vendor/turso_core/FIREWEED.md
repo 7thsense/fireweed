@@ -61,3 +61,12 @@ This makes obsolete body bytes compressible on the measured filesystem; it does
 not omit frames or promise secure deletion. A native VFS regression covers both
 900-byte and overflow bodies with large and spilling caches, savepoint rollback,
 pinned old readers, checkpoint/reopen, and reuse of every freed page.
+
+UPDATE now checks a partial index's new-row predicate before evaluating the new
+key expressions, applying key affinities, or constructing its index record.
+Rows outside the predicate (including NULL) never use that key in constraint
+checking or insertion. Old-entry deletion remains separately guarded by the
+old-row predicate. This also fixes erroneous evaluation errors for unused keys,
+such as `abs(-9223372036854775808)` on a row outside an expression index.
+The native regression covers predicate transitions, uniqueness rollback and
+index integrity, with the same case checked against SQLite.

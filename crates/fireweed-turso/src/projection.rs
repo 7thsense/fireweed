@@ -6129,6 +6129,233 @@ mod item_mutation_tests {
     }
 
     #[tokio::test]
+    async fn partial_index_updates_skip_keys_outside_the_predicate() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        store
+            .execute(
+                "CREATE TABLE partial_key(id INTEGER PRIMARY KEY,v INTEGER,active INTEGER)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute(
+                "CREATE UNIQUE INDEX partial_abs ON partial_key(abs(v)) WHERE active=1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO partial_key VALUES(1,7,0),(2,9,1),(3,11,NULL),(4,7,1)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute(
+                "CREATE INDEX partial_copy ON partial_key(abs(v)+1) WHERE active=1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        // These new rows do not belong to the index. Evaluating abs(MIN) for
+        // their unused keys is both wasted work and an erroneous overflow.
+        store
+            .execute(
+                "UPDATE partial_key SET v=-9223372036854775808 WHERE id IN(1,3)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute(
+                "UPDATE partial_key SET v=-9223372036854775808,active=0 WHERE id=2",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute("UPDATE partial_key SET v=-13,active=1 WHERE id=1", vec![])
+            .await
+            .unwrap();
+        assert!(
+            store
+                .execute("UPDATE partial_key SET v=13,active=1 WHERE id=3", vec![])
+                .await
+                .is_err()
+        );
+        store
+            .execute("UPDATE partial_key SET v=14 WHERE id=4", vec![])
+            .await
+            .unwrap();
+        let rows = store.query("SELECT id,abs(v) FROM partial_key INDEXED BY partial_abs WHERE active=1 ORDER BY abs(v)", vec![]).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.values.clone()).collect::<Vec<_>>(),
+            vec![
+                vec![Value::Integer(1), Value::Integer(13)],
+                vec![Value::Integer(4), Value::Integer(14)]
+            ]
+        );
+        let rejected = store
+            .query("SELECT v,active FROM partial_key WHERE id=3", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected[0].values,
+            vec![Value::Integer(i64::MIN), Value::Null]
+        );
+        // Reuse one VM across mixed predicate outcomes: later excluded rows
+        // must not reuse the earlier row's key registers.
+        store.execute("UPDATE partial_key SET v=CASE WHEN id=1 THEN 15 ELSE -9223372036854775808 END,active=CASE WHEN id=1 THEN 1 ELSE 0 END", vec![]).await.unwrap();
+        let rows = store
+            .query(
+                "SELECT id,abs(v)+1 FROM partial_key INDEXED BY partial_copy WHERE active=1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.values.clone()).collect::<Vec<_>>(),
+            vec![vec![Value::Integer(1), Value::Integer(16)]]
+        );
+        let integrity = store.query("PRAGMA integrity_check", vec![]).await.unwrap();
+        assert_eq!(integrity[0].values, vec![Value::Text("ok".into())]);
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit retained-VM SQL diagnostic, not workflow qualification"]
+    async fn compare_retained_point_and_joined_replacements() {
+        use fireweed_relational::{RelTx, RelValue};
+        use std::time::Instant;
+        const N: usize = 1000;
+        const POINT: &str = "UPDATE fireweed_items SET \
+            lifecycle_state=?2,priority=?3,priority_sort=?4,not_before=?5,eligible_since=?6,\
+            payload=CASE WHEN ?16 THEN payload ELSE NULL END,fields=?7,metadata=?8,\
+            entity_document=?9,index_fields=?10,lease_token_hash=NULL,lease_expires_at=NULL,\
+            worker_id=NULL,fenced=0,item_version=?11,terminal_at=?12,terminal_command_epoch=?13,\
+            updated_at=?17,last_command_sequence=?18,retry_count=retry_count+?15 \
+            WHERE tenant_id=?19 AND queue_id=?20 AND item_id=?1 AND item_version=?14 \
+            AND (?15=0 OR (lifecycle_state='Pending' AND superseded=0))";
+        for point in [false, true, false, true] {
+            let store = TursoRelational::in_memory().await.unwrap();
+            let definition = qdef();
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let priority_sort = fireweed_relational::elig_sort(&None, &definition.priority_model);
+            AsyncProjectionStore::ensure_shard(&store, definition)
+                .await
+                .unwrap();
+            let pushed = (1000..1000 + N)
+                .map(|n| {
+                    let mut row = item(&n.to_string(), &format!("key-{n}"), 1);
+                    row.payload = Some(Bytes::from(vec![b'x'; 934]));
+                    row
+                })
+                .collect::<Vec<_>>();
+            AsyncProjectionStore::apply_live(
+                &store,
+                vec![CommandPosition::new(shard.clone(), 0, 0)],
+                vec![envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: pushed.clone(),
+                    }),
+                    pushed.iter().map(|p| p.item_id).collect(),
+                )],
+            )
+            .await
+            .unwrap();
+            let connection = store.writer.clone().lock_owned().await;
+            let measured = crate::tx::run_reltx_blocking(move || {
+                let batch = if point {
+                    1
+                } else {
+                    fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH
+                };
+                let mut measured = 0.0;
+                for round in 0..9 {
+                    // Build parameters outside timing: this diagnostic isolates the executed SQL/VM.
+                    let calls = pushed
+                        .chunks(batch)
+                        .enumerate()
+                        .map(|(chunk_index, chunk)| {
+                            let mut params = Vec::<RelValue>::new();
+                            for (offset, row) in chunk.iter().enumerate() {
+                                let terminal = (chunk_index * batch + offset + round) % 3 == 0;
+                                params.extend([
+                                    row.item_id.to_string().into(),
+                                    if terminal { "Complete" } else { "Pending" }.into(),
+                                    RelValue::Null,
+                                    priority_sort.clone().into(),
+                                    RelValue::Null,
+                                    1_i64.into(),
+                                    "{}".into(),
+                                    format!(
+                                        "{{\"round\":{round},\"padding\":\"{}\"}}",
+                                        "x".repeat(300)
+                                    )
+                                    .into(),
+                                    RelValue::Null,
+                                    RelValue::Null,
+                                    (round as i64 + 2).into(),
+                                    terminal.then_some(1_i64).into(),
+                                    terminal.then_some(0_i64).into(),
+                                    (round as i64 + 1).into(),
+                                    0_i64.into(),
+                                    1_i64.into(),
+                                ]);
+                            }
+                            params.extend([
+                                1_i64.into(),
+                                (round as i64 + 1).into(),
+                                shard.tenant_id.as_str().into(),
+                                shard.queue_id.as_str().into(),
+                            ]);
+                            let query = if point {
+                                POINT.to_string()
+                            } else {
+                                fireweed_relational::clearing_item_replacements_sql(chunk.len())
+                            };
+                            (query, params, chunk.len())
+                        })
+                        .collect::<Vec<_>>();
+                    let start = Instant::now();
+                    let tx = crate::tx::ApplyTursoRel::new(&connection);
+                    tx.execute("BEGIN IMMEDIATE", &[]).unwrap();
+                    for (query, params, count) in calls {
+                        assert_eq!(tx.execute(&query, &params).unwrap(), count);
+                    }
+                    tx.execute("COMMIT", &[]).unwrap();
+                    if round > 0 {
+                        measured += start.elapsed().as_secs_f64();
+                    }
+                }
+                measured
+            })
+            .await;
+            let versions = store
+                .query(
+                    "SELECT MIN(item_version),MAX(item_version),COUNT(*) FROM fireweed_items",
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                versions[0].values,
+                vec![
+                    Value::Integer(10),
+                    Value::Integer(10),
+                    Value::Integer(N as i64)
+                ]
+            );
+            eprintln!(
+                "retained_replacement point={point} updates={} measured_s={measured:.6} updates_per_s={:.2}",
+                N * 8,
+                (N * 8) as f64 / measured
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn clearing_replacements_batch_real_sql_and_rollback_late_conflicts() {
         const N: usize = 1_000;
         let definition = qdef();

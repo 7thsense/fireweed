@@ -1,5 +1,21 @@
 # Campaign qualification and performance plan
 
+The retained-VM projection diagnostic rejected direct point replacements:
+48,624/49,147 updates/sec versus 53,322/53,644 for the existing 56-row joined
+query. Parameters were built outside timing; both paths used the actual
+transaction-local statement reuse adapter. This is a SQL diagnostic, not a
+workflow rate. Production keeps the joined query.
+
+A subsequent native regression found UPDATE evaluates partial-index new keys
+even when the new row fails the index predicate. SQLite skips those keys;
+Turso currently raises integer overflow for an unused `abs(i64::MIN)` key.
+A candidate moves the predicate guard before expression/key construction.
+The regression now passes, including unique/nonunique indexes, mixed multi-row
+predicate outcomes, rollback and integrity. All 310 Fireweed release checks
+pass (three ignored diagnostics, two unconfigured live-S3 checks excluded).
+Post-change retained-VM rates were mixed (51,424/57,371 batched updates/sec),
+so capacity gain remains unproven. A clean campaign comparison follows.
+
 The six-cycle readable-index candidate was **rejected early after cycle two**:
 all 96 second-cycle campaign reports were present, with a maximum active wall
 time of 102.956 seconds. That bounds global cycle throughput below 9,713/sec,
