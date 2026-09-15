@@ -1,5 +1,16 @@
 # Campaign qualification and performance plan
 
+A retained-statement diagnostic with 20,000 resident rows rejected a simpler
+replacement UPDATE without the extra target alias: native EXPLAIN chose a
+queue-prefix search followed by scanning the incoming batch, rather than
+full item-key lookups. ANALYZE did not repair this, nor did an experimental
+VALUES cardinality estimate; that native-core experiment was removed. The
+retained joined statement measured 50,644–51,623 updates/sec across these
+isolated runs. These are SQL diagnostics, not campaign qualification, and
+production SQL is unchanged. Raw output is archived under
+`fireweed-direct-*-diagnostic.log`. The next code experiment reuses read
+statement execution state within the already-owned apply transaction.
+
 The staggered-checkpoint candidate (`3b8f1036`) is **rejected and reverted**.
 It failed naturally during cycle three with another 30-second post-position
 produce timeout, after 380.17 process seconds. The planned early-stop command

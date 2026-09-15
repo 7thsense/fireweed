@@ -6226,9 +6226,19 @@ mod item_mutation_tests {
     #[tokio::test]
     #[ignore = "explicit retained-VM SQL diagnostic, not workflow qualification"]
     async fn compare_retained_point_and_joined_replacements() {
+        compare_retained_replacement_shapes(&["joined", "point", "joined", "point"], 1000).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit retained-VM SQL diagnostic, not workflow qualification"]
+    async fn compare_retained_direct_and_joined_replacements() {
+        compare_retained_replacement_shapes(&["joined", "direct", "direct_analyzed", "direct_analyzed", "joined"], 20_000)
+            .await;
+    }
+
+    async fn compare_retained_replacement_shapes(shapes: &[&'static str], count: usize) {
         use fireweed_relational::{RelTx, RelValue};
         use std::time::Instant;
-        const N: usize = 1000;
         const POINT: &str = "UPDATE fireweed_items SET \
             lifecycle_state=?2,priority=?3,priority_sort=?4,not_before=?5,eligible_since=?6,\
             payload=CASE WHEN ?16 THEN payload ELSE NULL END,fields=?7,metadata=?8,\
@@ -6237,7 +6247,30 @@ mod item_mutation_tests {
             updated_at=?17,last_command_sequence=?18,retry_count=retry_count+?15 \
             WHERE tenant_id=?19 AND queue_id=?20 AND item_id=?1 AND item_version=?14 \
             AND (?15=0 OR (lifecycle_state='Pending' AND superseded=0))";
-        for point in [false, true, false, true] {
+        fn query_for(shape: &str, rows: usize) -> String {
+            if shape == "point" {
+                return POINT.to_string();
+            }
+            let joined = fireweed_relational::clearing_item_replacements_sql(rows);
+            if shape == "joined" {
+                return joined;
+            }
+            assert!(matches!(shape, "direct" | "direct_analyzed"));
+            let start = joined
+                .find("FROM incoming CROSS JOIN fireweed_items target")
+                .unwrap();
+            let end = joined[start..]
+                .find("AND fireweed_items.item_id=incoming.item_id")
+                .unwrap()
+                + start;
+            format!(
+                "{}FROM incoming WHERE fireweed_items.tenant_id=? AND fireweed_items.queue_id=? {}",
+                &joined[..start],
+                &joined[end..]
+            )
+        }
+        for &shape in shapes {
+            let point = shape == "point";
             let store = TursoRelational::in_memory().await.unwrap();
             let definition = qdef();
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -6245,7 +6278,7 @@ mod item_mutation_tests {
             AsyncProjectionStore::ensure_shard(&store, definition)
                 .await
                 .unwrap();
-            let pushed = (1000..1000 + N)
+            let pushed = (1000..1000 + count)
                 .map(|n| {
                     let mut row = item(&n.to_string(), &format!("key-{n}"), 1);
                     row.payload = Some(Bytes::from(vec![b'x'; 934]));
@@ -6264,6 +6297,38 @@ mod item_mutation_tests {
             )
             .await
             .unwrap();
+            let batch = if point {
+                1
+            } else {
+                fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH
+            };
+            if shape == "direct_analyzed" {
+                store.execute("ANALYZE fireweed_items", vec![]).await.unwrap();
+            }
+            let plan = store
+                .query(
+                    format!("EXPLAIN QUERY PLAN {}", query_for(shape, batch)),
+                    vec![Value::Null; 16 * batch + 4],
+                )
+                .await
+                .unwrap();
+            let details: Vec<_> = plan
+                .iter()
+                .map(|row| match &row.values[3] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("unexpected plan detail: {other:?}"),
+                })
+                .collect();
+            eprintln!("retained_replacement shape={shape} resident={count} plan={details:?}");
+            if shape.starts_with("direct")
+                && !details.iter().any(|detail| {
+                    detail.starts_with("SEARCH fireweed_items ")
+                        && detail.contains("tenant_id=? AND queue_id=? AND item_id=?")
+                })
+            {
+                eprintln!("retained_replacement shape={shape} rejected_unbounded_plan=true");
+                continue;
+            }
             let connection = store.writer.clone().lock_owned().await;
             let measured = crate::tx::run_reltx_blocking(move || {
                 let batch = if point {
@@ -6310,11 +6375,7 @@ mod item_mutation_tests {
                                 shard.tenant_id.as_str().into(),
                                 shard.queue_id.as_str().into(),
                             ]);
-                            let query = if point {
-                                POINT.to_string()
-                            } else {
-                                fireweed_relational::clearing_item_replacements_sql(chunk.len())
-                            };
+                            let query = query_for(shape, chunk.len());
                             (query, params, chunk.len())
                         })
                         .collect::<Vec<_>>();
@@ -6344,13 +6405,13 @@ mod item_mutation_tests {
                 vec![
                     Value::Integer(10),
                     Value::Integer(10),
-                    Value::Integer(N as i64)
+                    Value::Integer(count as i64)
                 ]
             );
             eprintln!(
-                "retained_replacement point={point} updates={} measured_s={measured:.6} updates_per_s={:.2}",
-                N * 8,
-                (N * 8) as f64 / measured
+                "retained_replacement shape={shape} resident={count} updates={} measured_s={measured:.6} updates_per_s={:.2}",
+                count * 8,
+                (count * 8) as f64 / measured
             );
         }
     }
