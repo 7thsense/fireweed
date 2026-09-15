@@ -1,5 +1,15 @@
 # Campaign qualification and performance plan
 
+## Current status: first post-TRIM campaign qualifies (2026-09-15)
+
+The unchanged CLI `be319723...` passes every 10k and 12.5k gate in its first
+post-repair eight-cycle million-resident-row run: 15,064 complete recipients/sec
+overall, 14,342/sec in the slowest cycle, 18.49 GiB peak RSS. Repeated campaign
+and refreshed primitive passes remain required before declaring the goal met.
+See [disk baseline and napkin math](disk-baseline-and-napkin-math.md) for the
+local triage, verified discard repair, and updated CPU/write cost model.
+The entries below are retained history and their superseded next steps.
+
 Current retained code: native-memory SQL scratch (`ea4805cc`), with **311
 release checks and nine capacity-harness checks passing**. Both million-row
 varied-body primitive runs on CLI `be319723...` pass the three 10k floors:

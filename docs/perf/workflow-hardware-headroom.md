@@ -1,10 +1,14 @@
 # Workflow capacity versus hardware cost
 
-**New diagnostic finding:** the running Linux 7.2.3 kernel is repeatedly
-logging a Btrfs writeback error matching an upstream fix in 7.2.4. See
-[local machine diagnosis](local-machine-diagnosis.md) before interpreting
-the measurements below as a clean hardware baseline. The effect on throughput
-has not yet been isolated.
+**Current baseline, 2026-09-15:** blocked discard through LUKS was repaired;
+8 GiB direct/buffered writes now measure 900/738 MiB/sec. The unchanged
+Fireweed CLI completed its first fully qualifying eight-cycle run at 15,064
+recipients/sec (slowest cycle 14,342/sec). See
+[disk baseline and napkin math](disk-baseline-and-napkin-math.md) for the
+triage procedure, measured resource budget and remaining repetition gates.
+The sections below retain historical observations, not current diagnoses or
+hardware ceilings. The separate Btrfs kernel defect was fixed by upgrading
+to 7.2.6 before the discard repair.
 
 ## 2026-09-15: local recheck; another host is not a prerequisite
 
