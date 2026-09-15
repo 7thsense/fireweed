@@ -1,0 +1,45 @@
+{
+  "order": "Pre-update Python pair; reboot and first Python pair; campaign; dd direct then dd buffered; Python direct then Python buffered. No write tests overlap.",
+  "comparability": "Same 8 GiB size and 16 MiB write size, final fdatasync, fresh files. dd reads unique random data from tmpfs, Python reuses pre-generated incompressible blocks. Drive state and benchmark implementations differ.",
+  "python": [
+    {
+      "label": "Python before kernel update",
+      "direct": {
+        "MiB_s": 44.985898194738134,
+        "wall_s": 182.10151022300124,
+        "cpu_s": 0.853173
+      },
+      "buffered": {
+        "MiB_s": 38.509733536081484,
+        "wall_s": 212.72543972096173,
+        "cpu_s": 3.013055
+      }
+    },
+    {
+      "label": "Python first after update",
+      "direct": {
+        "MiB_s": 75.6204029052329,
+        "wall_s": 108.33055214299999,
+        "cpu_s": 0.6185510000000001
+      },
+      "buffered": {
+        "MiB_s": 51.44228172448518,
+        "wall_s": 159.24643552700002,
+        "cpu_s": 2.905736
+      }
+    },
+    {
+      "label": "Python repeated after dd",
+      "direct": {
+        "MiB_s": 51.21020208877862,
+        "wall_s": 159.96812482399991,
+        "cpu_s": 0.8532479999999999
+      },
+      "buffered": {
+        "MiB_s": 43.509725132955836,
+        "wall_s": 188.27974607899978,
+        "cpu_s": 3.008305
+      }
+    }
+  ]
+}
