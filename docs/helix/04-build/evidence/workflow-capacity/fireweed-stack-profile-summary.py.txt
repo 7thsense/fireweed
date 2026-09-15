@@ -1,0 +1,17 @@
+import re,json,sys
+from pathlib import Path
+from collections import Counter
+base=Path(sys.argv[1]);inclusive=Counter();self_count=Counter();depths=Counter();total=0;weighted=0;app_paths=Counter()
+for b in Path(str(base)+'-fixed-script.txt').read_text().split('\n\n'):
+ if 'cpu-clock:u:' not in b:continue
+ lines=b.splitlines();m=re.search(r':\s+(\d+) cpu-clock:u:',lines[0]);weight=int(m[1]) if m else 1
+ frames=[]
+ for l in lines[1:]:
+  if not l.startswith('\t'):continue
+  sym=l.strip().split(' ',1)[1].rsplit(' (',1)[0];frames.append(re.sub(r'\+0x[0-9a-f]+$','',sym))
+ total+=1;weighted+=weight;depths[len(frames)]+=1
+ if frames:self_count[frames[0]]+=weight
+ for f in set(frames):inclusive[f]+=weight
+ app=next((f for f in frames if 'fireweed_' in f),'<no fireweed frame captured>');app_paths[app]+=weight
+r={'samples':total,'multi_frame_samples':sum(v for k,v in depths.items() if k>1),'depths':dict(depths),'total_sample_period':weighted,'self':[{'percent':100*v/weighted,'symbol':k} for k,v in self_count.most_common()],'inclusive':[{'percent':100*v/weighted,'symbol':k} for k,v in inclusive.most_common()],'nearest_fireweed_caller':[{'percent':100*v/weighted,'symbol':k} for k,v in app_paths.most_common()]}
+Path(str(base)+'-caller-summary.json').write_text(json.dumps(r,indent=2)+'\n')

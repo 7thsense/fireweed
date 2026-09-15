@@ -1,5 +1,24 @@
 # Campaign qualification and performance plan
 
+The two-cycle 48-store DWARF profile (`2eabe833`, runtime `8a12e2de`)
+completed at 8,400.17 recipients/sec. It is diagnostic, not qualification.
+There were 79,941 CPU samples and zero recorded losses. Offline fixes for
+perf 7.2 module load bias (executable virtual address minus file offset) and
+its reused synthetic thread ID recovered multi-frame stacks for 79,884
+samples. A two-thread Rust smoke test validated all 44/46 sampled leaf-to-parent
+paths. The raw profile, fixes, source/provenance and resolved stacks are archived
+as `fireweed-stack-cpu-2eabe833*`; uncorrected caller reports are explicitly
+invalid. The owned projection root was removed after attribute capture.
+
+Inclusive CPU attribution: Turso normal statement execution 67.66%, retained
+apply execution 38.86%, row iteration 30.74%, and resolved clearing replacements
+16.15%. These overlap and must not be added. Direct workload body construction
+was 1.71% inclusive. This identifies substantial projection CPU work; it does
+not measure off-CPU publication waits. Next is an isolated, durable publication
+protocol comparison on the same filesystem before considering a log-layout
+change. It compares immutable data/manifest files with two synced append writes,
+using identical streams, and does not count as workflow qualification.
+
 Partial-index key guard (`8a12e2de`), clean 64-store/two-worker single cycle:
 **14,287.40 recipients/sec**, 70.22 seconds, CPU 0.94561 ms/recipient, peak
 RSS 13.73 GiB, reporting p95 0.532 seconds. Compared with the preceding

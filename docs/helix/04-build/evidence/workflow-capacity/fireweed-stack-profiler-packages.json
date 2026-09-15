@@ -1,0 +1,22 @@
+[
+  {
+    "url": "https://archive.archlinux.org/packages/n/numactl/numactl-2.0.19-1-x86_64.pkg.tar.zst",
+    "sha256": "699bce74daee11fa49de93999ba4e023f132bc51a7768dec845b2979d54f367d",
+    "signature_verification": "gpgv: Signature made Tue Oct 29 05:24:41 2024 EDT\ngpgv:                using EDDSA key 62CC73F884E52957B2FDD8839B7A287D9A2EC608\ngpgv: Good signature from \"David Runge <dvzrv@archlinux.org>\"\n"
+  },
+  {
+    "url": "https://archive.archlinux.org/packages/l/libtraceevent/libtraceevent-1%3A1.9.0-1-x86_64.pkg.tar.zst",
+    "sha256": "40bd5d4fd4c3d4a0c8be3cd2af9cbc570ec3dfe8b5047cf4854d742c22cfcd2e",
+    "signature_verification": "gpgv: Signature made Mon Mar  9 03:43:49 2026 EDT\ngpgv:                using EDDSA key 62CC73F884E52957B2FDD8839B7A287D9A2EC608\ngpgv: Good signature from \"David Runge <dvzrv@archlinux.org>\"\n"
+  },
+  {
+    "url": "https://archive.archlinux.org/packages/l/libpfm/libpfm-4.13.0%2Br83%2Bg91970fe-1-x86_64.pkg.tar.zst",
+    "sha256": "d1f7e9d7bb42749d688bf356a90b8227ea4576cc438713b2a7fdfb7a8c2cf2ba",
+    "signature_verification": "gpgv: Signature made Fri Dec 13 02:31:19 2024 EST\ngpgv:                using EDDSA key D2E95FEC015CF1F911AAAB0C3D4C5008BB5C8D29\ngpgv: Good signature from \"Peter Jung <ptr1337@archlinux.org>\"\n"
+  },
+  {
+    "url": "https://archive.archlinux.org/packages/p/perf/perf-7.2.3-1-x86_64.pkg.tar.zst",
+    "sha256": "fc68f94a5a84c7d6ef2faae4b68bc3b077e12a003606052c8bfb12e91287d474",
+    "signature_verification": "gpgv: Signature made Fri Sep  4 03:50:48 2026 EDT\ngpgv:                using RSA key F00B96D15228013FFC9C9D0393B11DAA4C197E3D\ngpgv: Good signature from \"Christian Heusel (gromit packager key) <gromit@archlinux.org>\"\n"
+  }
+]

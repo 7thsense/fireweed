@@ -1,0 +1,2 @@
+sampler_pid 1402261 prefix /tmp/fireweed-stack-cpu-2eabe833
+exit 0 root_requires_owned_cleanup /home/erik/Projects/fireweed/target/workflow-capacity/cpu-stack-2eabe833-bx3_8e4t

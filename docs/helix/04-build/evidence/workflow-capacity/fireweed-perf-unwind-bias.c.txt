@@ -1,0 +1,56 @@
+#define _GNU_SOURCE
+#include <elfutils/libdwfl.h>
+#include <dlfcn.h>
+#include <elf.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+Dwfl_Module *dwfl_report_elf(Dwfl *dwfl, const char *name, const char *file_name,
+                            int fd, GElf_Addr base, bool add_p_vaddr) {
+    typedef Dwfl_Module *(*report_fn)(Dwfl *, const char *, const char *, int, GElf_Addr, bool);
+    static report_fn original;
+    static int reported;
+    if (!original) original = (report_fn)dlsym(RTLD_NEXT, "dwfl_report_elf");
+    if (!original) return NULL;
+    Dwfl_Module *existing = NULL;
+    if (file_name && strstr(file_name, "/fireweed-workload")) {
+        int read_fd = fd >= 0 ? fd : open(file_name, O_RDONLY | O_CLOEXEC);
+        Elf64_Ehdr eh;
+        if (pread(read_fd, &eh, sizeof(eh), 0) == sizeof(eh) &&
+            !memcmp(eh.e_ident, ELFMAG, SELFMAG) && eh.e_ident[EI_CLASS] == ELFCLASS64 &&
+            eh.e_type == ET_DYN && eh.e_phentsize == sizeof(Elf64_Phdr)) {
+            for (unsigned i = 0; i < eh.e_phnum; ++i) {
+                Elf64_Phdr ph;
+                if (pread(read_fd, &ph, sizeof(ph), eh.e_phoff + i * sizeof(ph)) != sizeof(ph)) break;
+                if (ph.p_type == PT_LOAD && (ph.p_flags & PF_X) && ph.p_vaddr >= ph.p_offset) {
+                    GElf_Addr bias = ph.p_vaddr - ph.p_offset;
+                    if (base >= bias) {
+                        if (!reported++) fprintf(stderr, "fireweed offline unwind: base=%llx subtract executable vaddr-offset=%llx add_p_vaddr=%d\n", (unsigned long long)base, (unsigned long long)bias, add_p_vaddr);
+                        base -= bias;
+                        existing = dwfl_addrmodule(dwfl, base + ph.p_vaddr);
+                    }
+                    break;
+                }
+            }
+        }
+        if (fd < 0 && read_fd >= 0) close(read_fd);
+    }
+    if (existing) return existing;
+    return original(dwfl, name, file_name, fd, base, add_p_vaddr);
+}
+
+/* perf 7.2 caches one Dwfl on the process-wide maps and attaches its first
+ * sampled TID. Its callback exposes only that synthetic thread, while the
+ * current sample's registers/stack arrive through the updated callback data.
+ * Reuse the attached synthetic TID for lookup, retaining the actual sample TID
+ * in perf's output and attribution. This shim is for offline perf only. */
+int dwfl_getthread_frames(Dwfl *dwfl, pid_t tid,
+                          int (*callback)(Dwfl_Frame *, void *), void *arg) {
+    typedef int (*frames_fn)(Dwfl *, pid_t, int (*)(Dwfl_Frame *, void *), void *);
+    static frames_fn original;
+    if (!original) original = (frames_fn)dlsym(RTLD_NEXT, "dwfl_getthread_frames");
+    if (!original) return -1;
+    pid_t attached = dwfl_pid(dwfl);
+    return original(dwfl, attached > 0 ? attached : tid, callback, arg);
+}

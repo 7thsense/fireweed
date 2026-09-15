@@ -1,0 +1,72 @@
+{
+  "diagnostic": true,
+  "qualification": false,
+  "purpose": "DWARF caller attribution through two 48-store cycles after partial-index key fix; diagnostic only",
+  "head": "2eabe83394651443e2407802368e9da4a267c63b",
+  "binary_sha256": "7297c9fc18783b0c54eafc811cb0faa2ed91d20cfd12ac9643c34117571d1b0a",
+  "command": [
+    "/home/erik/Projects/fireweed/target/release/fireweed-workload",
+    "--profile",
+    "campaign",
+    "--campaign-metadata",
+    "--recycle",
+    "--cycles",
+    "2",
+    "--items",
+    "1000000",
+    "--batch",
+    "1000",
+    "--shards",
+    "48",
+    "--workers",
+    "2",
+    "--load-workers",
+    "2",
+    "--deadline-seconds",
+    "1800",
+    "--projection-root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-stack-2eabe833-bx3_8e4t/projections",
+    "--campaign-timestamp-priority",
+    "--root",
+    "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-stack-2eabe833-bx3_8e4t/data"
+  ],
+  "root": "/home/erik/Projects/fireweed/target/workflow-capacity/cpu-stack-2eabe833-bx3_8e4t",
+  "mount": {
+    "filesystems": [
+      {
+        "target": "/home",
+        "source": "/dev/mapper/root[/@home]",
+        "fstype": "btrfs",
+        "options": "rw,relatime,compress=zstd:3,ssd,space_cache=v2,subvolid=257,subvol=/@home"
+      }
+    ]
+  },
+  "projection_compression": "compression=zstd\n",
+  "sample_frequency_hz": 49,
+  "call_graph": "dwarf,8192",
+  "environment": {
+    "OBJECT_LOG_FLUSH_RUNTIME_THREADS": "1"
+  },
+  "offline_unwind_correction": {
+    "source": "/tmp/fireweed-perf-unwind-bias.c",
+    "linux_perf_source": "https://raw.githubusercontent.com/torvalds/linux/v7.2/tools/perf/util/unwind-libdw.c",
+    "linux_perf_source_sha256": "e5b751074b2b3711b58bffb8636531d43c64153b8f94168fb1c34f7a5011a76a",
+    "corrections": [
+      "subtract executable PT_LOAD p_vaddr-p_offset (4096 bytes) from module load bias; reuse the corrected registered module",
+      "use the attached synthetic Dwfl thread ID; callback data still supplies each actual sample registers and stack"
+    ],
+    "raw_samples_unchanged": true,
+    "profiling_child_unmodified": true,
+    "multi_thread_smoke": {
+      "a": 44,
+      "b": 46,
+      "correct_parent_in_every_leaf_sample": true
+    },
+    "coverage": {
+      "total_samples": 79941,
+      "frames_recovered": 79941,
+      "multiple_frames": 79884
+    },
+    "uncorrected_callers_are_invalid": true
+  }
+}

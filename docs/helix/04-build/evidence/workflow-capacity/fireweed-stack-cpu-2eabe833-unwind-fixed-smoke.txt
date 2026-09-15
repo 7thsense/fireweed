@@ -1,0 +1,32 @@
+fireweed offline unwind: base=55b2ba000000 subtract executable vaddr-offset=1000 add_p_vaddr=0
+tokio-rt-worker 1402348 443937.000958:   20408163 cpu-clock:u: 
+	    55b2bb82f3ff <turso_core::vdbe::builder::ProgramBuilder>::emit_insn+0x1f (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2bb82f362 <turso_core::vdbe::builder::ProgramBuilder>::prologue+0x112 (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2bb982c9d turso_core::translate::translate+0x54d (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2bb7b4e37 <turso_core::connection::Connection>::compile_cmd+0x217 (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2bb618463 <turso_core::connection::Connection>::prepare_with_origin::<alloc::string::String>+0x673 (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+
+tokio-rt-worker 1402378 443937.008315:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402361 443937.013089:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402380 443937.013933:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402398 443937.015321:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402359 443937.015730:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402388 443937.017632:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402397 443937.018503:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402368 443937.018846:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402363 443937.020318:   20408163 cpu-clock:u: 
+
+tokio-rt-worker 1402348 443937.021477:   20408163 cpu-clock:u: 
+	    55b2bbdf82dc _mi_page_malloc_zero+0xc (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2bb878cc1 <turso_core::vdbe::ProgramState>::new+0x1d1 (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2baadb3a3 <turso_core::connection::Connection>::prepare_with_origin::<&alloc::string::String>+0x6f3 (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+	    55b2bac7f15d <turso::connection::Connection>::prepare::<&alloc::string::String>::{closure#0}+0x1bd (/home/erik/Projects/fireweed/target/release/fireweed-workload)
+

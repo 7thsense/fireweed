@@ -1,0 +1,5 @@
+#[inline(never)] fn leaf_a(mut x:u64)->u64 { for _ in 0..500_000_000 { x^=x<<7; x^=x>>9; } x }
+#[inline(never)] fn leaf_b(mut x:u64)->u64 { for _ in 0..500_000_000 { x^=x<<11; x^=x>>13; } x }
+#[inline(never)] fn parent_a()->u64 { std::hint::black_box(leaf_a(123)) ^ 19 }
+#[inline(never)] fn parent_b()->u64 { std::hint::black_box(leaf_b(456)) ^ 23 }
+fn main(){let a=std::thread::spawn(parent_a);let b=std::thread::spawn(parent_b);std::hint::black_box((a.join().unwrap(),b.join().unwrap()));}
