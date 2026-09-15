@@ -1,5 +1,19 @@
 # Campaign qualification and performance plan
 
+The apply-read reuse candidate (`cf4e26f8`) is **rejected and removed**.
+The ordered baseline/candidate/candidate/baseline million-recipient runs
+measured 13,599 / 13,752 / 11,871 / 12,706 recipients/sec and
+0.97082 / 0.96557 / 1.00876 / 0.97348 CPU-ms per recipient. Mean CPU cost
+increased 1.54%; the small first-pair gain did not repeat. All children
+completed successfully, but none is a sustained qualification pass. The
+baseline wrapper selected the exact preserved `8a12e2de` runtime and marked
+its source override as ineligible for qualification. All projection roots
+were retained through the entire comparison, then archived and removed.
+Evidence is `fireweed-read-reuse-comparison.json` and the four
+`fireweed-campaign-read-reuse-*` artifact groups. The runtime is restored
+to the previously tested implementation; the new ignored query-plan
+diagnostic remains. The 10k/12.5k sustained goals remain unmet.
+
 The apply-read statement reuse candidate passes **311 release checks**, with
 four ignored diagnostics and the same two unconfigured live-S3 exclusions.
 Read queries now share the existing bounded statement cache with writes only
