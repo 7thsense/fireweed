@@ -1,5 +1,15 @@
 # Campaign qualification and performance plan
 
+Partial-index key guard (`8a12e2de`), clean 64-store/two-worker single cycle:
+**14,287.40 recipients/sec**, 70.22 seconds, CPU 0.94561 ms/recipient, peak
+RSS 13.73 GiB, reporting p95 0.532 seconds. Compared with the preceding
+readable-index observation (13,418.17/sec, 0.97445 ms), throughput rose 6.48%
+and CPU cost fell 2.96%. This is a useful serial observation, not replicated
+sustained qualification. Host writes were 2.69849 GiB at 40.62 MiB/sec.
+Evidence uses `fireweed-campaign-partial-index-keys-s64-w2-one*`; its owned
+root was removed. Next is a diagnostic DWARF caller profile through two
+48-store cycles to attribute remaining costs before further code changes.
+
 The retained-VM projection diagnostic rejected direct point replacements:
 48,624/49,147 updates/sec versus 53,322/53,644 for the existing 56-row joined
 query. Parameters were built outside timing; both paths used the actual

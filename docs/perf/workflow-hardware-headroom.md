@@ -1,5 +1,13 @@
 # Workflow capacity versus hardware cost
 
+Skipping unused partial-index keys (`8a12e2de`) lowered observed first-cycle
+CPU cost to 0.94561 ms/recipient at 14,287.40 recipients/sec. Constant-cost
+demand at 10k/12.5k is 9.46/11.82 CPU-seconds/sec and 27.63/34.54 MiB/sec
+host writes (2.69849 GiB per million measured). This is a single-cycle
+observation; the sustained target remains unmet. The change removes SQL work
+for index predicates that are false or NULL; no drive setting or durability
+barrier changed.
+
 The publication-path changes remove two demonstrated software stalls: upload
 dispatch waiting for a manifest commit, and committed index reads waiting for
 a new manifest publication. Single-cycle rates remain in the same range
