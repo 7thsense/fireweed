@@ -65,3 +65,27 @@ Additional heavy write benchmarks were paused upon finding the errors.
 
 Raw evidence: `../helix/04-build/evidence/workflow-capacity/fireweed-local-kernel-storage-review.log.gz`
 and `../helix/04-build/evidence/workflow-capacity/fireweed-local-kernel-diagnosis.json`.
+
+## After booting Linux 7.2.6
+
+The running kernel and installed headers now read `7.2.6-arch2-1`, and NVIDIA
+DKMS 610.57.04 reports installed for that kernel. The new boot's kernel journal
+had no Btrfs error entries before or during the sequential retests.
+
+Using the exact archived scripts, the 8 GiB direct/NOCOW test measured
+**75.62 MiB/sec in 108.33 seconds**; the 8 GiB normal buffered test measured
+**51.44 MiB/sec in 159.25 seconds**, including 3.47 seconds of final fdatasync.
+Both verified the first/last blocks and removed their private files. These
+improve on the preceding 44.99/38.51 MiB/sec pair but still reproduce low
+sustained bandwidth. Kernel replacement and reboot changed multiple conditions,
+including drive temperature/cache state; this does not isolate a kernel-caused
+speedup. The absence of the prior errors does not resolve the remaining
+storage-performance diagnosis.
+
+Raw reports are `fireweed-kernel726-direct.json` and
+`fireweed-kernel726-buffered.json` in the workflow-capacity evidence directory.
+The existing CLI retains SHA256
+`be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030`.
+An unchanged 64-store, two-worker, eight-cycle stretch campaign was started
+under tag `kernel726-s64-w2-eight`; its outcome must be inspected before any
+qualification claim. No throughput gate or application code was changed.
