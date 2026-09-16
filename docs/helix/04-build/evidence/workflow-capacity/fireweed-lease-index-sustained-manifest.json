@@ -1,0 +1,112 @@
+{
+  "scope": "Complete serial qualification: both 10k campaigns and all five primitive floors pass; repeat misses 12.5k in cycles 4,5,7",
+  "measured_head": "1b8cb97cc75fc35d7367371d9b663da622c2d5ff",
+  "binary_sha256": "5fae9e11e803ab456411bbf3a1cb29f40fb52e47cbb689563d1fce6e2c6085c0",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-lease-index-sustained-campaign-1.json.gz",
+      "sha256": "2e2f0de97062ef1dfecb921cfd52ba779e3bfe8e0d24165b9365dbe8473240d8"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-campaign-2.json.gz",
+      "sha256": "d1f094980c00ba3fe6ee263c42c0b822e9df04aac2f43169e2bb5936e8a8549b"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-checkpoint-analysis-1.json.gz",
+      "sha256": "bc502f56462bd98052309fd606a14d03453dfd291b22ac2ed2c9c2af8899c4f3"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-checkpoint-analysis-2.json.gz",
+      "sha256": "8b569cdb479ddce272aa01e74549ed8af296e561f005d3727c4dfec4a368e705"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-primitives-1.json.gz",
+      "sha256": "f0ef1664cbd31af49c8968ad500cbda55de46ea96ec475da4782244c57e4a3f4"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-primitives-2.json.gz",
+      "sha256": "40290af689f15b7b6138e263689eb81cf6fa1eb3f6fe7a88857ec56046089866"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-qualification-summary.json.gz",
+      "sha256": "45d866689cf466db3845a5b9cd4a404acfe418b578e1731dd4c1e17a2ee795d6"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-run-lease-index-untraced-qualification.py.gz",
+      "sha256": "606b38513ef596c4f4664e19fd4390af28e53e2cc29c205a2fa18b46d1f61649"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-analyze-lease-index-qualification.py.gz",
+      "sha256": "06f18b40b87314072d866e3cad5bb70810dab969df741c002df6db00493c954e"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-summarize-direct-json-qualification.py.gz",
+      "sha256": "32d1165f1f108be1ca43e0b6ef8c42f9dd74f5bb05ffc42586624818eecf33e1"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-live-lease-index.py.gz",
+      "sha256": "ba61ce6bc621e0b3d6fa25b2416e2710fdc23305ac2676ebd73e90838d9f67a5"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-live-observations.jsonl.gz",
+      "sha256": "d067fd25da8db73f62a04395e4d69fb2a9d6ddb3b288a8ec1dfdb69a8a5f2fc8"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-workload-after-lease-index-provenance.json.gz",
+      "sha256": "d2e68f241f73b0073d363f710759a92bad66ba215d530f06642d9316a39d8efa"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-device-monitor-v3.py.gz",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-device-summary-v3.py.gz",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-runner.log.gz",
+      "sha256": "39dd599418aab6004f89520eb3816f0a6b2146fb4ed1ae8dc783ec2b54edaf14"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-wrapper.log.gz",
+      "sha256": "ed5826e87592ed94d53e56c3cee9801c55d01425a8364d8ac12155097e0b8abc"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-1-device.jsonl.gz",
+      "sha256": "b45bb03770ed1c3fe8a63abf522a748bb269661be0ed2b4508e9b495df7a2fec"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-2-device.jsonl.gz",
+      "sha256": "4f0acd3c9f79e9f01a30ace6e873f91ff3cd863705995f0f67dfbfafa3a8acff"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-3-device.jsonl.gz",
+      "sha256": "1c51fe1b574905037fab1eb1cd8779fb55c90ae4154574c76f11746d16a3dbb3"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-4-device.jsonl.gz",
+      "sha256": "a70e14412470df2392c28248ddbc1debc0352ccddaac9e4f9de9a55da65626a0"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-1-device-summary.json.gz",
+      "sha256": "a23eb8abb11520aaae7289d6b936c4241277d41501005eae9061babd6c470759"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-2-device-summary.json.gz",
+      "sha256": "d523b2a94ce99ba6c8a3471d0aadf7b5eecfeba9c0201c1a9e82f527255205ac"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-3-device-summary.json.gz",
+      "sha256": "f7b44e34911fdbd791144ea370c6bee711c24833008a71e153637a51f8153aa3"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phase-4-device-summary.json.gz",
+      "sha256": "daa2125fa2252b4fea7bfdc1381a5a3ecab9c9e4a6a30f2ca679f2ed9dc674c0"
+    },
+    {
+      "artifact": "fireweed-lease-index-sustained-fireweed-lease-index-untraced-qualification-phases.json.gz",
+      "sha256": "cd3ab6dc707a090a38699ae1dba2aec865335fc275b04c19ae340bcdf84b577c"
+    }
+  ]
+}

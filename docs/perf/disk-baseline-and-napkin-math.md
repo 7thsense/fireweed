@@ -1,5 +1,35 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Current sustained lease-index budget and remaining gap (2026-09-16)
+
+The two untraced 8M-recipient campaigns cost **0.880054 / 0.912916 CPU-ms per
+complete recipient**. At 12.5k recipients/sec, constant-cost CPU demand would be
+**11.001 / 11.411 CPU-seconds/sec**. Both campaigns meet every 10k gate; only the
+first meets every 12.5k gate. The repeat's slowest cycle is **11,260/sec**, requiring
+about 11.0% more throughput (88.804 seconds down to 80 for one million recipients).
+An overall 13,224/sec repeat does not establish the per-cycle fairness target.
+
+Sampled host writes are **30.342 / 31.073 GiB**: **4,072 / 4,171 bytes per
+recipient**, or **48.547 / 49.716 MiB/sec** at the stretch rate if costs held
+constant. These host-wide estimates omit short monitor startup/tail gaps and are
+not projection-only writes or independent hardware ceilings. The earlier
+sequential disk baselines remain unchanged; do not add these bytes to VFS totals.
+
+The repeat still has a 12.020-second observed window with **98.48% device busy**,
+48.98 MiB/sec host writes and 144.18 ms average write-request latency. At 863.81
+write IOPS, Little's-law arithmetic yields about 124.54 outstanding writes,
+consistent with 124.72 measured weighted all-I/O depth. Workload CPU occupancy
+falls to 4.46 cores in the same window. Average CPU and bandwidth budgets alone
+therefore do not predict the minimum cycle rate; storage-path queueing remains.
+These measurements do not separate filesystem, log-sync and device service costs.
+
+All five million-row primitive operations pass 10k/sec twice, with validated
+count/window/rate arithmetic. The 12.5k campaign target remains fixed and unmet
+across repeats. Complete evidence and calculations are in
+`fireweed-lease-index-sustained-manifest.json`; see the campaign plan for every
+cycle rate, validation scope and the preserved control executable.
+
+
 ## Lease-index CPU screen updates the conditional estimate (2026-09-16)
 
 Four serial one-million-recipient diagnostic runs yield mean CPU costs of
@@ -9,7 +39,7 @@ candidate**. At 12.5k recipients/sec, holding those costs constant would require
 reduce instructions, by 1.59% and 2.49%; average wall rate improves 2.70%.
 
 Requested projection WAL writes average 6,606.82 versus 6,575.40 bytes/recipient,
-only a 0.48% reduction. At 12.5k that corresponds to 78.76 versus 78.39 MiB/sec
+only a 0.48% reduction. At 12.5k that corresponds to 78.76 versus 78.38 MiB/sec
 of logical WAL writes, before other projection/log activity and filesystem
 compression/coalescing. These are VFS bytes, not host-device writes. The change
 therefore supports a modest CPU-budget improvement, not a claim that storage

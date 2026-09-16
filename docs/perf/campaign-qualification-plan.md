@@ -1,5 +1,63 @@
 # Campaign qualification and performance plan
 
+## Lease-index sustained results: base target passes, stretch remains open (2026-09-16)
+
+All four serial workload children exited zero on clean `1b8cb97c`, executable
+`5fae9e11e803ab456411bbf3a1cb29f40fb52e47cbb689563d1fce6e2c6085c0`, with empty
+diagnostics. Both eight-million-recipient campaigns pass every **10k** gate.
+First passes every **12.5k** gate; repeat fails only three cycle-rate checks.
+The shell exits one for those failures, after completing both primitive suites.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| First | 15,350.12 | 12,866.97 | 0.880054 | 19.072 |
+| Repeat | 13,223.67 | 11,260.08 | 0.912916 | 19.887 |
+
+First-run cycle minima are 17,689.14 / 17,716.54 / 16,286.12 / 15,333.98 /
+14,170.47 / 16,142.14 / 15,790.38 / 12,866.97. Repeat minima are 13,112.83 /
+15,868.76 / 15,965.28 / 15,359.66 / **12,406.34 / 11,260.08** / 12,949.05 /
+**12,271.17**. All 2,278 checks pass at 10k in each campaign; at 12.5k only
+repeat cycles four, five and seven fail. Correctness, full-row oracles, progress,
+due-claim latency, sampled WAL, main-file materialization/stability and RSS
+stability all pass. The worst cycle needs about 11.0% more throughput: its
+88.804-second wall must fall below 80 seconds. The goal is not complete.
+
+| Primitive | First rows/sec | Repeat rows/sec |
+| --- | ---: | ---: |
+| Insert | 45,703 | 45,433 |
+| Enrich by key | 45,006 | 42,497 |
+| Schedule by ID | 55,293 | 62,428 |
+| Claim and complete | 45,326 | 43,424 |
+| Purge | 61,420 | 58,029 |
+
+Both primitive reports pass the strengthened five-operation gate, including full
+million-row counts and reconciliation of each rate with its measured phase window.
+All reports share one source and binary; no benchmark/build overlap or host
+setting change occurred.
+
+The repeat's first main-file checkpoint occurs in cycle four on every store.
+Its next cycle is slowest: load/preparation/delivery/purge are 16.22 / 32.20 /
+26.21 / 7.72 seconds for the slowest campaign, within an 88.804-second total that
+also includes other work/barriers. These phase values are not independent device
+costs. A 12.020-second maximum-busy observed rolling window records 98.48% device
+busy, 48.98 MiB/sec host writes, 863.81 write IOPS, 144.18 ms mean write-request
+latency, 124.72 mean outstanding I/Os, and only 4.46 workload CPU-seconds/sec.
+This confirms remaining storage-path waits; it does not identify an SSD ceiling
+or isolate filesystem, durable-log synchronization and controller costs.
+
+Retain the lease-index change as the modest CPU improvement supported by the
+balanced screen and successful base qualification; it has not solved the late
+stalls. Preserve this executable as `/tmp/fireweed-workload-after-lease-index`
+for the next comparison. Further work should examine actual hot-row serialization
+and write volume, with legacy projection decoding and public/log formats preserved,
+rather than rerun the rejected checkpoint-policy tweak or change hardware settings.
+
+Complete reports, strengthened gate summaries, phase/device analysis, raw samples,
+exact scripts and preserved-binary provenance are archived with verified hashes
+in `fireweed-lease-index-sustained-manifest.json`. The fixed repeated 12.5k target,
+all-five primitive floors and every workload/resource gate remain unchanged.
+
+
 ## Lease-index screen improves CPU; sustained qualification follows (2026-09-16)
 
 The complete serial control/candidate/candidate/control screen uses the original
