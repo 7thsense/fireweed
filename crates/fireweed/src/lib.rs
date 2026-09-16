@@ -95,12 +95,12 @@ pub use fireweed_engine::{
     ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse,
     ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
     ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
-    LeaseGuard, LifecyclePatch, LiveItemView, RetainedItemView, OperationHandle, OperationId, OperatorAsyncAccept,
+    LeaseGuard, LifecyclePatch, LiveItemView, OperationHandle, OperationId, OperatorAsyncAccept,
     OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
     OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
-    QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetryCountMode, ScheduleUpdate,
-    SelectedMutation, SideRecord, SideRecordPage, SnapshotStore, TimestampComparison,
-    UpsertOutcome,
+    QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetainedItemView, RetryCountMode,
+    ScheduleUpdate, SelectedMutation, SideRecord, SideRecordPage, SnapshotStore,
+    TimestampComparison, UpsertOutcome,
 };
 pub use operator::OPERATOR_ARCHIVED_METADATA_KEY;
 
@@ -2315,12 +2315,6 @@ mod storage_config_matrix_tests {
         );
         assert!(!postgres.contains("S3Compatible"));
 
-        let sqlite = between(
-            source,
-            &["pub(crate) fn open_composed_", "sqlite("].concat(),
-            &["fn open_s3_composed_", "sqlite("].concat(),
-        );
-        assert!(!sqlite.contains("S3Compatible"));
     }
 }
 
@@ -2391,46 +2385,6 @@ mod storage_config_open_tests {
             drop(fw);
         }
 
-        // memory × sqlite (retired)
-        #[cfg(any())]
-        {
-            let proj = root.join("mem-sqlite-proj.db");
-            let cfg = base_cfg(
-                LogConfig::Memory,
-                ProjectionStoreConfig::Sqlite { path: proj },
-            );
-            let fw = open(cfg, Arc::clone(&clock)).expect("memory×sqlite");
-            opened.push(("memory", "sqlite"));
-            drop(fw);
-        }
-
-        // sqlite × memory
-        #[cfg(any())]
-        {
-            let log = root.join("sqlite-mem-log.db");
-            let cfg = base_cfg(
-                LogConfig::Sqlite { path: log },
-                ProjectionStoreConfig::Memory,
-            );
-            let fw = open(cfg, Arc::clone(&clock)).expect("sqlite×memory");
-            opened.push(("sqlite", "memory"));
-            drop(fw);
-        }
-
-        // sqlite × sqlite (distinct paths)
-        #[cfg(any())]
-        {
-            let log = root.join("sqlite-sqlite-log.db");
-            let proj = root.join("sqlite-sqlite-proj.db");
-            let cfg = base_cfg(
-                LogConfig::Sqlite { path: log },
-                ProjectionStoreConfig::Sqlite { path: proj },
-            );
-            let fw = open(cfg, Arc::clone(&clock)).expect("sqlite×sqlite");
-            opened.push(("sqlite", "sqlite"));
-            drop(fw);
-        }
-
         // filesystem × memory
         #[cfg(feature = "objectlog")]
         {
@@ -2457,21 +2411,6 @@ mod storage_config_open_tests {
             );
             let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×turso");
             opened.push(("filesystem", "turso"));
-            drop(fw);
-        }
-
-        // filesystem × sqlite (retired)
-        #[cfg(any())]
-        {
-            let fs_root = root.join("object-log-sqlite");
-            std::fs::create_dir_all(&fs_root).expect("object-log root");
-            let proj = root.join("fs-sqlite-proj.db");
-            let cfg = base_cfg(
-                LogConfig::Filesystem { root: fs_root },
-                ProjectionStoreConfig::Sqlite { path: proj },
-            );
-            let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×sqlite");
-            opened.push(("filesystem", "sqlite"));
             drop(fw);
         }
 
@@ -2577,28 +2516,6 @@ mod storage_config_open_tests {
                 assert!(err.is_err(), "unreachable S3 endpoint must not succeed");
                 eprintln!("storage_config_open: s3×memory dispatch exercised (no live S3)");
             }
-        }
-    }
-
-    #[test]
-    fn open_sqlite_wrapper_matches_storage_config_cell() {
-        #[cfg(any())]
-        {
-            let root = temp_dir("wrapper");
-            let path = root.join("log.db");
-            let path_s = path.to_str().unwrap();
-            let via_wrapper = open_sqlite(path_s, clock()).expect("open_sqlite");
-            drop(via_wrapper);
-            let via_config = open(
-                base_cfg(
-                    LogConfig::Sqlite { path: path.clone() },
-                    ProjectionStoreConfig::Memory,
-                ),
-                clock(),
-            )
-            .expect("open StorageConfig sqlite×memory");
-            drop(via_config);
-            let _ = std::fs::remove_dir_all(&root);
         }
     }
 }
@@ -3070,339 +2987,6 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
                 });
         }
     }
-}
-
-#[cfg(any())]
-type ObjectLogSqliteBackend = fireweed_objectlog::AsyncObjectLogSqliteBackend;
-
-#[cfg(any())]
-struct ObjectLogSqliteLifecycle {
-    backend: Arc<ObjectLogSqliteBackend>,
-    executor: blocking_backend::OwnedBlockingExecutor,
-    max_tail_commands: u64,
-}
-
-/// fireweed-6fcc28a8: the log store's durable high-water metadata is a lazily-persisted reopen
-/// hint (`advance_high_water` PUTs only on the first append or every 64th), so on a fresh
-/// process it can trail the position live traffic actually reached even though every command
-/// is durably committed. `fireweed-2be7894a` reconciled this for the delete+rebuild path, but
-/// every other recomposition path (plain reopen, worker-reassignment recovery, stale-checkpoint
-/// catch-up) still compared the projection's exact high-water against this stale hint and
-/// misreported "projection is ahead of the authoritative object log" or a hard mismatch. Walk
-/// the log tail forward from the (possibly stale) hint to the true position and persist it —
-/// mirrors the rebuild path's reconciliation, but scoped to just the missed tail when a hint is
-/// available (`from` is `Some`). Callers only reach this with `from: None` when the durable hint
-/// itself is absent, in which case the walk necessarily starts at genesis; on a mismatch this is a
-/// one-time, on-open cost bounded by the log itself, not a per-append cost.
-///
-/// Note for callers: this mutates durable log metadata (`set_high_water`) as a side effect —
-/// it is not a read-only check, even though both call sites below live inside functions named
-/// `validate_*`/`verify_*`.
-#[cfg(any())]
-async fn reconcile_objectlog_sqlite_high_water(
-    log: &fireweed_objectlog::ObjectLogEngineStore,
-    key: &QueueKey,
-    from: Option<fireweed_engine::CommandPosition>,
-) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
-    use fireweed_engine::AsyncLogStore;
-
-    let mut from = from;
-    let mut last = from.clone();
-    loop {
-        let page = AsyncLogStore::read_from(log, key.clone(), from.clone(), 1_024).await?;
-        if let Some((position, _)) = page.entries.last() {
-            last = Some(position.clone());
-        }
-        match page.next {
-            Some(next) => from = Some(next),
-            None => break,
-        }
-    }
-    if let Some(position) = last.clone() {
-        match AsyncLogStore::set_high_water(log, key.clone(), position).await {
-            Ok(()) | Err(EngineError::Invalid("high-water regression")) => {}
-            Err(other) => return Err(other),
-        }
-    }
-    Ok(last)
-}
-
-#[cfg(any())]
-fn objectlog_reconcile_high_water(
-    log: &fireweed_objectlog::ObjectLogEngineStore,
-    key: &QueueKey,
-    from: Option<fireweed_engine::CommandPosition>,
-) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
-    fireweed_objectlog::block_on_objectlog(reconcile_objectlog_sqlite_high_water(log, key, from))
-}
-
-#[cfg(any())]
-fn validate_objectlog_sqlite_catalog(
-    log: &fireweed_objectlog::ObjectLogEngineStore,
-    projection: &fireweed_sqlite::SqliteProjectionStore,
-) -> EngineResult<Vec<QueueDefinition>> {
-    use fireweed_engine::ProjectionStore;
-
-    let definitions = objectlog_recover_definitions(log)?;
-    let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
-        .iter()
-        .cloned()
-        .map(|definition| {
-            (
-                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
-                definition,
-            )
-        })
-        .collect();
-    for projected in ProjectionStore::recover_definitions(projection)? {
-        let key = QueueKey::new(projected.tenant_id.clone(), projected.queue_id.clone());
-        let Some(authoritative) = log_by_key.get(&key) else {
-            return Err(EngineError::Storage(
-                "projection contains a queue absent from the authoritative object log".into(),
-            ));
-        };
-        if authoritative != &projected {
-            return Err(EngineError::Storage(
-                "projection queue definition conflicts with the authoritative object log".into(),
-            ));
-        }
-        let projected_high_water = projection.recovery_high_water(&key)?;
-        let authoritative_high_water = objectlog_high_water(log, &key)?;
-        match (projected_high_water, authoritative_high_water) {
-            (Some(_), None) => {
-                return Err(EngineError::Storage(
-                    "projection is non-empty but the authoritative object log is empty".into(),
-                ));
-            }
-            (Some(projected), Some(authoritative))
-                if projected.backend_epoch > authoritative.backend_epoch
-                    || (projected.backend_epoch == authoritative.backend_epoch
-                        && projected.sequence > authoritative.sequence) =>
-            {
-                let reconciled = objectlog_reconcile_high_water(log, &key, Some(authoritative))?;
-                let still_ahead = match &reconciled {
-                    Some(reconciled) => {
-                        projected.backend_epoch > reconciled.backend_epoch
-                            || (projected.backend_epoch == reconciled.backend_epoch
-                                && projected.sequence > reconciled.sequence)
-                    }
-                    None => true,
-                };
-                if still_ahead {
-                    return Err(EngineError::Storage(
-                        "projection is ahead of the authoritative object log".into(),
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(definitions)
-}
-
-#[cfg(any())]
-async fn verify_objectlog_sqlite_axes(
-    backend: &ObjectLogSqliteBackend,
-) -> EngineResult<ProjectionVerificationState> {
-    use fireweed_engine::AsyncLogStore;
-
-    let log = backend.log_store();
-    let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
-    if backend.uses_async_projection() {
-        for definition in &definitions {
-            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            backend.wait_for_async_projection_catch_up(&shard).await?;
-        }
-    }
-    let authoritative: HashMap<QueueKey, QueueDefinition> = definitions
-        .iter()
-        .cloned()
-        .map(|definition| {
-            (
-                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
-                definition,
-            )
-        })
-        .collect();
-    let projected: HashMap<QueueKey, QueueDefinition> = backend
-        .projection_definitions()
-        .await?
-        .into_iter()
-        .map(|definition| {
-            (
-                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
-                definition,
-            )
-        })
-        .collect();
-    if authoritative != projected {
-        return Err(EngineError::Storage(
-            "SQLite queue catalog does not exactly match the authoritative object log".into(),
-        ));
-    }
-
-    let mut projection_sequence = 0;
-    let mut authoritative_sequence = 0;
-    for definition in definitions {
-        let key = QueueKey::new(definition.tenant_id, definition.queue_id);
-        let projected_position = backend.projection_high_water(&key).await?;
-        let mut authoritative_position =
-            AsyncLogStore::high_water(log.as_ref(), key.clone()).await?;
-        if projected_position != authoritative_position {
-            // The log's high-water bookkeeping is a throttled reopen hint (fireweed-2be7894a)
-            // that can trail the real tail across a process restart or recovery path. Walk the
-            // tail forward before concluding the projection has actually drifted.
-            authoritative_position =
-                reconcile_objectlog_sqlite_high_water(log.as_ref(), &key, authoritative_position)
-                    .await?;
-        }
-        if projected_position != authoritative_position {
-            return Err(EngineError::Storage(format!(
-                "SQLite projection for {}/{} is not at the authoritative position: projection {:?}, log {:?}",
-                key.tenant_id, key.queue_id, projected_position, authoritative_position
-            )));
-        }
-        projection_sequence = projection_sequence.max(
-            projected_position
-                .as_ref()
-                .map_or(0, |position| position.sequence),
-        );
-        authoritative_sequence = authoritative_sequence.max(
-            authoritative_position
-                .as_ref()
-                .map_or(0, |position| position.sequence),
-        );
-    }
-    Ok(ProjectionVerificationState {
-        compatible: true,
-        projection_sequence,
-        authoritative_sequence,
-    })
-}
-
-#[cfg(any())]
-impl ObjectLogSqliteLifecycle {
-    async fn verify_backend(
-        backend: &ObjectLogSqliteBackend,
-    ) -> EngineResult<ProjectionVerificationState> {
-        verify_objectlog_sqlite_axes(backend).await
-    }
-
-    async fn rebuild_backend(
-        backend: &ObjectLogSqliteBackend,
-        max_tail_commands: u64,
-    ) -> EngineResult<ProjectionRebuildState> {
-        use fireweed_engine::AsyncLogStore;
-
-        let log = backend.log_store();
-        let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
-        backend.delete_projection().await?;
-        let mut replayed = 0_u64;
-        for definition in &definitions {
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            backend.ensure_projection_shard(definition.clone()).await?;
-            let mut from = None;
-            let mut last_position = None;
-            loop {
-                let page = AsyncLogStore::read_from(log.as_ref(), key.clone(), from.clone(), 1_024)
-                    .await?;
-                replayed = replayed.saturating_add(page.entries.len() as u64);
-                if replayed > max_tail_commands {
-                    return Err(EngineError::Storage(format!(
-                        "projection rebuild exceeds configured tail bound {}",
-                        max_tail_commands
-                    )));
-                }
-                if !page.entries.is_empty() {
-                    let positions: Vec<_> = page
-                        .entries
-                        .iter()
-                        .map(|(position, _)| position.clone())
-                        .collect();
-                    let commands: Vec<_> = page
-                        .entries
-                        .iter()
-                        .map(|(_, command)| command.clone())
-                        .collect();
-                    last_position = positions.last().cloned().or(last_position);
-                    backend
-                        .apply_projection_recovery(positions, commands)
-                        .await?;
-                }
-                match page.next {
-                    Some(next) => from = Some(next),
-                    None => break,
-                }
-            }
-            // fireweed-2be7894a: the log store's durable high-water metadata is a lazily-persisted
-            // reopen hint (writes are throttled to every 64th append), so it can trail the position
-            // this rebuild just proved by reading the actual log tail. Reconcile it now — otherwise a
-            // later reopen's catalog validation compares the exactly-rebuilt projection against a
-            // stale hint and misreports "projection is ahead of the authoritative object log".
-            // `high_water()` can't tell us whether the durable copy needs it: its in-process cache is
-            // updated on every append even though the durable PUT is throttled. Always (re)write it;
-            // a concurrent writer that has since moved past `last_position` just turns this into a
-            // harmless no-op rejection.
-            if let Some(last_position) = last_position {
-                match AsyncLogStore::set_high_water(log.as_ref(), key.clone(), last_position).await
-                {
-                    Ok(()) | Err(EngineError::Invalid("high-water regression")) => {}
-                    Err(other) => return Err(other),
-                }
-            }
-        }
-        let verification = verify_objectlog_sqlite_axes(backend).await?;
-        backend.finish_projection_rebuild(&definitions).await?;
-        Ok(ProjectionRebuildState {
-            snapshot_used: false,
-            tail_commands_replayed: replayed,
-            projection_sequence: verification.projection_sequence,
-        })
-    }
-}
-
-#[cfg(any())]
-impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
-    fn capabilities(&self) -> ProjectionLifecycleCapabilities {
-        ProjectionLifecycleCapabilities {
-            verify_projection: true,
-            delete_projection: true,
-            rebuild_projection: true,
-        }
-    }
-
-    fn buffered_group_commit_commands(&self) -> Option<usize> {
-        // LogEngine owns co-buffering; no dual-stack group-commit buffer is exposed.
-        Some(0)
-    }
-
-    fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
-        let backend = Arc::clone(&self.backend);
-        Box::pin(self.executor.run(move || {
-            fireweed_objectlog::block_on_objectlog(Self::verify_backend(backend.as_ref()))
-        }))
-    }
-
-    fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
-        let backend = Arc::clone(&self.backend);
-        Box::pin(
-            self.executor
-                .run(move || fireweed_objectlog::block_on_objectlog(backend.delete_projection())),
-        )
-    }
-
-    fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
-        let backend = Arc::clone(&self.backend);
-        let max_tail_commands = self.max_tail_commands;
-        Box::pin(self.executor.run(move || {
-            fireweed_objectlog::block_on_objectlog(Self::rebuild_backend(
-                backend.as_ref(),
-                max_tail_commands,
-            ))
-        }))
-    }
-
-    fn shutdown(&mut self) {}
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
@@ -5161,7 +4745,10 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// membership. Use a settled population for a complete export. Unsupported backends
     /// return `Unavailable`; existing live-only reads keep their semantics.
     pub async fn retained_items(
-        &self, queue: &QueueKey, after: Option<ItemId>, limit: usize,
+        &self,
+        queue: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> EngineResult<Vec<RetainedItemView>> {
         if !(1..=1000).contains(&limit) {
             return Err(EngineError::Invalid("retained page size must be 1..1000"));
@@ -6569,8 +6156,7 @@ pub fn open_objectlog(
 /// facade. The projection is verified against the log before serving, group-commit is flushed by an owned
 /// background thread, and dropping the last lifecycle handle shuts that thread down.
 ///
-/// This constructor requires both the `objectlog` and `postgres` features. The SQLite projection variant
-/// uses its dedicated `open_composed_sqlite` constructor.
+/// This constructor requires both the `objectlog` and `postgres` features.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 #[doc(hidden)]
 pub(crate) fn open_composed_postgres(
@@ -6775,157 +6361,6 @@ fn finish_objectlog_postgres(
         runtime: RuntimeCore::new(backend, clock),
         lifecycle,
     })
-}
-
-/// Open a filesystem authoritative object log with a disposable SQLite projection behind the public
-/// Fireweed facade. [`CommitResponseBarrier::Strict`] makes SQLite durable before success is visible;
-/// [`CommitResponseBarrier::AsyncProjection`] acknowledges after the manifest and hot projection, with
-/// the bounded owned SQLite actor applying selected-projection checkpoints in order.
-///
-/// The SQLite file is a disposable cache: the returned lifecycle handle can verify it, delete it in place,
-/// and rebuild it exactly from authoritative object-log history without changing the live hot projection.
-#[cfg(any())]
-#[doc(hidden)]
-pub(crate) fn open_composed_sqlite(
-    config: ComposedStorageConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    config.validate()?;
-    let ObjectLogConfig::Local { root } = &config.object_log else {
-        return Err(EngineError::Invalid(
-            "filesystem SQLite helper requires a local provider",
-        ));
-    };
-    let projection = open_filesystem_sqlite_projection(&config)?;
-    let log = open_composed_object_log_engine(root, &config.namespace, config.segments)?;
-    finish_composed_sqlite(config, clock, log, projection)
-}
-
-#[cfg(any())]
-fn open_s3_composed_sqlite(
-    config: ComposedStorageConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    config.validate()?;
-    let provider = s3_provider_from_composed(&config)?;
-    let projection = open_s3_sqlite_projection(&config)?;
-    let log = open_s3_composed_object_log_engine(&provider, &config.namespace, config.segments)?;
-    finish_composed_sqlite(config, clock, log, projection)
-}
-
-#[cfg(any())]
-fn open_filesystem_sqlite_projection(
-    config: &ComposedStorageConfig,
-) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
-    open_configured_sqlite_projection(config)
-}
-
-#[cfg(any())]
-fn open_s3_sqlite_projection(
-    config: &ComposedStorageConfig,
-) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
-    open_configured_sqlite_projection(config)
-}
-
-#[cfg(any())]
-fn open_configured_sqlite_projection(
-    config: &ComposedStorageConfig,
-) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
-    let projection_path = match &config.projection {
-        ComposedProjectionConfig::Sqlite { path } => path,
-        ComposedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
-    };
-    let projection_path = projection_path.to_str().ok_or(EngineError::Invalid(
-        "SQLite projection path must be valid UTF-8",
-    ))?;
-    if let Some(parent) = std::path::Path::new(projection_path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|error| EngineError::Storage(error.to_string()))?;
-    }
-    fireweed_sqlite::SqliteProjectionStore::open(projection_path)
-}
-
-#[cfg(any())]
-fn finish_composed_sqlite(
-    config: ComposedStorageConfig,
-    clock: Arc<dyn Clock>,
-    log: fireweed_objectlog::ObjectLogEngineStore,
-    projection: fireweed_sqlite::SqliteProjectionStore,
-) -> EngineResult<Fireweed> {
-    if let Err(error) = validate_objectlog_sqlite_catalog(&log, &projection) {
-        match config.recovery.incompatible_projection {
-            ProjectionRecoveryAction::FailClosed => return Err(error),
-            ProjectionRecoveryAction::RebuildProjection => projection.reset_projection()?,
-        }
-    }
-    let deferred_flush_chunk = config
-        .sqlite_projection_deferred_flush_chunk
-        .unwrap_or(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK);
-    let backend = match config.response_barrier {
-        CommitResponseBarrier::Strict => {
-            if config.sqlite_projection_deferred_flush_chunk.is_some() {
-                fireweed_objectlog::block_on_objectlog(
-                    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection_with_deferred_flush_chunk(
-                        log,
-                        projection,
-                        0,
-                        deferred_flush_chunk,
-                    ),
-                )?
-            } else {
-                fireweed_objectlog::block_on_objectlog(
-                    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
-                        log, projection, 0,
-                    ),
-                )?
-            }
-        }
-        CommitResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
-            fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection_with_async_projection(
-                log,
-                projection,
-                0,
-                config
-                    .async_projection
-                    .expect("validated async projection spec"),
-                deferred_flush_chunk,
-            ),
-        )?,
-    };
-    let backend = Arc::new(backend);
-    let runtime_backend = Arc::new(blocking_backend::BlockingLibBackend::new(Arc::clone(
-        &backend,
-    ))?);
-    let lifecycle_executor = blocking_backend::shared_executor()?;
-    let lifecycle = ProjectionLifecycleHandle {
-        inner: Arc::new(ProjectionLifecycleHandleInner {
-            _config: config.clone(),
-            lifecycle: Box::new(ObjectLogSqliteLifecycle {
-                backend: Arc::clone(&backend),
-                executor: lifecycle_executor,
-                max_tail_commands: config.recovery.max_tail_commands,
-            }),
-        }),
-    };
-    Ok(ComposedRuntime {
-        runtime: RuntimeCore::new(runtime_backend, clock),
-        lifecycle,
-    }
-    .into_fireweed())
-}
-
-/// Open an authoritative object log with a disposable SQLite projection.
-#[cfg(any())]
-pub fn open_objectlog_sqlite(
-    config: ObjectLogRuntimeConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    let config = config.into_storage_config();
-    match &config.object_log {
-        ObjectLogConfig::Local { .. } => open_composed_sqlite(config, clock),
-        ObjectLogConfig::S3Compatible { .. } => open_s3_composed_sqlite(config, clock),
-    }
 }
 
 /// Open a **sole-owner** PostgreSQL-backed Fireweed handle (log-replay class) at `url`. Requires the `postgres`
@@ -7567,14 +7002,26 @@ mod tests {
         Ok(())
     }
 
-    /// Filesystem object-log × sqlite Strict: no process-wide BlockingLibBackend on open;
-    /// claim+commit on current-thread runtime (fireweed-8a023735).
-    #[cfg(any())]
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
     #[tokio::test(flavor = "current_thread")]
-    async fn public_open_objectlog_filesystem_sqlite_claim_and_commit_on_current_thread()
+    async fn public_open_objectlog_filesystem_turso_claim_and_commit_on_current_thread()
     -> EngineResult<()> {
+        assert_objectlog_turso_current_thread(false).await
+    }
+
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_async_objectlog_filesystem_turso_claim_and_commit_on_current_thread()
+    -> EngineResult<()> {
+        assert_objectlog_turso_current_thread(true).await
+    }
+
+    /// Filesystem object-log × Turso Strict: no process-wide BlockingLibBackend on open;
+    /// claim+commit on current-thread runtime (fireweed-8a023735).
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
+    async fn assert_objectlog_turso_current_thread(async_open: bool) -> EngineResult<()> {
         let root = std::env::temp_dir().join(format!(
-            "fireweed-ol-sqlite-{}-{}",
+            "fireweed-ol-turso-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -7586,33 +7033,36 @@ mod tests {
         let proj = root.join("projection.db");
 
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open(
-            StorageConfig {
-                log: LogConfig::Filesystem {
-                    root: root.join("log"),
-                },
-                projection: ProjectionStoreConfig::Sqlite { path: proj },
-                control_plane: None,
-                authority: None,
-                response_barrier: ResponseBarrier::Strict,
-                async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
-                segments: SegmentConfig {
-                    target_bytes: 1024 * 1024,
-                    max_latency_ms: 5,
-                },
-                namespace: "default".to_owned(),
-                recovery: RecoveryPolicy::default(),
+        let config = StorageConfig {
+            log: LogConfig::Filesystem {
+                root: root.join("log"),
             },
-            clock,
-        )?;
+            projection: ProjectionStoreConfig::Turso { path: proj },
+            control_plane: None,
+            authority: None,
+            response_barrier: ResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+            segments: SegmentConfig {
+                target_bytes: 1024 * 1024,
+                max_latency_ms: 5,
+            },
+            namespace: "default".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        };
+        let fireweed = if async_open {
+            open_async(config, clock).await?
+        } else {
+            open(config, clock)?
+        };
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
 
         fireweed.create_queue(definition).await?;
-        fireweed.push(&queue, NewItem::default()).await?;
+        let item_id = fireweed.push(&queue, NewItem::default()).await?;
         let claimed = fireweed.claim(&queue, 1, 30_000).await?;
         assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].item_id, item_id);
 
         let outcomes = fireweed
             .commit(
@@ -7642,24 +7092,26 @@ mod tests {
             [EntryOutcome::Committed { .. }]
         ));
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+        assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
 
         drop(fireweed);
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 
-    /// fireweed-2ad3a030 / snorri: object-log × sqlite Strict claim_by_query → commit must
-    /// not reject the just-issued ClaimRef as a stale lease (async projection path).
-    #[cfg(any())]
+    /// Snorri repeats create_queue between claim and commit. Re-ensuring the queue must
+    /// preserve the issued lease, including on a frozen current-thread clock.
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
     #[tokio::test(flavor = "current_thread")]
-    async fn public_open_objectlog_sqlite_claim_by_query_then_commit() -> EngineResult<()> {
+    async fn public_open_objectlog_turso_repeated_create_preserves_claim_for_commit()
+    -> EngineResult<()> {
         use fireweed_core::{
             ClaimByQueryRequest, FilterOp, OrderField, QueryFilter, SortDirection, TypedValue,
             WorkerId,
         };
 
         let root = std::env::temp_dir().join(format!(
-            "fireweed-ol-sqlite-cbq-{}-{}",
+            "fireweed-ol-turso-cbq-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -7677,7 +7129,7 @@ mod tests {
                 log: LogConfig::Filesystem {
                     root: root.join("log"),
                 },
-                projection: ProjectionStoreConfig::Sqlite { path: proj },
+                projection: ProjectionStoreConfig::Turso { path: proj },
                 control_plane: None,
                 authority: None,
                 response_barrier: ResponseBarrier::Strict,
@@ -7704,7 +7156,7 @@ mod tests {
                 },
             )
             .await?;
-        let claimed = fireweed
+        let query_result = fireweed
             .claim_by_query(
                 &queue,
                 ClaimByQueryRequest {
@@ -7724,11 +7176,16 @@ mod tests {
                     request_id: Some(RequestId::new("rid-cbq-commit").unwrap()),
                 },
             )
-            .await?;
-        assert_eq!(claimed.items.len(), 1, "claim_by_query must lease the row");
-        let item = &claimed.items[0];
+            .await;
+        // Native Turso does not expose declared-index query claims yet. Do not
+        // pretend this API was ported by silently replacing its assertion.
+        assert!(matches!(query_result, Err(EngineError::Unavailable)));
+        assert_eq!(fireweed.metrics(&queue).await?.pending, 1);
+        let claimed = fireweed.claim(&queue, 1, 60_000).await?;
+        assert_eq!(claimed.len(), 1, "priority claim must lease the row");
+        let item = &claimed[0];
         // Snorri calls create_queue again immediately before commit; selected projection must not rehydrate
-        // from SQLite and drop the process-local lease cleartext.
+        // from the projection and drop the process-local lease cleartext.
         fireweed.create_queue(query_definition()).await?;
         let outcomes = fireweed
             .commit(
@@ -7755,7 +7212,7 @@ mod tests {
             .await?;
         assert!(
             matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]),
-            "claim_by_query ClaimRef must commit under Strict selected projection, got {outcomes:?}"
+            "ClaimRef must survive repeated create_queue under Strict selected projection, got {outcomes:?}"
         );
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
 
@@ -7866,220 +7323,6 @@ mod tests {
         assert_eq!(reopened.metrics(&queue).await?.pending, 1);
         drop(reopened);
         let _ = std::fs::remove_dir_all(&root);
-        Ok(())
-    }
-
-    /// Public sqlite×memory open drives AsyncLogReplay without process-wide
-    /// BlockingLibBackend. Rusqlite is adapter-local offload only (fireweed-db4405b6).
-    #[cfg(any())]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_sqlite_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let log_path = std::env::temp_dir().join(format!(
-            "fireweed-sqlite-mem-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&log_path);
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open(
-            StorageConfig {
-                log: LogConfig::Sqlite {
-                    path: log_path.clone(),
-                },
-                projection: ProjectionStoreConfig::Memory,
-                ..StorageConfig::memory()
-            },
-            Arc::clone(&clock),
-        )?;
-        let definition = query_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-
-        fireweed.create_queue(definition).await?;
-        let item_id = fireweed
-            .push(
-                &queue,
-                NewItem {
-                    priority: Some(PriorityValue::Int64(1)),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].item_id, item_id);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(
-            matches!(outcomes[0], EntryOutcome::Committed { .. }),
-            "expected Committed, got {:?}",
-            outcomes[0]
-        );
-        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
-        assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
-        let _ = std::fs::remove_file(&log_path);
-        Ok(())
-    }
-
-    /// Public sqlite×sqlite open without process-wide BlockingLibBackend; both axes
-    /// offload rusqlite adapter-locally (fireweed-db4405b6).
-    #[cfg(any())]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_sqlite_sqlite_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let stamp = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let log_path = std::env::temp_dir().join(format!("fireweed-sqlite-ss-log-{stamp}.sqlite"));
-        let proj_path =
-            std::env::temp_dir().join(format!("fireweed-sqlite-ss-proj-{stamp}.sqlite"));
-        let _ = std::fs::remove_file(&log_path);
-        let _ = std::fs::remove_file(&proj_path);
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open(
-            StorageConfig {
-                log: LogConfig::Sqlite {
-                    path: log_path.clone(),
-                },
-                projection: ProjectionStoreConfig::Sqlite {
-                    path: proj_path.clone(),
-                },
-                ..StorageConfig::memory()
-            },
-            Arc::clone(&clock),
-        )?;
-        let definition = query_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-
-        fireweed.create_queue(definition).await?;
-        fireweed.push(&queue, NewItem::default()).await?;
-        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
-        assert_eq!(claimed.len(), 1);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [EntryOutcome::Committed { .. }]
-        ));
-        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
-        let _ = std::fs::remove_file(&log_path);
-        let _ = std::fs::remove_file(&proj_path);
-        Ok(())
-    }
-
-    /// open_async sqlite×memory stays current-thread safe (no block_in_place / BLB).
-    #[cfg(any())]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_async_sqlite_memory_claim_and_commit_on_current_thread() -> EngineResult<()>
-    {
-        let log_path = std::env::temp_dir().join(format!(
-            "fireweed-sqlite-async-mem-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&log_path);
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open_async(
-            StorageConfig {
-                log: LogConfig::Sqlite {
-                    path: log_path.clone(),
-                },
-                projection: ProjectionStoreConfig::Memory,
-                ..StorageConfig::memory()
-            },
-            clock,
-        )
-        .await?;
-        let definition = query_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-
-        fireweed.create_queue(definition).await?;
-        fireweed.push(&queue, NewItem::default()).await?;
-        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
-        assert_eq!(claimed.len(), 1);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [EntryOutcome::Committed { .. }]
-        ));
-        let _ = std::fs::remove_file(&log_path);
         Ok(())
     }
 

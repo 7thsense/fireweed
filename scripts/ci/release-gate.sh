@@ -3,7 +3,7 @@
 #
 # Crate map after the Phase-6 hexagonal migration (the ONLY crates this gate
 # references): fireweed-core / fireweed-engine / fireweed-projection /
-# fireweed-conformance / fireweed-memory / fireweed-sqlite / fireweed-postgres /
+# fireweed-conformance / fireweed-memory / fireweed-turso / fireweed-postgres /
 # fireweed-objectlog / fireweed-resp / fireweed / fireweed-server / fireweed-release /
 # fireweed-bench. The deleted pre-Fireweed service, storage, and Kafka crates
 # crates are NOT referenced anywhere below.
@@ -172,8 +172,12 @@ bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/fireweed-core-branch.lcov" \
     --crate fireweed-core --min-lines 90 --min-branches 85
 ${CARGO} llvm-cov clean --workspace
-for package in fireweed-engine fireweed fireweed-memory fireweed-sqlite; do
-    CARGO_BUILD_JOBS=1 ${CARGO} llvm-cov --no-report --package "${package}"
+for package in fireweed-engine fireweed fireweed-memory fireweed-turso; do
+    coverage_features=()
+    if [[ "${package}" == fireweed-turso ]]; then
+        coverage_features=(--features local)
+    fi
+    CARGO_BUILD_JOBS=1 ${CARGO} llvm-cov --no-report --package "${package}" "${coverage_features[@]}"
 done
 ${CARGO} llvm-cov report --lcov \
     --output-path "${REPO_ROOT}/target/coverage/fireweed-engine.lcov"

@@ -1,5 +1,48 @@
 # Campaign qualification and performance plan
 
+## Retire disabled SQLite facade fixtures (2026-09-16)
+
+The facade no longer retains `cfg(any())` SQLite tests or its unreachable
+SQLite composition/lifecycle implementation. Native Turso tests run against a
+filesystem object log through the public API on a current-thread Tokio runtime.
+
+| Retired coverage | Disposition |
+| --- | --- |
+| Filesystem/SQLite claim then commit | Ported to filesystem/Turso; checks original ID, completion and zero remaining leases. |
+| SQLite-log/memory synchronous and asynchronous constructor lifecycle tests | Removed as duplicates of the active filesystem/memory constructor tests. |
+| SQLite/SQLite constructor lifecycle | Consolidated into Turso lifecycle coverage; both public `open` and `open_async` now run the same oracle. |
+| Snorri frozen-clock claim, repeated queue creation, then commit | Ported using Turso priority claiming; verifies that re-ensuring the queue preserves the lease for commit. |
+| Disabled SQLite matrix cells, empty wrapper test and constructor source assertion | Removed; active memory/Turso/filesystem matrix and retired-configuration rejection tests remain. |
+
+**Interface limitation discovered during the port:** a literal port of the old
+`claim_by_query` test returned `EngineError::Unavailable`. The native Turso
+composition implements `HotProjectionQueryPort` with default capability flags
+and does not expose declared-index query claims. The port explicitly checks that
+rejection and that the row remains pending before exercising the supported
+priority-claim lifecycle. This is not evidence that query claims work on Turso;
+that interface work remains separate from the representative campaign benchmark.
+
+The release coverage loop now names `fireweed-turso` with `--features local`
+instead of the deleted `fireweed-sqlite` crate. Shell syntax validation passes;
+the complete release/coverage pipeline was not run for this change.
+
+Validation, run serially:
+
+```sh
+CARGO_BUILD_JOBS=8 cargo test --locked --release -p fireweed --lib -- --test-threads=1
+bash -n scripts/ci/release-gate.sh
+```
+
+**154 passed, zero failed, one pre-existing ignored test** (the direct object-log
+product's unavailable commit-transition port). All three new native Turso tests
+pass. The complete final build/test log is archived as
+`fireweed-turso-facade-test-port-20260916.log.gz`; SHA-256 of decompressed bytes:
+`6795b8af2b311ceef771092a56301241b71b9f9e13aec7ccd3b698f6b1f8b99a`.
+
+This change retires facade fixtures and restores executable coverage; it does
+not claim removal of every historical SQLite reference elsewhere in the repo.
+No capacity measurement or throughput target changes with this test cleanup.
+
 ## Correction: optimized the inactive WAL backend; remove that fast path (2026-09-16)
 
 The narrow-frame experiment targeted the wrong backend. Fireweed's
