@@ -1,5 +1,41 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Checkpoint scheduling did not qualify; updated resource demand (2026-09-16)
+
+Two complete untraced eight-cycle campaigns with staggered checkpoint windows
+cost **0.904802 / 0.966630 CPU-ms per complete recipient**. At 10k recipients/sec,
+constant-cost demand is **9.048 / 9.666 CPU-seconds/sec**; at 12.5k it is
+**11.310 / 12.083 CPU-seconds/sec**. Average throughput is 14,151 / 11,345, but
+worst-cycle throughput is only **9,426 / 8,774**, so neither repeated milestone
+qualifies. All non-rate campaign checks pass. Restore the previous checkpoint
+policy; spreading the first main-file writes did not remove later stalls.
+
+Sampled host writes are 36.689 / 36.440 GiB for eight million recipients:
+**4,924 / 4,891 bytes per recipient**. Holding that cost constant would require
+**46.961 / 46.643 MiB/sec at 10k**, or **58.702 / 58.304 MiB/sec at 12.5k**.
+These are host-wide write-demand estimates with monitor startup/tail omitted,
+not projection-only bytes, application write sizes, or a new hardware ceiling.
+They must not be added to VFS logical-write measurements. Existing sequential
+disk baselines remain unchanged.
+
+The busiest rolling windows show 97.05% / 99.99% device busy, 52.11 / 18.61
+MiB/sec host writes, 967.47 / 536.56 write IOPS and 166.59 / 310.07 ms mean
+write-request latency. IOPS times latency gives about 161.16 / 166.38 outstanding
+writes, close to the measured all-I/O weighted queue depths 161.53 / 167.55.
+Workload CPU occupancy in those intervals is only 5.06 / 4.27 cores. Queueing and
+workload shape therefore matter; average CPU demand and a sequential bandwidth
+number alone do not predict the minimum cycle rate. These counters do not
+separate controller, filesystem and durable-log synchronization costs.
+
+All five million-row public primitive operations exceed 10k in both repeats.
+The strengthened acceptance gate now verifies every operation and reconciles
+its rate with full row count and measured phase duration. Its regression tests
+and re-evaluation of the saved evidence pass. See the campaign plan and
+`fireweed-staggered-checkpoints-repaired-results-manifest.json` for exact inputs,
+commands, hashes and failures. No workload, durability or fairness requirement
+was relaxed, and no SSD setting changed.
+
+
 ## Sustained checkpoint burst, not a sequential bandwidth ceiling (2026-09-16)
 
 The rejected JSON-decoder candidate completed one untraced 8M-recipient campaign

@@ -8,14 +8,32 @@ class QualificationTests(unittest.TestCase):
         return {"dirty": False, "head": "a" * 40, "binary_sha256": "b" * 64, "exit_code": 0, "filesystem": {"filesystems": [{"fstype": "btrfs"}]},
                 "result": {"schema": "primitive-capacity/v1", "cell": "filesystem--turso",
                            "items": 1_000_000, "physical_shards": 8, "aggregate_phases": [
-                               {"phase": phase, "records_per_s": 12_000} for phase in
-                               ("insert", "enrich_by_key", "schedule_by_id")]}}
+                               {"phase": phase, "records": 1_000_000, "wall_window_s": 1_000_000 / 12_000, "records_per_s": 12_000} for phase in
+                               ("insert", "enrich_by_key", "schedule_by_id", "claim_and_complete", "purge")]}}
 
     def test_successful_component_gate_and_missing_phase(self):
         report = self.baseline()
         self.assertTrue(qualify(report)["passed"])
         report["result"]["aggregate_phases"].pop()
         self.assertFalse(qualify(report)["passed"])
+
+    def test_every_component_requires_complete_work_and_consistent_rate(self):
+        for index in range(5):
+            missing = self.baseline()
+            missing["result"]["aggregate_phases"].pop(index)
+            self.assertFalse(qualify(missing)["passed"], (index, "missing"))
+            for field, value in [("records", 999_999), ("records", 0),
+                                 ("wall_window_s", 0), ("wall_window_s", float("nan")),
+                                 ("wall_window_s", float("inf")), ("wall_window_s", 200),
+                                 ("records_per_s", 9999), ("records_per_s", 24_000),
+                                 ("records_per_s", float("inf")), ("records_per_s", float("nan"))]:
+                report = self.baseline()
+                report["result"]["aggregate_phases"][index][field] = value
+                self.assertFalse(qualify(report)["passed"], (index, field, value))
+            at_floor = self.baseline()
+            at_floor["result"]["aggregate_phases"][index].update(
+                wall_window_s=100, records_per_s=10_000)
+            self.assertTrue(qualify(at_floor)["passed"], (index, "exact floor"))
 
     def test_missing_or_malformed_identity_fails_without_crashing(self):
         for field, check in (("head", "source_identity"), ("binary_sha256", "binary_identity")):

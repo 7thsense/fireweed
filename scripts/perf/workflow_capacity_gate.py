@@ -39,10 +39,20 @@ def qualify(report, campaign_target=10_000):
                   and initial >= result.get("items", 0) * (size - 128)
                   and replacement > initial)
         check("million_resident_rows", result.get("items", 0) >= 1_000_000, result.get("items"), 1_000_000)
-        phases = {p["phase"]: p["records_per_s"] for p in result.get("aggregate_phases", [])}
-        for name in ("insert", "enrich_by_key", "schedule_by_id"):
-            rate = phases.get(name, 0)
-            check(name, isinstance(rate, (int, float)) and math.isfinite(rate) and rate >= 10_000, rate, 10_000)
+        phases = {p["phase"]: p for p in result.get("aggregate_phases", [])}
+        for name in ("insert", "enrich_by_key", "schedule_by_id", "claim_and_complete", "purge"):
+            phase = phases.get(name, {})
+            records = phase.get("records")
+            window = phase.get("wall_window_s")
+            rate = phase.get("records_per_s", 0)
+            complete = isinstance(records, int) and records == result.get("items")
+            valid_window = isinstance(window, (int, float)) and math.isfinite(window) and window > 0
+            valid_rate = isinstance(rate, (int, float)) and math.isfinite(rate)
+            check(name + "_complete_work", complete, records, result.get("items"))
+            check(name + "_rate_accounting", complete and valid_window and valid_rate
+                  and math.isclose(rate, records / window, rel_tol=1e-9),
+                  rate, "records / measured phase window")
+            check(name, valid_rate and rate >= 10_000, rate, 10_000)
     elif result.get("schema") == "workflow-capacity/v6":
         check("original_row_workflow", result.get("profile") == "Mutable" and result.get("atomic_original_row_mutation") is True and result.get("dispatch") == "shared-normal-claim")
         check("faults_and_retention", result.get("faults") is True and result.get("includes_purge") is True)

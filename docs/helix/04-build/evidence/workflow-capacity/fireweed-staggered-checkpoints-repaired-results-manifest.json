@@ -1,0 +1,179 @@
+{
+  "scope": "Complete serial four-run qualification; checkpoint candidate rejected, 448 MiB restored, all-five primitive gate strengthened",
+  "measured_head": "7aaf819343ab7f9acb2ff2f3cd34b95c137f939f",
+  "binary_sha256": "b77ddaf077934e3c62daff69d2188d3e8658cb01a3cd09dc94a2365ae2157216",
+  "runner_exit": 1,
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-campaign-1.json.gz",
+      "sha256": "548a53435f2c0c437e53392b4182ccd73734d1ecbde439ee131cfea054cc1540",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/campaign-1.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-primitives-1.json.gz",
+      "sha256": "4ee45771abec271f615cd43db4c27d4b1ed4b80760f7b2a9726b6e28e5dac414",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/primitives-1.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-checkpoint-analysis-1.json.gz",
+      "sha256": "b6d64428b31ebcc0a14496af6328defd0afc131e62bf8dae1f957feddbbec55f",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/checkpoint-analysis-1.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-campaign-2.json.gz",
+      "sha256": "7141905276146ae3c04780c23fd34bd732fc7bc3a69573a7103b4d90f2b1926b",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/campaign-2.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-primitives-2.json.gz",
+      "sha256": "5817df03efbbb518a5661be346b562dc1872efcb0b9bc5dd2aee3428313f65ad",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/primitives-2.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-checkpoint-analysis-2.json.gz",
+      "sha256": "0347c88eed99ff6a18ab11fe4d9f10315edf5d1571a1afc47e1d370e00f5d08a",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/checkpoint-analysis-2.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-qualification-summary-original-gate.json.gz",
+      "sha256": "71882ec83c7c322920ac577986860e73a71627b3d11cf6b400ebdde8fb2cc367",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/qualification-summary-original-gate.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-qualification-summary-strengthened-gate.json.gz",
+      "sha256": "71882ec83c7c322920ac577986860e73a71627b3d11cf6b400ebdde8fb2cc367",
+      "source": "target/workflow-capacity/staggered-checkpoints-repaired-untraced-repeat-20260916/qualification-summary-strengthened-gate.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-run-staggered-checkpoints-repaired-qualification.py.gz",
+      "sha256": "433844f059bd3efc89dbe288cfab73e6a02605e7b45368e02bae3d757bf46185",
+      "source": "/tmp/fireweed-run-staggered-checkpoints-repaired-qualification.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-analyze-staggered-checkpoints.py.gz",
+      "sha256": "28af22643bc0767237989691f91d7c25b838d330d19cf957b3b43fbcfb388cd8",
+      "source": "/tmp/fireweed-analyze-staggered-checkpoints.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-summarize-direct-json-qualification.py.gz",
+      "sha256": "32d1165f1f108be1ca43e0b6ef8c42f9dd74f5bb05ffc42586624818eecf33e1",
+      "source": "/tmp/fireweed-summarize-direct-json-qualification.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-live-staggered-checkpoints.py.gz",
+      "sha256": "7871a8fb157ce3188aff5531275695719498b086e600f2c2b6d071ccbe1cb2b2",
+      "source": "/tmp/fireweed-live-staggered-checkpoints.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-live-observations.jsonl.gz",
+      "sha256": "993aa710344172010925ed2cf62cee0800b33b95bedec36cec0ba61be78603a1",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-live-observations.jsonl"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-wchan-snapshot.json.gz",
+      "sha256": "f6c36f4ce2800c86f362480a326adcc582269624ea2dd6fb1435bb282666096e",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-wchan-snapshot.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-syscall-snapshots.jsonl.gz",
+      "sha256": "bfd026c3ac4e7f5f6e1da495d26a50d4677f5b87f5a9f13303aac5d56479251f",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-syscall-snapshots.jsonl"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-five-primitive-gates-red.log.gz",
+      "sha256": "3a6bc989abf1e418ed6ddc428118893836b193537eac7d3420f83b176858c35d",
+      "source": "/tmp/fireweed-five-primitive-gates-red.log"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-five-primitive-gates-green.log.gz",
+      "sha256": "e89f6e07f427faa81353b0a64af69819f7530a97dc7629933ed317330ac1e16b",
+      "source": "/tmp/fireweed-five-primitive-gates-green.log"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-restoration-tests.log.gz",
+      "sha256": "4c0f8a5ebbe17c8e4f8c8b47432300f6aede341c0103ba997b42cf1ccacd2345",
+      "source": "/tmp/fireweed-staggered-checkpoints-restoration-tests.log"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-device-monitor-v3.py.gz",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1",
+      "source": "/tmp/fireweed-device-monitor-v3.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-device-summary-v3.py.gz",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8",
+      "source": "/tmp/fireweed-device-summary-v3.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-runner.log.gz",
+      "sha256": "54cd5fba596dacbc30cf973f995d97e9399391c2fa733c173ce293fa2a8ecf13",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-runner.log"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-wrapper.log.gz",
+      "sha256": "1caf1a3e8dc8bf4b2023e86ad5791ff1258f611d5ad8b53802788034e3469fa2",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-wrapper.log"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-1-device.jsonl.gz",
+      "sha256": "432bc9cfe45652d665d1f9106d8e5cff4f074f4a3908fe7ecd8004008530ee42",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-1-device.jsonl"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-2-device.jsonl.gz",
+      "sha256": "c192e0c3423e6b1a472c2a77d449903c1a5602752b18e68d54f56ae7d3d9e3ea",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-2-device.jsonl"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-3-device.jsonl.gz",
+      "sha256": "7f267a818a171c65335e3cd9d4c9f4a2f2e44399b669e1c3ade98da2abd290c5",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-3-device.jsonl"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-4-device.jsonl.gz",
+      "sha256": "c8d4d7aaa1e783675929489e29f290f5feae381a568dd7f25c4bdecb52f73407",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-4-device.jsonl"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-1-device-summary.json.gz",
+      "sha256": "cfcd05e4ae5731734a994cbc2126d6ac8d852fefeb95d9febe5755bb351b7322",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-1-device-summary.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-2-device-summary.json.gz",
+      "sha256": "aa6060eb432ca411458090f34ed828954232a4628c4f24c7bf7c61fc0226c25f",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-2-device-summary.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-3-device-summary.json.gz",
+      "sha256": "a2621eef4d4b99e13a51db07c3e8ef0aaf4f9a01a61a554b48aa6446f4002ab0",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-3-device-summary.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-4-device-summary.json.gz",
+      "sha256": "9b778d4f7554e643beac9b2734bf2751d17221d3bb78446bfc0c647cc8c50181",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phase-4-device-summary.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-staggered-checkpoints-repaired-untraced-qualification-phases.json.gz",
+      "sha256": "3110572d66ad74d0b689fde58f80be870f9ef76232b8a3183e4c5a14f912735c",
+      "source": "/tmp/fireweed-staggered-checkpoints-repaired-untraced-qualification-phases.json"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-fireweed-original-primitive-gate.py.gz",
+      "sha256": "623b4afbeb1138d53591c231704004770af73acd85c26a1987e8eb0e3d82c149",
+      "source": "/tmp/fireweed-original-primitive-gate.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-workflow_capacity_gate.py.gz",
+      "sha256": "eeaccd3ce59e9adfa3bd66ece0d49d8d1c59f01406c758286e4aa54c06bc2aa6",
+      "source": "scripts/perf/workflow_capacity_gate.py"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-results-test_workflow_capacity_gate.py.gz",
+      "sha256": "e7658a1f4a427fb470d06ce6a243d556f5257c6a7fa01075f547125ecbecfe05",
+      "source": "scripts/perf/test_workflow_capacity_gate.py"
+    }
+  ]
+}

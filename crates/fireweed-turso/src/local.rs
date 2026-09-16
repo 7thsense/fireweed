@@ -3187,17 +3187,6 @@ pub(crate) async fn verify_committed_reader_settings(
     Ok(())
 }
 
-/// Spread independently opened rebuildable projections across checkpoint
-/// windows while retaining the existing upper bound. The path keeps the choice
-/// stable across reopen without global state or a new durable record.
-fn projection_checkpoint_budget(path: &Path) -> i64 {
-    let hash = path.as_os_str().as_encoded_bytes().iter().fold(
-        0xcbf29ce484222325u64,
-        |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3),
-    );
-    (256 + (hash % 193) as i64) * 1024 * 1024
-}
-
 async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Result<i64> {
     if !config.rebuildable_io {
         return Ok(1_000);
@@ -3210,7 +3199,7 @@ async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Res
             "invalid projection page size {page_size}"
         )));
     }
-    Ok(projection_checkpoint_budget(config.path()) / page_size)
+    Ok(448 * 1024 * 1024 / page_size)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3631,25 +3620,6 @@ async fn scalar_i64(connection: &Connection, sql: &str) -> Result<i64> {
 mod projection_checkpoint_config_tests {
     use super::*;
 
-    #[test]
-    fn checkpoint_windows_spread_across_shards_within_the_existing_upper_budget() {
-        let budgets: std::collections::BTreeSet<_> = (0..64)
-            .map(|shard| {
-                let path = PathBuf::from(format!("/projection/shard-{shard}/projection.db"));
-                let budget = projection_checkpoint_budget(&path);
-                assert_eq!(budget, projection_checkpoint_budget(&path));
-                assert!((256 * 1024 * 1024..=448 * 1024 * 1024).contains(&budget));
-                budget
-            })
-            .collect();
-        assert!(
-            budgets.len() >= 32,
-            "shard windows must not collapse into a herd"
-        );
-        assert!(*budgets.first().unwrap() <= 288 * 1024 * 1024);
-        assert!(*budgets.last().unwrap() >= 416 * 1024 * 1024);
-    }
-
     #[tokio::test]
     async fn log_backed_connections_use_memory_scratch_with_file_backed_state() {
         let root = tempfile::tempdir().unwrap();
@@ -3705,7 +3675,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            projection_checkpoint_budget(&new_path) / 4096
+            114_688
         );
         drop(new);
         let reopened =
@@ -3716,7 +3686,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*reopened.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            projection_checkpoint_budget(&new_path) / 4096
+            114_688
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));
@@ -3745,7 +3715,7 @@ mod projection_checkpoint_config_tests {
                 scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                     .await
                     .unwrap(),
-                projection_checkpoint_budget(&path) / page_size
+                448 * 1024 * 1024 / page_size
             );
         }
         let standalone = TursoRelational::in_memory().await.unwrap();

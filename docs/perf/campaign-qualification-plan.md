@@ -1,5 +1,68 @@
 # Campaign qualification and performance plan
 
+## Reject checkpoint staggering; enforce every primitive floor (2026-09-16)
+
+The complete serial qualification used clean `7aaf819343ab7f9acb2ff2f3cd34b95c137f939f`
+and binary `b77ddaf077934e3c62daff69d2188d3e8658cb01a3cd09dc94a2365ae2157216`.
+All four workload children exited zero, with empty diagnostics and no overlap;
+the qualification shell exited one because the campaign rate gates failed.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| First | 14,151.16 | 9,425.56 | 0.904802 | 19.152 |
+| Repeat | 11,345.44 | 8,774.47 | 0.966630 | 20.086 |
+
+First-run cycle minima: 16,471.55 / 16,202.28 / 15,661.31 / 15,453.14 /
+15,534.90 / 15,016.83 / 14,554.31 / 9,425.56. Repeat: 11,635.21 / 13,748.35 /
+14,765.60 / 14,318.93 / 11,106.29 / 10,255.12 / 10,101.19 / 8,774.47.
+Both fail the 10k floor only in cycle seven. At 12.5k, the repeat additionally
+fails overall rate and cycles zero, four, five and six. Every correctness,
+progress, due-claim, WAL, database-size and RSS-stability check passes.
+
+The first main-file checkpoint did spread: materialized physical stores at the
+ends of cycles two/three/four were 10/55/64, then 20/48/64 in the repeat. That
+did not prevent later stalls. The repeat also missed 12.5k before any main file
+materialized, contradicting checkpoint synchronization as a complete explanation.
+The busiest observed rolling windows used 97.05% / 99.99% device busy time,
+52.11 / 18.61 MiB/sec host writes, 166.59 / 310.07 ms mean write-request latency
+and only 5.06 / 4.27 workload CPU-seconds per wall second. These are host-wide
+queueing observations, not drive bandwidth ceilings or isolated device-service
+measurements. No host settings changed.
+
+Reject the path-derived 256–448 MiB policy and restore the previous 448 MiB
+budget. Retain the added reopen readback check; both checkpoint configuration
+tests pass after restoration. This is rejection for failing
+qualification, not a controlled estimate of causal regression against a
+contemporaneous old-policy run. Both complete measurements and their failures
+remain evidence; the repeat was not stopped when its early rate failed.
+
+| Primitive | First rows/sec | Repeat rows/sec |
+| --- | ---: | ---: |
+| Insert | 46,667 | 46,392 |
+| Enrich by key | 43,312 | 42,313 |
+| Schedule by ID | 56,161 | 113,561 |
+| Claim and complete | 84,214 | 45,534 |
+| Purge | 64,261 | 58,863 |
+
+The gate previously enforced only the first three floors. New regression tests
+reproduce accepting an omitted purge phase and an incomplete row count. The
+fixed gate requires all five phases to process the full reported resident count,
+checks finite positive phase windows and rate = records/window, and enforces
+10k for every phase. Exact-floor cases pass; missing phases, incomplete work,
+nonfinite values and inconsistent or sub-floor rates fail. All 18 harness tests
+pass. Re-evaluating the saved reports under the stronger gate preserves both
+primitive passes and both campaign failures; original reports are not rewritten.
+
+Evidence, original/strengthened gate summaries, policy derivation, raw device
+samples, analysis scripts and validation logs are preserved in
+`fireweed-staggered-checkpoints-repaired-results-manifest.json`. The goal remains
+unmet. The next bounded code investigation is consolidating the two lease indexes:
+current native expiry and pending-lease reads are queue-scoped, but each ordinary
+lease maintains both a queue-scoped partial tree and a global leased tree.
+A candidate must preserve fenced/cohort filtering and pending-lease reads,
+prove its query plans, and demonstrate lower work in a serial campaign comparison.
+
+
 ## Repaired-host checkpoint staggering candidate (2026-09-16)
 
 The candidate derives each rebuildable projection's checkpoint budget from its
