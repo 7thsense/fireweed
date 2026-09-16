@@ -1,0 +1,47 @@
+{
+  "scope": "Consolidated leased-scope index validation; performance comparison pending",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-lease-index-red.log.gz",
+      "sha256": "18a5ceeee23a88ba6af96e631237c24e494e607eb26a5b2a763276b2db2e5d2d"
+    },
+    {
+      "artifact": "fireweed-lease-index-focused-tests.log.gz",
+      "sha256": "deb511d5e79d53f1b1759fb770d96eb2eca5de61d40df28cfc2986d30eef7c54"
+    },
+    {
+      "artifact": "fireweed-lease-index-ordered-focused-tests.log.gz",
+      "sha256": "a16ab22792f7f586ea7a181beb53e3f562961cf43970182596093d605f7cccf5"
+    },
+    {
+      "artifact": "fireweed-lease-index-adapter-tests.log.gz",
+      "sha256": "ee33d4d82584442fa3bb1fc744d78614b236f88f513f17ff3b34e3218f0d73ed"
+    },
+    {
+      "artifact": "fireweed-lease-index-public-tests.log.gz",
+      "sha256": "3fa7c01c4d140178d249f6f4f37bc4049b45fcf541ef82549ec8fa0a1936721c"
+    },
+    {
+      "artifact": "fireweed-lease-index-feature-gate.json.gz",
+      "sha256": "ceedf9461e135172e535f11a600e8a1711ed090fa75bb383c18a592cd478b009"
+    }
+  ],
+  "counts_pass_fail_ignore": {
+    "ordered-focused-tests.log": [
+      3,
+      0,
+      0
+    ],
+    "adapter-tests.log": [
+      65,
+      0,
+      2
+    ],
+    "public-tests.log": [
+      12,
+      0,
+      0
+    ]
+  }
+}

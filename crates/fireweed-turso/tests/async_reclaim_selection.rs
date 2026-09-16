@@ -10,7 +10,7 @@ use fireweed_engine::{
 use fireweed_turso::TursoRelational;
 
 #[tokio::test]
-async fn expired_lease_selection_and_transition_match_sqlite() {
+async fn ordinary_expiry_respects_time_fences_and_cohorts() {
     let definition = qdef();
     let mut cohort_definition = qdef();
     cohort_definition.queue_id = QueueId::new("cohort-queue").unwrap();
@@ -158,7 +158,7 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
 }
 
 #[tokio::test]
-async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
+async fn cohort_lease_validation_renew_and_retry_preserve_boundaries() {
     let mut definition = qdef();
     definition.cohort_policy = Some(CohortPolicy {
         enabled: true,

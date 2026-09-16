@@ -1,5 +1,49 @@
 # Campaign qualification and performance plan
 
+## Consolidated lease-index candidate validated (2026-09-16)
+
+Native ordinary-expiry and pending-lease reads are queue-scoped and return item-ID
+order. The candidate replaces the two overlapping leased indexes with one partial
+index over `(tenant_id, queue_id, item_id, lease_expires_at, retry_count,
+cohort_size, fenced, superseded)` for all `Leased` rows. Ordinary expiry filters
+remain covered; the broader pending view still includes fenced/cohort leases.
+The PostgreSQL adapter maintains its separate schema unchanged. Each ordinary
+lease that actually reaches SQL now maintains one leased tree instead of two;
+existing claim/mutation fusion already skips some intermediate leases, so the
+remaining benefit must be measured rather than inferred from logical claim count.
+
+An expiry-first candidate failed the query-plan regression: Turso selected the
+main primary-key index. The retained candidate puts the required item-ID order
+first and covers the actual pending-view fields. Both real queries now select
+the new index without forced-index SQL. Expiry is filtered while scanning the
+ordered leased subset; this is not a claim of an expiry-range seek or constant
+work with arbitrarily large outstanding-lease backlogs.
+
+The file-backed regression creates the previous indexes and mixed ordinary,
+fenced, cohort, superseded, non-leased and other-queue/tenant rows. Two migrations
+and a reopen preserve the complete rows. Independent expected results check
+strict expiry and broader pending visibility, and EXPLAIN checks index selection.
+The test is explicitly gated on the optional `local` feature; Cargo metadata
+verifies that boundary. The older native reclaim tests are renamed to describe
+their actual assertions rather than claiming a SQLite comparison.
+
+All **3 focused checks, 65 adapter/cancellation/concurrency/recovery checks and
+12 public campaign/primitive/log-only recovery checks pass**. Two existing adapter
+diagnostics remain ignored. The public workload keeps original IDs and row
+metadata, due-window delivery, retries, progress/disposition and discovered
+retention; no workflow, durability, checkpoint or resource gate changes.
+Evidence: `fireweed-lease-index-validation-manifest.json`, including the red
+migration regression and rejected expiry-first plan.
+
+Performance is unmeasured. Next compare control/candidate/candidate/control,
+one million recipients each, with identical user-mode counters and projection
+VFS tracing. Use the preserved `2e8f8ff5` control executable (`9124cfd7...`), whose
+production behavior matches the restored pre-candidate baseline. Compare logical
+work, CPU, instructions, WAL bytes and wall rate; do not qualify from a one-cycle
+diagnostic or overlapping VFS elapsed times. Only a supported improvement advances
+to the unchanged repeated eight-cycle qualification.
+
+
 ## Reject checkpoint staggering; enforce every primitive floor (2026-09-16)
 
 The complete serial qualification used clean `7aaf819343ab7f9acb2ff2f3cd34b95c137f939f`

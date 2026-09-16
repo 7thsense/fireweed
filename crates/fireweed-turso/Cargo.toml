@@ -66,3 +66,8 @@ required-features = ["local"]
 name = "qualification"
 path = "tests/qualification.rs"
 required-features = ["local"]
+
+[[test]]
+name = "lease_index"
+path = "tests/lease_index.rs"
+required-features = ["local"]

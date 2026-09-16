@@ -85,11 +85,15 @@ CREATE INDEX IF NOT EXISTS fireweed_items_pending_group_nonnull_idx
     WHERE lifecycle_state = 'Pending' AND superseded = 0 AND group_key IS NOT NULL;
 -- Ungrouped rows do not need a second copy of the pending priority index.
 DROP INDEX IF EXISTS fireweed_items_pending_group_idx;
-CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx
-    ON fireweed_items (tenant_id, queue_id, lease_expires_at, item_id)
-    WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = 0 AND superseded = 0;
-CREATE INDEX IF NOT EXISTS fireweed_items_global_expired_lease_idx
-    ON fireweed_items (lease_expires_at, tenant_id, queue_id, item_id)
+-- Native expiry and pending-lease reads are queue-scoped. One leased tree
+-- supports both in item-ID order. Cover expiry filters and pending-view fields;
+-- keep fenced/cohort leases visible to the broader view. Maintaining one tree
+-- avoids duplicate index writes for ordinary claim transitions.
+DROP INDEX IF EXISTS fireweed_items_expired_lease_idx;
+DROP INDEX IF EXISTS fireweed_items_global_expired_lease_idx;
+CREATE INDEX IF NOT EXISTS fireweed_items_leased_scope_idx
+    ON fireweed_items (tenant_id, queue_id, item_id, lease_expires_at,
+                      retry_count, cohort_size, fenced, superseded)
     WHERE lifecycle_state = 'Leased';
 CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
