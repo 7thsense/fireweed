@@ -1,5 +1,54 @@
 # Campaign qualification and performance plan
 
+## Exact publication replay prepared; measurement pending (2026-09-16)
+
+A complete one-million-recipient campaign capture on the preserved clean
+`4f4acde0` binary exits zero at 17,167.46 recipients/sec. This one-cycle capture
+is diagnostic, not sustained qualification. It retains 64 physical stores under
+`target/workflow-capacity/publication-capture-20260916/source`. The immutable
+inventory contains **5,525 data objects and 5,445 manifests**, totaling
+**1,802,012,562 bytes**, with a SHA-256 for every input file. Input bytes remain
+local rather than adding a 1.8 GB dataset to Git; the capture command and inventory
+are archived in `fireweed-publication-replay-input-manifest.json`.
+
+The new `vendor/object-log/examples/replay_publications.rs` diagnostic preloads
+these actual contents and reconstructs original data chunk boundaries from
+manifest locations. It rejects missing objects, unreferenced data, incomplete
+partition prefixes, invalid ranges, and gaps/overlaps in object chunk coverage.
+It publishes through public native `LocalBlobStore::put_chunks`/`put`, one ordered
+stream per captured store with all 64 streams concurrent on a 16-worker Tokio
+runtime. Each manifest follows durable completion of all its referenced data.
+Each replay cycle uses a new destination, so it repeats the captured single-cycle
+directory structure rather than the application's growing long-lived namespaces.
+
+All six diagnostic tests pass, including dependency ordering, failure before
+manifest publication, exact byte/media accounting, and detection of destination
+corruption. Real-capture preflight also passes. After timed publication cycles,
+the diagnostic reopens every store, compares every object byte-for-byte, and
+checks the complete key sets. Source reading and final verification are outside
+the cycle timers. No production implementation or qualification gate is changed.
+
+Planned measurement: 32 copies (57.664 GB of logical publications), with serial
+execution relative to every other workload/build and host/process monitoring.
+The result must disclose exclusions: application/Turso work, command serialization,
+manifest planning, online stage/reporting barriers, original engine runtime and
+queue topology, and other catalog/mutable metadata publications. The 256 omitted
+snapshot files total 98,944 bytes, but their overwritten publication history is
+unknown; that snapshot size is not their original write volume. This diagnostic
+can isolate publication cost under its stated scheduling. It cannot qualify the
+workflow or be treated as a hardware ceiling under mixed projection/log traffic.
+
+```sh
+CARGO_TARGET_DIR="$PWD/target/object-log-tests" CARGO_BUILD_JOBS=8 \
+  cargo build --locked --release --manifest-path vendor/object-log/Cargo.toml \
+  --example replay_publications
+target/object-log-tests/release/examples/replay_publications --inspect \
+  target/workflow-capacity/publication-capture-20260916
+target/object-log-tests/release/examples/replay_publications \
+  target/workflow-capacity/publication-capture-20260916 \
+  target/workflow-capacity/NEW-publication-replay-destination 32
+```
+
 ## Directory-sync sharing rejected: too little concurrent coverage (2026-09-16)
 
 All four serial one-million-row diagnostic runs finish with exit zero and identical
