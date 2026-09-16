@@ -4,17 +4,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
-    BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, Bytes, ClaimRef,
-    ClientItemKey, CommitEntry, CommitRequest, CompoundIndexDef, CompoundIndexField,
-    DiscoveryGranularity, EligibilityPolicy, EngineError, EntryOutcome, FilterOp, FinalizeKind,
-    Fireweed, GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType, ItemMutationOperation,
-    ItemMutationOutcome, ItemMutationRequest, ItemMutationResponse, ItemMutationReturning,
-    ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard, LifecyclePatch, NewItem,
-    ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
+    AsyncProjectionSpec, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest,
+    BatchUpdateValue, Bytes, ClaimRef, ClientItemKey, CommitEntry, CommitRequest, CompoundIndexDef,
+    CompoundIndexField, DiscoveryGranularity, EligibilityPolicy, EngineError, EntryOutcome,
+    FilterOp, FinalizeKind, Fireweed, GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType,
+    ItemMutationOperation, ItemMutationOutcome, ItemMutationRequest, ItemMutationResponse,
+    ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
+    LifecyclePatch, LogConfig, NewItem, ObjectLogAuthority, OrderingMode, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionStoreConfig,
     QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey, RecoveryAction, RecoveryPolicy,
-    RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, ScheduleUpdate, SegmentConfig,
-    SelectedMutation, SideRecord, SystemClock, TenantId, TypedValue, UtcTimestamp,
+    RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SegmentConfig, SelectedMutation,
+    SideRecord, StorageConfig, SystemClock, TenantId, TypedValue, UtcTimestamp,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -250,17 +250,21 @@ fn lease_invalidation_mutation(item_key: &str, evaluated_at: UtcTimestamp) -> It
     }
 }
 
-fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, cell: &str) -> Fireweed {
-    fireweed::open_objectlog_sqlite(
-        ObjectLogRuntimeConfig {
-            object_log: ObjectLogStorage::Local {
+fn objectlog_turso(root: &Path, barrier: ResponseBarrier, cell: &str) -> Fireweed {
+    fireweed::open(
+        StorageConfig {
+            log: LogConfig::Filesystem {
                 root: root.join("object-log"),
             },
-            authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Sqlite {
-                path: root.join("projection.sqlite"),
+            authority: Some(ObjectLogAuthority::NativeConditionalWrite),
+            control_plane: None,
+            projection: ProjectionStoreConfig::Turso {
+                path: root.join("projection.turso"),
             },
             response_barrier: barrier,
+            async_projection: (barrier == ResponseBarrier::AsyncProjection)
+                .then(AsyncProjectionSpec::default),
+            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig::new(262_144, 20).unwrap(),
             namespace: format!("durability-{cell}"),
             recovery: RecoveryPolicy {
@@ -903,30 +907,6 @@ async fn assert_durable(cell: &str, open: impl Fn(&Path) -> Fireweed) {
 }
 
 #[tokio::test]
-async fn sqlite_log_close_reopen() {
-    assert_durable("sqlite-log", |root| {
-        fireweed::open_sqlite(
-            root.join("log.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .unwrap()
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn sqlite_relational_close_reopen() {
-    assert_durable("sqlite-relational", |root| {
-        fireweed::open_sqlite_relational(
-            root.join("relational.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .unwrap()
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn objectlog_local_direct_close_reopen() {
     assert_durable("objectlog-local", |root| {
         fireweed::open_objectlog(root.join("object-log"), Arc::new(SystemClock)).unwrap()
@@ -934,18 +914,107 @@ async fn objectlog_local_direct_close_reopen() {
     .await;
 }
 
-#[tokio::test]
-async fn objectlog_sqlite_strict_close_reopen() {
-    assert_durable("objectlog-sqlite-strict", |root| {
-        objectlog_sqlite(root, ResponseBarrier::Strict, "strict")
-    })
-    .await;
+// Turso supports addressed mutations; the selector/index-query contract above
+// remains covered by the memory projection. Exercise persisted request identities
+// here, including admission that removes a fully indexed entity from PushItems.
+async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
+    for discard_projection in [false, true] {
+        let fixture = FixtureRoot::new(cell);
+        let queue = queue_key(cell);
+        let definition = queue_definition(cell);
+        let request_id = RequestId::new("indexed-push").unwrap();
+        let fireweed = objectlog_turso(fixture.path(), barrier, cell);
+        fireweed.create_queue(definition.clone()).await.unwrap();
+        let (item_id, disposition) = fireweed
+            .push_with_request_id(&queue, request_id.clone(), primary_item())
+            .await
+            .unwrap();
+        assert_eq!(disposition, fireweed::PushDisposition::Fresh);
+        assert_eq!(
+            fireweed
+                .push_with_request_id(&queue, request_id.clone(), primary_item())
+                .await
+                .unwrap(),
+            (item_id, fireweed::PushDisposition::Replayed)
+        );
+        let update = batch_request(item_id);
+        let updated = fireweed.batch_update(&queue, update.clone()).await.unwrap();
+        // This public read also settles async projection work before close.
+        assert_eq!(
+            fireweed
+                .live_item(&queue, ClientItemKey::new("primary").unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .payload
+                .as_deref(),
+            Some(b"batched".as_slice())
+        );
+        drop(fireweed);
+        if discard_projection {
+            std::fs::remove_file(fixture.path().join("projection.turso")).unwrap();
+            for suffix in ["-wal", "-shm"] {
+                let path = fixture.path().join(format!("projection.turso{suffix}"));
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("remove test projection sidecar: {error}"),
+                }
+            }
+        }
+        let reopened = objectlog_turso(fixture.path(), barrier, cell);
+        assert_eq!(reopened.queue_definition(&queue).await.unwrap(), definition);
+        assert_eq!(
+            reopened
+                .push_with_request_id(&queue, request_id.clone(), primary_item())
+                .await
+                .unwrap(),
+            (item_id, fireweed::PushDisposition::Replayed)
+        );
+        let mut changed = primary_item();
+        changed.payload = Some(Bytes::from_static(b"conflicting-body"));
+        assert_eq!(
+            reopened
+                .push_with_request_id(&queue, request_id.clone(), changed)
+                .await
+                .unwrap_err(),
+            EngineError::RequestIdConflict
+        );
+        let mut changed_entity = primary_item();
+        changed_entity.entity = Some(serde_json::json!({"kind": "effect", "suppressed": true}));
+        assert_eq!(
+            reopened
+                .push_with_request_id(&queue, request_id, changed_entity)
+                .await
+                .unwrap_err(),
+            EngineError::RequestIdConflict,
+            "fully indexed entity changes must not alias after admission"
+        );
+        assert_eq!(
+            reopened.batch_update(&queue, update).await.unwrap(),
+            updated
+        );
+        let row = reopened
+            .live_item(&queue, ClientItemKey::new("primary").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.item_id, item_id);
+        assert_eq!(row.payload.as_deref(), Some(b"batched".as_slice()));
+        assert_eq!(row.fields["customer"].as_ref(), b"acme");
+        assert_eq!(row.fields["region"].as_ref(), b"east");
+        let metrics = reopened.metrics(&queue).await.unwrap();
+        assert_eq!(metrics.pending, 1);
+        drop(reopened);
+    }
 }
 
 #[tokio::test]
-async fn objectlog_sqlite_async_close_reopen() {
-    assert_durable("objectlog-sqlite-async", |root| {
-        objectlog_sqlite(root, ResponseBarrier::AsyncProjection, "async")
-    })
-    .await;
+async fn objectlog_turso_strict_reopen_and_log_only_rebuild() {
+    assert_turso_request_durability(ResponseBarrier::Strict, "turso-strict").await;
+}
+
+#[tokio::test]
+async fn objectlog_turso_async_reopen_and_log_only_rebuild() {
+    assert_turso_request_durability(ResponseBarrier::AsyncProjection, "turso-async").await;
 }

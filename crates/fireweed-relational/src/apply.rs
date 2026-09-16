@@ -10,7 +10,7 @@ use fireweed_engine::{
     BatchUpdateResponse, ClaimCommand, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, PayloadUpdate, PushItem, QueueCommand,
     QueueKey, RequestOutcome, ResolvedItemMutationAction, ScheduleUpdate, SetGatesCommand,
-    UpdateFieldsCommand, push_items_fingerprint_sha256,
+    UpdateFieldsCommand,
 };
 use serde_json::Value as JsonValue;
 
@@ -396,13 +396,13 @@ pub fn persist_request_outcome_sql(
         )?;
         return Ok(());
     }
-    let QueueCommand::Push(push) = &envelope.command else {
+    let QueueCommand::Push(_) = &envelope.command else {
         return Ok(());
     };
     let Some(request_id) = envelope.request_id.as_ref() else {
         return Ok(());
     };
-    let (Some(_), Some(RequestOutcome::Push { item_ids })) = (
+    let (Some(fingerprint), Some(RequestOutcome::Push { item_ids })) = (
         envelope.request_fingerprint,
         envelope.request_outcome.as_ref(),
     ) else {
@@ -416,7 +416,11 @@ pub fn persist_request_outcome_sql(
         shard,
         IDEMPOTENCY_OPERATION_PUSH,
         request_id.as_str(),
-        push_items_fingerprint_sha256(&push.items)?.to_vec(),
+        // Admission can discard a fully indexed entity document. Hashing the
+        // admitted PushItems therefore need not identify the caller's body.
+        // Persist the original request fingerprint carried by the durable log,
+        // just as log-only replay does, rather than inventing a new identity.
+        fingerprint.to_be_bytes().to_vec(),
         response,
         position,
         envelope.created_at,

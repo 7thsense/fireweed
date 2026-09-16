@@ -1,5 +1,39 @@
 # Campaign qualification and performance plan
 
+## Retired SQLite tests and durable request identity (2026-09-15)
+
+The broader release invocation exposed stale `public_durability_matrix` calls
+to retired SQLite constructors. The two SQLite-only cases were duplicate runs
+of the same fixture and are removed. Filesystem-log/Turso strict and async tests
+now cover request replay, conflict rejection, batch update replay, original-row
+fields/payload, queue definitions and pending counts after ordinary reopen and
+after deleting the projection and rebuilding from the log. The original memory
+projection fixture retains selector, typed-index query, gate and lease checks:
+Turso currently rejects the legacy selector and index-query operations, so those
+checks are not represented as passing Turso coverage.
+
+The port found a product defect: index admission can remove a fully indexed
+entity document from `PushItem`, but the projection recomputed the push request
+fingerprint from those transformed items. An identical original request then
+failed with `RequestIdConflict`. Projection apply now retains the original
+fingerprint in the durable envelope, matching log-only replay. This is the
+existing 64-bit durable fingerprint format accepted by the read path; it does
+not claim a newly persisted SHA-256 request identity.
+
+The revised matrix passes all three cases, including both Turso barriers with
+and without projection files. The negative assertion changing only the fully indexed entity also passes.
+The expanded local release validation passes **314 tests**, with four existing
+diagnostics ignored and two live-S3 tests filtered because no endpoint is
+configured. This includes facade/log unit tests, native projection adapter
+tests, the migrated matrix, and CLI campaign/primitive/log-only recovery tests.
+Archived red/green matrix logs and `fireweed-register-copy-local-validation.log.gz`
+document the request-replay regression and recovery checks.
+Existing projections with old recomputed 32-byte push fingerprints remain an
+upgrade concern: a log-only rebuild repairs them, but normal reopen currently
+preserves already-applied rows. Address automatic repair or an explicit upgrade
+procedure before releasing this change. The register-reuse optimization is
+still unqualified; no throughput claim follows from these correctness tests.
+
 ## CPU profile and register-copy candidate (2026-09-15)
 
 The installed pacman `perf` 7.2.3 samples a one-cycle, 64-store default-runtime
@@ -23,9 +57,9 @@ code passes 2,115 checks and reproduces both failures at the same assertions:
 `test_make_sure_correct_insn_table` (`StructField` function-address equality).
 This establishes no new failures in this suite, not a fully green native suite.
 Evidence: `fireweed-register-copy-native-comparison.json` and both native logs.
-The candidate is restored and Fireweed public release/recovery validation is
-running. No performance improvement or retained runtime change is claimed yet;
-a short comparison precedes full campaign qualification.
+The candidate also passes the expanded 314-test local release/recovery set.
+No performance improvement is claimed yet; a short comparison precedes full
+campaign qualification.
 
 ## One-worker runtime rejected after repaired-storage control (2026-09-15)
 

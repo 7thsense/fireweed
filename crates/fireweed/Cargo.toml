@@ -165,6 +165,7 @@ required-features = ["postgres", "objectlog", "turso"]
 [[test]]
 name = "public_durability_matrix"
 path = "tests/public_durability_matrix.rs"
+required-features = ["objectlog", "turso"]
 
 [[test]]
 name = "postgres_constructors"
