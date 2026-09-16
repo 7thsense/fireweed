@@ -1,5 +1,46 @@
 # Campaign qualification and performance plan
 
+## Idle log wait: repeated CPU reduction in the serial screen (2026-09-16)
+
+The disk-backed control/candidate/candidate/control one-cycle screen completed
+with identical original-row logical work counts. The control is clean `1fc73b97`
+(binary `6961d4208d1510767f9b26d4f6729b4837ad4da3f7c271bce7112e9bf50a99b4`);
+the candidate is clean `ffd96612`
+(binary `355a6adb76dd2753f362538adfd4fe856fe2dd5b9c0ba7d23eb235e1625d1973`).
+The only intervening production-code change removes the log worker's idle timer.
+Both use the same diagnostic high-level API fixture, 1M original rows, 64 stores,
+realistic stage limits, metadata, timestamp priority, faults and reporting.
+
+| Run | Recipients/sec | CPU-ms/recipient | Voluntary context switches |
+| --- | ---: | ---: | ---: |
+| Control 1 | 16,216.71 | 0.85522 | 3,289,620 |
+| Candidate 1 | 17,203.06 | 0.81544 | 705,043 |
+| Candidate 2 | 17,115.88 | 0.81336 | 618,915 |
+| Control 2 | 15,036.38 | 0.91643 | 3,596,508 |
+
+CPU time improves in both pairs (-4.65%, -11.25%). Mean CPU time decreases
+8.06%, user instructions 0.69%, user cycles 3.75%, voluntary context switches
+80.77%, and involuntary switches 52.60%. Mean throughput rises 9.81%, with
+substantial control variation; this is not a sustained gain claim. Mean RSS
+changes +0.56%. Successful immutable-log publication count changes +0.26%,
+published bytes +0.00010%, logical WAL bytes -0.48%. This supports reducing
+scheduler overhead without materially changing durability batching.
+
+All per-run gates except diagnostic eligibility and insufficient cycle count
+pass. One cycle cannot establish main-file/RSS stability or late-cycle throughput;
+these remain unqualified diagnostic runs. Next run public campaign/primitive/
+recovery tests and the unchanged canonical repeated eight-cycle qualification.
+At 12.5k, this short screen's candidate CPU cost implies 10.18 CPU-seconds/sec,
+versus 11.07 for its controls; use full-length measurements to revise the
+sustained napkin estimate. No workflow, reporting, durability or target was weakened.
+
+The corrected screen recorder preserves a report and failed log directory even
+if process attachment fails, returns nonzero, and scans all perf thread children.
+All four attachments succeeded. `fireweed-idle-wait-screen-manifest.json` archives
+33 raw reports/counters/allocation/provenance and tool/build artifacts, verified
+against SHA-256 of decompressed bytes.
+
+
 ## Idle log-worker wait candidate validated; performance pending (2026-09-16)
 
 The empty-queue path now waits for a condition-variable notification without
