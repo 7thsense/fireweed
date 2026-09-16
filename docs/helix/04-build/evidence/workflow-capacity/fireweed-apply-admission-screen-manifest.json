@@ -1,0 +1,109 @@
+{
+  "scope": "Four serial one-cycle diagnostics; rejected candidate; SHA256 hashes cover decompressed bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-1-device-summary.json.gz",
+      "sha256": "9a1db10bcb53cf3733c1d18a5ad3acd24a743a02f141ea49805ce6195c17c320"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-1-device.jsonl.gz",
+      "sha256": "b9625399bf3ff4a9384058e2a1fa4d77058fda1cf35ed250f5898c181b55d4a1"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-1-perf.csv.gz",
+      "sha256": "d73408834f1cb37cc4b480d8dae31d1d31185314403766c99af2447a43c6ed13"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-1-provenance.json.gz",
+      "sha256": "e9dbc9f4ee72a17a2bb2996be679f332d93276f5903e802e4962694d733e67a8"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-1.json.gz",
+      "sha256": "eac82cc6e0e370aa5b795c9e8e421abb18ebad54f5e8bc8cc272e5615417cceb"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-2-device-summary.json.gz",
+      "sha256": "2be74cb7d9e7d42e36377231c4a26006571338b9bd45585be1b2ca616969addd"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-2-device.jsonl.gz",
+      "sha256": "c7098de5a0f39a0c33919af859c1f0c90bc02014725efb3aa37c47d892b286da"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-2-perf.csv.gz",
+      "sha256": "348b03541de498859098dddc158917dd65d221cf55229280eadf7d31cdc38193"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-2-provenance.json.gz",
+      "sha256": "e9dbc9f4ee72a17a2bb2996be679f332d93276f5903e802e4962694d733e67a8"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-candidate-2.json.gz",
+      "sha256": "b8f2502a71c762a3a2502db93a919068953e79557a9fe2bd96de7e34a920321f"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-1-device-summary.json.gz",
+      "sha256": "21f3af3733144e1d3a927686f11de10256efb60261e9522a67bc323465c76d58"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-1-device.jsonl.gz",
+      "sha256": "e93616915c2c3960b6a3de67eb12d378c0a3e3e651727f5c4ac90ab9aa68b39d"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-1-perf.csv.gz",
+      "sha256": "e6419161d22252d926b19f6835924edc1169473dc21f4a8aeea135b612e96429"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-1-provenance.json.gz",
+      "sha256": "968152146e4b365bd0aa9fae51688b528de3640c5ea062fd138ed2953f50a43f"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-1.json.gz",
+      "sha256": "c71c56e73569b8cbd89c4949ae27259a28f127ca43584ec75e553b1413c82cb3"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-2-device-summary.json.gz",
+      "sha256": "034d8b41e03674698563d52a6d6194e38842201627d21c6f0945411de08345b5"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-2-device.jsonl.gz",
+      "sha256": "22da1e8e17610590e4b7945727279b116bb8af4d20822de5c91e2bc19acbf150"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-2-perf.csv.gz",
+      "sha256": "db7249525bae25b25f78a7a4f3ea84eb07f1bf78892bf188056ecf4f8d8721bc"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-2-provenance.json.gz",
+      "sha256": "968152146e4b365bd0aa9fae51688b528de3640c5ea062fd138ed2953f50a43f"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-control-2.json.gz",
+      "sha256": "e30e0d6d4c4001cc0eceb827988204ad0253ad64bbff8eac18bb0ee790f7e567"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-summary.json.gz",
+      "sha256": "f74f9b9d8da00fe81991dfc3793a50731a37e4067a1143e5dd06fe89196ad7d5"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-fireweed-run-apply-admission-counters.py.gz",
+      "sha256": "f2781b346b0745add60b0ec7380503c757361d9ffb3fae488779e5d318b124c8"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-fireweed-apply-admission-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-fireweed-apply-admission-counters-runner.log.gz",
+      "sha256": "fd0c175ec441109f05a44a0059cba8d686d4db9653f3d2aeea51473feb99bcb1"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-fireweed-apply-admission-public-tests.log.gz",
+      "sha256": "983f9986e484cadb1309f91d5583c383a7fe4b08cf53a3f168b65d2632aa83f7"
+    },
+    {
+      "artifact": "fireweed-apply-admission-screen-fireweed-apply-admission-build.log.gz",
+      "sha256": "2e8635e28bae765dd82c06e937f7b2ab38726e550ac99fa9900f388a35f90b0f"
+    }
+  ]
+}

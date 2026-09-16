@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+## Reject global projection admission (2026-09-16)
+
+The four serial million-recipient diagnostic screens completed successfully.
+The cap at 16 active applies regressed both comparisons:
+
+| Run | Recipients/sec | CPU-ms/recipient |
+| --- | ---: | ---: |
+| Control 1 | 16,248.06 | 0.85992 |
+| Candidate 1 | 15,156.11 | 0.93044 |
+| Control 2 | 14,507.96 | 0.91583 |
+| Candidate 2 | 13,782.85 | 1.02271 |
+
+Throughput fell 6.72% and 5.00%; CPU cost rose 8.20% and 11.67%.
+Restore `projection.rs` byte-for-byte to parent `153003bb`, removing the cap
+and its implementation-specific tests. These results reject this admission
+policy; they do not establish why it regressed or the optimal concurrency.
+The candidate passed all 12 public campaign/primitive/recovery tests as well as
+the adapter checks recorded below. Correctness alone did not justify retaining it.
+
+`fireweed-apply-admission-screen-manifest.json` archives raw reports, provenance,
+counters, device samples, runner/recorder source, public test and build logs.
+Controls use executable `9124cfd…`; candidates use `dfedfc3…` from `b0056dd5`.
+These are one-cycle screens, not repeated eight-cycle qualification. The 12,500
+recipient/sec goal remains unmet; no workload or hardware assumptions change.
+
 ## Bound active projection transactions across stores (2026-09-16)
 
 The candidate adds process-wide admission to the actual `apply_owned` path,
