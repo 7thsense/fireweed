@@ -1,5 +1,42 @@
 # Campaign qualification and performance plan
 
+## Owned-decoder candidate rejected after serial comparison (2026-09-16)
+
+A clean `77fdfa73` candidate/control/candidate diagnostic compares combined
+linear purge validation and owned addressed-row decoding against preserved
+`f931a497` qualification binary `94adbef091a89a54df649805542fbd7128dfa4769a7b06b96420c269efc29fe8`.
+Candidate binary is `6322f4b5afb9e9fa92e6d53caff197b09addb3cba048066e8452ba60130421c6`.
+Each run completes the same one-million-recipient original-row campaign. User
+cycles/instructions have 100% running coverage. Projection I/O tracing and explicit
+provenance make these diagnostics, not sustained qualification. No competing
+workload/build or host setting change ran.
+
+| Run | Recipients/sec | CPU-ms/recipient | Instructions/recipient | WAL requested bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Candidate 1 | 16,215.57 | 0.877085 | 2,690,035 | 6,640,568,608 |
+| Control | 15,239.12 | 0.892236 | 2,699,142 | 6,664,341,008 |
+| Candidate 2 | 14,417.95 | 0.929320 | 2,743,133 | 6,644,560,888 |
+
+Candidate instructions are 0.34% lower / 1.63% higher; CPU is 1.70% lower /
+4.16% higher. There is no useful repeatable improvement demonstrated here.
+The combined design does not isolate the decoder from the linear purge fix,
+and time-varying host state remains a limitation. It neither proves a decoder
+regression nor justifies a new full repeated qualification for this candidate.
+Restore `projection.rs` byte-for-byte to `1719a76f`, removing the helper and its
+two candidate-specific tests. Preserve the simple set-based purge validation and
+its previously passing 276 engine / 327 selected release tests. No tests are
+rerun solely for the exact source restoration; no new performance claim follows.
+
+The 4.2% gap remains the last **measured** sustained gap for the qualified
+pre-purge baseline. The retained purge change is still not independently
+performance-qualified. The canonical target/release executable remains the
+rejected candidate until rebuilt; do not label it as current-source output.
+The preserved `94adbef0...` executable remains the authoritative comparison
+control. Raw records, counters, device observations and exact scripts/build log
+are listed in `fireweed-owned-addressed-counters-manifest.json` (decompressed
+SHA-256 hashes). Continue toward the original repeated stretch goal with stronger
+remaining-cost evidence, without weakening workflow or gates.
+
 ## Owned addressed-row decoding candidate (2026-09-16)
 
 After the linear purge-validation change, native addressed-mutation planning now

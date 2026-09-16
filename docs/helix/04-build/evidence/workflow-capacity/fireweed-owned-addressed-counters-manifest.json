@@ -1,0 +1,107 @@
+[
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-1-provenance.json.gz",
+    "source_sha256": "ed15a52acd8c25e91dfe829f46590808e9f22400a06881100d6574211919fc71",
+    "bytes": 520
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-1.json.gz",
+    "source_sha256": "3d1424ddfd159747a2468a1565b3c4cc60e857d288ed6439c9553a34320c9f99",
+    "bytes": 696128
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-1-device-summary.json.gz",
+    "source_sha256": "d356955e1852b9b7cdabecfae6913af96f462138b40f112675007a096c7d285b",
+    "bytes": 871
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-control-provenance.json.gz",
+    "source_sha256": "f2f48e06b3a72d3e16e3b72f074b29acb6ce3e3201e709c0594a725eb5d8fb9a",
+    "bytes": 488
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-control.json.gz",
+    "source_sha256": "99f17dc6213e3ca18fa67b88c14f5ecc503f0692e3a7714acdd1047e0cf793c5",
+    "bytes": 691163
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-control-device-summary.json.gz",
+    "source_sha256": "469fa2b5c32c9ed20d22948868d9c3b8d3c3f1fd921a76e2be2dfb9559468f4b",
+    "bytes": 868
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-2-provenance.json.gz",
+    "source_sha256": "ed15a52acd8c25e91dfe829f46590808e9f22400a06881100d6574211919fc71",
+    "bytes": 520
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-2.json.gz",
+    "source_sha256": "13a373a3db7212a42838501a095dbd253dc2ebaec2ee1a1510251d92094c04c3",
+    "bytes": 701799
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-2-device-summary.json.gz",
+    "source_sha256": "cf4b6a00fab3e2db90858cb0741d9179b13823e9ee5e2f4e2c47348813ee2c9b",
+    "bytes": 888
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-summary.json.gz",
+    "source_sha256": "33767587ec9971f8c760a62a3adbcec6ae25f33891781980ea06e0357c65fab9",
+    "bytes": 886
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-1-device.jsonl.gz",
+    "source_sha256": "f3c94793f8cd318f02cf52600b7645b8028d07ea4400ec3d1673025f9ec17e6c",
+    "bytes": 70323
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-control-device.jsonl.gz",
+    "source_sha256": "5cac5980f6373ce31628308593b7aa9faaad8d72eab7a5089adbccec01d898a3",
+    "bytes": 73864
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-2-device.jsonl.gz",
+    "source_sha256": "1f7e134e0b843b97fea26289d0306442cba87f2fc536cb8c0fb31d98f4a1eb67",
+    "bytes": 76238
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-1-perf.csv.gz",
+    "source_sha256": "f214f288da9fe44d93cc090cdfd8527d61ebe925ad61c00df461be52c0ffa3b8",
+    "bytes": 137
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-control-perf.csv.gz",
+    "source_sha256": "f680b5a6e4f65afd59a898095ebaa1248c0125988f9d2206fe4431ede5961970",
+    "bytes": 137
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-candidate-2-perf.csv.gz",
+    "source_sha256": "f467905e226660995927ba0e4696ee0234d5c26703669161a34b99d02fe7122b",
+    "bytes": 137
+  },
+  {
+    "artifact": "fireweed-run-owned-addressed-counters.py.gz",
+    "source_sha256": "f13d0fa3267b1c4ec7d6e7cfbf67371bcdb61e2de491bb653ee085477168ccce",
+    "bytes": 5271
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counter-recorder.py.gz",
+    "source_sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+    "bytes": 9015
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counter-summary.json.gz",
+    "source_sha256": "69d76109b493f02767b33d68debf8c2eb5812f7c24ad0f9390541c6278c4b4af",
+    "bytes": 5346
+  },
+  {
+    "artifact": "fireweed-owned-addressed-counters-runner.log.gz",
+    "source_sha256": "57718737f05c2978737f3b41ee4d269fbf939ce04412e7424059a438b0158a3a",
+    "bytes": 855
+  },
+  {
+    "artifact": "fireweed-owned-addressed-release-build.log.gz",
+    "source_sha256": "373ff7c82275b2c344adf592bb0e802508daf094ecfa50f9b7524a5ff72a8f0b",
+    "bytes": 14756
+  }
+]

@@ -250,91 +250,6 @@ fn class_s_item_from_owned_values(
     Ok(Some((id, item)))
 }
 
-// Consume SQL-owned buffers when constructing the addressed mutation image.
-fn addressed_item_from_owned_values(
-    values: Vec<Value>,
-    shard: &QueueKey,
-) -> EngineResult<fireweed_projection::ProjectionImageItem> {
-    use fireweed_projection::ProjectionImageItem;
-    let [
-        item_id,
-        client_item_key,
-        priority,
-        not_before,
-        eligible_since,
-        group_key,
-        cohort_size,
-        payload,
-        fields,
-        metadata,
-        index_fields,
-        entity_document,
-        state,
-        item_version,
-        attempt_count,
-        max_attempts,
-        created_seq,
-        lease_token,
-        lease_expires_at,
-        worker_id,
-        fenced,
-        superseded,
-        terminal_at,
-        terminal_epoch,
-        terminal_sequence,
-    ]: [Value; 25] = values
-        .try_into()
-        .map_err(|_| storage("invalid addressed-item column count"))?;
-    if !matches!(group_key, Value::Null) || !matches!(cohort_size, Value::Null) {
-        return Err(EngineError::Unavailable);
-    }
-    let item_id = ItemId::new(take_text(item_id)?).map_err(storage)?;
-    Ok(ProjectionImageItem {
-        item_id,
-        client_item_key: ClientItemKey::new(take_text(client_item_key)?).map_err(storage)?,
-        priority: parse_priority(take_optional_text(priority)?)?,
-        not_before: take_optional_integer(not_before)?.map(nanos_ts),
-        eligible_since: take_optional_integer(eligible_since)?.map(nanos_ts),
-        group_key: None,
-        cohort_size: None,
-        payload: take_optional_blob(payload)?.map(Bytes::from),
-        fields: fields_from_json(take_text(fields)?)?,
-        metadata: metadata_from_json(take_text(metadata)?)?,
-        gate_keys: Vec::new(),
-        index_fields: fireweed_engine::index_fields::decode_index_fields_blob(
-            take_optional_blob(index_fields)?.as_deref(),
-        )?,
-        entity_document: entity_from_json(take_optional_text(entity_document)?)?,
-        state: parse_state(&take_text(state)?).map_err(storage)?,
-        item_version: nonnegative_u64(take_integer(item_version)?, "item_version")?,
-        attempt_count: nonnegative_u32(take_integer(attempt_count)?, "retry_count")?,
-        max_attempts: nonnegative_u32(take_integer(max_attempts)?, "max_attempts")?,
-        created_seq: nonnegative_u64(take_integer(created_seq)?, "created_seq")?,
-        lease_token: take_optional_text(lease_token)?
-            .map(LeaseToken::new)
-            .transpose()
-            .map_err(storage)?,
-        lease_expires_at: take_optional_integer(lease_expires_at)?.map(nanos_ts),
-        lease_is_cohort: false,
-        worker_id: take_optional_text(worker_id)?
-            .map(fireweed_core::WorkerId::new)
-            .transpose()
-            .map_err(storage)?,
-        fenced: take_integer(fenced)? != 0,
-        superseded: take_integer(superseded)? != 0,
-        terminal_at: take_optional_integer(terminal_at)?.map(nanos_ts),
-        terminal_position: take_optional_integer(terminal_epoch)?
-            .map(|epoch| {
-                Ok::<_, EngineError>(CommandPosition::new(
-                    shard.clone(),
-                    nonnegative_u64(epoch, "terminal_epoch")?,
-                    nonnegative_u64(take_integer(terminal_sequence)?, "terminal_sequence")?,
-                ))
-            })
-            .transpose()?,
-    })
-}
-
 async fn one_row(
     connection: &Connection,
     query: &str,
@@ -3191,7 +3106,7 @@ impl TursoRelational {
         pending_claims: &[fireweed_engine::ClaimCommand],
     ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
         use fireweed_engine::ItemMutationOperation;
-        use fireweed_projection::ProjectionData;
+        use fireweed_projection::{ProjectionData, ProjectionImageItem};
         let ItemMutationOperation::Addressed { entries } = &request.operation else {
             return Err(EngineError::Unavailable);
         };
@@ -3272,10 +3187,55 @@ impl TursoRelational {
                     .or_default()
                     .push(text(&row[1])?);
             }
-            for values in rows {
-                let mut item = addressed_item_from_owned_values(values, shard)?;
-                item.gate_keys = gates.remove(&item.item_id).unwrap_or_default();
-                image.items.push(item);
+            for v in rows {
+                if !matches!(v[5], Value::Null) || !matches!(v[6], Value::Null) {
+                    return Err(EngineError::Unavailable);
+                }
+                let item_id = ItemId::new(text(&v[0])?).map_err(storage)?;
+                image.items.push(ProjectionImageItem {
+                    item_id,
+                    client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
+                    priority: parse_priority(optional_text(&v[2])?)?,
+                    not_before: optional_integer(&v[3])?.map(nanos_ts),
+                    eligible_since: optional_integer(&v[4])?.map(nanos_ts),
+                    group_key: None,
+                    cohort_size: None,
+                    payload: optional_blob(&v[7])?.map(Bytes::from),
+                    fields: fields_from_json(text(&v[8])?)?,
+                    metadata: metadata_from_json(text(&v[9])?)?,
+                    gate_keys: gates.remove(&item_id).unwrap_or_default(),
+                    index_fields: fireweed_engine::index_fields::decode_index_fields_blob(
+                        optional_blob(&v[10])?.as_deref(),
+                    )?,
+                    entity_document: entity_from_json(optional_text(&v[11])?)?,
+                    state: parse_state(&text(&v[12])?).map_err(storage)?,
+                    item_version: nonnegative_u64(integer(&v[13])?, "item_version")?,
+                    attempt_count: nonnegative_u32(integer(&v[14])?, "retry_count")?,
+                    max_attempts: nonnegative_u32(integer(&v[15])?, "max_attempts")?,
+                    created_seq: nonnegative_u64(integer(&v[16])?, "created_seq")?,
+                    lease_token: optional_text(&v[17])?
+                        .map(LeaseToken::new)
+                        .transpose()
+                        .map_err(storage)?,
+                    lease_expires_at: optional_integer(&v[18])?.map(nanos_ts),
+                    lease_is_cohort: false,
+                    worker_id: optional_text(&v[19])?
+                        .map(fireweed_core::WorkerId::new)
+                        .transpose()
+                        .map_err(storage)?,
+                    fenced: integer(&v[20])? != 0,
+                    superseded: integer(&v[21])? != 0,
+                    terminal_at: optional_integer(&v[22])?.map(nanos_ts),
+                    terminal_position: optional_integer(&v[23])?
+                        .map(|epoch| {
+                            Ok::<_, EngineError>(CommandPosition::new(
+                                shard.clone(),
+                                nonnegative_u64(epoch, "terminal_epoch")?,
+                                nonnegative_u64(integer(&v[24])?, "terminal_sequence")?,
+                            ))
+                        })
+                        .transpose()?,
+                });
             }
         }
         let claims_by_id: HashMap<_, _> = pending_claims
@@ -7540,147 +7500,5 @@ mod owned_claim_decode_tests {
                 class_s_item_from_owned_values(values.into_iter(), 99, &HashSet::new()).is_err()
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod owned_addressed_decode_tests {
-    use super::*;
-    use fireweed_core::{QueueId, TenantId};
-
-    fn row() -> Vec<Value> {
-        vec![
-            Value::Text("42".into()),
-            Value::Text("recipient-é".into()),
-            Value::Null,
-            Value::Integer(10),
-            Value::Integer(11),
-            Value::Null,
-            Value::Null,
-            Value::Blob(vec![7; 4096]),
-            Value::Text(r#"{"field":[1,2,3]}"#.into()),
-            Value::Text(r#"{"color":"blue"}"#.into()),
-            Value::Null,
-            Value::Text(r#"{"ok":true}"#.into()),
-            Value::Text("Leased".into()),
-            Value::Integer(3),
-            Value::Integer(2),
-            Value::Integer(9),
-            Value::Integer(77),
-            Value::Text("token".into()),
-            Value::Integer(88),
-            Value::Text("worker".into()),
-            Value::Integer(1),
-            Value::Integer(0),
-            Value::Integer(99),
-            Value::Integer(2),
-            Value::Integer(91),
-        ]
-    }
-
-    fn shard() -> QueueKey {
-        QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap())
-    }
-
-    #[test]
-    fn owned_addressed_decode_transfers_payload_and_preserves_planner_fields() {
-        let values = row();
-        let Value::Blob(payload) = &values[7] else {
-            unreachable!()
-        };
-        let pointer = payload.as_ptr();
-        let decoded = addressed_item_from_owned_values(values, &shard()).unwrap();
-        assert_eq!(decoded.item_id, ItemId::from_u64(42));
-        assert_eq!(decoded.client_item_key.as_str(), "recipient-é");
-        assert_eq!(decoded.payload.as_ref().unwrap().as_ptr(), pointer);
-        assert_eq!(decoded.payload.unwrap(), Bytes::from(vec![7; 4096]));
-        assert_eq!(decoded.fields["field"], Bytes::from_static(&[1, 2, 3]));
-        assert_eq!(
-            metadata_to_json(&decoded.metadata).unwrap(),
-            r#"{"color":"blue"}"#
-        );
-        assert_eq!(
-            decoded.entity_document,
-            Some(serde_json::json!({"ok":true}))
-        );
-        assert_eq!(decoded.state, fireweed_core::ItemState::Leased);
-        assert_eq!(
-            (
-                decoded.item_version,
-                decoded.attempt_count,
-                decoded.max_attempts,
-                decoded.created_seq
-            ),
-            (3, 2, 9, 77)
-        );
-        assert_eq!(decoded.not_before, Some(nanos_ts(10)));
-        assert_eq!(decoded.eligible_since, Some(nanos_ts(11)));
-        assert_eq!(decoded.lease_token.unwrap().as_str(), "token");
-        assert_eq!(decoded.worker_id.unwrap().as_str(), "worker");
-        assert_eq!(decoded.lease_expires_at, Some(nanos_ts(88)));
-        assert_eq!(decoded.terminal_at, Some(nanos_ts(99)));
-        assert_eq!(
-            decoded.terminal_position,
-            Some(CommandPosition::new(shard(), 2, 91))
-        );
-        assert!(decoded.fenced && !decoded.superseded && !decoded.lease_is_cohort);
-        assert!(
-            decoded.priority.is_none()
-                && decoded.group_key.is_none()
-                && decoded.cohort_size.is_none()
-        );
-        assert!(decoded.gate_keys.is_empty() && decoded.index_fields.is_empty());
-    }
-
-    #[test]
-    fn owned_addressed_decode_preserves_nulls_and_rejects_invalid_rows() {
-        let mut nullable = row();
-        for index in [2, 3, 4, 7, 11, 17, 18, 19, 22, 23] {
-            nullable[index] = Value::Null;
-        }
-        // As before, terminal sequence is irrelevant when terminal epoch is NULL.
-        nullable[24] = Value::Text("unused".into());
-        let decoded = addressed_item_from_owned_values(nullable, &shard()).unwrap();
-        assert!(decoded.payload.is_none() && decoded.entity_document.is_none());
-        assert!(decoded.lease_token.is_none() && decoded.worker_id.is_none());
-        assert!(decoded.terminal_at.is_none() && decoded.terminal_position.is_none());
-        for (index, invalid) in [
-            (0, Value::Integer(42)),
-            (1, Value::Null),
-            (2, Value::Text("invalid json".into())),
-            (7, Value::Text("not a blob".into())),
-            (8, Value::Text("invalid json".into())),
-            (9, Value::Text("invalid json".into())),
-            (10, Value::Blob(vec![255])),
-            (11, Value::Text("invalid json".into())),
-            (12, Value::Text("invalid state".into())),
-            (13, Value::Integer(-1)),
-            (14, Value::Integer(-1)),
-            (15, Value::Integer(i64::MAX)),
-            (16, Value::Integer(-1)),
-            (17, Value::Integer(1)),
-            (19, Value::Integer(1)),
-            (23, Value::Integer(-1)),
-            (24, Value::Integer(-1)),
-        ] {
-            let mut values = row();
-            values[index] = invalid;
-            assert!(
-                addressed_item_from_owned_values(values, &shard()).is_err(),
-                "column {index}"
-            );
-        }
-        for index in [5, 6] {
-            let mut values = row();
-            values[index] = Value::Integer(1);
-            assert!(matches!(
-                addressed_item_from_owned_values(values, &shard()),
-                Err(EngineError::Unavailable)
-            ));
-        }
-        assert!(addressed_item_from_owned_values(vec![], &shard()).is_err());
-        let mut too_long = row();
-        too_long.push(Value::Null);
-        assert!(addressed_item_from_owned_values(too_long, &shard()).is_err());
     }
 }
