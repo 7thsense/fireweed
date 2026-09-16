@@ -1,5 +1,20 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Purge validation algorithmic budget (2026-09-16)
+
+A fresh user-cycle profile of the guarded-counter qualification binary attributes
+0.77% self samples to purge-plan validation. The old full-batch validation performs
+32,004,000 linear ID comparisons for 8,000 distinct requested/planned IDs. One
+requested-ID hash set with removals changes this to expected-linear construction
+and validation while enforcing both subset membership and unique planned IDs.
+That operation-count reduction is **not** an end-to-end speedup estimate: profile
+loss, hashing costs and blocked time prevent deriving capacity from it alone.
+
+The candidate passes engine and public/native release tests, but has not yet been
+performance-compared. Keep the last measured worst-cycle gap at **4.2%** and the
+repeated 12.5k goal open. Neither disk baselines nor workload/gate assumptions
+change. See the [profile and validation record](campaign-qualification-plan.md).
+
 ## Guarded-counter sustained budget and remaining gap (2026-09-16)
 
 The untraced repeated qualification retains every 10k gate but still misses

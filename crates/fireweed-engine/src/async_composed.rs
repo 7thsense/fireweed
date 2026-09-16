@@ -2458,15 +2458,13 @@ fn validate_purge_plan(
     let QueueCommand::PurgeItems(command) = &env.command else {
         return Err(EngineError::Invalid("invalid async purge plan"));
     };
-    let unique: HashSet<_> = command.item_ids.iter().copied().collect();
+    // Removing each planned ID validates membership and uniqueness together.
+    // A linear request scan per ID makes large retention batches quadratic.
+    let mut requested: HashSet<_> = request.item_ids.iter().copied().collect();
     if env.command_id.0.is_empty()
         || env.item_ids != command.item_ids
         || command.force != request.force
-        || unique.len() != command.item_ids.len()
-        || command
-            .item_ids
-            .iter()
-            .any(|id| !request.item_ids.contains(id))
+        || command.item_ids.iter().any(|id| !requested.remove(id))
         || env.created_at != request.now
         || env.request_id.is_some()
         || env.request_fingerprint.is_some()
@@ -4187,6 +4185,43 @@ mod tests {
             now: UtcTimestamp::new(10, 0).unwrap(),
             expected_epoch: Some(1),
         }
+    }
+
+    #[test]
+    fn purge_plan_accepts_unique_subsets_and_rejects_duplicates_and_foreign_ids() {
+        let planner = ControlledLifecyclePlanner {
+            smuggle: LifecycleSmuggle::None,
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let validate = |requested: Vec<u64>, planned: Vec<u64>| {
+            let request = purge_request(requested.into_iter().map(ItemId::from_u64).collect());
+            let mut planned_request = request.clone();
+            planned_request.item_ids = planned.into_iter().map(ItemId::from_u64).collect();
+            let mut future = planner.plan_purge(planned_request);
+            let Poll::Ready(Ok(plan)) = poll_once(future.as_mut()) else {
+                panic!("fixture must produce a plan immediately")
+            };
+            validate_purge_plan(&request, &plan.request)
+        };
+        // Requests may repeat IDs; a valid planned subset may not.
+        assert_eq!(validate(vec![1, 2, 2, 3], vec![3, 1]).unwrap(), 2);
+        assert_eq!(validate(vec![1, 2, 2, 3], vec![]).unwrap(), 0);
+        assert_eq!(validate(vec![], vec![]).unwrap(), 0);
+        assert!(validate(vec![1, 2, 2, 3], vec![2, 2]).is_err());
+        assert!(validate(vec![1, 2, 3], vec![1, 4]).is_err());
+        assert!(validate(vec![], vec![1]).is_err());
+        // Retention-sized batches and arbitrary ordering retain the same contract.
+        let large: Vec<_> = (1..=8192).collect();
+        assert_eq!(
+            validate(large.clone(), large.iter().rev().copied().collect()).unwrap(),
+            8192
+        );
+        let mut late_duplicate = large.clone();
+        late_duplicate.push(1);
+        assert!(validate(large.clone(), late_duplicate).is_err());
+        let mut late_foreign = large.clone();
+        late_foreign.push(8193);
+        assert!(validate(large, late_foreign).is_err());
     }
 
     #[test]

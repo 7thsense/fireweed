@@ -1,0 +1,92 @@
+[
+  {
+    "artifact": "fireweed-guarded-counter-profile-candidate-provenance.json.gz",
+    "source_sha256": "1415647add2994ecd393e6ae181b02399f06a4054b54172a83bf157ea9357886",
+    "bytes": 456
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-candidate.json.gz",
+    "source_sha256": "64e6b133db2851f2c59f3d610ad5fb1dbd624279f29e0c875bc05a4742fd7c21",
+    "bytes": 675065
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-candidate-device-summary.json.gz",
+    "source_sha256": "b2e4249e4f379704cdee6de67f0579ea9e65bc86aa4c189e15ed8f4b350f3601",
+    "bytes": 893
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-summary.json.gz",
+    "source_sha256": "466204bdc5cf4bf8c05c3ca8174d7bce8e65a887c2824b8e7c6bdfeed59b79b6",
+    "bytes": 276
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-candidate-device.jsonl.gz",
+    "source_sha256": "e864dec1c6fdbbed8bd75eb1247f16e6fbf7a018fa4129453d39a1c060da6f78",
+    "bytes": 75074
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-candidate-perf.data.gz",
+    "source_sha256": "a3cd19ba3db4bfede29f116846a5498e4421a627c0f87ed3e610c9376167420e",
+    "bytes": 388592816
+  },
+  {
+    "artifact": "fireweed-run-guarded-counter-profile.py.gz",
+    "source_sha256": "e2b00f29808f5743d865830bf216f407cc01d264d3cd6b17c328d8495c4de989",
+    "bytes": 4976
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-recorder.py.gz",
+    "source_sha256": "c754d9bb884369e45c781532c2a7c7815d1ca3ce68b6599d83d4822a98b25009",
+    "bytes": 9037
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-runner.log.gz",
+    "source_sha256": "92f130e3c403f8f6697a8e78c97f6d16d6f1b235a3bc07fc090d785651bff395",
+    "bytes": 263
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-stats.txt.gz",
+    "source_sha256": "813d6c5d8e623641a1a908de9120cb241f6da4d13f40d4949795363ba8dcf7ad",
+    "bytes": 6385
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-unwind-errors.txt.gz",
+    "source_sha256": "20fdbabff53eeba3b680bb00b6deea56e4c812c9e8997c48db4ba99474b73382",
+    "bytes": 172
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-inclusive.txt.gz",
+    "source_sha256": "1dbf7cfa9e8234298f77c2535c4cfe9ccd04ae6697b122cffe487c9f6aa09ac7",
+    "bytes": 25368
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-header.txt.gz",
+    "source_sha256": "b764ffcdd3a9ae6513af87276c6866c715d55600f0adb88fd1f40347e67eb52b",
+    "bytes": 2331
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-errors.txt.gz",
+    "source_sha256": "6efa2eec8c49624fc13f277e6b5d63b3c30e20846628106beb45257c36a6f77a",
+    "bytes": 77
+  },
+  {
+    "artifact": "fireweed-guarded-counter-profile-self.txt.gz",
+    "source_sha256": "c45fd31e3a92ea1deb7d5000bf1b007a599518ea0dd47245f2cba2409d14b53a",
+    "bytes": 7408
+  },
+  {
+    "artifact": "fireweed-linear-purge-focused-tests.log.gz",
+    "source_sha256": "7bf5898f4eb9c8c3a0cebe13c127422b7360400a07067633e1b98f3fbdcbf2c4",
+    "bytes": 1311
+  },
+  {
+    "artifact": "fireweed-linear-purge-engine-tests.log.gz",
+    "source_sha256": "40b6f84d6c3beffd4521ca5031788d504a8fdb96d34efbf59234012f2c2607a0",
+    "bytes": 24150
+  },
+  {
+    "artifact": "fireweed-linear-purge-full-tests.log.gz",
+    "source_sha256": "76fc326cd936581c6b00949c04e83af803b041fa25caa2d17e08e12d093b190a",
+    "bytes": 48778
+  }
+]

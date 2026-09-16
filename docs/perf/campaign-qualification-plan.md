@@ -1,5 +1,60 @@
 # Campaign qualification and performance plan
 
+## Fresh CPU attribution and linear purge validation (2026-09-16)
+
+The previous goal turn made progress: guarded lifecycle-counter inference passed
+validation, reduced adjacent-run instructions about 6%, and the canonical repeated
+qualification narrowed the measured worst-cycle gap to 4.2%. Revalidate that state
+at clean `34661518`; no benchmark or build remained active.
+
+A separate one-cycle million-recipient campaign profiles the same qualification
+executable `94adbef091a89a54df649805542fbd7128dfa4769a7b06b96420c269efc29fe8`
+(build source `f931a497`). Only the workload process is sampled with pacman perf,
+`cycles:u`, 49 Hz and 4096-byte DWARF stacks. All child checks pass at 15,460.83/sec,
+0.883607 CPU-ms/recipient and 14.063 GiB peak RSS. This is diagnostic attribution,
+not qualification or evidence of an additional speedup. No workload/build overlap.
+
+Approximately 89k user-cycle samples have 1,023 lost samples and 41 lost chunks.
+The earlier validated unwind-bias shim is loaded into **offline perf report only**,
+never the workload. Loss and truncated stacks limit attribution; inclusive
+percentages overlap and exclude blocked time/kernel CPU. Summing thread labels,
+Turso `normal_step` accounts for 60.12% inclusive, `op_column` 13.99%, index B-tree
+seek 14.37%, accepted-claim realization 8.81%, addressed planning 5.69%, membership
+reporting 4.26%, and retained-item query 3.98%. Allocation/free self samples remain
+significant. Another column-header cache is not justified by this alone: previous
+comparisons already rejected that approach.
+
+One direct source-level defect is `validate_purge_plan`, at 0.77% self samples:
+it builds a set of planned IDs for duplicate detection, then performs a linear
+request-vector search for each planned ID. A full ordered batch of 8,000 distinct
+IDs requires 8,000×8,001/2 = **32,004,000 ID comparisons** in those searches.
+The candidate builds one requested-ID set and removes each planned ID. A failed
+remove rejects either a foreign ID or a repeated planned ID; duplicate requested
+IDs and reordered/empty valid subsets retain their existing semantics. Expected
+work becomes linear in request plus plan size. All other envelope, epoch, force,
+checksum and commit-fault guards remain unchanged. No log/API change or additional
+persistent state is introduced.
+
+Validation: seven focused purge tests and all **276 engine library tests** pass;
+the broader selected release suite passes **327 tests, zero failures, four
+intentional ignores**, with two unconfigured S3 probes filtered. New cases cover
+reordered subsets, duplicate requested IDs, duplicate/foreign planned IDs, empty
+inputs and 8,192-item batches with late invalid entries. Existing tests retain
+before-commit rejection, same-queue serialization and cancellation guarantees.
+
+**No end-to-end speedup is yet claimed for the purge candidate.** The profile's
+roughly 0.8% attribution cannot by itself close the 4.2% remaining stretch gap.
+Preserve `/tmp/fireweed-workload-before-linear-purge` (the exact `94adbef0...`
+control) for the next serial comparison. Source inspection identifies another
+bounded opportunity to examine: addressed-mutation planning clones owned text/blob
+SQL values during decoding, while accepted-claim decoding already moves its
+buffers. Any change there must retain the full planner semantics, including
+payload Keep/BeforeSnapshot/NoChange, pending claim overlays and validation errors.
+
+Archive `fireweed-guarded-counter-profile-manifest.json` lists 18 artifacts:
+raw perf data, recorder/provenance, reports/loss logs, device counters, exact runner
+and all three validation logs. Hashes identify decompressed contents.
+
 ## Guarded-counter repeated qualification: 10k passes, stretch still open (2026-09-16)
 
 Canonical campaign/primitive/campaign/primitive execution from clean `f931a497`
