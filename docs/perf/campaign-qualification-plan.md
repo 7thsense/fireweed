@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+## Reject response ownership after reversed-order controls (2026-09-16)
+
+The reverse-order screen completed correctly:
+
+| Run order | Recipients/sec | CPU-ms/recipient | User instructions (trillions) |
+| --- | ---: | ---: | ---: |
+| Candidate 1 | 16,321.01 | 0.85869 | 2.64687 |
+| Control 1 | 15,491.87 | 0.90661 | 2.66888 |
+| Candidate 2 | 13,544.88 | 0.95285 | 2.66637 |
+| Control 2 | 14,805.65 | 0.95924 | 2.68511 |
+
+Across all eight screens, arithmetic mean candidate instruction count fell
+1.08%, user cycles fell 1.01%, and CPU time fell only 0.62%. Mean throughput
+fell 4.21% (14,650 versus 15,293 recipients/sec); peak RSS averaged 0.38% higher.
+Three of four adjacent comparisons have lower candidate throughput. Reversing
+order demonstrates variability but does not establish a useful performance
+benefit. Remove the candidate and restore `turso_compose.rs` byte-for-byte to
+`b195e379`. Its 166 passing tests establish correctness, not performance.
+Do not spend sustained qualification runs on this change.
+
+All eight reports match on items, claims, dispositions, handler row counts and
+payload accounting separately for all 128 campaigns. No skipped work explains
+the instruction reduction. The reverse-screen manifest archives raw outputs,
+provenance, counters, device observations, scripts, combined arithmetic and the
+exact compared fields. The existing 10k evidence remains; repeated 12.5k is still
+unmet. No hardware changes or gate relaxations were made.
+Evidence: `fireweed-member-ownership-reverse-manifest.json`.
+
 ## Response ownership screen: fewer instructions, throughput unresolved (2026-09-16)
 
 Four serial original-row million-recipient diagnostics completed correctly.

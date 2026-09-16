@@ -1,5 +1,18 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Response-copy experiment and CPU-cost uncertainty (2026-09-16)
+
+Eight serial one-cycle runs across both orderings reject the response-copy
+candidate: its 1.08% instruction reduction did not translate into throughput.
+Four unchanged controls average 0.914565 CPU-ms/recipient, ranging from 0.866597
+to 0.959236. At 12.5k recipients/sec, the constant-cost calculation is
+**11.432 CPU-seconds/sec**, with observed-control endpoints **10.832–11.990**.
+The rejected candidate averages 0.908927 CPU-ms/recipient, or 11.362 CPU-seconds/sec
+at the same target. This small CPU difference is not a throughput prediction;
+mean measured throughput was lower. The tests performed identical logical work
+for all 128 campaigns in every run. Existing sustained gates and disk baselines
+remain authoritative. See `fireweed-member-ownership-reverse-manifest.json`.
+
 ## Global apply admission screen (2026-09-16)
 
 The 16-active-apply cap regressed both serial comparisons and was removed.
