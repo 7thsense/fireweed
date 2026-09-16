@@ -1,0 +1,67 @@
+{
+  "diagnostic_only": true,
+  "build_source_head": "141d4be74a024619ec12337cca370301c272e10c",
+  "executable_sha256": "520abf5e083fd751c223ec475521a5686d3eb999638fa86e861b19729cd32cab",
+  "artifacts": [
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-campaign.json.gz",
+      "uncompressed_sha256": "31ad74a9a7c8d6695577878dc093bfa8e7434c390acd53e0e16d04d9236da82f",
+      "uncompressed_bytes": 5025675
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-provenance.json.gz",
+      "uncompressed_sha256": "a5dd7f5afc8deb9b5cffc17b6ee422d7c85d9518525492e7146257666a19ad55",
+      "uncompressed_bytes": 364
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-summary.json.gz",
+      "uncompressed_sha256": "0a6ead826e2c5e88c4741c985c8d6730b472a5a192e586acd9b95632b8b52d87",
+      "uncompressed_bytes": 1745
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-comparison.json.gz",
+      "uncompressed_sha256": "a36e80eb75436dbf9b2bedfcf3e086d41e091b52ddb1fca1789c31c1b3b774f7",
+      "uncompressed_bytes": 1005
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-device.jsonl.gz",
+      "uncompressed_sha256": "4f73fc121b195697bd0829ae7fd457d5d25fecd00ee50f63e37151ee2f7f36d5",
+      "uncompressed_bytes": 603735
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-device-summary.json.gz",
+      "uncompressed_sha256": "06d3965dee420e5eff5fbca26e9a11572ffc258806375fe6ae95625ffa829b99",
+      "uncompressed_bytes": 902
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-run-selective-cache-read-trace.py.gz",
+      "uncompressed_sha256": "3d4f4112ca2c3cdcc6607079d1943a95f4f8466c1caa2696846adbbb1bf32ac8",
+      "uncompressed_bytes": 2730
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-summarize-projection-read-trace.py.gz",
+      "uncompressed_sha256": "6fbc5ba609409296104181a4fce215561e68950f1c0a9d17c4a209bf9b6149a4",
+      "uncompressed_bytes": 1055
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-build.log.gz",
+      "uncompressed_sha256": "ad505afeeafc215e4bf80834cca687b7d3579168b8996abd855f096001e89234",
+      "uncompressed_bytes": 14269
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-read-trace-runner.log.gz",
+      "uncompressed_sha256": "ce756f59b9f13a436a4b057bd52f5b158df294292de5d551de2d342afb970fe3",
+      "uncompressed_bytes": 184
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-device-monitor-v3.py.gz",
+      "uncompressed_sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1",
+      "uncompressed_bytes": 1522
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-device-summary-v3.py.gz",
+      "uncompressed_sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8",
+      "uncompressed_bytes": 1458
+    }
+  ]
+}

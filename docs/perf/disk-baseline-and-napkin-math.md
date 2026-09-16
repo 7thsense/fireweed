@@ -1,5 +1,40 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Selective cache measurement: fewer reads, modest CPU change (2026-09-16)
+
+Clean `141d4be7`, binary
+`520abf5e083fd751c223ec475521a5686d3eb999638fa86e861b19729cd32cab`, completes
+all eight million recipients at **15,236.67/sec**, with **13,107.79/sec** slowest
+cycle, **0.885019 CPU-ms/recipient** and **19.516 GiB** peak RSS. All rate,
+correctness, fairness/reporting and WAL/DB/RSS gates pass; tracing/provenance is
+the sole failed qualification gate. This remains a diagnostic, not qualification.
+
+Projection reads total **22,310,784 calls and 91,378,663,424 requested bytes**:
+1,721,755 main/other calls (7,046,000,640 bytes), and 20,589,029 WAL calls
+(84,332,662,784 bytes). No immediate VFS errors occur. Compared with the earlier
+unchanged eight-cycle control, calls and bytes fall **46.7%**, throughput rises
+**2.9%**, and CPU cost falls **2.4%**. These are single sequential recordings at
+different times, not proof of a repeatable throughput gain. The minimum cycle
+rate is lower than the control's 13,361.81/sec despite the higher aggregate rate.
+The cache mechanism removes considerable read traffic but does not remove the
+remaining SQL/queue/serialization work; do not convert the read reduction into
+an equivalent throughput claim.
+
+Host observation records only **0.004959 GiB device reads**, 33.081 GiB writes,
+64.76 MiB/sec writes, 35.20% device busy and 4.91 ms mean write-request time.
+Requested VFS reads are overwhelmingly OS-cached, not physical SSD bandwidth.
+At 12.5k recipients/sec the measured workload implies **34,861 read calls/sec**,
+**136.16 MiB/sec requested VFS reads** and **11.063 CPU-seconds/sec**. These are
+resource budgets, not independent throughput ceilings. No host settings, cache
+caps, batch limits or acceptance gates changed; the build and workload ran
+sequentially. The prior control binary is preserved for further comparison.
+
+The twelve artifacts in `fireweed-selective-cache-read-trace-manifest.json`
+include raw results, exact runner/parser, device monitor/summary, build/run logs
+and decompressed hashes. Next run the canonical untraced campaign/primitive
+qualification twice; the repeated 12.5k goal remains unproven.
+
+
 ## Read amplification above the device (2026-09-16)
 
 The eight-cycle diagnostic requests **5.233 VFS reads / 21,433 read bytes per
