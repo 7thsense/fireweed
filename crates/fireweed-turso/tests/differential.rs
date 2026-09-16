@@ -774,3 +774,210 @@ async fn addressed_metadata_changes_omit_unchanged_payload_but_clear_and_replace
         assert_eq!(rows[0].values[0], turso::Value::Blob(b"middle".to_vec()));
     }
 }
+
+#[tokio::test]
+async fn interleaved_claim_mutations_match_sequential_replay_and_rollback_late_conflicts() {
+    use fireweed_conformance::ts;
+    use fireweed_engine::{
+        AddressedMutation, BatchUpdateValue, ItemMutationOperation, ItemMutationRequest,
+        ItemMutationReturning, ItemPatch, LeaseGuard, LifecyclePatch, RequestOutcome,
+    };
+    async fn rows(store: &fireweed_turso::TursoRelational, sql: &str) -> Vec<Vec<turso::Value>> {
+        store
+            .query(sql, vec![])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.values)
+            .collect()
+    }
+    async fn snapshot(store: &fireweed_turso::TursoRelational) -> Vec<Vec<Vec<turso::Value>>> {
+        let mut result = vec![];
+        for table in [
+            "queues",
+            "relational_cursor",
+            "fireweed_items",
+            "fireweed_item_payloads",
+            "fireweed_request_idempotency",
+            "fireweed_claim_replay_items",
+            "fireweed_claim_outbox",
+            "fireweed_lease_bearers",
+        ] {
+            result.push(rows(store, &format!("SELECT * FROM {table} ORDER BY rowid")).await);
+        }
+        result
+    }
+    let pair = Pair::memory().await;
+    let ids: Vec<_> = ["951", "952", "953", "954"]
+        .into_iter()
+        .map(|s| ItemId::new(s).unwrap())
+        .collect();
+    let mut items: Vec<_> = ["951", "952", "953", "954"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| item(s, s, i as i64))
+        .collect();
+    for item in &mut items {
+        item.payload = Some(Bytes::from_static(b"original-body"));
+    }
+    pair.apply(
+        0,
+        envelope(QueueCommand::Push(PushCommand { items }), ids.clone()),
+    )
+    .await;
+    let before = snapshot(&pair.turso).await;
+    let mut commands = vec![];
+    let mut positions = vec![];
+    // A second handler claims new work between the first and second follow-ups.
+    // Item 952 deliberately stays leased throughout the combined transaction.
+    for sequence in 1..=5 {
+        let request_id = fireweed_core::RequestId::new(format!("interleaved-{sequence}")).unwrap();
+        let mut command = if matches!(sequence, 1 | 2 | 4) {
+            let (claimed, token) = match sequence {
+                1 => (ids[..2].to_vec(), "first"),
+                2 => (vec![ids[2]], "second"),
+                _ => (vec![ids[3]], "third"),
+            };
+            let token = LeaseToken::new(token).unwrap();
+            let mut command = envelope(
+                QueueCommand::Claim(
+                    ClaimCommand::new(claimed.clone(), token.clone(), ts(30), None)
+                        .with_authority_first(),
+                ),
+                claimed.clone(),
+            );
+            command.request_outcome = Some(RequestOutcome::ClaimByQuery {
+                item_ids: claimed,
+                lease_token: token,
+                worker_id: None,
+            });
+            command
+        } else {
+            let changed = if sequence == 3 {
+                vec![(ids[0], "first", LifecyclePatch::SetPending)]
+            } else {
+                vec![
+                    (ids[2], "second", LifecyclePatch::SetFailed),
+                    (ids[3], "third", LifecyclePatch::SetComplete),
+                ]
+            };
+            let entries = changed
+                .iter()
+                .map(|(id, token, state)| AddressedMutation {
+                    item_id: *id,
+                    expected_item_version: None,
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::Match(LeaseToken::new(*token).unwrap()),
+                    patch: ItemPatch {
+                        lifecycle: *state,
+                        payload: if sequence == 3 {
+                            BatchUpdateValue::Replace(Some(Bytes::from_static(b"enriched-body")))
+                        } else {
+                            BatchUpdateValue::Keep
+                        },
+                        metadata: BatchUpdateValue::Replace(fireweed_core::Metadata::from_entries(
+                            BTreeMap::from([(
+                                "color".into(),
+                                fireweed_core::MetadataValue::String("red".into()),
+                            )]),
+                        )),
+                        ..Default::default()
+                    },
+                })
+                .collect();
+            let request = ItemMutationRequest {
+                request_id: request_id.clone(),
+                evaluated_at: ts(20),
+                dry_run: false,
+                returning: ItemMutationReturning::Identity,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed { entries },
+            };
+            let plan = pair
+                .reference
+                .plan_addressed_item_mutation(&pair.shard, &qdef(), &request, &[])
+                .await
+                .unwrap();
+            assert_eq!(plan.response.summary.changed, changed.len() as u64);
+            let mut command = envelope(
+                QueueCommand::MutateItems(plan.command),
+                changed.iter().map(|(id, _, _)| *id).collect(),
+            );
+            command.request_outcome = Some(RequestOutcome::ItemMutation {
+                response_payload: serde_json::to_string(&plan.response).unwrap(),
+            });
+            command
+        };
+        command.request_id = Some(request_id);
+        command.request_fingerprint = Some(sequence);
+        command.created_at = ts(20);
+        let position = CommandPosition::new(pair.shard.clone(), 0, sequence);
+        AsyncProjectionStore::apply_live(
+            &pair.reference,
+            vec![position.clone()],
+            vec![command.clone()],
+        )
+        .await
+        .unwrap();
+        positions.push(position);
+        commands.push(command);
+    }
+    // Re-claiming the unpaired, already-leased row ends the fusible prefix.
+    // The ordinary claim guard must still reject and roll back that prefix.
+    let mut duplicate_claim = commands.clone();
+    let QueueCommand::Claim(claim) = &mut duplicate_claim[3].command else {
+        unreachable!()
+    };
+    claim.item_ids = vec![ids[1]];
+    duplicate_claim[3].item_ids = vec![ids[1]];
+    let Some(RequestOutcome::ClaimByQuery { item_ids, .. }) =
+        &mut duplicate_claim[3].request_outcome
+    else {
+        unreachable!()
+    };
+    *item_ids = vec![ids[1]];
+    assert!(
+        AsyncProjectionStore::apply_live(&pair.turso, positions.clone(), duplicate_claim)
+            .await
+            .is_err()
+    );
+    assert_eq!(snapshot(&pair.turso).await, before);
+
+    // The last row fails after earlier claims, replacements and receipts have run.
+    // Every persistent table touched by this fixture must roll back atomically.
+    let mut bad = commands.clone();
+    let QueueCommand::MutateItems(mutation) = &mut bad[4].command else {
+        unreachable!()
+    };
+    let values = match &mut mutation.items[1].action {
+        fireweed_engine::ResolvedItemMutationAction::Replace(values)
+        | fireweed_engine::ResolvedItemMutationAction::ReplaceKeepingPayload(values) => values,
+        _ => unreachable!(),
+    };
+    values.item_version += 1;
+    assert!(
+        AsyncProjectionStore::apply_live(&pair.turso, positions.clone(), bad)
+            .await
+            .is_err()
+    );
+    assert_eq!(snapshot(&pair.turso).await, before);
+    assert!(
+        AsyncProjectionStore::render_claimed(&pair.turso, pair.shard.clone(), ids.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    AsyncProjectionStore::apply_live(&pair.turso, positions.clone(), commands.clone())
+        .await
+        .unwrap();
+    pair.assert_projection_image_and_reads_equal(&ids).await;
+    let receipt_sql = "SELECT operation,request_id,request_fingerprint,response_payload,command_positions,expires_at,created_at FROM fireweed_request_idempotency ORDER BY operation,request_id";
+    let expected_receipts = rows(&pair.reference, receipt_sql).await;
+    assert_eq!(expected_receipts.len(), 5);
+    assert_eq!(rows(&pair.turso, receipt_sql).await, expected_receipts);
+    AsyncProjectionStore::apply_live(&pair.turso, positions, commands)
+        .await
+        .unwrap();
+    pair.assert_projection_image_and_reads_equal(&ids).await;
+    assert_eq!(rows(&pair.turso, receipt_sql).await, expected_receipts);
+}

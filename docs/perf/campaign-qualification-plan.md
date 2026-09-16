@@ -1,5 +1,34 @@
 # Campaign qualification and performance plan
 
+## Interleaved claim/mutation fusion validated; measurement pending (2026-09-16)
+
+The relational apply window now recognizes interleaved independent handlers,
+for example `Claim(A), Claim(B), Mutate(A), Claim(C), Mutate(B), Mutate(C)`.
+Previously the third claim ended the initial claim-then-mutation window, forcing
+B's intermediate lease update even when its follow-up shared the transaction.
+The candidate skips only claims paired with a later lease-invalidating replacement,
+using the existing Pending/version guards; it does not reorder commands, remove
+log events, enlarge batches or change the coordinator's join delay. Unpaired
+claims keep the normal path. Repeated identities, unsupported commands and
+queue/epoch/sequence boundaries end the window before the offending command.
+
+**325 local release tests pass**, four existing diagnostics ignored and two
+unconfigured live-S3 checks filtered. Four new window tests cover pair identity,
+interleaving, whole-command barriers, non-clearing/Leased/invalid-version
+replacements and queue/epoch/sequence boundaries. A native differential test
+compares combined apply against individual Turso replay: full projection image,
+reads, metadata/payload, versions, attempts, leases, cursors, metrics and request
+receipts. It also verifies exact replay and atomic rollback of all touched tables
+for an invalid re-claim and a conflict in the final replacement. Existing public
+campaign, primitive, durability and log-only recovery tests pass. The 17 harness
+tests passed separately. No build or test overlapped the remote benchmark.
+Evidence: `fireweed-interleaved-fusion-validation.log.gz`.
+
+No throughput or write-volume improvement is claimed. Next rebuild the canonical
+CLI and compare serially against preserved `5d0ac295...` using the unchanged
+million-row workflow and explicit binary/source identities. Keep the fixed 10k
+and 12.5k sustained targets, fairness, reporting and resource limits intact.
+
 ## Baldr unchanged-binary eight-cycle diagnostic (2026-09-16)
 
 After the local three-run comparison ended, Baldr ran the identical control

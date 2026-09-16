@@ -522,15 +522,12 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
         }
 
         if !grouped_shards.contains(&pos.queue)
-            && let Some((claim_end, run_end, fused)) = claim_mutation_run(positions, envelopes, i)
+            && let Some((run_end, fused)) = claim_mutation_run(positions, envelopes, i)
         {
             for index in i..run_end {
                 let position = &positions[index];
                 let envelope = &envelopes[index];
-                if index < claim_end {
-                    let QueueCommand::Claim(claim) = &envelope.command else {
-                        unreachable!()
-                    };
+                if let QueueCommand::Claim(claim) = &envelope.command {
                     let mut remaining = claim.clone();
                     remaining.item_ids.retain(|id| !fused.contains(id));
                     if !remaining.item_ids.is_empty() {
@@ -874,56 +871,66 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
     Ok(applied_update_fields)
 }
 
-/// Only fuse claims with one later lease-invalidating replacement in a contiguous
-/// Claim-then-MutateItems run. Unpaired rows retain the ordinary claim path.
+/// Fuse claims with one later lease-invalidating replacement in a contiguous
+/// Claim/MutateItems run, including interleaved independent handlers. Commands
+/// retain their order; unpaired rows retain the ordinary claim path. A repeated
+/// identity or an unsupported command ends the window before that command.
 fn claim_mutation_run(
     positions: &[CommandPosition],
     envelopes: &[CommandEnvelope],
     start: usize,
-) -> Option<(usize, usize, HashSet<ItemId>)> {
+) -> Option<(usize, HashSet<ItemId>)> {
     let first = positions.get(start)?;
+    if !matches!(envelopes.get(start)?.command, QueueCommand::Claim(_)) {
+        return None;
+    }
     let contiguous = |i: usize| {
         positions[i].queue == first.queue
             && positions[i].backend_epoch == first.backend_epoch
             && Some(positions[i].sequence) == first.sequence.checked_add((i - start) as u64)
     };
     let mut claimed = HashSet::new();
-    let mut claim_end = start;
-    while claim_end < envelopes.len() && contiguous(claim_end) {
-        let QueueCommand::Claim(claim) = &envelopes[claim_end].command else {
-            break;
-        };
-        if !claim.authority_first || claim.item_ids.iter().any(|id| !claimed.insert(*id)) {
-            return None;
-        }
-        claim_end += 1;
-    }
-    if claim_end == start {
-        return None;
-    }
-    let mut end = claim_end;
+    let mut end = start;
     let mut visited = HashSet::new();
     let mut fused = HashSet::new();
     while end < envelopes.len() && contiguous(end) {
-        let QueueCommand::MutateItems(mutation) = &envelopes[end].command else {
-            break;
-        };
-        for item in &mutation.items {
-            // Multiple replacements/purges of a row need their intermediate state.
-            if !visited.insert(item.item_id) {
-                return None;
+        match &envelopes[end].command {
+            QueueCommand::Claim(claim) => {
+                if !claim.authority_first
+                    || claim
+                        .item_ids
+                        .iter()
+                        .any(|id| visited.contains(id) || !claimed.insert(*id))
+                {
+                    break;
+                }
             }
-            if claimed.contains(&item.item_id)
-                && matches!(&item.action, ResolvedItemMutationAction::Replace(values) | ResolvedItemMutationAction::ReplaceKeepingPayload(values)
-                    if values.invalidate_lease && values.state != ItemState::Leased
-                        && values.item_version >= 2)
-            {
-                fused.insert(item.item_id);
+            QueueCommand::MutateItems(mutation) => {
+                if mutation
+                    .items
+                    .iter()
+                    .any(|item| !visited.insert(item.item_id))
+                {
+                    break;
+                }
+                // Validate the whole command before adding any pairs. On a
+                // duplicate we end before this command, so partially extended
+                // seen sets above are never used again.
+                for item in &mutation.items {
+                    if claimed.contains(&item.item_id)
+                        && matches!(&item.action, ResolvedItemMutationAction::Replace(values) | ResolvedItemMutationAction::ReplaceKeepingPayload(values)
+                            if values.invalidate_lease && values.state != ItemState::Leased
+                                && values.item_version >= 2)
+                    {
+                        fused.insert(item.item_id);
+                    }
+                }
             }
+            _ => break,
         }
         end += 1;
     }
-    (!fused.is_empty()).then_some((claim_end, end, fused))
+    (!fused.is_empty()).then_some((end, fused))
 }
 
 fn coalescible_update_run_end(
@@ -6534,6 +6541,183 @@ fn apply_command_sql_with_claims(
             }
             relect_group_summaries(tx, shard, &groups, now)?;
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod claim_mutation_window_tests {
+    use super::*;
+    use fireweed_core::{LeaseToken, QueueId, TenantId};
+    use fireweed_engine::{CommandChecksum, CommandId, MutateItemsCommand, ResolvedItemValues};
+
+    fn id(n: u32) -> ItemId {
+        ItemId::mint(1, 0, n)
+    }
+    fn claim(ids: &[u32]) -> QueueCommand {
+        QueueCommand::Claim(
+            ClaimCommand::new(
+                ids.iter().copied().map(id).collect(),
+                LeaseToken::new("lease").unwrap(),
+                UtcTimestamp::new(30, 0).unwrap(),
+                None,
+            )
+            .with_authority_first(),
+        )
+    }
+    fn mutation(ids: &[u32]) -> QueueCommand {
+        QueueCommand::MutateItems(MutateItemsCommand {
+            items: ids
+                .iter()
+                .map(|n| fireweed_engine::ResolvedItemMutation {
+                    item_id: id(*n),
+                    action: ResolvedItemMutationAction::ReplaceKeepingPayload(Box::new(
+                        ResolvedItemValues {
+                            state: ItemState::Pending,
+                            item_version: 3,
+                            priority: None,
+                            not_before: None,
+                            eligible_since: UtcTimestamp::new(1, 0).unwrap(),
+                            payload: None,
+                            fields: Default::default(),
+                            metadata: Default::default(),
+                            gate_keys: vec![],
+                            index_fields: Default::default(),
+                            entity_document: None,
+                            invalidate_lease: true,
+                        },
+                    )),
+                })
+                .collect(),
+            gate_changes: vec![],
+        })
+    }
+    fn inputs(commands: Vec<QueueCommand>) -> (Vec<CommandPosition>, Vec<CommandEnvelope>) {
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let positions = (0..commands.len())
+            .map(|i| CommandPosition::new(shard.clone(), 0, i as u64))
+            .collect();
+        let envelopes = commands
+            .into_iter()
+            .enumerate()
+            .map(|(i, command)| CommandEnvelope {
+                command_id: CommandId::new(format!("window-{i}")),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: vec![],
+                command,
+                checksum: CommandChecksum(0),
+                created_at: UtcTimestamp::new(1, 0).unwrap(),
+            })
+            .collect();
+        (positions, envelopes)
+    }
+
+    #[test]
+    fn interleaved_handlers_pair_only_their_preceding_claims() {
+        let (positions, envelopes) = inputs(vec![
+            claim(&[1, 2]),
+            claim(&[3]),
+            mutation(&[1]),
+            claim(&[4]),
+            mutation(&[3, 4]),
+        ]);
+        let (end, fused) = claim_mutation_run(&positions, &envelopes, 0).unwrap();
+        assert_eq!(end, 5);
+        assert_eq!(fused, HashSet::from([id(1), id(3), id(4)]));
+    }
+
+    #[test]
+    fn ambiguous_commands_end_the_window_before_any_part_is_consumed() {
+        let mut legacy = claim(&[2]);
+        let QueueCommand::Claim(c) = &mut legacy else {
+            unreachable!()
+        };
+        c.authority_first = false;
+        for barrier in [
+            claim(&[1]),
+            claim(&[2, 2]),
+            mutation(&[1]),
+            mutation(&[2, 2]),
+            QueueCommand::ResumeQueue,
+            legacy,
+        ] {
+            let (positions, envelopes) = inputs(vec![
+                claim(&[1]),
+                mutation(&[1]),
+                barrier,
+                claim(&[3]),
+                mutation(&[3]),
+            ]);
+            let (end, fused) = claim_mutation_run(&positions, &envelopes, 0).unwrap();
+            assert_eq!(end, 2);
+            assert_eq!(fused, HashSet::from([id(1)]));
+        }
+        // A mutation preceding a claim must not be mistaken for its follow-up.
+        let (positions, envelopes) = inputs(vec![
+            claim(&[1]),
+            mutation(&[1, 2]),
+            claim(&[2]),
+            mutation(&[2]),
+        ]);
+        assert_eq!(
+            claim_mutation_run(&positions, &envelopes, 0).unwrap(),
+            (2, HashSet::from([id(1)]))
+        );
+        for commands in [
+            vec![claim(&[1, 1]), mutation(&[1])],
+            vec![claim(&[1]), mutation(&[1, 1])],
+            vec![mutation(&[1]), claim(&[1])],
+        ] {
+            let (positions, envelopes) = inputs(commands);
+            assert!(claim_mutation_run(&positions, &envelopes, 0).is_none());
+        }
+    }
+
+    #[test]
+    fn interleaved_window_stops_at_queue_epoch_and_sequence_boundaries() {
+        for boundary in 0..3 {
+            let (mut positions, envelopes) = inputs(vec![
+                claim(&[1]),
+                mutation(&[1]),
+                claim(&[2]),
+                mutation(&[2]),
+            ]);
+            match boundary {
+                0 => positions[2].queue.queue_id = QueueId::new("other").unwrap(),
+                1 => positions[2].backend_epoch = 1,
+                _ => positions[2].sequence += 1,
+            }
+            assert_eq!(
+                claim_mutation_run(&positions, &envelopes, 0).unwrap(),
+                (2, HashSet::from([id(1)]))
+            );
+        }
+    }
+
+    #[test]
+    fn replacements_must_clear_the_lease_and_include_its_version_increment() {
+        for unsupported in 0..3 {
+            let mut replacement = mutation(&[2]);
+            let QueueCommand::MutateItems(m) = &mut replacement else {
+                unreachable!()
+            };
+            let ResolvedItemMutationAction::ReplaceKeepingPayload(values) = &mut m.items[0].action
+            else {
+                unreachable!()
+            };
+            match unsupported {
+                0 => values.invalidate_lease = false,
+                1 => values.state = ItemState::Leased,
+                _ => values.item_version = 1,
+            }
+            let (positions, envelopes) =
+                inputs(vec![claim(&[1]), mutation(&[1]), claim(&[2]), replacement]);
+            assert_eq!(
+                claim_mutation_run(&positions, &envelopes, 0).unwrap(),
+                (4, HashSet::from([id(1)]))
+            );
         }
     }
 }
