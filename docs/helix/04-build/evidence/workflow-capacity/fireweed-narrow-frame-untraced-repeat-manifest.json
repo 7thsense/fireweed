@@ -1,0 +1,120 @@
+{
+  "run_source_head": "604c22a958604582d0ed63680689c3b7d01cf957",
+  "binary_sha256": "89abe51884017c2112999a0b1a0c932702b0be9fded86b6a618de4fc6205dcae",
+  "candidate_exercised": false,
+  "classification": "additional in-process control; the optimized multiprocess branch is not enabled",
+  "all_10000_checks_pass": true,
+  "all_12500_checks_pass": false,
+  "artifacts": [
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-campaign-1.json.gz",
+      "uncompressed_sha256": "0f5f3c72d0dbc24aed1d61f5c295617194dfafe1faf2023686afbd5d5dca70d3",
+      "uncompressed_bytes": 5349858
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-primitives-1.json.gz",
+      "uncompressed_sha256": "2d6590274c0a789b8892c53fd07842acf144853cdc7e3e99fd40e384c067bfb3",
+      "uncompressed_bytes": 152595
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-campaign-2.json.gz",
+      "uncompressed_sha256": "ec314d3f87b7c553947b914c3b351b72fe7d95fd4eeea59fed6d85e040e6b8e4",
+      "uncompressed_bytes": 5428482
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-primitives-2.json.gz",
+      "uncompressed_sha256": "f57d0884c5a9fa9ca9b70abd39f6b915c9236c4d5e1c936de6edbd0ac4bbe1a0",
+      "uncompressed_bytes": 148802
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-summary.json.gz",
+      "uncompressed_sha256": "423de2ab57d0f924ca054908b6e03a3a72e4160fb7849bcefdf5ce85803c4287",
+      "uncompressed_bytes": 8328
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-budgets.json.gz",
+      "uncompressed_sha256": "56917cdf10baff0feec01616b2d176fa8f55b04667d4fa597df59a81bdd12eae",
+      "uncompressed_bytes": 503
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-backend-source-proof.json.gz",
+      "uncompressed_sha256": "73ec181d24fab64b5556608bd7d3e2f5a6d7fb62fb3ab1ee330cbb44ec2d6357",
+      "uncompressed_bytes": 9026
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-1-device.jsonl.gz",
+      "uncompressed_sha256": "bacb8e3972e6e954b3c698260a15181a8289a94edeb8f531e012db2f800f289d",
+      "uncompressed_bytes": 594784
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-1-device-summary.json.gz",
+      "uncompressed_sha256": "264b4f78020a69f9aa089a291cf10809073cfc62c66c1f08cdd04e454b5fddb6",
+      "uncompressed_bytes": 904
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-2-device.jsonl.gz",
+      "uncompressed_sha256": "c20521194257e8126133a359634acf718dd0afd919fe6f102c9ce6147073dd33",
+      "uncompressed_bytes": 100155
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-2-device-summary.json.gz",
+      "uncompressed_sha256": "bafd229db027f1c5571970eaf7be7496ac284e82dc8d5aa3f1b8cf770eb0cdab",
+      "uncompressed_bytes": 904
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-3-device.jsonl.gz",
+      "uncompressed_sha256": "397ce22587e3afab8287136e81141e25dd1d2c1262bc126fcbf31d8868b242a5",
+      "uncompressed_bytes": 665764
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-3-device-summary.json.gz",
+      "uncompressed_sha256": "e33a99fb2378ce580104ffeb475c64ad46b681b0766080a8b6f9b268ca0e23c0",
+      "uncompressed_bytes": 904
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-4-device.jsonl.gz",
+      "uncompressed_sha256": "fecf1d2ab99093f8e45269d4e41b03e8f493d28f74f469f2d18abb3bac5dd60f",
+      "uncompressed_bytes": 91857
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phase-4-device-summary.json.gz",
+      "uncompressed_sha256": "8fc5024121a5977e485052d829dba09e4942136372769dfbe8ae6c1c6052deea",
+      "uncompressed_bytes": 919
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-run-narrow-frame-untraced-qualification.py.gz",
+      "uncompressed_sha256": "10590660d105bee36ee3e9e067e1b6bbe5f2f40340e4cddf8518e67199ce9923",
+      "uncompressed_bytes": 2845
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-summarize-untraced-repeat.py.gz",
+      "uncompressed_sha256": "575a39ff33a256dc7626c2478b550f64d8a794a87988a5143de19a4bcbab5d34",
+      "uncompressed_bytes": 1304
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-phases.json.gz",
+      "uncompressed_sha256": "61ea47960b0d22bee5c9eff8b88178fceabe928564c8599733784c68180fcb43",
+      "uncompressed_bytes": 3070
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-runner.log.gz",
+      "uncompressed_sha256": "c4c4d7393900b1aeef486b8929ce6a08b4848952ffb69495ab7c7c5734f3560b",
+      "uncompressed_bytes": 14527
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-untraced-qualification-wrapper.log.gz",
+      "uncompressed_sha256": "d4bf988bf33e82e97f0e5301f3f5923fc8b58ada22217d89f29169c2f29f18f6",
+      "uncompressed_bytes": 268
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-inactive-frame-scan-revert-tests.log.gz",
+      "uncompressed_sha256": "d5464eed67b8c9c0c3556638af2b44d1f4a5249e83ee09f0aa3200404cb3c783",
+      "uncompressed_bytes": 10021
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-qualification-command.sh.gz",
+      "uncompressed_sha256": "18fd4d7e756fa66f5fcbb65ca7323e31527e9cf42a495fdfc9489b9f76927c1c",
+      "uncompressed_bytes": 1576
+    }
+  ]
+}

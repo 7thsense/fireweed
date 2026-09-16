@@ -1,5 +1,59 @@
 # Campaign qualification and performance plan
 
+## Correction: optimized the inactive WAL backend; remove that fast path (2026-09-16)
+
+The narrow-frame experiment targeted the wrong backend. Fireweed's
+`TursoRelational::open_with_io` calls `Builder::new_local` and changes only the I/O
+implementation. Turso defaults `enable_multiprocess_wal` to false; without that
+flag, `open_shared_wal_coordination_inner` returns None and the WAL uses
+`InProcessWalCoordination`. Therefore the multiprocess fast path in `604c22a9`
+is **not exercised by this workload**. My earlier reasoning incorrectly assumed
+that mapped shared coordination was active. These recordings cannot establish
+any performance benefit from that patch. Source excerpts, hashes and the backend
+factory chain are archived in `fireweed-narrow-frame-untraced-backend-source-proof.json.gz`.
+
+Remove the 15-line inactive fast path. Production code in
+`shared_wal_coordination.rs` is restored byte-for-byte to `ab0e0d0a`; retain the
+useful latest-visible-frame oracle test. All **44 shared-coordination tests pass**
+after restoration. The original selective page-cache change remains active for
+both backends: its measured 46.7% VFS-read reduction is separate from this failed
+backend assumption and is not retracted.
+
+All four completed runs use clean `604c22a9`, executable
+`89abe51884017c2112999a0b1a0c932702b0be9fded86b6a618de4fc6205dcae`, empty
+diagnostics and successful workload exits. They are additional **in-process
+control observations**, not a demonstrated optimization comparison.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| First | 15,273.21 | 13,226.85 | 0.884260 | 19.359 |
+| Repeat | 13,285.76 | 11,637.16 | 0.915180 | 18.511 |
+
+First passes every 12.5k gate. Repeat fails cycle-rate checks 1, 5 and 7
+(zero-based): 12,492.49 / 11,637.16 / 12,427.83. All correctness, reporting,
+due-to-claim, WAL/DB/RSS and 10k checks pass. All five primitive rates exceed
+10k in both repeats: insert 31,551/36,848; enrich 39,396/44,397; schedule
+117,381/115,372; claim/complete 45,366/45,836; purge 161,008/147,184 rows/sec.
+These remain million-row, varied-payload, batched public operations.
+
+The slowest additional observation needs **7.41%** more throughput (85.932
+seconds down to 80). CPU budgets at 12.5k are **11.053/11.440 CPU-seconds/sec**.
+Host write rates are 61.48/53.24 MiB/sec, mean write-request latency 4.82/17.31 ms,
+and busy time 35.07/56.81%. These measurements document variability, not a device
+bandwidth ceiling or causal benefit from an unused code path. No host settings,
+workload limits or gates changed, and runs were sequential.
+
+Next profile the actual in-process backend across all eight cycles using the
+preserved `9124cfd7...` executable built from `2e8f8ff5`. Its frame-range iterator
+scans per-page historical vectors, including old versions when no new page frame
+exists in the requested range; that is an active code path worth measuring.
+Use 19 Hz user-CPU samples with 2 KiB DWARF stacks to include late-cycle work with
+bounded trace volume. This is diagnostic only; resource usage includes the perf
+wrapper. Confirm hot paths before selecting another change. The full goal
+remains open. Twenty-two artifacts, including restoration tests, are indexed by
+`fireweed-narrow-frame-untraced-repeat-manifest.json` with decompressed hashes.
+
+
 ## Bound small frame-range scans before the next qualification (2026-09-16)
 
 `MappedSharedWalCoordination::iter_latest_frames` now directly enumerates the

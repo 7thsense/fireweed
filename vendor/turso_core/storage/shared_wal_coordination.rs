@@ -2474,20 +2474,6 @@ impl MappedSharedWalCoordination {
         if visible_slots <= first_slot {
             return Vec::new();
         }
-        // Small snapshot advances should cost the changed slots, not a whole
-        // block's hash table and temporary maps. Restrict this path to at most
-        // one block of entries; large checkpoint scans retain block deduplication.
-        if visible_slots - first_slot <= FRAME_INDEX_BLOCK_CAPACITY {
-            let mut entries: Vec<_> = (first_slot..visible_slots)
-                .map(|slot| {
-                    let entry = Self::frame_index_entry(&mappings, slot);
-                    (entry.page_id, entry.frame_id)
-                })
-                .collect();
-            entries.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-            entries.dedup_by_key(|entry| entry.0);
-            return entries;
-        }
         let mut seen_pages = std::collections::BTreeSet::new();
         let mut entries = Vec::new();
         let last_block = (visible_slots - 1) / FRAME_INDEX_BLOCK_CAPACITY;
