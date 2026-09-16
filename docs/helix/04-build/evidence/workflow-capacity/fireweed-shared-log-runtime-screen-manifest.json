@@ -1,0 +1,163 @@
+{
+  "source_head": "746084596d079465159924f5fa0a1754f97b97fc",
+  "diagnostic_only": true,
+  "order": [
+    "control-1",
+    "candidate-1",
+    "candidate-2",
+    "control-2"
+  ],
+  "conclusion": "CPU -3.37%, instructions -1.22%, RSS -8.15%; throughput -1.95%. No demonstrated throughput improvement; sustained qualification pending.",
+  "artifacts": [
+    {
+      "path": "fireweed-shared-log-runtime-screen-fireweed-analyze-lease-index-counters.py.gz",
+      "sha256_uncompressed": "92ad3a1ef3e86b449c28757bf18fdaffde1428b4e17083ca797da959116bc3d7",
+      "uncompressed_bytes": 2638
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-fireweed-analyze-shared-log-runtime.py.gz",
+      "sha256_uncompressed": "789559cb6f5eacd97ac9561a892d6b272ee836093f27397e9e46c7496a842af4",
+      "uncompressed_bytes": 1346
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-fireweed-run-shared-log-runtime-counters.py.gz",
+      "sha256_uncompressed": "584e00d26873fcac7d810b837ef1ca53afd1bcc45102b63d893bc0b666fb5c4a",
+      "uncompressed_bytes": 5726
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-fireweed-shared-log-runtime-counter-recorder.py.gz",
+      "sha256_uncompressed": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+      "uncompressed_bytes": 9015
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-analysis.json.gz",
+      "sha256_uncompressed": "a38ea47483b298d79085775096800699d08e1d85a395e2cb331028406a577afd",
+      "uncompressed_bytes": 9478
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-1-device-summary.json.gz",
+      "sha256_uncompressed": "e6d59c2e7cea988df0c85866f7d93c34c8dc1e95d37d03cb0bcef45b743771b4",
+      "uncompressed_bytes": 883
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-1-device.jsonl.gz",
+      "sha256_uncompressed": "115669a2db0a0368821ed5f1c118fe6d6f3c4faa202d6b31e36ee243fac214a9",
+      "uncompressed_bytes": 74277
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-1-perf.csv.gz",
+      "sha256_uncompressed": "1166471705699c53c261aca9c1b479ccd008d07013c99430e7a5f3739d5d3b90",
+      "uncompressed_bytes": 137
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-1-provenance.json.gz",
+      "sha256_uncompressed": "5c89a2a3f7de3a182b39aeacb613f3238f9439953358c02ce67e9981105036de",
+      "uncompressed_bytes": 497
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-1-threads.jsonl.gz",
+      "sha256_uncompressed": "01b64cfc7c502e5c5eb531491173141eef24e9007bbf04bc0bd7ef6d4a5436eb",
+      "uncompressed_bytes": 4826
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-1.json.gz",
+      "sha256_uncompressed": "70bfade21b75986eefda996db29faf44f3d3be3086da4eb05d4dc6497618cfae",
+      "uncompressed_bytes": 710154
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-2-device-summary.json.gz",
+      "sha256_uncompressed": "67f5d60cf6f8e576d55871546132a7c3e572bfc112b5ee4eaf254becfa80f3b1",
+      "uncompressed_bytes": 873
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-2-device.jsonl.gz",
+      "sha256_uncompressed": "2c88317004ca785b5c7c30d8dd2b14469384c656d54d59761e005e15e367f009",
+      "uncompressed_bytes": 74236
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-2-perf.csv.gz",
+      "sha256_uncompressed": "8b820e53c1cb1ab62f4eb0755aa0f2d080bea5be70a4c0dd05a0b8a8548b4783",
+      "uncompressed_bytes": 137
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-2-provenance.json.gz",
+      "sha256_uncompressed": "5c89a2a3f7de3a182b39aeacb613f3238f9439953358c02ce67e9981105036de",
+      "uncompressed_bytes": 497
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-2-threads.jsonl.gz",
+      "sha256_uncompressed": "da36793d9b370201d1f79eb70b25e44300d1b6eb63546f4918ad38178da6faed",
+      "uncompressed_bytes": 4573
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-candidate-2.json.gz",
+      "sha256_uncompressed": "4cecdbc5f79caa9be1846d29744e495f7b2a4b52442671b0bf48eb046998eb16",
+      "uncompressed_bytes": 714910
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-1-device-summary.json.gz",
+      "sha256_uncompressed": "84d1ea0a54b0ea69fa0de53b28dcb5db7a1a9af094f577dc17cc4476b83922a7",
+      "uncompressed_bytes": 873
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-1-device.jsonl.gz",
+      "sha256_uncompressed": "b0ef93641e28b88a1510b88f1cd4d354038b80588c2e43beaa59bb920ccaed09",
+      "uncompressed_bytes": 69492
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-1-perf.csv.gz",
+      "sha256_uncompressed": "6a7d17c1941f4e2ccfbf0803298d125759035c98eff92244297982e7350e19d2",
+      "uncompressed_bytes": 137
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-1-provenance.json.gz",
+      "sha256_uncompressed": "c034823af030d15083cbcdb55c5861ed3310d976e94950577d87c814d2759d09",
+      "uncompressed_bytes": 497
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-1-threads.jsonl.gz",
+      "sha256_uncompressed": "3c2f735a2c8fd9054a32730ee11432eb8e98c8a64cf9b93ce8fb59ee45417317",
+      "uncompressed_bytes": 4160
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-1.json.gz",
+      "sha256_uncompressed": "ace166181645e0a72c4bce79f358764739593ff0f552059f43577a9ea53a8627",
+      "uncompressed_bytes": 696816
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-2-device-summary.json.gz",
+      "sha256_uncompressed": "5e0a0bd79f216d87ae2d74b1b5afe9dd2bb970393c8b93879171c115bf682811",
+      "uncompressed_bytes": 867
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-2-device.jsonl.gz",
+      "sha256_uncompressed": "cbe7c81f3b982b29be875f880f840b884c2ba027a5371d1084037c86f9a37fa6",
+      "uncompressed_bytes": 79123
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-2-perf.csv.gz",
+      "sha256_uncompressed": "0992098af07461cf8937297fd54cf58e0753bf8884e8156c4e04dba3e0a048cb",
+      "uncompressed_bytes": 137
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-2-provenance.json.gz",
+      "sha256_uncompressed": "c034823af030d15083cbcdb55c5861ed3310d976e94950577d87c814d2759d09",
+      "uncompressed_bytes": 497
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-2-threads.jsonl.gz",
+      "sha256_uncompressed": "9224bdbf2894f3a356a3076f361a29a2a5329c43267eeb099d36734f05a61795",
+      "uncompressed_bytes": 5120
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-control-2.json.gz",
+      "sha256_uncompressed": "a234c48da0eef8da450b032fbb237722752620fbc0b872f7990cd2e4ea56f0fa",
+      "uncompressed_bytes": 719008
+    },
+    {
+      "path": "fireweed-shared-log-runtime-screen-summary.json.gz",
+      "sha256_uncompressed": "cf6521191dfaed53c0a3b34f9d4762538acc77b1ec0e0e56a562afbc61919983",
+      "uncompressed_bytes": 1203
+    }
+  ]
+}

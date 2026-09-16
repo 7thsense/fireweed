@@ -1,0 +1,18 @@
+{
+  "base_head": "746084596d079465159924f5fa0a1754f97b97fc",
+  "result": "Before fix: injected failed listing overwrites sealed object bytes. After fix: 45 log contract tests and 12 public workflow tests pass.",
+  "artifacts": [
+    {
+      "path": "fireweed-counter-listing-red.log.gz",
+      "sha256_uncompressed": "03582dd876c7a5d0b61bf940add05fc1a5262bc17b85aa0d555788eb60739e54"
+    },
+    {
+      "path": "fireweed-counter-listing-contracts.log.gz",
+      "sha256_uncompressed": "c864d47731ee3fba06be7ca22fd9cfdc11aca35b4f059273bf3511143aa49a83"
+    },
+    {
+      "path": "fireweed-counter-listing-public.log.gz",
+      "sha256_uncompressed": "dc890a0cc7cd0312c2ed1980c9390b1c5ba68386481d29c5796053613f18a15f"
+    }
+  ]
+}

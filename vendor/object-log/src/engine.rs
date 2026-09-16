@@ -740,9 +740,15 @@ fn flush_loop<S>(
     // Resume the data-object counter past any keys already under `prefix`. Restarting
     // at 0 on reopen overwrites sealed objects while manifests still point at the old
     // byte ranges → RangeOutOfBounds / mid-JSON EOF on fetch (fireweed-481d3e43).
-    let mut counter = rt
-        .block_on(recover_data_object_counter(blob.as_ref(), &prefix))
-        .unwrap_or(0);
+    let mut counter = match rt.block_on(recover_data_object_counter(blob.as_ref(), &prefix)) {
+        Ok(counter) => counter,
+        Err(error) => {
+            // A failed listing is not an empty prefix. Fail admission before
+            // any PUT can reuse a sealed object's name.
+            let _ = fail_engine_and_take_pending_uploads(&shared, &mut VecDeque::new(), 0, error);
+            return;
+        }
+    };
     let mut pending: VecDeque<FlushWork<S::Meta>> = VecDeque::new();
     let mut active_puts = 0usize;
     let mut committing: Option<CommitJob> = None;
@@ -801,7 +807,7 @@ fn flush_loop<S>(
                     shared.cv.notify_all();
                 }
                 Err(error) => {
-                    let uploads = abort_failed_commit_worker(
+                    let uploads = fail_engine_and_take_pending_uploads(
                         &shared,
                         &mut pending,
                         job.first_seq,
@@ -881,7 +887,7 @@ fn flush_loop<S>(
 
 /// A panicked committer cannot safely resume sequencing. Close admission and
 /// fail queued callers/barriers rather than leaving them waiting on a dead job.
-fn abort_failed_commit_worker<M>(
+fn fail_engine_and_take_pending_uploads<M>(
     shared: &Arc<Shared<M>>,
     pending: &mut VecDeque<FlushWork<M>>,
     first_seq: u64,
@@ -1811,6 +1817,7 @@ mod ready_commit_group_tests {
         runtimes: Mutex<HashSet<String>>,
         second_upload_gate: Mutex<Option<(std::sync::mpsc::SyncSender<()>, oneshot::Receiver<()>)>>,
         second_upload_completed: std::sync::atomic::AtomicBool,
+        fail_data_listing: std::sync::atomic::AtomicBool,
     }
 
     impl RuntimeRecordingStore {
@@ -1820,6 +1827,7 @@ mod ready_commit_group_tests {
                 runtimes: Mutex::new(HashSet::new()),
                 second_upload_gate: Mutex::new(None),
                 second_upload_completed: std::sync::atomic::AtomicBool::new(false),
+                fail_data_listing: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -1861,11 +1869,73 @@ mod ready_commit_group_tests {
             self.inner.get_range(key, range).await
         }
         async fn list(&self, prefix: &str) -> Result<Vec<String>, ObjectLogError> {
+            if prefix == "data/"
+                && self
+                    .fail_data_listing
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ObjectLogError::StorageUnavailable(
+                    "injected object listing failure".into(),
+                ));
+            }
             self.inner.list(prefix).await
         }
         async fn delete(&self, key: &str) -> Result<(), ObjectLogError> {
             self.inner.delete(key).await
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_counter_listing_cannot_overwrite_existing_log_objects() {
+        let inner = Arc::new(MemoryBlobStore::new());
+        let key = "data/00000000000000000001";
+        let original = Bytes::from_static(b"existing immutable object");
+        inner.put(key, original.clone()).await.unwrap();
+        let store = Arc::new(RuntimeRecordingStore::new(inner.clone()));
+        store
+            .fail_data_listing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut config = FlushConfig::default();
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let engine = LogEngine::new(
+            store,
+            Arc::new(crate::InMemorySequencer::new()),
+            config,
+            "data/",
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            engine.produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"must not overwrite"),
+                1,
+                (),
+                Durability::Sequenced,
+            ),
+        )
+        .await;
+        let flushed = tokio::time::timeout(Duration::from_secs(5), engine.flush()).await;
+        tokio::task::spawn_blocking(move || drop(engine))
+            .await
+            .unwrap();
+        let retained = inner.get(key).await.unwrap();
+        assert_eq!(
+            retained,
+            Some(original),
+            "failed listing must preserve sealed bytes"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "failed prefix recovery must reject admission"
+        );
+        assert!(
+            flushed.unwrap().is_err(),
+            "flush must report failed initialization"
+        );
+        assert_eq!(inner.list("data/").await.unwrap(), vec![key.to_string()]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,5 +1,31 @@
 # Campaign qualification and performance plan
 
+## Shared-runtime screen and log startup failure (2026-09-16)
+
+The serial control/candidate/candidate/control screen is complete on candidate
+`74608459`, executable `693faa1693643119aacd6ecd8d0fda416c2d4e54dbe9b77228f3dfefae481f18`.
+All four one-million-recipient processes exit zero. Relative to the retained
+`4f4acde0` control, mean CPU time falls **3.37%**, user-mode instructions **1.22%**,
+and peak RSS **8.15%**. Mean throughput falls **1.95%** (15,272.84 to 14,975.55/sec),
+so a throughput benefit is unproved. Mean sampled maximum thread count falls
+from 1,096.5 to 522; these are sampled process totals, not runtime-worker counts.
+Projection WAL bytes rise 0.26%. At 12.5k/sec the measured CPU cost implies
+10.764 CPU-seconds/sec versus 11.139 for control; this extrapolation is not a
+throughput ceiling or sustained qualification. The modest CPU/resource savings
+justify running the unchanged untraced two-repeat qualification. Evidence and
+reproduction scripts: `fireweed-shared-log-runtime-screen-manifest.json`.
+
+A separate startup failure-injection test then reproduced an existing durability
+bug: an object-listing error defaulted the recovered data counter to zero, and
+the next successful produce overwrote sealed object 1. The failing assertion
+shows its original bytes replaced with the new payload. Initialization now fails
+admission and flush waiters before any PUT on listing failure. Successful counter
+recovery and log format are unchanged. This is an independent correctness fix,
+not the cause of the screen's resource improvement. Qualification must use the
+new fixed revision; the screen above predates this fix. All 45 log contract tests
+and 12 public campaign/primitive/recovery tests pass after the fix (zero failures
+or ignored tests). Red/green logs: `fireweed-counter-listing-validation-manifest.json`.
+
 ## Shared log flush-runtime candidate: correctness passes, performance pending (2026-09-16)
 
 The candidate shares Tokio flush runtimes across engines with the same selected
