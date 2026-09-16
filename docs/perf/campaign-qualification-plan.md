@@ -1,5 +1,36 @@
 # Campaign qualification and performance plan
 
+## Reject identity-aware join candidate after comparison (2026-09-16)
+
+Clean candidate `49fed4e2`, executable `bde46a680e0ca4002a6ca05a90c775caf93855d415f8e9e9d61fa21ac80629e4`,
+was compared serially with preserved control `5d0ac295...` (runtime `fa49f380`).
+Each is the same one-million-row, one-cycle, 64-store/two-worker campaign with
+metadata, timestamp priority, handler limits, retries and public reporting.
+Only projection VFS write counters were enabled, identically for all three runs.
+The tree stayed clean and no workloads overlapped. All three completed correctly.
+
+| Run | Recipients/sec | CPU-ms/recipient | Requested WAL bytes | WAL calls | Accumulated WAL call seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Candidate | 15,923.20 | 0.90288 | 6,569,980,648 | 6,346 | 23.29 |
+| Control | 14,238.96 | 0.92883 | 6,588,718,408 | 6,357 | 313.59 |
+| Candidate repeat | 13,784.48 | 0.96574 | 6,676,404,368 | 6,413 | 155.36 |
+
+Candidate WAL volume ranges from 0.28% below to 1.33% above control; CPU cost
+and throughput also straddle control. No isolated benefit is established.
+All 64 WAL handles report zero write errors; main-file writes are 262,144 bytes
+in every run. Accumulated VFS times overlap across stores and are neither CPU
+nor elapsed campaign time. Host mean write-request latency is 3.45 / 14.55 /
+11.05 ms. These screens do not qualify either sustained milestone.
+
+Remove the candidate predicate and its candidate-specific tests, retaining this
+comparison and the validation evidence. The production code returns to the
+previously validated owned-parameter implementation. Avoid retaining extra
+per-selection bookkeeping or altered waiting behavior without measured benefit.
+Artifacts: `fireweed-claim-identity-comparison-*` and exact runner/recorder.
+Next use the already-authorized idle Baldr host for an unchanged-binary diagnostic;
+explicitly account for its different CPU/memory/disk rather than interpreting
+raw cross-host rates as an isolated disk speedup. No host configuration changes.
+
 ## Match claim-followup identities before releasing the join (2026-09-16)
 
 The coordinator now tracks outstanding claimed item IDs in command order. A
