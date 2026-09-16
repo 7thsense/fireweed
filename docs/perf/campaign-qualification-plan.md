@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+## Upgrade repair validated; final qualification next (2026-09-15)
+
+Normal startup now repairs old 32-byte push fingerprints from the original
+fingerprints in the authoritative log's existing recovery scan. Updates match
+queue, request ID and exact `(epoch, sequence)` receipt position, and only old
+32-byte rows. The operation is transactional and idempotent; it does not alter
+receipt expiry, response IDs, log entries, or add serving-path work. A newer
+reuse of a request ID cannot be overwritten by an older envelope.
+
+The expanded local release set passes **315 tests**, with four existing
+diagnostics ignored and two unconfigured live-S3 tests filtered. The new adapter
+regression checks wrong positions/queues and repeated repair. Public strict and
+async tests cover normal reopen, complete projection loss, and an existing
+old-format receipt, including same-body replay and changed-indexed-entity
+conflict rejection. Evidence: `fireweed-push-receipt-upgrade-validation.log.gz`.
+This closes the earlier upgrade concern for the durable-log path tested here.
+
+All **16 capacity-harness tests** also pass, including the qualification runner
+and failure-preservation checks (`fireweed-final-capacity-harness-tests.log.gz`).
+
+Next run `scripts/perf/qualify-workflow-capacity.sh` on the final clean source:
+two unchanged million-row/eight-cycle stretch campaigns and two million-row
+varied-body primitive runs. No host tuning or gate changes accompany it. The
+previous full candidate passed once; final repeated qualification remains open.
+
 ## Register-reuse sustained candidate passes once (2026-09-15)
 
 The `a9605e58...` candidate passes every 10k and 12.5k gate over eight million

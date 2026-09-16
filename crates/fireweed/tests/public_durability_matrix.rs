@@ -918,7 +918,7 @@ async fn objectlog_local_direct_close_reopen() {
 // remains covered by the memory projection. Exercise persisted request identities
 // here, including admission that removes a fully indexed entity from PushItems.
 async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
-    for discard_projection in [false, true] {
+    for recovery_mode in ["reopen", "rebuild", "legacy-receipt"] {
         let fixture = FixtureRoot::new(cell);
         let queue = queue_key(cell);
         let definition = queue_definition(cell);
@@ -951,7 +951,7 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
             Some(b"batched".as_slice())
         );
         drop(fireweed);
-        if discard_projection {
+        if recovery_mode == "rebuild" {
             std::fs::remove_file(fixture.path().join("projection.turso")).unwrap();
             for suffix in ["-wal", "-shm"] {
                 let path = fixture.path().join(format!("projection.turso{suffix}"));
@@ -961,6 +961,20 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
                     Err(error) => panic!("remove test projection sidecar: {error}"),
                 }
             }
+        }
+        if recovery_mode == "legacy-receipt" {
+            let projection = fireweed_turso::TursoRelational::open(
+                fireweed_turso::TursoConfig::local(fixture.path().join("projection.turso")),
+            )
+            .await
+            .unwrap();
+            // The former projection stored a 32-byte hash of transformed items.
+            // Startup must recover the caller's identity from its logged envelope.
+            assert_eq!(projection.execute(
+                "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 WHERE operation='push'",
+                vec![vec![0x55u8; 32].into()],
+            ).await.unwrap(), 1);
+            drop(projection);
         }
         let reopened = objectlog_turso(fixture.path(), barrier, cell);
         assert_eq!(reopened.queue_definition(&queue).await.unwrap(), definition);

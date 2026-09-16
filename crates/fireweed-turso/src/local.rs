@@ -1037,6 +1037,70 @@ impl TursoRelational {
         .await
     }
 
+    /// Startup-only detection of receipts written by the old admitted-item hash path.
+    pub async fn has_legacy_push_fingerprints(&self, shard: &QueueKey) -> EngineResult<bool> {
+        let rows = self
+            .query(
+                "SELECT 1 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+             AND operation='push' AND length(request_fingerprint)=32 LIMIT 1",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                ],
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Repair only the receipt for this exact logged request incarnation. A reused
+    /// request ID must never be overwritten by an older envelope during replay.
+    pub async fn repair_legacy_push_fingerprints(
+        &self,
+        entries: &[(CommandPosition, fireweed_engine::CommandEnvelope)],
+    ) -> EngineResult<u64> {
+        let mut statements = Vec::new();
+        for (position, envelope) in entries {
+            if !matches!(&envelope.command, fireweed_engine::QueueCommand::Push(_)) {
+                continue;
+            }
+            let (
+                Some(request_id),
+                Some(fingerprint),
+                Some(fireweed_engine::RequestOutcome::Push { .. }),
+            ) = (
+                &envelope.request_id,
+                envelope.request_fingerprint,
+                &envelope.request_outcome,
+            )
+            else {
+                continue;
+            };
+            let positions =
+                serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+            statements.push(RelationalStatement::new(
+                "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 \
+                 WHERE tenant_id=?2 AND queue_id=?3 AND operation='push' AND request_id=?4 \
+                 AND command_positions=?5 AND length(request_fingerprint)=32",
+                vec![
+                    fingerprint.to_be_bytes().to_vec().into(),
+                    position.queue.tenant_id.as_str().to_string().into(),
+                    position.queue.queue_id.as_str().to_string().into(),
+                    request_id.as_str().to_string().into(),
+                    positions.into(),
+                ],
+            ));
+        }
+        if statements.is_empty() {
+            return Ok(0);
+        }
+        self.execute_immediate(&statements)
+            .await
+            .map(|counts| counts.into_iter().sum())
+            .map_err(|error| EngineError::Storage(error.to_string()))
+    }
+
     pub async fn push_idempotency_committed(
         &self,
         shard: &QueueKey,

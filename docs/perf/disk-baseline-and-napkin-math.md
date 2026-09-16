@@ -1,5 +1,44 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Latest sustained candidate: one full pass, repetition pending
+
+The register-buffer reuse candidate (`a9605e58...`, source `6b55ef72`) completes
+all eight million original-row lifecycles at **14,166 recipients/sec**, with
+**13,242/sec** in its slowest cycle. Every 10k/12.5k gate passes in this run.
+This supersedes the historical next-investigation notes below, but does not
+establish repeated qualification or an isolated performance gain from reuse.
+The request-fingerprint upgrade repair now passes the 315-test local suite;
+final repeated qualification remains pending.
+
+Using its full-process CPU cost and sampled host-wide physical writes:
+
+| Quantity | Measured value |
+| --- | ---: |
+| CPU per complete recipient | 0.97191 ms |
+| Host writes per recipient | 3762 bytes |
+| Process CPU occupancy | 13.76 CPU-seconds/sec |
+| CPU demand at 12,500 recipients/sec | 12.15 CPU-seconds/sec |
+| Write demand at 12,500 recipients/sec | 44.85 MiB/sec |
+
+Holding the measured cost and occupancy fixed gives approximately 14.2k/sec.
+This retrospective resource model supports the target's plausibility; it is
+not an independently measured hardware ceiling. The sustained buffered disk
+calibration remains 738 MiB/sec. That bandwidth figure alone cannot predict
+workflow throughput or durable publication latency. Actual campaign device
+write latency averaged 3.31 ms at 31.7% busy time.
+
+Memory conditions also belong in the estimate: this run observed up to 3.79 GiB
+of process swap on zram and 763,808 major faults, despite at least 41.01 GiB host
+available memory. Swappiness was 150, with no cgroup memory cap or OOM events.
+No host settings were changed. These observations do not establish swap as a
+throughput limit; the run passes all unchanged stability gates. The earlier
+memory-attributed run had no process swap, so it should not be substituted for
+this run's resource evidence.
+
+Evidence: `fireweed-campaign-trim-register-copy-eight*` and
+`fireweed-register-copy-eight-memory-context.json` under
+`docs/helix/04-build/evidence/workflow-capacity/`.
+
 ## What the Forseti investigation established
 
 The full chronology, commands and archived evidence are in

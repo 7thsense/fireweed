@@ -5320,6 +5320,65 @@ mod deterministic_cancellation_tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn legacy_push_fingerprint_repair_matches_exact_log_position_and_is_idempotent() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        let (position, command, request_id, fingerprint) =
+            replayable_push(&shard, ItemId::new("901").unwrap(), 0, "legacy-push", 1);
+        AsyncProjectionStore::apply_recovery(&store, vec![position.clone()], vec![command.clone()])
+            .await
+            .unwrap();
+        assert_eq!(store.execute(
+            "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 WHERE operation='push'",
+            vec![vec![0x55u8; 32].into()],
+        ).await.unwrap(), 1);
+        assert!(store.has_legacy_push_fingerprints(&shard).await.unwrap());
+        let mut wrong_position = position.clone();
+        wrong_position.sequence += 1;
+        assert_eq!(
+            store
+                .repair_legacy_push_fingerprints(&[(wrong_position, command.clone())])
+                .await
+                .unwrap(),
+            0
+        );
+        let mut wrong_queue = position.clone();
+        wrong_queue.queue.queue_id = fireweed_core::QueueId::new("different-queue").unwrap();
+        assert_eq!(
+            store
+                .repair_legacy_push_fingerprints(&[(wrong_queue, command.clone())])
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(store.has_legacy_push_fingerprints(&shard).await.unwrap());
+        let entries = vec![(position, command)];
+        assert_eq!(
+            store
+                .repair_legacy_push_fingerprints(&entries)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!store.has_legacy_push_fingerprints(&shard).await.unwrap());
+        assert_eq!(
+            store
+                .repair_legacy_push_fingerprints(&entries)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            replay(&store, &shard, request_id, fingerprint).await,
+            IdempotencyDecision::Replay(_)
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_started_and_resolved_cancellation_cuts_do_not_strand_writer_or_outcome() {
         let definition = qdef();
