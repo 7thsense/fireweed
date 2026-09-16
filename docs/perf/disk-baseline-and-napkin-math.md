@@ -1,5 +1,35 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Publication-phase budget after a passing diagnostic (2026-09-16)
+
+The unchanged workflow with publication tracing costs **0.92693 CPU-ms per
+recipient**, uses **13.77 process CPU-seconds/sec**, and completes at 14,864/sec
+with a 13,299/sec slowest cycle. Instrumented provenance prevents qualification;
+repeated untraced 10k and 12.5k milestones remain open.
+
+At this measured cost, 10k / 12.5k require **9.27 / 11.59 CPU-seconds/sec**.
+Host writes are about **4,256 bytes/recipient**, requiring **40.59 / 50.74
+MiB/sec**. Relative to the previously measured later contiguous-write interval
+of 81.36 MiB/sec, the stretch write budget has about **1.60x** headroom. This
+cross-workload budget is neither an independent throughput prediction nor proof
+that synchronization latency cannot limit the workflow below that bandwidth.
+
+The eight million recipients cause **87,983 successful local publications**:
+44,074 segments, 43,141 manifests and 768 metadata objects. At two synchronization
+barriers per publication, the stretch rate implies roughly **275 sync calls/sec**.
+Despite manifests totaling only 7.26 MB, each requires durable publication;
+there are only 2.12% fewer manifests than segments. Byte bandwidth alone omits
+this cost. The phase trace attributes 89.09% of accumulated publication elapsed
+time to file/directory synchronization, versus 0.82% to writes. Those durations
+include scheduling and overlap; do not sum them into campaign wall time.
+
+This motivates testing bounded grouping of already-uploading successors, with
+publication counts as the direct mechanism check. A faster instrumented run
+alone does not establish a speedup. Preserve the same public workflow, durability,
+correctness, fairness, reporting and resource gates in the serial comparison.
+Evidence and qualifications: [publication-phase record](campaign-qualification-plan.md).
+
+
 ## Extended write calibration and joint campaign budget (2026-09-16)
 
 An immediate serial follow-up to the eight-cycle joint trace extended the same
