@@ -1,5 +1,31 @@
 # Campaign qualification and performance plan
 
+## Match claim-followup identities before releasing the join (2026-09-16)
+
+The coordinator now tracks outstanding claimed item IDs in command order. A
+complete finalization or lease-invalidating replacement only closes the matching
+claims; completing an older batch no longer immediately releases a newer claim
+in the same selected prefix. Re-claiming an item after completion starts its
+wait again. The original 500 ms deadline, dependent-read coverage bypass,
+per-queue FIFO selection, generation bounds and empty-command behavior remain.
+No SQL, schema, log format, runtime API or workload gate changes are involved.
+
+**323 local release tests pass**, with four existing diagnostics ignored and two
+unconfigured live-S3 checks filtered. New regressions cover unrelated/partial
+completions, re-claims, matching versus non-invalidating metadata replacements,
+the unchanged original deadline, immediate release after all completions and
+coverage bypass. Existing queue-fairness, fault/retry, public durability, campaign,
+primitive, differential and log-only recovery tests also pass. The earlier focused
+coordinator run passed 35 tests before the metadata case was added. No other
+build, test or benchmark overlapped these runs. Evidence:
+`fireweed-claim-identity-{tests,validation}.log.gz`.
+
+**Performance has not been measured for this candidate.** Preserve the old
+`5d0ac295...` executable (`/tmp/fireweed-workload-before-claim-identity`) as the
+control, rebuild the canonical CLI and compare serially with exact provenance.
+Measure both CPU and projection write volume; only a promising screen warrants
+another full repeated qualification. Both sustained milestones remain open.
+
 ## Current-binary CPU attribution (2026-09-16)
 
 After the failed repeat and offline WAL read, a separate one-cycle million-row

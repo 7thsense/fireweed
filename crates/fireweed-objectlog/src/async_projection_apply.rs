@@ -1236,15 +1236,22 @@ fn commands_are_claim_without_complete<'a>(
 ) -> bool {
     let mut claim = false;
     let mut complete = false;
+    let mut outstanding = HashSet::new();
     for envelope in commands {
         match &envelope.command {
-            QueueCommand::Claim(_) => claim = true,
+            QueueCommand::Claim(command) => {
+                claim = true;
+                outstanding.extend(command.item_ids.iter().copied());
+            }
             QueueCommand::Finalize(finalize)
                 if finalize.outcomes.iter().all(|outcome| {
                     matches!(outcome.kind, fireweed_engine::FinalizeKind::Complete)
                 }) =>
             {
                 complete = true;
+                for outcome in &finalize.outcomes {
+                    outstanding.remove(&outcome.item_id);
+                }
             }
             QueueCommand::MutateItems(mutation)
                 if mutation.items.iter().any(|item| {
@@ -1253,12 +1260,25 @@ fn commands_are_claim_without_complete<'a>(
                         .is_some_and(|values| values.invalidate_lease)
                 }) =>
             {
-                complete = true
+                complete = true;
+                for item in &mutation.items {
+                    if item
+                        .action
+                        .replacement_values()
+                        .is_some_and(|values| values.invalidate_lease)
+                    {
+                        outstanding.remove(&item.item_id);
+                    }
+                }
             }
             _ => {}
         }
     }
-    claim && !complete
+    // A follow-up for an older claim must not flush a newer, still-open
+    // claim in the same prefix. Process identities in command order so a
+    // re-claim after completion starts waiting again. Selection still uses
+    // the original join deadline and bypasses it for coverage waiters.
+    claim && (!complete || !outstanding.is_empty())
 }
 
 #[cfg(test)]
@@ -2499,6 +2519,151 @@ mod tests {
             None,
         ));
         entry
+    }
+
+    fn join_claim(item_ids: Vec<ItemId>) -> CommandEnvelope {
+        let mut envelope = pause_env("join-claim");
+        envelope.item_ids = item_ids.clone();
+        envelope.command = QueueCommand::Claim(fireweed_engine::ClaimCommand::new(
+            item_ids,
+            fireweed_core::LeaseToken::new("join-token").unwrap(),
+            UtcTimestamp::new(30, 0).unwrap(),
+            None,
+        ));
+        envelope
+    }
+
+    fn join_complete(item_ids: &[ItemId]) -> CommandEnvelope {
+        let mut envelope = pause_env("join-complete");
+        envelope.item_ids = item_ids.to_vec();
+        envelope.command = QueueCommand::Finalize(fireweed_engine::FinalizeCommand {
+            outcomes: item_ids
+                .iter()
+                .map(|id| {
+                    fireweed_engine::FinalizeOutcome::new(
+                        *id,
+                        fireweed_engine::FinalizeKind::Complete,
+                    )
+                })
+                .collect(),
+        });
+        envelope
+    }
+
+    #[test]
+    fn partial_followup_does_not_release_another_claims_join_window() {
+        let a = ItemId::mint(1, 0, 1);
+        let b = ItemId::mint(1, 0, 2);
+        let unrelated = ItemId::mint(1, 0, 3);
+        let mut commands = vec![join_claim(vec![a, b]), join_complete(&[unrelated])];
+        assert!(commands_are_claim_without_complete(&commands));
+        commands.push(join_complete(&[a]));
+        assert!(commands_are_claim_without_complete(&commands));
+        commands.push(join_complete(&[b]));
+        assert!(!commands_are_claim_without_complete(&commands));
+        // A later lease of the same item needs its own following completion.
+        commands.push(join_claim(vec![a]));
+        assert!(commands_are_claim_without_complete(&commands));
+        commands.push(join_complete(&[a]));
+        assert!(!commands_are_claim_without_complete(&commands));
+    }
+
+    #[test]
+    fn metadata_followup_only_releases_matching_invalidated_leases() {
+        use fireweed_engine::{
+            MutateItemsCommand, ResolvedItemMutation, ResolvedItemMutationAction,
+            ResolvedItemValues,
+        };
+        let a = ItemId::mint(1, 0, 1);
+        let b = ItemId::mint(1, 0, 2);
+        let unrelated = ItemId::mint(1, 0, 3);
+        let mutation = |id, invalidate_lease| {
+            let mut envelope = pause_env("metadata-followup");
+            envelope.item_ids = vec![id];
+            envelope.command = QueueCommand::MutateItems(MutateItemsCommand {
+                items: vec![ResolvedItemMutation {
+                    item_id: id,
+                    action: ResolvedItemMutationAction::ReplaceKeepingPayload(Box::new(
+                        ResolvedItemValues {
+                            state: fireweed_core::ItemState::Pending,
+                            item_version: 3,
+                            priority: None,
+                            not_before: None,
+                            eligible_since: UtcTimestamp::new(1, 0).unwrap(),
+                            payload: None,
+                            fields: Default::default(),
+                            metadata: Default::default(),
+                            gate_keys: vec![],
+                            index_fields: Default::default(),
+                            entity_document: None,
+                            invalidate_lease,
+                        },
+                    )),
+                }],
+                gate_changes: vec![],
+            });
+            envelope
+        };
+        let mut commands = vec![join_claim(vec![a, b]), mutation(unrelated, true)];
+        assert!(commands_are_claim_without_complete(&commands));
+        commands.push(mutation(a, true));
+        commands.push(mutation(b, false));
+        assert!(commands_are_claim_without_complete(&commands));
+        commands.push(mutation(b, true));
+        assert!(!commands_are_claim_without_complete(&commands));
+        commands.push(join_claim(vec![a]));
+        assert!(commands_are_claim_without_complete(&commands));
+    }
+
+    #[test]
+    fn partial_followup_keeps_original_deadline_and_coverage_bypass() {
+        let a = ItemId::mint(1, 0, 1);
+        let b = ItemId::mint(1, 0, 2);
+        let entry = |id, command: CommandEnvelope| {
+            ApplyEntry::Ready(ApplyBatch {
+                id,
+                shard: shard(),
+                positions: vec![pos(id)],
+                commands: vec![command],
+                command_count: 1,
+                debt_bytes: 0,
+                enqueued_at: Instant::now(),
+            })
+        };
+        let mut state = CoordinatorState {
+            entries: VecDeque::from([entry(1, join_claim(vec![a, b]))]),
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let mut joins = HashMap::new();
+        let WorkerSelection::WaitUntil(deadline) =
+            select_worker_generation(&state, &mut joins, now, |_| false)
+        else {
+            panic!("initial claim must wait");
+        };
+        state.entries.push_back(entry(2, join_complete(&[a])));
+        let late = deadline - Duration::from_millis(1);
+        let WorkerSelection::WaitUntil(same_deadline) =
+            select_worker_generation(&state, &mut joins, late, |_| false)
+        else {
+            panic!("partial completion must not flush the remaining lease");
+        };
+        assert_eq!(same_deadline, deadline);
+        assert!(matches!(
+            select_worker_generation(&state, &mut joins, late, |_| true),
+            WorkerSelection::Ready(_)
+        ));
+        assert!(matches!(
+            select_worker_generation(&state, &mut joins, deadline, |_| false),
+            WorkerSelection::Ready(_)
+        ));
+        state.entries.push_back(entry(3, join_complete(&[b])));
+        let WorkerSelection::Ready(generation) =
+            select_worker_generation(&state, &mut joins, late, |_| false)
+        else {
+            panic!("all completions should release the prefix without waiting");
+        };
+        assert_eq!(generation.entry_ids, vec![1, 2, 3]);
     }
 
     #[test]
