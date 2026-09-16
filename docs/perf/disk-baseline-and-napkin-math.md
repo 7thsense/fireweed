@@ -1,5 +1,17 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Guarded-counter candidate CPU budget (2026-09-16)
+
+One-cycle diagnostic candidate/control/candidate measurements reduce instructions
+per recipient about 6%, with candidate CPU cost 0.88276 / 0.90491 ms versus
+0.93270 ms control. At 12.5k recipients/sec these candidate costs require
+**11.03 / 11.31 CPU-seconds/sec**, versus **11.66** for the adjacent control.
+These are measured resource budgets, not independent throughput ceilings or
+sustained qualification. The repeated eight-cycle result remains to be measured;
+retain the fixed 10k/12.5k targets and all resource/correctness gates.
+See the [comparison record](campaign-qualification-plan.md) for provenance and
+variance. No disk baseline or durability assumption changes.
+
 ## Repeated 10k established; remaining stretch budget (2026-09-16)
 
 The canonical untraced pair now passes every **10k** campaign and primitive gate.

@@ -1,0 +1,112 @@
+[
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-1-provenance.json.gz",
+    "source_sha256": "3aafd53e6bd705bf03f6cb2c343c2143fb51ecc6890b7bbed2d6fa7dba64439b",
+    "bytes": 502
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-1.json.gz",
+    "source_sha256": "c956dbe7e9beb4b8fab1f4c977ce0f44f5d47a66364116214b86ba9f21d44d6d",
+    "bytes": 699342
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-1-device-summary.json.gz",
+    "source_sha256": "8a2e02aa42fe3b2f8942c515cce660f410351a94ab07f132f2b5b2a6bc6aa085",
+    "bytes": 908
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-control-provenance.json.gz",
+    "source_sha256": "c082d977d84d16895a13eb4e57e300305a15a739fbb065ce35ec87e748711c51",
+    "bytes": 502
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-control.json.gz",
+    "source_sha256": "d46637c31fc29fdd49b2fd53184657b92d7e831d7d8b0ff7def803fb930b1b20",
+    "bytes": 695915
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-control-device-summary.json.gz",
+    "source_sha256": "486c6431f64cde51170cc53fa28b79d3af9874c47cedaf7735bfd1af8251cbd9",
+    "bytes": 884
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-2-provenance.json.gz",
+    "source_sha256": "3aafd53e6bd705bf03f6cb2c343c2143fb51ecc6890b7bbed2d6fa7dba64439b",
+    "bytes": 502
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-2.json.gz",
+    "source_sha256": "2da433827154ce0d8c9f686e13437ce707450b1809174c96ddf41b26c4d1ddab",
+    "bytes": 687983
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-2-device-summary.json.gz",
+    "source_sha256": "edbf940cabc99bbb8a4109715558de3e4559d8de85fd01776fcc4c37c8f7790b",
+    "bytes": 871
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-summary.json.gz",
+    "source_sha256": "4611a20d9a6bca29a6574931e1d57d6a5fa2c6736b97e9392f907ac8ec2945b0",
+    "bytes": 908
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-1-device.jsonl.gz",
+    "source_sha256": "126a451e55d3b8ba297b41c1b5d5a71d507286d90885d3ceabcfdb8a93069a78",
+    "bytes": 69248
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-control-device.jsonl.gz",
+    "source_sha256": "d4aa5dd5594292fbbfcc22aa0ba1373b233b991f07c7075ffe12d5f1f761cdff",
+    "bytes": 77216
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-2-device.jsonl.gz",
+    "source_sha256": "3183338fd0e09322fef8fb48127274f91cd64bcf68c0b9f720dadc93bab2e324",
+    "bytes": 73748
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-1-perf.csv.gz",
+    "source_sha256": "93b8fb80aa92ac27dce12e4917e5c2da80638dd5ce0f0ba0b93b77a803929049",
+    "bytes": 137
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-control-perf.csv.gz",
+    "source_sha256": "052ff970447067ab9c024da0ae501e6caed0f5d70a748f5218a55e67a2c3528b",
+    "bytes": 137
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-candidate-2-perf.csv.gz",
+    "source_sha256": "5be09847c8231770d8a59ed125846bc8115276cff703746cfb9516d54bb117f1",
+    "bytes": 137
+  },
+  {
+    "artifact": "fireweed-run-authority-metrics-counters.py.gz",
+    "source_sha256": "3c3b75fb9ce60fb988f736df92a25442e90e198d4e2bd6148a7d116f55b633d6",
+    "bytes": 5295
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counter-recorder.py.gz",
+    "source_sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+    "bytes": 9015
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counter-summary.json.gz",
+    "source_sha256": "8dc3f26001a731f15ed7abcc23147cd7f850a068320d99e95681269e09c72f8a",
+    "bytes": 5314
+  },
+  {
+    "artifact": "fireweed-authority-metrics-counters-runner.log.gz",
+    "source_sha256": "baa144030a56dfc919f416af6ab4098742df95e57743edb3aaeeac4852ca7579",
+    "bytes": 877
+  },
+  {
+    "artifact": "fireweed-authority-metrics-release-build.log.gz",
+    "source_sha256": "ad505afeeafc215e4bf80834cca687b7d3579168b8996abd855f096001e89234",
+    "bytes": 14269
+  },
+  {
+    "artifact": "fireweed-summarize-commit-companion.py.gz",
+    "source_sha256": "f046b0226c15952e4f384da446e8b75b55dee5d7bf31c980416ac36bad8cda71",
+    "bytes": 1515
+  }
+]

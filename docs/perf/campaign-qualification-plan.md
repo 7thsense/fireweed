@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+## Guarded-counter comparison supports sustained qualification (2026-09-16)
+
+Sequential candidate/control/candidate used clean `ebd55df0`, candidate binary
+`7cbab73fd4769f3c11e97d1b0c5ff75ca2effb2c67b394255f67c2447dd05979`,
+and preserved baseline `83e48da6...`. Each run completed one million original-row
+campaign recipients with the existing limits, two enrichments, delivery, reporting
+and retention. User cycles/instructions had 100% counter running coverage;
+projection I/O tracing makes these diagnostic comparisons, not qualification.
+
+| Run | Recipients/sec | CPU-ms/recipient | Instructions/recipient |
+| --- | ---: | ---: | ---: |
+| Candidate 1 | 16,306.75 | 0.882760 | 2,677,272 |
+| Control | 14,575.45 | 0.932700 | 2,851,733 |
+| Candidate 2 | 15,044.10 | 0.904906 | 2,680,160 |
+
+Instructions decrease 6.12% / 6.02%; CPU decreases 5.35% / 2.98%. Throughput
+increases 11.88% / 3.21%, with substantial timing variance. Candidate 2 has 35
+projection WAL writes taking over 100 ms, versus zero in the preceding runs;
+this is observed latency, not proof of an exclusive device bottleneck. WAL
+requested bytes are 6.535 / 6.750 / 6.641 GB, so the saved reads do not establish
+a major write-volume improvement. Retain the candidate for canonical repeated
+untraced eight-cycle campaign and primitive qualification. The 12.5k milestone
+remains open until every unchanged gate passes twice.
+
+Raw records, counters, device samples, exact recorder/runner, build log and parser
+are archived in `fireweed-authority-metrics-counters-manifest.json`; hashes refer
+to decompressed artifact contents. No host tuning or concurrent workloads ran.
+
 ## Guarded-claim lifecycle counter inference (2026-09-16)
 
 `MetricsDelta` now infers Pending before and Leased after a fresh authority-first
