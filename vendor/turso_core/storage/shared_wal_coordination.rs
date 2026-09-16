@@ -2474,6 +2474,20 @@ impl MappedSharedWalCoordination {
         if visible_slots <= first_slot {
             return Vec::new();
         }
+        // Small snapshot advances should cost the changed slots, not a whole
+        // block's hash table and temporary maps. Restrict this path to at most
+        // one block of entries; large checkpoint scans retain block deduplication.
+        if visible_slots - first_slot <= FRAME_INDEX_BLOCK_CAPACITY {
+            let mut entries: Vec<_> = (first_slot..visible_slots)
+                .map(|slot| {
+                    let entry = Self::frame_index_entry(&mappings, slot);
+                    (entry.page_id, entry.frame_id)
+                })
+                .collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+            entries.dedup_by_key(|entry| entry.0);
+            return entries;
+        }
         let mut seen_pages = std::collections::BTreeSet::new();
         let mut entries = Vec::new();
         let last_block = (visible_slots - 1) / FRAME_INDEX_BLOCK_CAPACITY;
@@ -3992,6 +4006,50 @@ mod tests {
                 (13, boundary + 2),
             ]
         );
+    }
+
+    #[test]
+    fn mapped_shared_wal_coordination_frame_ranges_match_latest_visible_oracle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mapped = create_mapping(&dir.path().join("coordination.tshm"));
+        let boundary = FRAME_INDEX_BLOCK_CAPACITY as u64;
+        let records: Vec<_> = (0..2 * boundary + 31)
+            .map(|slot| (1 + (slot * 37 + slot / 11) % 257, slot * 3 + 1))
+            .collect();
+        for &(page, frame) in &records {
+            mapped.record_frame(page, frame);
+        }
+        let mut ranges = vec![
+            (0, 0),
+            (0, u64::MAX),
+            (u64::MAX, u64::MAX),
+            (4, 1),
+            (2, 3),
+            (1, 1),
+            (1, 4),
+        ];
+        // Exercise both algorithms and both sides of the cutoff, including
+        // ranges crossing a block boundary, frame-ID gaps, and old snapshots
+        // whose pages have newer versions already present in the shared index.
+        for start in [0, 1, boundary - 2, boundary - 1, boundary, boundary + 7] {
+            for width in [0, 1, 2, 19, boundary - 1, boundary, boundary + 1] {
+                ranges.push((start * 3 + 1, (start + width) * 3));
+                ranges.push((start * 3, (start + width) * 3 + 1));
+            }
+        }
+        for (min, max) in ranges {
+            let mut expected = std::collections::BTreeMap::new();
+            for &(page, frame) in &records {
+                if min <= frame && frame <= max {
+                    expected.insert(page, frame);
+                }
+            }
+            assert_eq!(
+                mapped.iter_latest_frames(min, max),
+                expected.into_iter().collect::<Vec<_>>(),
+                "frame range {min}..={max}"
+            );
+        }
     }
 
     #[test]

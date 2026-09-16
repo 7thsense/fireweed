@@ -1,5 +1,32 @@
 # Campaign qualification and performance plan
 
+## Bound small frame-range scans before the next qualification (2026-09-16)
+
+`MappedSharedWalCoordination::iter_latest_frames` now directly enumerates the
+visible slots when a range contains at most 4,096 entries. It sorts one vector
+by page ascending/frame descending and keeps the first entry per page. This
+avoids scanning an 8,192-slot hash table for even a single changed frame, plus
+its temporary maps and seen-page tree. Larger ranges retain the existing
+block-deduplicating checkpoint path. Snapshot boundaries, rollback handling,
+cache caps, on-disk formats and public workflow behavior are unchanged.
+
+The new native oracle test compares the exact latest frame for each page over
+frame-ID gaps, duplicate page versions, old snapshots with newer index entries,
+block crossings, empty/reversed ranges and ranges on both sides of the cutoff.
+All **44 shared-coordination tests pass**. The complete native debug suite passes
+**2,123 tests, zero failures, 16 ignored** in 233.22 seconds. Fireweed release
+validation passes **328 tests, zero failures, four ignored and two live-S3 tests
+filtered**, including public strict/async durability, original-row campaign and
+log-only recovery coverage. Validation runs were sequential; logs and source
+hash are archived in `fireweed-narrow-frame-scan-validation-manifest.json`.
+
+This is a validated implementation candidate, not a measured speedup. The last
+untraced repeat still misses the worst-cycle target by 4.80%. Next run the same
+canonical two campaign/primitive qualifications without diagnostic overrides.
+The previous executable is preserved as
+`9124cfd715be116ce28c5ed83ded45fb0773c9ff45772dfab8e54614999acf61` for comparison.
+
+
 ## Selective cache untraced repeats: stretch still fails (2026-09-16)
 
 All four canonical runs use clean `2e8f8ff5` and executable

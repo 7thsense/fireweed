@@ -1,0 +1,38 @@
+{
+  "base_head": "ab0e0d0a6eeb331b8ef64ce946c89a13e6dfd675",
+  "source_path": "vendor/turso_core/storage/shared_wal_coordination.rs",
+  "source_sha256": "7f82c857855cf0a97c7e8b5fd9df50e92d2a0eb683d1f349f6d039d785b04b9c",
+  "focused": {
+    "passed": 44,
+    "failed": 0
+  },
+  "native": {
+    "passed": 2123,
+    "failed": 0,
+    "ignored": 16
+  },
+  "fireweed_release": {
+    "passed": 328,
+    "failed": 0,
+    "ignored": 4,
+    "filtered": 2
+  },
+  "performance_unmeasured": true,
+  "artifacts": [
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-scan-native-focused.log.gz",
+      "uncompressed_sha256": "7aec265f0d1c4b92ffa8a357a0c0c00415917623f1f91176c7b6e474bcb15f73",
+      "uncompressed_bytes": 10021
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-scan-native-full.log.gz",
+      "uncompressed_sha256": "c053574d7294108ae1ef7c2131269def361752e462c9073145e6e518d7439d1b",
+      "uncompressed_bytes": 172701
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-narrow-frame-scan-local-validation.log.gz",
+      "uncompressed_sha256": "599b5d963d17bf3275b4cd145ad61eba96707f8ce384ccfefea508033faa1e80",
+      "uncompressed_bytes": 48282
+    }
+  ]
+}
