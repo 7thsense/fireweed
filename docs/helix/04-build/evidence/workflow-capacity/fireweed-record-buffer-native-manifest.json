@@ -1,0 +1,22 @@
+{
+  "artifacts": [
+    {
+      "artifact": "fireweed-record-buffer-focused.log.gz",
+      "sha256": "000dba4bb57af4c779cac46c2be731a43d07ecc41be3e7985b33fc7ac3409c59"
+    },
+    {
+      "artifact": "fireweed-record-buffer-core-tests.log.gz",
+      "sha256": "dbb2bb9a93bcca5bda78d08c28b0e542c26c5863e11120e9711f3219bb4ef26b"
+    },
+    {
+      "artifact": "fireweed-active-profile-allocation-callers.txt.gz",
+      "sha256": "4527e84fc29e07e59947d70d5a84782467ca0d755b97bfa50d1d3f214d6c2ad9"
+    },
+    {
+      "artifact": "fireweed-active-profile-allocation-errors.txt.gz",
+      "sha256": "39d354df46c97f6e8893c54191125b5f5a34b196805f50ee1c9c9955f5d640b3"
+    }
+  ],
+  "allocation_report_command": "LD_PRELOAD=/tmp/fireweed-perf-unwind-bias.so perf report --stdio --no-children --sort symbol -S _mi_page_malloc_zero -g graph,0.5,caller --percent-type global-period -i target/workflow-capacity/active-wal-profile-20260916/control-perf.data",
+  "note": "offline analysis of preserved control; 2048-byte stacks can truncate callers; 0.5% threshold omits smaller branches"
+}

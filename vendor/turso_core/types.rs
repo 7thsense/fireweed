@@ -1420,9 +1420,25 @@ mod immutable_record {
             Self::from_values(registers.into_iter().map(|x| x.get_value()), len)
         }
 
+        pub(crate) fn from_registers_reusing<'a, I: Iterator<Item = &'a Register> + Clone>(
+            registers: impl IntoIterator<Item = &'a Register, IntoIter = I>,
+            len: usize,
+            buffer: std::vec::Vec<u8>,
+        ) -> Result<Self> {
+            Self::from_values_reusing(registers.into_iter().map(|x| x.get_value()), len, buffer)
+        }
+
         pub fn from_values<'a>(
             values: impl IntoIterator<Item = impl AsValueRef + 'a> + Clone,
             len: usize,
+        ) -> Result<Self> {
+            Self::from_values_reusing(values, len, std::vec::Vec::new())
+        }
+
+        fn from_values_reusing<'a>(
+            values: impl IntoIterator<Item = impl AsValueRef + 'a> + Clone,
+            len: usize,
+            mut buf: std::vec::Vec<u8>,
         ) -> Result<Self> {
             let mut serials = Vec::try_with_capacity_ext(len)?;
             let mut size_header = 0;
@@ -1444,12 +1460,15 @@ mod immutable_record {
             let header_size = Record::calc_header_size(size_header);
 
             // 1. write header size
-            let mut buf = std::vec::Vec::new();
-            buf.try_reserve_exact(header_size + size_values)?;
-            assert_eq!(buf.capacity(), header_size + size_values);
+            let record_size = header_size + size_values;
+            if buf.capacity() < record_size {
+                buf.try_reserve_exact(record_size - buf.len())?;
+            }
             let n = write_varint(&mut serial_type_buf, header_size as u64);
 
-            buf.resize(buf.capacity(), 0);
+            // Every output byte is overwritten below. Preserve initialized bytes
+            // when reusing capacity, but never expose a previous record's tail.
+            buf.resize(record_size, 0);
             let mut writer = AppendWriter::new(&mut buf, 0);
             writer.extend_from_slice(&serial_type_buf[..n]);
 
@@ -3898,6 +3917,49 @@ mod tests {
     }
 
     #[test]
+    fn record_buffer_reuse_matches_independent_serializer() {
+        let cases = std::vec![
+            std::vec![],
+            std::vec![
+                Value::Blob(std::vec![0xa5; 16_384]),
+                Value::Text(Text::new("large"))
+            ],
+            std::vec![Value::Null, Value::from_i64(0), Value::from_i64(1)],
+            std::vec![
+                Value::from_i64(-129),
+                Value::from_i64(32_768),
+                Value::from_i64(i64::MAX),
+                Value::from_f64(3.25)
+            ],
+            std::vec![
+                Value::Text(Text::new("雪\0λ".repeat(100))),
+                Value::Blob(std::vec![0, 255])
+            ],
+            (0..200)
+                .map(|i| Value::Text(Text::new(format!("field-{i}"))))
+                .collect(),
+            std::vec![],
+        ];
+        let mut buffer = std::vec![0x7f; 1024];
+        for values in cases {
+            let registers: std::vec::Vec<_> = values.iter().cloned().map(Register::Value).collect();
+            let reference = Record::new(values.into_iter().try_collect().unwrap());
+            let mut expected = std::vec::Vec::new();
+            reference.serialize(&mut expected);
+            let fits = buffer.capacity() >= expected.len();
+            let pointer = buffer.as_ptr();
+            let record =
+                ImmutableRecord::from_registers_reusing(&registers, registers.len(), buffer)
+                    .unwrap();
+            assert_eq!(record.get_payload(), expected.as_slice());
+            if fits {
+                assert_eq!(record.get_payload().as_ptr(), pointer);
+            }
+            buffer = record.into_payload();
+        }
+    }
+
+    #[test]
     fn text_prefix_continuation_matches_decoded_ordering() {
         use std::cmp::Ordering::{Equal, Greater, Less};
         let tails = vec![
@@ -3941,10 +4003,8 @@ mod tests {
                                 let lhs_refs: Vec<_> =
                                     lhs[..lhs_len].iter().map(Value::as_ref).collect();
                                 for rhs_len in 1..=3 {
-                                    let rhs_refs: Vec<_> = rhs[..rhs_len]
-                                        .iter()
-                                        .map(Value::as_ref)
-                                        .collect();
+                                    let rhs_refs: Vec<_> =
+                                        rhs[..rhs_len].iter().map(Value::as_ref).collect();
                                     for tie in [Less, Equal, Greater] {
                                         let expected = compare_immutable_for_testing(
                                             &lhs_refs,

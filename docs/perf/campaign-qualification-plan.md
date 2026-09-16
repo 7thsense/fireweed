@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+## Record output-buffer reuse candidate (2026-09-16)
+
+The new candidate reuses the owned destination record buffer in native Turso's
+`MakeRecord` opcode when the destination is outside the input register range.
+Overlapping inputs keep the original allocating path. Serialization sizes the
+output to the new record length, grows fallibly when required, and overwrites
+all returned bytes; a shorter record cannot expose the old tail. Header-vector
+allocation, SQL shape, row model, workload and qualification gates are unchanged.
+No allocation or throughput reduction is claimed before measurement.
+
+Two focused tests pass: byte equality with the independent `Record` serializer
+across empty, mixed-type, wide-header and growing/shrinking records; and
+preservation of overlapping input/output registers. The complete native suite
+passes **2,126 tests, zero failures, 16 existing ignores**. Public campaign and
+recovery validation, then an alternating control/candidate/control/candidate
+hardware-counter screen, follow on clean source. Only repeated full qualification
+can establish the throughput milestone.
+
+The prior one-worker runtime control already failed to improve repaired-host
+performance, so it is not repeated. An offline allocation caller report from the
+existing full profile confirms 6.12% allocator self samples; its short stacks and
+0.5% display threshold do not establish how much this particular candidate can
+save. `fireweed-record-buffer-native-manifest.json` records the native test logs,
+allocation caller report and exact offline command. The shim is offline only.
+
 ## Reject the record-comparison continuation candidate (2026-09-16)
 
 The serial control/candidate/control/candidate screen completed four one-million
