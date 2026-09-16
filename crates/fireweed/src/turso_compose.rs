@@ -228,19 +228,19 @@ fn finish_inert_mutation_generation_append(
     >,
 ) -> EngineResult<Vec<RawCommitRequest>> {
     debug_assert!(generation.slot_and_connection_released);
-    Ok(std::mem::take(&mut generation.members)
-        .into_iter()
-        .filter_map(|member| match member.outcome {
+    Ok(generation.members
+        .iter()
+        .filter_map(|member| match &member.outcome {
             fireweed_engine::MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
                 request,
                 ..
-            }) => Some(request),
+            }) => Some(request.clone()),
             fireweed_engine::MutationGenerationMemberOutcome::BatchUpdate { request, .. }
             | fireweed_engine::MutationGenerationMemberOutcome::Finalize { request }
             | fireweed_engine::MutationGenerationMemberOutcome::Singleton { request } => {
-                Some(request)
+                Some(request.clone())
             }
-            fireweed_engine::MutationGenerationMemberOutcome::Claim { request, .. } => request,
+            fireweed_engine::MutationGenerationMemberOutcome::Claim { request, .. } => request.clone(),
             fireweed_engine::MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_))
             | fireweed_engine::MutationGenerationMemberOutcome::PushAccepted
             | fireweed_engine::MutationGenerationMemberOutcome::ClaimAccepted { .. }
@@ -4549,7 +4549,7 @@ impl DerivedObjectLogTursoBackend {
         // Retain the generation turn through append AND publication of its
         // unpublished identity delta. Releasing it while extracting commands
         // lets the next claim snapshot omit this generation's selected IDs.
-        let mut prepared = retain_sequencer_after_slot_release(members.clone(), generation);
+        let mut prepared = retain_sequencer_after_slot_release(members, generation);
         let commits =
             coalesce_generation_commits(finish_inert_mutation_generation_append(&mut prepared)?)?;
         if !commits.is_empty() {
@@ -4564,7 +4564,7 @@ impl DerivedObjectLogTursoBackend {
                     return Err(error);
                 }
             }
-            for (work, member) in works.iter().zip(&members) {
+            for (work, member) in works.iter().zip(&prepared.members) {
                 match (work, &member.outcome) {
                     (
                         MutationGenerationWork::Claim { request, .. },
@@ -4609,7 +4609,7 @@ impl DerivedObjectLogTursoBackend {
                 self.record_frontier(&queue, false).await?;
             }
         }
-        Ok(members)
+        Ok(std::mem::take(&mut prepared.members))
     }
 
     async fn allocate_accepted_pushes(

@@ -1,0 +1,15 @@
+{
+  "scope": "Offline analysis of existing eight-cycle profile; no new workload",
+  "raw_perf_sha256": "12dc0cb3de927b40a80f00d48964079374446b94c6be1eea60bd77594d818a18",
+  "command": "LD_PRELOAD=/tmp/fireweed-perf-unwind-bias.so perf report --stdio --no-children --sort symbol -S _mi_page_malloc_zero -g graph,0.1,caller --percent-type global-period -i target/workflow-capacity/active-wal-profile-20260916/control-perf.data",
+  "artifacts": [
+    {
+      "artifact": "fireweed-active-profile-allocation-detail.txt.gz",
+      "sha256": "406f6cd73b7005b59b46f451f9a237bc89b784334905aa7b03b8c017f7d28cda"
+    },
+    {
+      "artifact": "fireweed-active-profile-allocation-detail-errors.txt.gz",
+      "sha256": "39d354df46c97f6e8893c54191125b5f5a34b196805f50ee1c9c9955f5d640b3"
+    }
+  ]
+}

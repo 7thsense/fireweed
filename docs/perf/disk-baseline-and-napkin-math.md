@@ -1,5 +1,16 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Global apply admission screen (2026-09-16)
+
+The 16-active-apply cap regressed both serial comparisons and was removed.
+Unchanged controls cost 0.859922 and 0.915832 CPU-ms per recipient, implying
+**10.749 and 11.448 CPU-seconds/sec at 12.5k recipients/sec** if those costs
+held constant. Candidates cost 0.930441 and 1.022708 CPU-ms per recipient;
+limiting transaction concurrency did not reduce CPU cost here. These one-cycle
+observations neither qualify the sustained target nor establish a hardware
+ceiling. Preserve the previous disk baseline and all eight-cycle gates.
+Full reports and provenance: `fireweed-apply-admission-screen-manifest.json`.
+
 ## Record-buffer screen (2026-09-16)
 
 Output-buffer reuse was rejected after both alternating pairs increased CPU

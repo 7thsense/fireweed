@@ -1,0 +1,17 @@
+{
+  "scope": "Generation response ownership candidate; performance pending",
+  "artifacts": [
+    {
+      "artifact": "fireweed-member-ownership-facade-tests.log.gz",
+      "sha256": "4383086e4359910717fa17e5c8d3f6c84e5fb151d3b0324e3504b79e4a39040f"
+    },
+    {
+      "artifact": "fireweed-member-ownership-public-tests.log.gz",
+      "sha256": "70fdeaee5d28a6cc7bc9bead9298f50533d591b883dd9211b6c9a39d6b1b8f70"
+    },
+    {
+      "artifact": "fireweed-member-ownership-build.log.gz",
+      "sha256": "914f2754f050c5ac67ba830f54861ae155fa553afe34a149c9b2f3770fd87539"
+    }
+  ]
+}

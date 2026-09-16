@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+## Retain generation responses while extracting append requests (2026-09-16)
+
+A more detailed offline allocator caller report of the existing eight-cycle
+profile identifies allocation through generation outcome clones. In particular,
+`drive_started_generation` clones all members to consume just their log requests,
+copying claimed payload/metadata and response state unnecessarily. The candidate
+moves members into the existing prepared generation, clones only append requests,
+and returns those original members after append and frontier publication. The
+sequencer owner remains held over the same operations. No public outcome fields,
+commit contents, log durability, workload or qualification gates change.
+
+The report uses a 0.1% global-period threshold; the prior report used 0.5%.
+It retains the same 171K samples, zero reported lost samples and short stacks.
+The 0.26% allocator branch under the generation driver and 0.13% branch under
+`GenerationJoin::member` are sampled caller attribution, not complete clone CPU
+cost or a predicted throughput benefit. This candidate changes only the former;
+member delivery retains its existing clone. Evidence and exact offline command:
+`fireweed-active-profile-allocation-detail-manifest.json`.
+
+Read-statement reuse was considered but already rejected in `cf4e26f8`'s screen;
+it is not repeated. Keyless admission specialization would miss this campaign,
+which supplies client keys, and was not implemented. Validation and a serial
+control/candidate screen must precede any performance claim for response ownership.
+The complete release façade library suite passes **154 tests, zero failures, one
+existing ignore**. All **12 public campaign/primitive/recovery tests pass**.
+The standalone workload build passes. Logs and hashes are recorded in
+`fireweed-member-ownership-validation-manifest.json`; performance remains pending.
+
 ## Reject global projection admission (2026-09-16)
 
 The four serial million-recipient diagnostic screens completed successfully.
