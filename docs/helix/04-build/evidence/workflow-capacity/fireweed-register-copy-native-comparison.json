@@ -1,0 +1,20 @@
+{
+  "baseline_commit": "7fc01f60d14108db91656d5a6387f62e4009ba27",
+  "candidate_diff_sha256": "539b7cd1d4300b1081a438a31c7699bf1806d7c1bb254fa2634b59027903ca3a",
+  "command": "SOURCE_DATE_EPOCH=1789179522 CARGO_BUILD_JOBS=8 CARGO_TARGET_DIR=/home/erik/Projects/fireweed/target cargo test --locked --release --manifest-path vendor/turso_core/Cargo.toml --lib",
+  "candidate": {
+    "passed": 2118,
+    "failed": 2,
+    "ignored": 16
+  },
+  "baseline": {
+    "passed": 2115,
+    "failed": 2,
+    "ignored": 16
+  },
+  "same_failures": [
+    "storage::wal::test::test_wal_readlock0_optimization_behavior",
+    "vdbe::insn::tests::test_make_sure_correct_insn_table"
+  ],
+  "interpretation": "Both failures reproduce on unchanged code at the same assertions. Three new regressions pass. The native suite is not fully green; public release validation and performance comparison remain pending."
+}

@@ -15,10 +15,17 @@ Evidence: `fireweed-trim-cpu-profile.json`, `fireweed-trim-cpu-self.txt`,
 The next bounded candidate reuses existing owned text/blob buffers for VDBE
 register copies and parameter loads. It must retain independent ownership,
 text subtypes, unbound-parameter NULL behavior, static-text allocation-free
-copies, and sequential overlap semantics. The initial three native regressions
-passed; a subsequent static-text fast-path refinement is rebuilding. No
-performance improvement or retained runtime change is claimed yet. Broader
-correctness checks and a short comparison precede full campaign qualification.
+copies, and sequential overlap semantics. All three focused regressions pass,
+including the static-text refinement. Full native release testing passes 2,118
+checks, with 16 ignored and two failures. Repeating the same suite on unchanged
+code passes 2,115 checks and reproduces both failures at the same assertions:
+`test_wal_readlock0_optimization_behavior` (slot-zero expectation) and
+`test_make_sure_correct_insn_table` (`StructField` function-address equality).
+This establishes no new failures in this suite, not a fully green native suite.
+Evidence: `fireweed-register-copy-native-comparison.json` and both native logs.
+The candidate is restored and Fireweed public release/recovery validation is
+running. No performance improvement or retained runtime change is claimed yet;
+a short comparison precedes full campaign qualification.
 
 ## One-worker runtime rejected after repaired-storage control (2026-09-15)
 
