@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+## More workers increase WAL traffic; rejected (2026-09-16)
+
+The same `dcaf90ac...` executable on clean source `f0e54a2f` completed the full
+64-store, four-worker-per-campaign trace. It reaches **10,542.61 recipients/sec**,
+with a slowest cycle of **6,583.64/sec**, **1.18063 CPU-ms/recipient** and
+**19.43 GiB peak RSS**. Rate and RSS-stability gates fail; correctness, reporting,
+latency, WAL and main-file stability checks pass. This traced run does not qualify.
+
+WAL writes rise from 56.68 to **63.82 GB** (+12.6%); main writes rise from 2.07 to
+**4.12 GB**. CPU work rises from 7,844.81 to **9,445.03 seconds** (+20.4%).
+Accumulated synchronous WAL write-call time is 1,117.95 seconds across 64 stores;
+main-file time is 196.87 seconds. These are overlapping VFS timings, not additive
+wall time. Four workers did not improve the existing coordinator's write
+coalescing in this comparison. Retain the canonical two-worker configuration.
+Evidence: `fireweed-canonical-64-w4-write-trace*`.
+
+A bounded code candidate removes an avoidable parameter copy: resolved replacement
+and insert/payload helpers already own their parameter vectors, but the Turso
+adapter clones their text/blob buffers through a borrowed executor interface.
+Add an owned execution route with a borrowing default for other adapters, preserve
+statement reuse and observation, and exercise owned text/blob inserts followed by
+borrowed rebinding and rollback. This targets CPU/allocation overhead only; it
+does not change SQL, transaction boundaries, log format, or claim/durability
+semantics, and is not claimed to remove WAL stalls. Validate before measurement.
+
 ## Write attribution: WAL dominates projection write calls (2026-09-16)
 
 The complete 64-store/eight-cycle diagnostic used unchanged `dcaf90ac...`,
