@@ -1,5 +1,46 @@
 # Campaign qualification and performance plan
 
+## Baldr unchanged-binary eight-cycle diagnostic (2026-09-16)
+
+After the local three-run comparison ended, Baldr ran the identical control
+executable `5d0ac295...` (build source `fa49f380`), hash-verified remotely. The
+million-row/eight-cycle workload, 64 stores, two workers, handler bounds, metadata,
+timestamp priority, reporting, failures/retries and retention were unchanged.
+No trace flags, package installs, host tuning, other benchmarks or builds overlapped
+this run. The adapted recorder explicitly reports **no source checkout** (`head:
+null`, dirty/source qualification rejected), alongside binary provenance. It is
+not a qualification run and its measurements must not be silently substituted
+for Forseti's target measurements.
+
+Baldr has an i9-8950HK, six physical/twelve logical CPUs, about 31 GiB RAM and
+its existing encrypted Btrfs/NVMe setup. Its kernel is 7.2.3; CPU, memory, disk
+and kernel differ from Forseti, so this is not an isolated disk experiment.
+All eight million lifecycles complete correctly: **9,843.15/sec** overall,
+813.16 seconds, 8,459.09 CPU-seconds (**1.05739 CPU-ms/recipient**) and
+15.051 GiB peak RSS. Cycle rates are 10,753 / 9,965 / 10,253 / 9,487 / 9,646 /
+10,468 / 10,207 / 8,946/sec. The 10k overall gate and cycles 1/3/4/7 fail;
+all 12.5k cycle gates fail. RSS snapshots over the last three cycles vary by
+30.59%, also failing the unchanged 10% stability gate (the final snapshot drops,
+not grows). Other workload/resource gates pass, excluding the explicitly absent
+source identity and diagnostic provenance.
+
+Host observations: 32.86 GiB written, 15.55 GiB read, 41.46 MiB/sec writes,
+33.38% device busy, **0.607 ms mean write request**, 0.19% full I/O pressure,
+3.32% some memory pressure, and **11.66 host busy CPU-seconds/sec** out of 12
+logical CPUs. The workload occupies **10.40 CPU-seconds/sec**. These host-wide
+counters are not process-level device attribution. Baldr's low write latency
+and high CPU occupancy support further CPU reduction; they do not prove a
+specific cause for Forseti's write stalls or make Baldr a faster qualification host.
+See the napkin update for explicit target resource arithmetic.
+
+Raw report, hardware, remote hashes, recorder/runner, provenance, both target
+evaluations and device samples are archived as `fireweed-baldr-owned-params-*`.
+The gate now treats a null/non-string source or binary identity as a failed
+identity check rather than raising TypeError. It still rejects this diagnostic;
+no gate is relaxed. All 17 harness tests pass, including malformed/null identity
+regressions (`fireweed-null-identity-gate-tests.log.gz`). The interleaved claim/mutation optimization is being validated
+separately and was not present in this remote executable.
+
 ## Reject identity-aware join candidate after comparison (2026-09-16)
 
 Clean candidate `49fed4e2`, executable `bde46a680e0ca4002a6ca05a90c775caf93855d415f8e9e9d61fa21ac80629e4`,

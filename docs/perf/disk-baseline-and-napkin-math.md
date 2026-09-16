@@ -1,5 +1,28 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Baldr control separates a CPU budget from write latency (2026-09-16)
+
+The unchanged eight-cycle control on Baldr reaches 9,843/sec at **1.05739
+CPU-ms/recipient** and **10.40 process CPU-seconds/sec**. A 10k rate requires
+10.57 CPU-seconds/sec; 12.5k requires **13.22**, exceeding its twelve logical CPUs
+at the measured cost even under ideal occupancy. At observed occupancy, the
+stretch target instead requires at most **0.83222 CPU-ms/recipient**, a **21.3%**
+reduction. That is an aggregate resource estimate, not proof that every cycle
+will meet the target, and SMT threads are not independent physical cores.
+
+Baldr writes 32.86 GiB for eight million lifecycles (about **4,410 bytes/recipient**),
+which scales to roughly **52.6 MiB/sec** at 12.5k. Mean device write-request latency
+is only **0.607 ms**, versus 29.89 ms in Forseti's failed repeat; Baldr nevertheless
+misses the target with almost all host logical CPU time busy. Therefore faster
+write service alone is insufficient on this smaller CPU. CPU/memory/kernel/disk
+all differ; this is not a controlled attribution of Forseti's stalls to hardware.
+The unchanged rate and RSS gates still fail. Neither performance milestone is met.
+
+The raw hardware/workload/counter evidence and the diagnostic provenance limits
+are in the [qualification record](campaign-qualification-plan.md). Continue code
+optimization and retain disk latency, CPU cost and worst-cycle rate separately;
+do not treat sequential bandwidth or the best short run as sustained capacity.
+
 ## Owned-parameter repeat: target still requires sustained occupancy (2026-09-16)
 
 The current binary completes the two eight-million-recipient campaigns at

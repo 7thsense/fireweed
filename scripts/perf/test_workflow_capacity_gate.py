@@ -17,6 +17,16 @@ class QualificationTests(unittest.TestCase):
         report["result"]["aggregate_phases"].pop()
         self.assertFalse(qualify(report)["passed"])
 
+    def test_missing_or_malformed_identity_fails_without_crashing(self):
+        for field, check in (("head", "source_identity"), ("binary_sha256", "binary_identity")):
+            for value in (None, 123, [], {}, "", "not-a-hash"):
+                with self.subTest(field=field, value=value):
+                    report = self.baseline()
+                    report[field] = value
+                    result = qualify(report)
+                    self.assertFalse(result["passed"])
+                    self.assertFalse(next(c["passed"] for c in result["checks"] if c["name"] == check))
+
     def test_primitive_payload_identity_is_explicit(self):
         for label in ("repeated_padding", "campaign_varied"):
             report = self.baseline()

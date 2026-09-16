@@ -12,8 +12,10 @@ def qualify(report, campaign_target=10_000):
         checks.append({"name": name, "passed": bool(passed), "actual": actual, "required": required})
 
     check("clean_source", report.get("dirty") is False)
-    check("source_identity", bool(re.fullmatch(r"[0-9a-f]{40}", report.get("head", ""))))
-    check("binary_identity", bool(re.fullmatch(r"[0-9a-f]{64}", report.get("binary_sha256", ""))))
+    head = report.get("head")
+    binary_sha = report.get("binary_sha256")
+    check("source_identity", isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)))
+    check("binary_identity", isinstance(binary_sha, str) and bool(re.fullmatch(r"[0-9a-f]{64}", binary_sha)))
     check("successful_correctness_run", report.get("exit_code") == 0)
     check("filesystem_log_and_turso", result.get("cell") == "filesystem--turso")
     check("storage_evidence_present", bool(report.get("filesystem")))
