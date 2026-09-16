@@ -5,7 +5,7 @@
 The serial combined linear-purge/owned-decoder screen is inconclusive: candidate
 CPU costs 0.87709 / 0.92932 ms per recipient, versus 0.89224 control; instructions
 are 0.34% lower / 1.63% higher. Do not treat the faster first run as a stable
-capacity increase. Restore the decoder candidate and retain only the previously
+capacity increase. Revert the decoder candidate and retain only the previously
 validated linear purge change. Its independent sustained effect is still unknown.
 The last qualified baseline retains the **4.2%** worst-cycle stretch gap. No new
 disk limit, target, durability assumption or workflow/gate change follows.

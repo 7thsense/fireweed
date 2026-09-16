@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+## Offline late-cycle review after the rejected decoder (2026-09-16)
+
+Read-only analysis of the existing guarded-counter qualification records shows
+both campaigns first materialize all 64 main projection files by the end of
+cycle 4 (zero-based). Final file sizes are roughly 29.4–29.8 MiB/store. The first
+campaign's maximum delivery duration rises from 19.00 seconds in cycle 3 to 25.14
+in cycle 4, then returns to about 19 seconds. The repeat rises from 19.46 to 33.25,
+then remains 27.61–28.27 seconds in cycles 5–7. Repeat preparation also rises to
+about 33 seconds in cycles 5/6. This correlates the sustained slowdown with the
+post-checkpoint portion of the run; it does **not** prove checkpointing alone is
+the cause. Phase maxima come from different campaigns and are not additive.
+
+Do not repeat the earlier staggered-checkpoint experiment without a new mechanism
+check: `3b8f1036` already failed and was reverted. Existing main-file sizes also
+supply a bounded reader-cache question. Writer and serving-reader caps are
+128 MiB, but each committed pooled reader has a 4 MiB cap. Turso creates a distinct
+pager/cache per connection; setting the small pool cap does not shrink the writer's
+cache. A 30 MiB database does not prove a 30 MiB hot working set, but outcome and
+retention queries contribute about 8% inclusive user-cycle samples together.
+Next measure physical main/WAL read requests or cache misses before deciding
+whether a larger bounded pool cache is warranted. Keep total RSS, its last-three-
+cycle growth gate, all reader isolation guarantees and the same workflow. This
+is a projection cache investigation, not SSD tuning or a new capacity claim.
+
+Raw derived stage/file-size table: `fireweed-guarded-counter-cycle-stage-analysis.json.gz`.
+Runtime source after decoder restoration is byte-identical to `1719a76f`; the
+working tree is clean once this evidence is committed. The goal remains active.
+
 ## Owned-decoder candidate rejected after serial comparison (2026-09-16)
 
 A clean `77fdfa73` candidate/control/candidate diagnostic compares combined
