@@ -1,5 +1,33 @@
 # Campaign qualification and performance plan
 
+## Fewer stores reduce CPU cost but not late stalls (2026-09-16)
+
+An unchanged `dcaf90ac...` binary, clean source `88ae2078`, ran the same
+million-row/eight-cycle campaign with 32 rather than 64 physical stores.
+No host settings or compression properties changed. Two campaigns per store
+and two workers per campaign mean total campaign/reporting streams and workers
+also halve; each campaign contains twice as many rows. This is a configuration
+comparison, not an isolated sharding effect or a gate change.
+
+Overall throughput is **13,411.59 recipients/sec**, CPU cost **0.86818 ms per
+recipient**, peak RSS **11.68 GiB**. The first six cycle rates are
+16,924 / 16,971 / 14,462 / 17,289 / 14,228 / 15,311. The last two fall to
+**8,690 / 10,690**, failing both qualification milestones. All non-rate gates
+pass. Keep the canonical runner unchanged; this is not a qualified replacement.
+
+Host writes total **36.05 GiB**, versus 30.74–31.48 GiB in the preceding 64-store
+pair. Lower CPU work does not establish a sustained throughput improvement.
+A late 33.95-second interval observes CPU occupancy 5.42 CPU-seconds/sec,
+device busy 88.04%, mean write-request latency 77.50 ms and 75.28 MiB/sec writes.
+These host observations locate an I/O-path stall but do not distinguish
+checkpoint admission, filesystem work and device service. Raw evidence and the
+external monitor are preserved as `fireweed-canonical-32-stores*`.
+
+Next use the existing opt-in projection VFS write timer on a full 64-store
+campaign. It separates synchronous WAL-write time from main-file write time.
+Treat tracing as diagnostic overhead and retain all workload/correctness gates;
+do not claim qualification from that run. No SSD tuning is proposed.
+
 ## Final repeated qualification failed (2026-09-16)
 
 The canonical serial four-run qualification completed on clean source
