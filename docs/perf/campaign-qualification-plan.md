@@ -1,5 +1,50 @@
 # Campaign qualification and performance plan
 
+## Split-mount campaign fixture ready for sustained isolation (2026-09-16)
+
+`crates/fireweed-workload/examples/projection_isolation.rs` is a diagnostic client
+of the existing public `fireweed_workload::campaign::run` API. It changes only
+projection placement. It does not copy or reimplement the campaign, enrichment
+handlers, oracle, delivery loops or retention. The default configuration is the
+same one-million-resident, eight-cycle, 64-store campaign: two campaigns per store,
+two workers and loaders per campaign, batch 1000, stage limits 500/200/500, purge
+8000, original-row metadata, timestamp priority, faults and reporting enabled.
+Its executable uses the same Tokio runtime default and mimalloc policy as the CLI.
+
+The caller supplies an empty log root and a projection routing directory with
+exactly 64 distinct, empty `shard-N` directories or directory symlinks. The fixture
+rejects existing data, aliased destinations, unexpected entries and projections
+inside the log root. Disk controls and RAM runs use this same executable and
+routing structure. For RAM runs, 32 projections reside on the existing `/tmp`
+tmpfs mount and 32 on `/dev/shm`; neither quota nor mount configuration changes.
+
+Build and invoke the high-level client with:
+
+```sh
+cargo build --locked --release -p fireweed-workload --example projection_isolation
+target/release/examples/projection_isolation --root EMPTY_LOG_ROOT --projection-root SHARD_MAP
+```
+
+The archived serial runner prepares and owns the directories, checks each user
+quota, and requires 17 GiB available per RAM mount before starting. It records
+per-mount remaining quota and actual allocated file bytes every second, aborts
+before remaining quota falls below 1 GiB, and retains failed projection files.
+Normal completed runs clean up only their owned directories. Process RSS remains
+separate from tmpfs allocation. The recorder explicitly follows shard links for
+WAL/storage measurements and records actual destination filesystems rather than
+the routing directory's filesystem. Thus the normal filesystem qualification
+checks reject RAM projections. Diagnostic provenance and a result marker also
+identify all these runs as ineligible for production qualification.
+
+The layout safety regression passes. Four serial disk/RAM/RAM/disk smokes each
+complete 120 recipients through the existing workload, with identical logical
+counts, all WALs observed, and correct physical filesystem reporting. These small
+smokes validate the fixture, **not capacity**. Their reports, runner, recorder,
+quota query and validation are archived in `fireweed-split-projection-fixture-manifest.json`.
+
+Next build this committed fixture and run the full serial eight-cycle comparison.
+No full RAM result exists yet. Repeated on-disk 12.5k qualification remains unproved.
+
 ## Sustained projection isolation stops at a user quota; repair error handling (2026-09-16)
 
 The first disk control of the exact-binary eight-cycle comparison exits zero at
