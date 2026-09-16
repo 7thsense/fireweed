@@ -1,5 +1,29 @@
 # Campaign qualification and performance plan
 
+## Register-reuse sustained candidate passes once (2026-09-15)
+
+The `a9605e58...` candidate passes every 10k and 12.5k gate over eight million
+complete recipient lifecycles: **14,166/sec overall**, **13,242/sec slowest
+cycle**, **15.70 GiB peak RSS**, and **0.97191 CPU-ms/recipient**. This is one
+full pass, not repeated qualification. Preserved evidence:
+`fireweed-campaign-trim-register-copy-eight*`.
+
+The 535 memory samples have no collection errors. Process swap reaches
+3.79 GiB; major faults increase by
+763,808, while host available memory remains above
+41.01 GiB. Swap is zram, swappiness is 150,
+and cgroup memory limits are unlimited with no high/max/OOM events. These are
+observations, not proof that swap bounds throughput; the run passes unchanged
+gates. No host settings were changed. Device writes total 28.03 GiB, mean write
+request latency 3.31 ms, device busy 31.7%. Evidence includes the late-run
+`fireweed-register-copy-eight-memory-context.json`.
+
+At this run's CPU cost, 12.5k recipients/sec requires **12.15 CPU-seconds/sec**;
+the measured process averages **13.75 CPU-seconds/sec**. This supports a modest
+CPU margin, not a sequential-SSD-derived throughput prediction. The pending
+request-fingerprint upgrade repair must be validated before repeating full
+qualification on the final binary.
+
 ## Unprofiled register-reuse diagnostic comparison (2026-09-15)
 
 Three sequential, unprofiled one-cycle million-recipient campaigns compare the
