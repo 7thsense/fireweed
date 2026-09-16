@@ -1,0 +1,202 @@
+{
+  "artifacts": [
+    {
+      "artifact": "fireweed-record-buffer-control-1-provenance.json.gz",
+      "sha256": "14d1f2e6b2f625c264bb44c02514bde32df2537229269ccdf4983f5f74b6091f",
+      "decompressed_bytes": 459
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-1.json.gz",
+      "sha256": "7379dadbc6aaae6ea3bfac31a56bdbae7cbfba6c14d735cc7cf0fbb8f1a5e9e4",
+      "decompressed_bytes": 673426
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-1-device-summary.json.gz",
+      "sha256": "9d6de2e9438329096fc198144e181b2e186b78ea3b3304a7b3d69d9444a6b725",
+      "decompressed_bytes": 872
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-1-provenance.json.gz",
+      "sha256": "1261857c5cd8141733e174f7dfea911d6f2ab7852b26dfaee8877ee7641bef54",
+      "decompressed_bytes": 491
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-1.json.gz",
+      "sha256": "6e1c5ec82676680624ddec75792bab3adbfdc8c622fb060d2c682682fcb58438",
+      "decompressed_bytes": 679907
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-1-device-summary.json.gz",
+      "sha256": "17142ee8f4b7aea32921e1aaf4e2ef132f2b08e5f6763cefccc24a012b499852",
+      "decompressed_bytes": 853
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-2-provenance.json.gz",
+      "sha256": "14d1f2e6b2f625c264bb44c02514bde32df2537229269ccdf4983f5f74b6091f",
+      "decompressed_bytes": 459
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-2.json.gz",
+      "sha256": "d3e381f193d6f90188a5b44ebb27e5b5855f5b44db77c3ff5b5c6c2d8dab3fa4",
+      "decompressed_bytes": 673445
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-2-device-summary.json.gz",
+      "sha256": "c17e677c0d4016cbbe30ce296e30f037c4e2cb1a0adb73b172b0cb57f6ccb197",
+      "decompressed_bytes": 859
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-2-provenance.json.gz",
+      "sha256": "1261857c5cd8141733e174f7dfea911d6f2ab7852b26dfaee8877ee7641bef54",
+      "decompressed_bytes": 491
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-2.json.gz",
+      "sha256": "89a442b0468262417a23f6c93a19a65494557c5ab44e38562fdca3a6e2e95276",
+      "decompressed_bytes": 678615
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-2-device-summary.json.gz",
+      "sha256": "eddd1afafbd76f18679de968b0047f041d7b2b91c18a7aefeb5386838ec406eb",
+      "decompressed_bytes": 887
+    },
+    {
+      "artifact": "fireweed-record-buffer-summary.json.gz",
+      "sha256": "3284b66df046b33899dab54eccc265965a2881f3def4a075388c216786132c30",
+      "decompressed_bytes": 1130
+    },
+    {
+      "artifact": "fireweed-record-buffer-analysis.json.gz",
+      "sha256": "7abc4ba854ec69df883ef33e42ca65189bb47b0262833bfa897a781883b09e3e",
+      "decompressed_bytes": 1876
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-1-device.jsonl.gz",
+      "sha256": "17b02b944b30b4704c66b650c6b7f340e4fa95b04106c7fd9465da0e90500281",
+      "decompressed_bytes": 69308
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-1-device.jsonl.gz",
+      "sha256": "3af91d9ab6667a4838d18b3eca535dffdb22f4ecdca0dc5c8db430545130f895",
+      "decompressed_bytes": 70725
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-2-device.jsonl.gz",
+      "sha256": "361ca9c95e174d5aa91381dc351a4d19e9887b463b0eccc4d65bbd1fc569d48b",
+      "decompressed_bytes": 71899
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-2-device.jsonl.gz",
+      "sha256": "8a6373731e9078a3d09c6d188648ea62ac8a09a28ff7cc184764355d732a762c",
+      "decompressed_bytes": 76342
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-1-perf.csv.gz",
+      "sha256": "027ff068142cede8516a119febbb0cfc304ea2fddda62aed2ec37ba10502a985",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-1-perf.csv.gz",
+      "sha256": "6151a600227d3f08071bf22045c576ee571c1ec1bb38e357ab5fa0f50a1e33de",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-buffer-control-2-perf.csv.gz",
+      "sha256": "f8501aaa3b586ca5fbdbc2fd35cd710dec5d758ae299455af145addff9f7a705",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-buffer-candidate-2-perf.csv.gz",
+      "sha256": "20b0601e633ee8581f103b98716f7e6269497b631d3bc9e0470f6e002381a651",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-buffer-fireweed-run-record-buffer-counters.py.gz",
+      "sha256": "c45a45f90114224a70ec41bd9fb2f68a41f8c53b506578e7711c83cf44384b5c",
+      "decompressed_bytes": 5184
+    },
+    {
+      "artifact": "fireweed-record-buffer-fireweed-record-buffer-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+      "decompressed_bytes": 9015
+    },
+    {
+      "artifact": "fireweed-record-buffer-fireweed-record-buffer-counters-runner.log.gz",
+      "sha256": "146e4b6f9ce34062785b9a61d042d5e6c12d008701f9b7e75bed49a60c073ac6",
+      "decompressed_bytes": 1091
+    },
+    {
+      "artifact": "fireweed-record-buffer-fireweed-record-buffer-public-tests.log.gz",
+      "sha256": "837bb591f646931669a90868695aa9b46fd4a68dacb20b3d9c8a00fbb4a448e1",
+      "decompressed_bytes": 15577
+    },
+    {
+      "artifact": "fireweed-record-buffer-fireweed-record-buffer-build.log.gz",
+      "sha256": "914f2754f050c5ac67ba830f54861ae155fa553afe34a149c9b2f3770fd87539",
+      "decompressed_bytes": 13578
+    },
+    {
+      "artifact": "fireweed-record-buffer-fireweed-record-buffer-restoration.log.gz",
+      "sha256": "f39a0a36060567faa7bfa7f1c76ab59832c11453aa92911cd67aa6221dc1c6d9",
+      "decompressed_bytes": 4765
+    }
+  ],
+  "analysis": {
+    "classification": "diagnostic one-cycle screen, not qualification",
+    "decision": "reject buffer candidate: both paired CPU costs and instruction counts rise, both paired wall rates fall",
+    "rows": [
+      {
+        "run": "control-1",
+        "rate": 16465.522883300662,
+        "cpu_ms_per_recipient": 0.85422772,
+        "user_cpu_s": 726.454115,
+        "system_cpu_s": 127.773605,
+        "instructions": 2625696759492,
+        "cycles": 2257424461653,
+        "binary_sha256": "9124cfd715be116ce28c5ed83ded45fb0773c9ff45772dfab8e54614999acf61"
+      },
+      {
+        "run": "candidate-1",
+        "rate": 16062.15375603599,
+        "cpu_ms_per_recipient": 0.865011703,
+        "user_cpu_s": 737.648264,
+        "system_cpu_s": 127.363439,
+        "instructions": 2661796654599,
+        "cycles": 2251689945304,
+        "binary_sha256": "89354e643a49aa1358af64d2a3dcfdd3dbc9765226250b31b28a71f202f9ac9c"
+      },
+      {
+        "run": "control-2",
+        "rate": 15749.50842692571,
+        "cpu_ms_per_recipient": 0.9038847419999999,
+        "user_cpu_s": 770.014635,
+        "system_cpu_s": 133.870107,
+        "instructions": 2657022523216,
+        "cycles": 2213102008788,
+        "binary_sha256": "9124cfd715be116ce28c5ed83ded45fb0773c9ff45772dfab8e54614999acf61"
+      },
+      {
+        "run": "candidate-2",
+        "rate": 15020.472368734258,
+        "cpu_ms_per_recipient": 0.9360178849999999,
+        "user_cpu_s": 795.79241,
+        "system_cpu_s": 140.225475,
+        "instructions": 2664892735961,
+        "cycles": 2176457649336,
+        "binary_sha256": "89354e643a49aa1358af64d2a3dcfdd3dbc9765226250b31b28a71f202f9ac9c"
+      }
+    ],
+    "paired_changes": [
+      {
+        "cpu_pct": 1.2624248484935485,
+        "instructions_pct": 1.3748691647844424,
+        "rate_pct": -2.449780247633493
+      },
+      {
+        "cpu_pct": 3.5550044720192853,
+        "instructions_pct": 0.2962042164202039,
+        "rate_pct": -4.628944843415406
+      }
+    ]
+  }
+}

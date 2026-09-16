@@ -1,5 +1,18 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Record-buffer screen (2026-09-16)
+
+Output-buffer reuse was rejected after both alternating pairs increased CPU
+cost and instruction count. Identical controls cost 0.85423 and 0.90388 CPU-ms
+per recipient: at 12.5k/sec, about **10.678 and 11.299 CPU-seconds/sec**, before
+host work outside the measured process. These remain one-cycle observations,
+not sustained throughput predictions. The prior control's 65.36% CPU-some
+pressure and 14.50 busy CPU-seconds/sec motivate inspecting actual projection
+apply concurrency. That evidence establishes neither an optimal thread count
+nor an SSD ceiling. See `fireweed-record-buffer-screen-manifest.json` and the
+campaign plan for the complete screen and unchanged qualification requirements.
+
+
 ## Repeated CPU-cost observations (2026-09-16)
 
 The record-comparison candidate was rejected: both alternating pairs increased

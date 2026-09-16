@@ -2779,32 +2779,10 @@ pub fn op_make_record(
         }
     }
 
-    make_record_into(&mut state.registers, start_reg, count, dest_reg)?;
+    let record = make_record(&state.registers, &start_reg, &count)?;
+    state.registers[dest_reg] = Register::Record(record);
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
-}
-
-/// Reuse only a destination that cannot also supply an input value. The original
-/// allocating path preserves overlapping-register semantics.
-fn make_record_into(
-    registers: &mut [Register],
-    start: usize,
-    count: usize,
-    dest: usize,
-) -> Result<()> {
-    let end = start + count;
-    let record = if (start..end).contains(&dest) {
-        make_record(registers, &start, &count)?
-    } else {
-        let previous = std::mem::replace(&mut registers[dest], Register::Value(Value::Null));
-        let buffer = match previous {
-            Register::Record(record) => record.into_payload(),
-            _ => std::vec::Vec::new(),
-        };
-        ImmutableRecord::from_registers_reusing(&registers[start..end], count, buffer)?
-    };
-    registers[dest] = Register::Record(record);
-    Ok(())
 }
 
 pub fn op_mem_max(
@@ -16986,30 +16964,6 @@ mod tests {
     use crate::translate::collate::CollationSeq;
     use crate::vdbe::BranchOffset;
     use crate::{Database, DatabaseOpts, MemoryIO, IO};
-
-    #[test]
-    fn record_buffer_reuse_preserves_overlapping_inputs() {
-        for destination in 0..4 {
-            let mut registers = std::vec![
-                Register::Value(Value::Text(crate::types::Text::new("source"))),
-                Register::Value(Value::from_i64(7)),
-                Register::Value(Value::Blob(std::vec![0, 255, 42])),
-                Register::Record(ImmutableRecord::from_bin_record(std::vec![0; 1024])),
-            ];
-            let expected = make_record(&registers, &0, &3).unwrap();
-            let original = registers.clone();
-            make_record_into(&mut registers, 0, 3, destination).unwrap();
-            let Register::Record(actual) = &registers[destination] else {
-                panic!("expected record")
-            };
-            assert_eq!(actual.get_payload(), expected.get_payload());
-            for index in 0..4 {
-                if index != destination {
-                    assert_eq!(registers[index], original[index]);
-                }
-            }
-        }
-    }
 
     #[test]
     fn test_register_copy_reuses_buffers_and_preserves_independence() {

@@ -1,5 +1,43 @@
 # Campaign qualification and performance plan
 
+## Reject record-buffer reuse; inspect projection apply concurrency (2026-09-16)
+
+Four serial original-row million-recipient screens completed correctly with no
+trace overrides. Controls use preserved `2e8f8ff5` executable `9124cfd…`;
+candidates use clean `c06b48bc` executable `89354e6…`. They are one-cycle diagnostic
+comparisons, not qualification. Full hashes and commands are archived.
+
+| Run | Recipients/sec | CPU-ms/recipient | User instructions (trillions) |
+| --- | ---: | ---: | ---: |
+| Control 1 | 16,465.52 | 0.85423 | 2.62570 |
+| Candidate 1 | 16,062.15 | 0.86501 | 2.66180 |
+| Control 2 | 15,749.51 | 0.90388 | 2.65702 |
+| Candidate 2 | 15,020.47 | 0.93602 | 2.66489 |
+
+Both pairs increase CPU cost (+1.26%, +3.56%) and instructions (+1.37%, +0.30%),
+and decrease wall throughput (-2.45%, -4.63%). Remove the candidate. Production
+prefixes in `types.rs` and `vdbe/execute.rs` are restored byte-for-byte to
+`4d469f1a`. Keep the independent serialization regression across record sizes;
+it passes after restoration. The candidate had passed 2,126 native tests and all
+12 public campaign/primitive/recovery tests. Passing correctness did not establish
+a performance benefit. The 28-artifact `fireweed-record-buffer-screen-manifest.json`
+records raw reports, CPU counters, device samples, runner/recorder source, build
+and public test output, analysis and restoration validation.
+
+The next larger software candidate is **bounded projection apply concurrency**.
+The existing controls report substantial CPU scheduling pressure (for example,
+the prior second control had 65.36% CPU-some pressure and 14.50 busy CPU-seconds
+per wall second). This is a lead, not proof that concurrency is excessive.
+`apply_owned` takes the store writer then offloads an owned transaction through
+`Handle::try_current`; its shared runtime is only a fallback. Relational work
+uses another blocking hop with a thread-local current-thread runtime. Changing
+only the fallback runtime would miss normal Tokio callers. Any global admission
+experiment must act on the actual `apply_owned` path, retain ownership through
+commit/rollback, and preserve cancellation while queued, per-store serialization,
+reporting responsiveness and all qualification gates. It must not repeat the
+already-rejected one-worker **log** runtime experiment. No concurrency setting has
+changed in this commit and no throughput target is relaxed.
+
 ## Record output-buffer reuse candidate (2026-09-16)
 
 The new candidate reuses the owned destination record buffer in native Turso's
