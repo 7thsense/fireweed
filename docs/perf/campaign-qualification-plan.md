@@ -1,5 +1,32 @@
 # Campaign qualification and performance plan
 
+## Owned addressed-row decoding candidate (2026-09-16)
+
+After the linear purge-validation change, native addressed-mutation planning now
+consumes its already-owned SQL Text/Blob values when constructing the projection
+image. The old decoder cloned these buffers before parsing or wrapping them.
+The query shape, full planner fields, group/cohort exclusion, payload Keep versus
+BeforeSnapshot/NoChange selection, pending-claim overlay and transaction boundaries
+are unchanged. The decoder requires exactly the query's 25 columns and returns a
+storage error on malformed row width instead of indexing a short vector.
+
+Two focused tests pass: payload pointer identity verifies transfer without copying,
+and field assertions preserve metadata, fields, optional values, lease/version and
+terminal tracking. Malformed values, negative/overflowing counters, grouped rows,
+and missing/extra columns are rejected. A NULL terminal epoch still makes its
+unused sequence irrelevant, preserving previous behavior. The broader selected
+release suite passes **329 tests, zero failures, four intentional ignores**, with
+two unconfigured S3 probes filtered. Public campaign tests cover Keep, snapshots,
+NoChange, due-window delivery, reporting, retention and log-only recovery.
+Logs: `fireweed-owned-addressed-{focused,full}-tests.log.gz`.
+
+No speedup has yet been measured for this candidate. Next compare the combined
+linear-purge plus owned-decoder changes against preserved qualification binary
+`94adbef0...`, with serial candidate/control/candidate hardware counters. Report
+combined effects explicitly; this comparison cannot isolate either change alone.
+The fixed repeated 12.5k goal remains open; the last measured worst-cycle gap is
+4.2%. No host or workload/gate changes follow from this implementation.
+
 ## Fresh CPU attribution and linear purge validation (2026-09-16)
 
 The previous goal turn made progress: guarded lifecycle-counter inference passed
