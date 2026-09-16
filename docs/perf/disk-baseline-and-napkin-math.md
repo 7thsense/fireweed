@@ -1,5 +1,28 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Sustained checkpoint burst, not a sequential bandwidth ceiling (2026-09-16)
+
+The rejected JSON-decoder candidate completed one untraced 8M-recipient campaign
+at 13,673.93/sec overall. CPU cost was 0.902964 ms/recipient, implying **11.287
+CPU-seconds/sec at 12.5k** if costs held constant. That average did not prevent a
+9,678/sec cycle: all 64 main projection files first materialized in that cycle,
+and delivery time rose from about 17 to 57 seconds.
+
+One observed 11.643-second burst had 99.52% block-device busy time, 57.99 MiB/sec
+host writes, 1,955.94 write IOPS and 120.18 ms mean request latency. Little's-law
+check: 1,955.94 requests/sec × 0.12018 sec ≈ **235 outstanding requests**, matching
+the measured 235.23 weighted queue depth. Average completed write size was
+30.36 KiB; this differs from the large sequential baseline. Workload CPU usage
+fell to 1.246 cores in the same interval. These are measured burst demands and
+queueing observations, not a new claim about the drive's maximum speed.
+
+The code-level lead is checkpoint scheduling across stores. A constant CPU-cost
+napkin estimate cannot predict a worst-cycle rate while synchronized storage
+bursts stall otherwise available CPUs. Preserve the existing disk baselines and
+all gates; test spreading projection checkpoint work before changing hardware.
+Raw samples, complete campaign report, calculations and interpretation limits:
+`fireweed-direct-json-sustained-manifest.json`.
+
 ## Direct metadata JSON diagnostic budget (2026-09-16)
 
 The balanced four-run screen averages 0.910048 CPU-ms/recipient for controls

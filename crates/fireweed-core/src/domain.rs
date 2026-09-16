@@ -446,78 +446,14 @@ impl serde::Serialize for MetadataValue {
 impl<'de> serde::Deserialize<'de> for MetadataValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         if deserializer.is_human_readable() {
-            deserializer.deserialize_any(MetadataValueJsonVisitor)
+            let value = serde_json::Value::deserialize(deserializer)?;
+            metadata_value_from_json(value).map_err(serde::de::Error::custom)
         } else {
             Ok(MetadataValueWire::deserialize(deserializer)?.into())
         }
     }
 }
 
-// Scalar and array values need no intermediate serde_json tree. Objects keep
-// the compatibility decoder for legacy tags, decimal objects and wrappers.
-struct MetadataValueJsonVisitor;
-
-impl<'de> serde::de::Visitor<'de> for MetadataValueJsonVisitor {
-    type Value = MetadataValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a metadata value")
-    }
-
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(MetadataValue::Null)
-    }
-
-    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(MetadataValue::Null)
-    }
-
-    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(MetadataValue::Bool(value))
-    }
-
-    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(MetadataValue::Integer(value))
-    }
-
-    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-        i64::try_from(value)
-            .map(MetadataValue::Integer)
-            .map_err(|_| E::custom("metadata integer exceeds i64"))
-    }
-
-    fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Self::Value, E> {
-        Err(E::custom(
-            "metadata number must be an integer or decimal object",
-        ))
-    }
-
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(MetadataValue::String(value.to_owned()))
-    }
-
-    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-        Ok(MetadataValue::String(value))
-    }
-
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(
-        self,
-        mut sequence: A,
-    ) -> Result<Self::Value, A::Error> {
-        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(4096));
-        while let Some(value) = sequence.next_element::<MetadataValue>()? {
-            values.push(value);
-        }
-        Ok(MetadataValue::Array(values))
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-        let value = <serde_json::Value as serde::Deserialize>::deserialize(
-            serde::de::value::MapAccessDeserializer::new(map),
-        )?;
-        metadata_value_from_json(value).map_err(serde::de::Error::custom)
-    }
-}
 fn metadata_from_json_value(value: serde_json::Value) -> Result<Metadata, String> {
     match value {
         serde_json::Value::Object(mut map) => {
@@ -2388,71 +2324,84 @@ mod native_metadata_compatibility {
 }
 
 #[cfg(test)]
-mod direct_metadata_json_tests {
+mod metadata_human_serde_compatibility {
     use super::*;
+    use serde::Deserialize;
+    use serde::de::value::{
+        Error, F64Deserializer, I64Deserializer, I128Deserializer, U128Deserializer,
+    };
 
-    fn compare(raw: &str) {
-        let reference = serde_json::from_str::<serde_json::Value>(raw)
-            .map_err(|e| e.to_string())
-            .and_then(metadata_value_from_json);
-        let actual = serde_json::from_str::<MetadataValue>(raw);
-        match (reference, actual) {
-            (Ok(expected), Ok(actual)) => assert_eq!(actual, expected, "{raw}"),
-            (Err(_), Err(_)) => {}
-            (expected, actual) => {
-                panic!("decoder disagreement for {raw}: {expected:?} vs {actual:?}")
-            }
+    #[test]
+    fn human_readable_wide_integer_inputs_preserve_i64_limits() {
+        for n in [i64::MIN, 0, 42, i64::MAX] {
+            assert_eq!(
+                MetadataValue::deserialize(I128Deserializer::<Error>::new(n as i128)).unwrap(),
+                MetadataValue::Integer(n)
+            );
+        }
+        for n in [0_u128, 42, i64::MAX as u128] {
+            assert_eq!(
+                MetadataValue::deserialize(U128Deserializer::<Error>::new(n)).unwrap(),
+                MetadataValue::Integer(n as i64)
+            );
+        }
+        for n in [
+            i128::MIN,
+            i64::MIN as i128 - 1,
+            i64::MAX as i128 + 1,
+            i128::MAX,
+        ] {
+            assert!(MetadataValue::deserialize(I128Deserializer::<Error>::new(n)).is_err());
+        }
+        for n in [i64::MAX as u128 + 1, u128::MAX] {
+            assert!(MetadataValue::deserialize(U128Deserializer::<Error>::new(n)).is_err());
         }
     }
 
     #[test]
-    fn direct_json_matches_tree_decoder_for_scalars_arrays_and_legacy_objects() {
-        let inputs = [
-            "null",
-            "true",
-            "false",
-            "0",
-            "-0",
-            "-9223372036854775808",
-            "9223372036854775807",
-            "9223372036854775808",
-            "18446744073709551615",
-            "18446744073709551616",
-            "-9223372036854775809",
-            "1.0",
-            "1e0",
-            "1e999",
-            r#""escaped \u0000 \u03bb \"""#,
-            "[]",
-            "{}",
-            r#"{"Null":7}"#,
-            r#"{"Bool":true}"#,
-            r#"{"Bool":1}"#,
-            r#"{"Integer":2}"#,
-            r#"{"Integer":1.5}"#,
-            r#"{"String":"λ"}"#,
-            r#"{"String":false}"#,
-            r#"{"Array":[1,{"String":"x"},null]}"#,
-            r#"{"Object":{"entries":{"x":[1,2,3]}}}"#,
-            r#"{"mantissa":1234,"scale":2}"#,
-            r#"{"Number":{"mantissa":1234,"scale":2}}"#,
-            r#"{"entries":false}"#,
-            r#"{"x":1,"x":2}"#,
-            r#"{"mantissa":1,"scale":2,"extra":true}"#,
-            "[",
-            "[1,]",
-            "[1.5]",
-            "[9223372036854775808]",
-        ];
-        for raw in inputs {
-            compare(raw);
-            compare(&format!("[{raw}]"));
-            compare(&format!("[null,[{raw}],false]"));
+    fn non_json_nonfinite_inputs_keep_existing_null_semantics() {
+        // JSON text cannot contain these values. The generic human-readable
+        // Serde API previously passed them through serde_json::Value as null.
+        for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                MetadataValue::deserialize(F64Deserializer::<Error>::new(n)).unwrap(),
+                MetadataValue::Null
+            );
         }
-        let mut nested = serde_json::json!([null, false, 0, "λ\0".repeat(4096), [1, 2, 3]]);
-        for depth in 0..8 {
-            compare(&nested.to_string());
-            nested = serde_json::json!([depth, nested, {"Object":{"entries":{"x":[1,2,3]}}}]);
+        for n in [0.0, -0.0, 1.0, 1.5] {
+            assert!(MetadataValue::deserialize(F64Deserializer::<Error>::new(n)).is_err());
         }
+    }
+
+    struct SomeValue<D>(D);
+
+    impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for SomeValue<D> {
+        type Error = D::Error;
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            visitor: V,
+        ) -> Result<V::Value, D::Error> {
+            visitor.visit_some(self.0)
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct enum identifier ignored_any
+        }
+    }
+
+    #[test]
+    fn human_readable_some_value_unwraps_its_metadata_value() {
+        assert_eq!(
+            MetadataValue::deserialize(SomeValue(I64Deserializer::<Error>::new(7))).unwrap(),
+            MetadataValue::Integer(7)
+        );
+        assert_eq!(
+            MetadataValue::deserialize(SomeValue(SomeValue(I64Deserializer::<Error>::new(8))))
+                .unwrap(),
+            MetadataValue::Integer(8)
+        );
     }
 }

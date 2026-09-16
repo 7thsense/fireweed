@@ -1,0 +1,61 @@
+{
+  "scope": "One completed eight-cycle campaign; remaining qualification deliberately stopped; decoder rejected and prior production restored, retaining three compatibility regressions",
+  "artifacts": [
+    {
+      "artifact": "fireweed-direct-json-sustained-campaign-1.json.gz",
+      "sha256": "5879e56bcfde2ae2b9fdf88dece0fb5bdfbde593b82c33cae74ef9a3a2970426"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-stall-analysis.json.gz",
+      "sha256": "aa77960e763a817fdc33f31366ca2d4ee0b4eed8af99401c07b2467bcd264b12"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-run-direct-json-untraced-qualification.py.gz",
+      "sha256": "1cee121d407697079e7b0217a766114b37bf03a1ec86f9c3128d102102162c48"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-untraced-qualification-runner.log.gz",
+      "sha256": "94cfb070f00cf0b92c1e796285a5450a12c781a9e9fa1384a81ecbb6a5089c79"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-untraced-qualification-wrapper.log.gz",
+      "sha256": "41f1aff45aeaa3b914b4e680791b6a3c658e713859734f2f7c0f9ca94ddfdd01"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-untraced-qualification-phases.json.gz",
+      "sha256": "696d4ec24e6815e1697775d569082132b52d2163d9544353d3e821bd135b2435"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-untraced-qualification-phase-1-device.jsonl.gz",
+      "sha256": "99c81777be4b29c941b7703f0cb5a2adf9f4d09b71bf687ad4509de3200fda7e"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-untraced-qualification-phase-1-device-summary.json.gz",
+      "sha256": "892e157dcf5827bbb1cd6e98d67bc917ef631b9d077114f2f2b4892e5e62a20f"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-summarize-direct-json-qualification.py.gz",
+      "sha256": "32d1165f1f108be1ca43e0b6ef8c42f9dd74f5bb05ffc42586624818eecf33e1"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-live-summary.json.gz",
+      "sha256": "ed6d1c74709f7f50dcac59678e1ba6e0d36cfe7e4d4a57d38036aeb47b497726"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-analyze-direct-json-stall.py.gz",
+      "sha256": "d98842ca6ce60b53d73a238965f9f02d8d6a190f7a9653d05c3e6ca979105381"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-compatibility-reproduction.log.gz",
+      "sha256": "d5f5a93ca6e7963813800f151f59036220bcab9ceebfa17aa528ce88f249bdbd"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-direct-json-restoration-tests.log.gz",
+      "sha256": "982f68dbadfcb16126425a350b99166ba5c75d962c2b4741ba755fb3f355bd3b"
+    },
+    {
+      "artifact": "fireweed-direct-json-sustained-fireweed-metadata-human-serde-regressions.rs.gz",
+      "sha256": "3b7a6a2419c577406653e31eaeed3536466833296ec5bad44a533bbc3ef11266"
+    }
+  ]
+}

@@ -1,5 +1,51 @@
 # Campaign qualification and performance plan
 
+## Reject custom JSON decoder; measured checkpoint burst (2026-09-16)
+
+The first untraced eight-cycle campaign completed successfully at **13,673.93
+recipients/sec overall**, 0.902964 CPU-ms/recipient and 18.917 GiB peak RSS.
+Clean source `6bea8067` produced executable `be199017…`; diagnostics were empty.
+Of 2,278 checks at either target, only cycle 4's rate failed: **9,678.17/sec**.
+Cycle minima were 17,159.97 / 16,079.85 / 15,868.92 / 16,081.51 / 9,678.17 /
+12,720.59 / 14,055.85 / 12,744.19. All correctness, progress, due-claim, WAL and
+storage/RSS stability checks passed. This is not repeated qualification.
+
+Source review found a compatibility gap outside JSON text: the new visitor
+omitted accepted human-readable Serde 128-bit integer and `Some` inputs, and
+changed nonfinite float inputs from the previous null result to rejection.
+Three new tests reproduced all three failures. Restore the previous production
+implementation byte-for-byte to `405c671f`; retain those regression tests.
+The complete restored core suite passes **123 tests, zero failures/ignores**.
+The candidate's small diagnostic averages did not justify a custom decoder
+with incomplete compatibility. Its earlier JSON-only equivalence checks were
+insufficient to prove the full generic Serde contract.
+
+The qualification shell was paused while its first campaign and recorder kept
+running. After the completed report was saved, that paused shell was deliberately
+terminated. No primitive suite or second campaign started. The wrapper's -15 exit
+is this controlled stop, not a workload crash or timeout; the campaign child
+exited zero. Logs, exact regression inputs, reports and analysis are archived in
+`fireweed-direct-json-sustained-manifest.json`.
+
+The remaining performance evidence points to a larger issue. Every physical
+projection was still 4 KiB at the end of cycle 3; all 64 had materialized roughly
+31 MiB main files by cycle 4. For the slowest campaigns, delivery grew from
+16.75 to 57.39 seconds while preparation stayed about 25 seconds. A nearby
+11.643-second device interval, starting 292.106 seconds after monitor start,
+recorded **99.52% device busy, 57.99 MiB/sec host writes, 1,955.94 write IOPS,
+120.18 ms mean write-request latency and 235.23 mean outstanding I/Os**.
+The workload used only **1.246 CPU-seconds per wall second** in that interval.
+These host counters establish a storage stall during the burst. Request latency
+includes queueing; this is not an SSD bandwidth ceiling or a diagnosis of
+controller versus filesystem behavior.
+
+The next code experiment staggers rebuildable projection checkpoint thresholds
+while retaining the existing 448 MiB upper budget. The earlier 192–448 MiB
+attempt failed before the local storage repair; it is not evidence that the
+repaired-host checkpoint burst is harmless. The fresh phase and device evidence
+justify revisiting scheduling, with no SSD settings, log durability changes,
+extra workflow records or weakened qualification gates.
+
 ## Direct metadata JSON screen; advance to sustained measurement (2026-09-16)
 
 The serial control/candidate/candidate/control screen completed correctly.
