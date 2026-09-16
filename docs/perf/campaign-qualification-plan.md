@@ -29,13 +29,18 @@ fall from 2.266T to 2.211T while user CPU time rises from 730.29s to 798.33s.
 Their ratio drops from 3.103 to 2.769 cycles per user CPU-ns. This is consistent
 with a lower effective clock, but is not proof of thermal throttling; wrapper
 accounting and counter semantics must be considered. `ref-cycles:u` is not
-supported on this Ryzen 7 4800H. The next sustained control should record CPU
-frequency/temperature alongside counters and device telemetry, without changing
-host settings, to distinguish CPU-rate drift from additional software work or
-I/O waits. Fixed single-run CPU-ms budgets must not silently assume boost speed
-persists indefinitely.
+supported on this Ryzen 7 4800H. The existing device-monitor-v3 observations already include frequency and
+CPU temperature, so no new run is necessary to retrieve them. Control median
+host-mean sampled frequency declines from **3.263 to 2.920 GHz**, consistent
+with the counter/time ratio change; median CPU temperature declines from
+**77.19 to 72.06 °C** (maxima 82.13 and 80.00 °C). This supports clock-rate
+variation but does not establish its cause, thermal throttling, or an SSD limit.
+Sampled host-wide frequency is not workload-time-weighted frequency. Fixed
+single-run CPU-ms budgets must not silently assume boost speed persists.
+The next optimization still needs to reduce measured work per recipient and
+pass repeated full-length gates; host settings remain unchanged.
 
-The 27-artifact `fireweed-record-continuation-manifest.json` includes all raw
+The 28-artifact `fireweed-record-continuation-manifest.json` includes all raw
 reports, counter CSVs, device observations, exact runner/recorder sources, build
 and public validation logs. Restoration output is archived separately as
 `fireweed-record-continuation-restoration.log.gz`. The repeated 12.5k goal remains

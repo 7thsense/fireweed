@@ -7,7 +7,9 @@ instructions and CPU time. Identical control binaries measured **0.8591 and
 0.9463 CPU-ms/recipient**, corresponding to **10.739 and 11.828 CPU-seconds/sec**
 at 12.5k recipients/sec. User cycles per user CPU-ns fell from 3.103 to 2.769;
 this is consistent with an effective-clock change, not proof of its cause.
-Temperature/frequency telemetry during a sustained control is the next check.
+The existing telemetry confirms median sampled host frequency fell from
+3.263 to 2.920 GHz while median CPU temperature fell from 77.19 to 72.06 °C.
+This supports clock-rate variation, not a thermal-throttling explanation.
 Do not turn one observed CPU cost or short burst clock into a hardware ceiling.
 The previous 0.8910 profile-derived budget remains an explicitly conditional
 observation, not a fixed machine constant. See the campaign plan and
