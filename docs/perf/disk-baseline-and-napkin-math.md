@@ -1,5 +1,39 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Captured publication stream: measured isolated capacity (2026-09-16)
+
+Replaying actual immutable campaign objects through native LocalBlobStore, with
+original chunks and data-before-manifest durability, publishes 53.704 GiB in
+280.974 timed seconds. All 351,040 destination objects pass complete byte/key
+verification afterward. Mean publication-only equivalent capacity is 113,889.74
+recipients/sec; the slowest of 32 cycles is 51,351.59/sec. These rates exclude
+application/Turso work, serialization, manifest planning, online workflow barriers,
+other metadata publication history and original engine queue/runtime topology.
+They are not workflow qualification or an independent hardware ceiling.
+
+The captured immutable log budget is **1,802.013 bytes/recipient** and
+**0.02194 native file/directory sync calls/recipient**. At 12.5k that is
+**21.482 MiB/sec and 274.25 sync calls/sec**. The observed slowest isolated cycle
+has 4.108 times the target's equivalent capacity under the replay scheduling.
+The input snapshot omits 256 other files (98,944 bytes); their overwritten write
+history is unknown and must not be inferred from that final snapshot size.
+
+Host counters over the publication marker span record about **35.80 GiB** at
+130.34 MiB/sec. The first two groups of eight cycles write at 263.84 / 256.93
+MiB/sec physically observed, then 133.57 and **61.18 MiB/sec** for the last groups.
+The last eight still sustain 56,169.84 publication-only equivalents/sec, with
+96.53 MiB/sec of logical publication traffic. Host and application bytes differ
+because they are different layers; do not add them or assign host bytes entirely
+to this process. Observed windows omit boundary gaps and include short inter-cycle
+gaps. The rate transition is real; a particular device-internal explanation is
+not established.
+
+The durable publication path has substantial isolated headroom for the fixed
+workflow target. Mixed projection/log traffic and remaining software work still
+need isolation; average bandwidth alone does not predict per-cycle fairness.
+The retained full-workflow CPU/write budget and repeated-qualification status are
+unchanged. Evidence: `fireweed-publication-replay-results-manifest.json`.
+
 ## Directory-sync experiment leaves the capacity budget unchanged (2026-09-16)
 
 The serial ABBA screen shares only 28/11,090 and 55/11,048 successful publication

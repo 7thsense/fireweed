@@ -1,0 +1,57 @@
+{
+  "scope": "32 copies of exact captured immutable publications; 351040 objects verified byte-for-byte. Isolated publication capacity only, never workflow qualification.",
+  "head": "60bf12a15a965b37c4236881a460f93b9e46b7a7",
+  "binary_sha256": "a4c97a0b157b1a70b6d8b8ace4c98dfc0c849fd59099207c9ca47846f197ac00",
+  "hash_scope": "decompressed artifact bytes",
+  "input_manifest": "fireweed-publication-replay-input-manifest.json",
+  "artifacts": [
+    {
+      "artifact": "fireweed-publication-replay-result-result.json.gz",
+      "sha256": "51e518e97725f9aff8ccf1e5a4539e37af13a8aa976130a047e463cbb6d01d84"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-usage.json.gz",
+      "sha256": "d6a110c000d3f9b90492abb9a2fa6b22e2a1d34f388aab3abf9b0a77f46fba12"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-provenance.json.gz",
+      "sha256": "6e9447f70fa8a6a64276807c2166823181895dab8cdee4f1397ab3fc7d4cc5bd"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-device.jsonl.gz",
+      "sha256": "72c9964bdeb2b662baafcb0d673c8db6522323a8b94737ed351296d6f9e91657"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-device-summary.json.gz",
+      "sha256": "552bd6128bf599140e764fdc692632e517e80a25f44ee8a59133efb94174bfad"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-stderr.log.gz",
+      "sha256": "ca3feee306df6eb1c1a1b86a105c6dcdf8acf6fc6c86f5b2c177bfc0bb932882"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-analysis.json.gz",
+      "sha256": "fddfdf6a568b080f6b4deb4b62874db74384897d64b6da037b3e38df71fedbac"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-fireweed-run-publication-replay.py.gz",
+      "sha256": "40f5dcf1e744a46fa798013bf59fb4ea381beea1103a5d88ea755428a43f139e"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-fireweed-analyze-publication-replay.py.gz",
+      "sha256": "cebdb3d9239e97432057d6095993278527d0bda4c10e7bd0a5fcfe61351dc8ad"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-fireweed-publication-replay-runner.log.gz",
+      "sha256": "f4acaba4b3e4ff49058cda24c3318b693721c0b2ed7f9ec92b8257bf389bb5ad"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-fireweed-device-monitor-v3.py.gz",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-publication-replay-result-fireweed-device-summary-v3.py.gz",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    }
+  ]
+}

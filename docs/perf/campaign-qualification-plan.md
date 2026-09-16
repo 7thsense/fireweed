@@ -1,5 +1,54 @@
 # Campaign qualification and performance plan
 
+## Publication replay completes: substantial isolated headroom (2026-09-16)
+
+The native publication replay on clean `60bf12a1`, executable
+`a4c97a0b157b1a70b6d8b8ace4c98dfc0c849fd59099207c9ca47846f197ac00`, exits zero.
+All **351,040 destination objects** are byte-for-byte identical to their captured
+sources and all destination key sets match. Every cycle publishes 10,970 objects,
+1,802,012,562 bytes and 21,940 native file/directory sync calls. All 32 cycles finish
+in **280.974 timed seconds**, or **113,889.74 publication-only equivalent
+recipients/sec**; the minimum cycle is **51,351.59/sec**. These are not completed
+workflow rates. Preload takes 0.940 seconds and full verification 194.580 seconds,
+both excluded from the publication timers.
+
+| Replay cycles | Equivalent recipients/sec | Logical publication MiB/sec | Sampled host write MiB/sec |
+| --- | ---: | ---: | ---: |
+| 0–7 | 217,068.95 | 373.04 | 263.84 |
+| 8–15 | 222,449.47 | 382.29 | 256.93 |
+| 16–23 | 121,709.16 | 209.16 | 133.57 |
+| 24–31 | 56,169.84 | 96.53 | 61.18 |
+
+The full timed marker span records about **35.80 GiB of host writes** at
+130.34 MiB/sec, versus 53.704 GiB of logical publication bytes. The last eight
+cycles show 88.22% busy, 2,498.99 write IOPS, 24.18 ms mean write-request latency,
+60.72 outstanding I/Os and 0.827 workload CPU-seconds/sec. These sampled host
+windows omit boundary gaps and include inter-cycle gaps/other processes. Whole-
+process CPU counters include verification and must not be assigned to publication.
+The burst-to-lower-rate transition is observed; its device-internal cause is not
+proved by these counters.
+
+At 12.5k recipients/sec, the captured immutable log requires **21.482 MiB/sec of
+logical publication bytes and 274.25 native durability calls/sec**. Even the
+slowest isolated cycle is 4.108 times that target. This rules out treating an
+8–12k workflow result as the standalone capacity of this publication stream; it
+does not rule out log waits under mixed projection traffic, serialization/engine
+costs, or stage-barrier effects omitted by the isolation model. The retained
+workflow evidence still proves repeated 10k, not repeated 12.5k.
+
+Next use the existing public `--projection-root` diagnostic with the exact same
+preserved workflow executable: serial disk/tmpfs/tmpfs/disk one-cycle runs,
+keeping the authoritative log on disk, all logical work and tracing identical.
+A one-cycle projection is almost entirely WAL, so this isolates the cost of
+projection filesystem traffic while retaining application/engine/serialization
+work. Record tmpfs storage separately from process RSS. Such runs remain explicitly
+ineligible for qualification. The result will guide a code change; moving the
+whole projection to tmpfs is not being adopted as the solution.
+
+Reports, input linkage, raw samples, code and analysis are archived in
+`fireweed-publication-replay-results-manifest.json`. The replay destinations and
+original capture remain local under `target/workflow-capacity/`.
+
 ## Exact publication replay prepared; measurement pending (2026-09-16)
 
 A complete one-million-recipient campaign capture on the preserved clean
