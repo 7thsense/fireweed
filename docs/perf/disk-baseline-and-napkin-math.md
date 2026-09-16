@@ -21,9 +21,11 @@ Keep both CPU reduction and synchronization variance in the model. The longer
 81.36 MiB/sec calibration interval bounds optimism about sequential headroom;
 it does not turn elapsed fsync time into a bandwidth measurement.
 
-Next inspect repeated header decoding in native Turso column access, already
-visible in the CPU profile. Preserve per-cycle fairness, reporting, durability
-and all resource gates in any subsequent comparison and repeated qualification.
+History review rejected another column-header cache trial because the earlier
+serial comparison showed no useful repeatable workflow gain. Next measure
+removing redundant lifecycle-counter reads for guarded authority-first claims.
+Preserve per-cycle fairness, reporting, durability and all resource gates in
+subsequent comparison and repeated qualification.
 
 
 ## Publication-phase budget after a passing diagnostic (2026-09-16)

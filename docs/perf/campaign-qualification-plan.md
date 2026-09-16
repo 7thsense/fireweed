@@ -1,5 +1,39 @@
 # Campaign qualification and performance plan
 
+## Guarded-claim lifecycle counter inference (2026-09-16)
+
+`MetricsDelta` now infers Pending before and Leased after a fresh authority-first
+claim. A complete contiguous sequence may infer its initial counts only when
+**every addressed row first appears in such a claim**. Later resolved mutations
+or purges determine its final counts. Conditional claims, unknown initial states,
+unsupported command families, replayed positions and gaps retain conservative
+SQL reads. Mixed known/unknown rows do not introduce a second per-row data structure.
+
+This relies on existing SQL Pending/non-superseded guards and exact moved-row
+validation, including fused claims. Inferred deltas apply only after successful
+relational application, inside the same transaction; a failed claim rolls back
+rows, counters and cursor. Neither the authoritative log nor public API changes.
+
+The focused native tests cover zero-read inference, fallback selection, exact
+replay and failed missing/already-leased/superseded claims. Each rejected claim
+leaves the same cursor position usable and persisted public counters equal to
+an independent row scan. The existing live/recovery paired test establishes two
+saved reads for claim-plus-mutation (previously one), unchanged write counts and
+matching row-derived totals. Its old one-read expectation initially failed and
+was corrected; a separate initial fixture error used nondecimal item IDs and was
+corrected before the focused suite passed.
+
+Validation: four focused tests pass; the complete selected release suite passes
+**327 tests, zero failures, four intentional ignores**, with two unconfigured S3
+probes filtered. Logs are archived as
+`fireweed-authority-metrics-{focused,full}-tests.log.gz`.
+
+Performance remains unmeasured at this commit. Compare candidate/control/candidate
+on the unchanged one-million-recipient campaign, with user CPU instruction
+counters and diagnostic projection-write tracing. Only a subsequent repeated
+untraced eight-cycle campaign/primitive qualification can establish the 12.5k
+milestone. Preserve the existing 10k qualification as the baseline.
+
 ## Stop a duplicate column-cache experiment; inspect metric reads (2026-09-16)
 
 A cursor-owned incremental column-offset cache was implemented with no borrowed

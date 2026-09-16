@@ -26,7 +26,10 @@ enum FinalEffect {
 
 enum AfterPlan {
     FreshPush(Counts),
-    FinalRows(BTreeMap<ItemId, Option<usize>>),
+    FinalRows {
+        rows: BTreeMap<ItemId, Option<usize>>,
+        initially_pending: bool,
+    },
 }
 
 fn fresh_after_plan(
@@ -39,6 +42,7 @@ fn fresh_after_plan(
     let mut effects: BTreeMap<ItemId, FinalEffect> = BTreeMap::new();
     let mut pushes = false;
     let mut other_rows = false;
+    let mut initially_pending = true;
     for (position, envelope) in positions.iter().zip(commands) {
         if position.queue != *queue {
             continue;
@@ -70,9 +74,17 @@ fn fresh_after_plan(
                 }
                 other_rows = true;
                 for id in &command.item_ids {
-                    // A claim may be conditional. A later guarded replacement
-                    // or purge must establish the final state for this ID.
-                    effects.insert(*id, FinalEffect::UnresolvedClaim);
+                    // Authority-first SQL requires every named row to move from
+                    // active Pending or the transaction fails. Conditional claims
+                    // still need a later replacement/purge or measured after-state.
+                    let effect = if command.authority_first {
+                        FinalEffect::Resolved(Some(1))
+                    } else {
+                        FinalEffect::UnresolvedClaim
+                    };
+                    if effects.insert(*id, effect).is_none() && !command.authority_first {
+                        initially_pending = false;
+                    }
                 }
             }
             QueueCommand::MutateItems(command) => {
@@ -93,7 +105,12 @@ fn fresh_after_plan(
                             fireweed_core::ItemState::Failed => 3,
                         }),
                     };
-                    effects.insert(item.item_id, FinalEffect::Resolved(state));
+                    if effects
+                        .insert(item.item_id, FinalEffect::Resolved(state))
+                        .is_none()
+                    {
+                        initially_pending = false;
+                    }
                 }
             }
             QueueCommand::PurgeItems(command) => {
@@ -102,7 +119,9 @@ fn fresh_after_plan(
                 }
                 other_rows = true;
                 for id in &command.item_ids {
-                    effects.insert(*id, FinalEffect::Resolved(None));
+                    if effects.insert(*id, FinalEffect::Resolved(None)).is_none() {
+                        initially_pending = false;
+                    }
                 }
             }
             // Keep every other command family on the established SQL path.
@@ -124,14 +143,36 @@ fn fresh_after_plan(
             FinalEffect::Resolved(state) => Some((id, state)),
         })
         .collect();
-    Some(AfterPlan::FinalRows(final_rows?))
+    Some(AfterPlan::FinalRows {
+        rows: final_rows?,
+        initially_pending,
+    })
 }
 
 impl AfterPlan {
+    fn known_before(&self, scope: &Scope) -> Option<Counts> {
+        match self {
+            Self::FreshPush(_) => Some([0; 4]),
+            Self::FinalRows {
+                rows,
+                initially_pending: true,
+            } => {
+                let ids = scope.as_ref()?;
+                if rows.len() != ids.len() || !rows.keys().eq(ids.iter()) {
+                    return None;
+                }
+                // This inference is used only after successful guarded SQL apply;
+                // replay/noncontiguous positions cannot construct a fresh plan.
+                Some([i64::try_from(ids.len()).ok()?, 0, 0, 0])
+            }
+            Self::FinalRows { .. } => None,
+        }
+    }
+
     fn after(&self, before: Counts, scope: &Scope) -> Option<Counts> {
         match self {
             Self::FreshPush(after) => Some(*after),
-            Self::FinalRows(rows) => {
+            Self::FinalRows { rows, .. } => {
                 let ids = scope.as_ref()?;
                 if rows.len() != ids.len() || !rows.keys().eq(ids.iter()) {
                     return None;
@@ -203,12 +244,9 @@ impl MetricsDelta {
         let mut captured = Vec::with_capacity(scopes.len());
         for (queue, scope) in scopes {
             let plan = fresh_after_plan(&queue, positions, commands, cursor_seeds);
-            let before = if matches!(plan, Some(AfterPlan::FreshPush(_))) {
-                // Ordinary INSERT fails on any existing row/key; only a
-                // successful SQL apply will reach counter application.
-                [0; 4]
-            } else {
-                counts(tx, &queue, &scope)?
+            let before = match plan.as_ref().and_then(|plan| plan.known_before(&scope)) {
+                Some(before) => before,
+                None => counts(tx, &queue, &scope)?,
             };
             let known_after = plan.and_then(|plan| plan.after(before, &scope));
             captured.push((queue, scope, before, known_after));
@@ -423,5 +461,213 @@ mod tests {
         store.migrate().await.unwrap();
         let reopened = store.server_metrics(&queue).await.unwrap();
         assert_eq!(reopened.leased, 1);
+    }
+
+    fn claim_command(ids: Vec<ItemId>, authority_first: bool) -> CommandEnvelope {
+        fireweed_conformance::envelope(
+            QueueCommand::Claim(fireweed_engine::ClaimCommand {
+                item_ids: ids.clone(),
+                lease_token: fireweed_core::LeaseToken::new("metrics-claim").unwrap(),
+                lease_expires_at: fireweed_conformance::ts(100),
+                worker_id: None,
+                authority_first,
+            }),
+            ids,
+        )
+    }
+
+    #[test]
+    fn fresh_authority_claims_avoid_metric_reads_but_ambiguous_histories_do_not() {
+        struct Reads(std::cell::Cell<usize>);
+        impl RelTx for Reads {
+            fn execute(&self, _: &str, _: &[RelValue]) -> EngineResult<usize> {
+                unreachable!()
+            }
+            fn query(
+                &self,
+                _: &str,
+                _: &[RelValue],
+            ) -> EngineResult<Vec<fireweed_relational::RelRow>> {
+                self.0.set(self.0.get() + 1);
+                Ok(vec![fireweed_relational::RelRow(vec![
+                    1i64.into(),
+                    0i64.into(),
+                    0i64.into(),
+                    0i64.into(),
+                ])])
+            }
+        }
+        let q = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let id = ItemId::from_u64(1);
+        let seeds = std::collections::HashMap::from([(q.clone(), 0)]);
+        let position = CommandPosition::new(q.clone(), 0, 0);
+        let claim = claim_command(vec![id], true);
+        let rel = Reads(std::cell::Cell::new(0));
+        let delta =
+            MetricsDelta::capture(&rel, &[position.clone()], &[claim.clone()], &seeds).unwrap();
+        assert_eq!(
+            rel.0.get(),
+            0,
+            "guarded fresh claim should need no metric SELECT"
+        );
+        assert_eq!(delta.0[0].2, [1, 0, 0, 0]);
+        assert_eq!(delta.0[0].3, Some([0, 1, 0, 0]));
+        for (positions, commands, seeds) in [
+            (
+                vec![position.clone()],
+                vec![claim_command(vec![id], false)],
+                seeds.clone(),
+            ),
+            (
+                vec![position.clone()],
+                vec![claim.clone()],
+                std::collections::HashMap::from([(q.clone(), 1)]),
+            ),
+            (
+                vec![CommandPosition::new(q.clone(), 0, 1)],
+                vec![claim.clone()],
+                seeds.clone(),
+            ),
+            (
+                vec![position.clone(), CommandPosition::new(q.clone(), 0, 1)],
+                vec![
+                    fireweed_conformance::envelope(
+                        QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
+                            item_ids: vec![id],
+                            force: true,
+                        }),
+                        vec![id],
+                    ),
+                    claim.clone(),
+                ],
+                seeds.clone(),
+            ),
+            (
+                vec![position.clone(), CommandPosition::new(q.clone(), 0, 1)],
+                vec![
+                    claim.clone(),
+                    fireweed_conformance::envelope(QueueCommand::ResumeQueue, vec![]),
+                ],
+                seeds.clone(),
+            ),
+        ] {
+            let before = rel.0.get();
+            MetricsDelta::capture(&rel, &positions, &commands, &seeds).unwrap();
+            assert!(
+                rel.0.get() > before,
+                "ambiguous/replayed prefixes must read actual rows"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authority_claim_metric_inference_replays_and_rolls_back_with_rows() {
+        use fireweed_conformance::{envelope, item, qdef};
+        use fireweed_engine::AsyncProjectionStore;
+        for invalid in ["missing", "leased", "superseded"] {
+            let store = TursoRelational::in_memory().await.unwrap();
+            let definition = qdef();
+            let q = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            AsyncProjectionStore::ensure_shard(&store, definition)
+                .await
+                .unwrap();
+            let items = vec![item("1", "a", 1), item("2", "b", 2), item("3", "c", 3)];
+            let ids: Vec<_> = items.iter().map(|i| i.item_id).collect();
+            let push = envelope(
+                QueueCommand::Push(fireweed_engine::PushCommand { items }),
+                ids.clone(),
+            );
+            AsyncProjectionStore::apply_live(
+                &store,
+                vec![CommandPosition::new(q.clone(), 0, 0)],
+                vec![push],
+            )
+            .await
+            .unwrap();
+            if invalid == "superseded" {
+                store
+                    .execute(
+                        "UPDATE fireweed_items SET superseded=1 WHERE item_id=?1",
+                        vec![ids[2].to_string().into()],
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .execute(
+                        "UPDATE queues SET resident_pending=resident_pending-1",
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+            }
+            let claim = claim_command(vec![ids[0]], true);
+            let position = CommandPosition::new(q.clone(), 0, 1);
+            AsyncProjectionStore::apply_live(&store, vec![position.clone()], vec![claim.clone()])
+                .await
+                .unwrap();
+            // Replaying a committed claim must not apply its inferred delta twice.
+            AsyncProjectionStore::apply_live(&store, vec![position], vec![claim])
+                .await
+                .unwrap();
+            AsyncProjectionStore::apply_live(
+                &store,
+                vec![CommandPosition::new(q.clone(), 0, 2)],
+                vec![claim_command(vec![ids[0]], false)],
+            )
+            .await
+            .unwrap();
+            let before = store.server_metrics(&q).await.unwrap();
+            let bad_id = match invalid {
+                "missing" => ItemId::from_u64(999),
+                "leased" => ids[0],
+                _ => ids[2],
+            };
+            let result = AsyncProjectionStore::apply_live(
+                &store,
+                vec![CommandPosition::new(q.clone(), 0, 3)],
+                vec![claim_command(vec![ids[1], bad_id], true)],
+            )
+            .await;
+            assert!(result.is_err(), "invalid {invalid} claim must fail");
+            let after = store.server_metrics(&q).await.unwrap();
+            assert_eq!(
+                (after.pending, after.leased, after.complete, after.failed),
+                (
+                    before.pending,
+                    before.leased,
+                    before.complete,
+                    before.failed
+                )
+            );
+            // The rejected transaction must leave both the row and cursor reusable.
+            AsyncProjectionStore::apply_live(
+                &store,
+                vec![CommandPosition::new(q.clone(), 0, 3)],
+                vec![claim_command(vec![ids[1]], true)],
+            )
+            .await
+            .unwrap();
+            let rows = store.query("SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE superseded=0 GROUP BY lifecycle_state", vec![]).await.unwrap();
+            let mut actual = [0u64; 4];
+            for row in rows {
+                let turso::Value::Text(state) = &row.values[0] else {
+                    panic!("state")
+                };
+                let turso::Value::Integer(count) = row.values[1] else {
+                    panic!("count")
+                };
+                let index = match state.as_str() {
+                    "Pending" => 0,
+                    "Leased" => 1,
+                    "Complete" => 2,
+                    "Failed" => 3,
+                    _ => panic!("state"),
+                };
+                actual[index] = count as u64;
+            }
+            let m = store.server_metrics(&q).await.unwrap();
+            assert_eq!([m.pending, m.leased, m.complete, m.failed], actual);
+            assert_eq!(m.leased, 2);
+        }
     }
 }

@@ -6136,7 +6136,7 @@ mod item_mutation_tests {
             &shard,
             &[3, 4],
             vec![claim, mutations(&pushed[2..], 5)],
-            1,
+            2, // Guarded claims establish both initial and final counts.
         )
         .await;
         // Model a valid superseded-row fixture with consistent counters.
