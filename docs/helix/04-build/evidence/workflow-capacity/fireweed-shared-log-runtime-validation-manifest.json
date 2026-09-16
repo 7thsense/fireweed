@@ -1,0 +1,35 @@
+{
+  "scope": "Shared flush-runtime candidate correctness; performance pending",
+  "hash_scope": "decompressed artifact bytes",
+  "counts_pass_fail_ignore": {
+    "red": [
+      0,
+      1,
+      0
+    ],
+    "contracts": [
+      44,
+      0,
+      0
+    ],
+    "public": [
+      12,
+      0,
+      0
+    ]
+  },
+  "artifacts": [
+    {
+      "artifact": "fireweed-shared-log-runtime-red.log.gz",
+      "sha256": "ba8de7067d49230cbe596b97a3216fea743108e0c100b9b26019b5cb7bfa180d"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-contracts.log.gz",
+      "sha256": "7b3d5b7f0854b9df302a7af0eeaa7b63f82336932ef058b109b6f8140ae43f11"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-public.log.gz",
+      "sha256": "b28ab8ad0142292adf1ea316c3af6cd98dc10f494b337501581165adba490be3"
+    }
+  ]
+}

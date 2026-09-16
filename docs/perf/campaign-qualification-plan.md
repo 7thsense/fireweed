@@ -1,5 +1,43 @@
 # Campaign qualification and performance plan
 
+## Shared log flush-runtime candidate: correctness passes, performance pending (2026-09-16)
+
+The candidate shares Tokio flush runtimes across engines with the same selected
+worker count. Each runtime has at most 64 owning engines, leaving room for I/O in
+Tokio's default blocking pool alongside synchronous commit jobs. Additional engines
+use another pool. Registry entries are weak: the last owning flush thread drops
+the runtime outside async context, and closing one engine cannot shut down its
+siblings. Per-engine queues, byte budgets, in-flight limits, grouping, ordered
+committer and worker-count selection are unchanged. Manifest sequencers retain
+their own existing runtimes; only flush execution resources are shared.
+
+A shared runtime can outlive a failed engine, so runtime destruction can no longer
+serve as its implicit I/O drain. After a committer panic, admission and waiters still
+fail closed, but the engine now explicitly awaits already-started PUTs before its
+flush thread exits. Those uploads are never sequenced past the failure. This keeps
+close/reopen/orphan inspection from racing unfinished writes; it can wait for a
+started upload to return even after the commit failure. Normal shutdown continues
+to drain buffered work and await manifest durability.
+
+The pre-change test fails because two actual data-PUT paths use different runtime
+IDs. The candidate passes 44 log tests and 12 public campaign/primitive/recovery
+tests. New coverage verifies runtime identity through real PUTs, independent
+commit/close while a sibling manifest is blocked, survival after sibling close,
+bounded pool ownership/retirement, and failure draining followed by reopen without
+publishing the failed prefix or reusing object IDs. No source or test relies on
+the retired SQLite backend. Evidence is in
+`fireweed-shared-log-runtime-validation-manifest.json`.
+
+Next run the unchanged serial control/candidate/candidate/control one-million-row
+screen against `/tmp/fireweed-workload-before-shared-log-runtime` (clean source
+`4f4acde0`, SHA-256
+`9f54d1207211f5c12104bac95e70289479d2fdecd53baa7562926ae60e6a3763`). Both variants
+use identical VFS and user-mode perf counters, plus sampled thread counts. Verify
+that sharing occurs on the actual workload path, then assess CPU/instructions,
+throughput, RSS and writes before deciding on full sustained qualification. The
+fixed repeated 12.5k target and all five primitive floors remain unchanged.
+
+
 ## Checkpoint timing does not justify background execution as the next fix (2026-09-16)
 
 The complete traced campaign on clean `4f4acde0`, executable

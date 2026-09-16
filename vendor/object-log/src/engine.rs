@@ -8,8 +8,8 @@ use crate::{
     BlobStore, CommitBatch, CommitOutcome, IndexEntry, ObjectLogError, PartitionKey, Sequencer,
 };
 use bytes::Bytes;
-use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -680,6 +680,41 @@ async fn recover_data_object_counter(
     Ok(max)
 }
 
+// A synchronous committer occupies a blocking worker while its I/O is pending.
+// Bound owners per runtime so committers leave room in Tokio's blocking I/O pool.
+const MAX_ENGINES_PER_FLUSH_RUNTIME: usize = 64;
+
+// Engines with the same worker configuration share execution resources, not queues,
+// budgets or commit order. Weak entries let the last owning flush thread shut its
+// runtime down outside an async context; closing one engine never closes a sibling.
+fn shared_flush_runtime(worker_threads: usize) -> Arc<tokio::runtime::Runtime> {
+    type Registry = Mutex<HashMap<usize, Vec<Weak<tokio::runtime::Runtime>>>>;
+    static RUNTIMES: OnceLock<Registry> = OnceLock::new();
+    let mut runtimes = RUNTIMES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("flush runtime registry");
+    let pools = runtimes.entry(worker_threads).or_default();
+    pools.retain(|runtime| runtime.strong_count() > 0);
+    for pool in pools.iter() {
+        if pool.strong_count() < MAX_ENGINES_PER_FLUSH_RUNTIME {
+            if let Some(runtime) = pool.upgrade() {
+                return runtime;
+            }
+        }
+    }
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .thread_name("object-log-io")
+            .enable_all()
+            .build()
+            .expect("flush runtime"),
+    );
+    pools.push(Arc::downgrade(&runtime));
+    runtime
+}
+
 fn flush_loop<S>(
     shared: Arc<Shared<S::Meta>>,
     blob: Arc<dyn BlobStore>,
@@ -701,11 +736,7 @@ fn flush_loop<S>(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or_else(|| max_inflight.min(8));
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .enable_all()
-        .build()
-        .expect("flush runtime");
+    let rt = shared_flush_runtime(worker_threads);
     // Resume the data-object counter past any keys already under `prefix`. Restarting
     // at 0 on reopen overwrites sealed objects while manifests still point at the old
     // byte ranges → RangeOutOfBounds / mid-JSON EOF on fetch (fireweed-481d3e43).
@@ -770,12 +801,18 @@ fn flush_loop<S>(
                     shared.cv.notify_all();
                 }
                 Err(error) => {
-                    abort_failed_commit_worker(
+                    let uploads = abort_failed_commit_worker(
                         &shared,
                         &mut pending,
                         job.first_seq,
                         ObjectLogError::Sequencer(format!("commit worker failed: {error}")),
                     );
+                    // A shared runtime can outlive this engine. Await accepted uploads
+                    // explicitly so close/reopen/reaping cannot race orphan writes.
+                    // They are never sequenced after the failed commit.
+                    for upload in uploads {
+                        let _ = rt.block_on(upload);
+                    }
                     return;
                 }
             }
@@ -849,10 +886,11 @@ fn abort_failed_commit_worker<M>(
     pending: &mut VecDeque<FlushWork<M>>,
     first_seq: u64,
     error: ObjectLogError,
-) {
+) -> Vec<TokioJoinHandle<Result<(), ObjectLogError>>> {
+    let mut uploads = Vec::new();
     for mut work in pending.drain(..) {
         if let Some(put) = work.put.take() {
-            put.abort();
+            uploads.push(put);
         }
         send_storage_error(&mut work.responders, error.clone());
     }
@@ -870,12 +908,13 @@ fn abort_failed_commit_worker<M>(
     }
     q.bytes = 0;
     // Keep outstanding bytes conservatively charged until the failed engine
-    // and any cancelled upload tasks are dropped.
+    // and its accepted uploads have completed.
     for (_, tx) in q.flush_waiters.drain(..) {
         let _ = tx.send(Err(error.clone()));
     }
     q.force_flush = false;
     shared.cv.notify_all();
+    uploads
 }
 
 /// Combine only an already-ready contiguous success prefix. Never wait to fill
@@ -1313,6 +1352,25 @@ mod flush_barrier_tests {
     use super::*;
 
     #[test]
+    fn runtime_pool_caps_concurrent_engine_owners_and_retires() {
+        let runtimes: Vec<_> = (0..=MAX_ENGINES_PER_FLUSH_RUNTIME)
+            .map(|_| shared_flush_runtime(2))
+            .collect();
+        assert!(
+            runtimes[..MAX_ENGINES_PER_FLUSH_RUNTIME]
+                .iter()
+                .all(|rt| Arc::ptr_eq(rt, &runtimes[0]))
+        );
+        assert!(!Arc::ptr_eq(&runtimes[0], runtimes.last().unwrap()));
+        let weak = [
+            Arc::downgrade(&runtimes[0]),
+            Arc::downgrade(runtimes.last().unwrap()),
+        ];
+        drop(runtimes);
+        assert!(weak.iter().all(|runtime| runtime.upgrade().is_none()));
+    }
+
+    #[test]
     fn failure_only_rejects_barriers_covering_its_enqueue_position() {
         let error = ObjectLogError::Sequencer("manifest failed".into());
         let mut queue = Queue::<()> {
@@ -1746,6 +1804,277 @@ mod ready_commit_group_tests {
                 .len(),
             2
         );
+    }
+
+    struct RuntimeRecordingStore {
+        inner: Arc<dyn BlobStore>,
+        runtimes: Mutex<HashSet<String>>,
+        second_upload_gate: Mutex<Option<(std::sync::mpsc::SyncSender<()>, oneshot::Receiver<()>)>>,
+        second_upload_completed: std::sync::atomic::AtomicBool,
+    }
+
+    impl RuntimeRecordingStore {
+        fn new(inner: Arc<dyn BlobStore>) -> Self {
+            Self {
+                inner,
+                runtimes: Mutex::new(HashSet::new()),
+                second_upload_gate: Mutex::new(None),
+                second_upload_completed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlobStore for RuntimeRecordingStore {
+        async fn put(&self, key: &str, value: Bytes) -> Result<(), ObjectLogError> {
+            if key.starts_with("data/") {
+                self.runtimes
+                    .lock()
+                    .unwrap()
+                    .insert(tokio::runtime::Handle::current().id().to_string());
+            }
+            let gate = if key == "data/00000000000000000002" {
+                self.second_upload_gate.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some((entered, release)) = gate {
+                entered.send(()).unwrap();
+                release.await.unwrap();
+                let result = self.inner.put(key, value).await;
+                if result.is_ok() {
+                    self.second_upload_completed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                return result;
+            }
+            self.inner.put(key, value).await
+        }
+        async fn get(&self, key: &str) -> Result<Option<Bytes>, ObjectLogError> {
+            self.inner.get(key).await
+        }
+        async fn get_range(
+            &self,
+            key: &str,
+            range: Range<u64>,
+        ) -> Result<Option<Bytes>, ObjectLogError> {
+            self.inner.get_range(key, range).await
+        }
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, ObjectLogError> {
+            self.inner.list(prefix).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), ObjectLogError> {
+            self.inner.delete(key).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn engines_share_runtime_but_commit_and_close_independently() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = oneshot::channel();
+        let a_blob = Arc::new(RuntimeRecordingStore::new(Arc::new(GatedManifestStore {
+            inner: MemoryBlobStore::new(),
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+            fail: false,
+            panic_on_commit: false,
+        })));
+        let b_blob = Arc::new(RuntimeRecordingStore::new(Arc::new(MemoryBlobStore::new())));
+        let mut config = FlushConfig::default();
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let a_seq = Arc::new(
+            ManifestSequencer::open(a_blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let b_seq = Arc::new(
+            ManifestSequencer::open(b_blob.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let a = LogEngine::new(a_blob.clone(), a_seq, config, "data/");
+        a.produce(
+            PartitionKey("p".into()),
+            Bytes::from_static(b"a-first"),
+            1,
+            (),
+            Durability::Buffered,
+        )
+        .await
+        .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let b = LogEngine::new(b_blob.clone(), b_seq, config, "data/");
+        let b_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            b.produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"b-first"),
+                1,
+                (),
+                Durability::Sequenced,
+            ),
+        )
+        .await;
+        let mut closing_b = tokio::task::spawn_blocking(move || drop(b));
+        let b_closed = tokio::time::timeout(Duration::from_secs(5), &mut closing_b).await;
+        // Always release the held manifest before assertions, including the pre-change red run.
+        release_tx.send(()).unwrap();
+        if b_closed.is_err() {
+            closing_b.await.unwrap();
+        }
+        assert!(
+            b_closed.is_ok(),
+            "closing B waited for A's blocked manifest"
+        );
+        assert_eq!(b_result.unwrap().unwrap().base_offset, Some(0));
+        a.flush().await.unwrap();
+        assert_eq!(
+            a.produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"a-second"),
+                1,
+                (),
+                Durability::Sequenced
+            )
+            .await
+            .unwrap()
+            .base_offset,
+            Some(1)
+        );
+        let rows = a.fetch(&PartitionKey("p".into()), 0, 100).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.payload.clone()).collect::<Vec<_>>(),
+            vec![
+                Bytes::from_static(b"a-first"),
+                Bytes::from_static(b"a-second")
+            ]
+        );
+        tokio::task::spawn_blocking(move || drop(a)).await.unwrap();
+        let a_ids = a_blob.runtimes.lock().unwrap().clone();
+        let b_ids = b_blob.runtimes.lock().unwrap().clone();
+        assert_eq!(a_ids.len(), 1);
+        assert_eq!(b_ids.len(), 1);
+        assert_eq!(a_ids, b_ids, "actual data PUTs must use one flush runtime");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_engine_drains_accepted_uploads_before_close_and_reopen() {
+        let (manifest_entered_tx, manifest_entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (manifest_release_tx, manifest_release_rx) = oneshot::channel();
+        let (upload_entered_tx, upload_entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (upload_release_tx, upload_release_rx) = oneshot::channel();
+        let store = Arc::new(RuntimeRecordingStore::new(Arc::new(GatedManifestStore {
+            inner: MemoryBlobStore::new(),
+            entered: manifest_entered_tx,
+            release: Mutex::new(Some(manifest_release_rx)),
+            fail: false,
+            panic_on_commit: true,
+        })));
+        *store.second_upload_gate.lock().unwrap() = Some((upload_entered_tx, upload_release_rx));
+        let mut config = FlushConfig::default();
+        config.max_batches = 1;
+        config.max_inflight_flushes = 4;
+        config.linger = Duration::ZERO;
+        config.budget.enabled = false;
+        let sequencer = Arc::new(
+            ManifestSequencer::open(store.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let engine = LogEngine::new(store.clone(), sequencer, config, "data/");
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"first"),
+                1,
+                (),
+                Durability::Buffered,
+            )
+            .await
+            .unwrap();
+        manifest_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        engine
+            .produce(
+                PartitionKey("p".into()),
+                Bytes::from_static(b"second"),
+                1,
+                (),
+                Durability::Buffered,
+            )
+            .await
+            .unwrap();
+        upload_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        manifest_release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !engine.shared.queue.lock().unwrap().shutdown {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let flush_failed = engine.flush().await.is_err();
+        // A failed committer closes admission first; its accepted PUT must still
+        // complete before close returns, even though no manifest may reference it.
+        let upload_was_owned = upload_release_tx.send(()).is_ok();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || drop(engine)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(flush_failed);
+        assert!(upload_was_owned);
+        assert!(
+            store
+                .second_upload_completed
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert_eq!(store.list("data/").await.unwrap().len(), 2);
+        let sequencer = Arc::new(
+            ManifestSequencer::open(store.clone(), "manifest/")
+                .await
+                .unwrap(),
+        );
+        let reopened = LogEngine::new(store.clone(), sequencer, config, "data/");
+        assert!(
+            reopened
+                .fetch(&PartitionKey("p".into()), 0, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .produce(
+                    PartitionKey("p".into()),
+                    Bytes::from_static(b"after-reopen"),
+                    1,
+                    (),
+                    Durability::Sequenced
+                )
+                .await
+                .unwrap()
+                .base_offset,
+            Some(0)
+        );
+        let rows = reopened
+            .fetch(&PartitionKey("p".into()), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].payload, Bytes::from_static(b"after-reopen"));
+        assert_eq!(store.list("data/").await.unwrap().len(), 3);
+        tokio::task::spawn_blocking(move || drop(reopened))
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
