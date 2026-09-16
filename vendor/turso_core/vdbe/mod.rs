@@ -366,6 +366,28 @@ impl Register {
             }
         }
     }
+
+    /// Deep-copy a value, retaining a compatible destination buffer.
+    /// Unlike set_value, the source remains owned by its parameter/register.
+    #[inline]
+    pub fn copy_from_value(&mut self, value: &Value) -> Result<()> {
+        match (self, value) {
+            (Register::Value(Value::Text(existing)), Value::Text(source)) => {
+                if matches!(&source.value, std::borrow::Cow::Borrowed(_)) {
+                    // Static text already clones without an allocation. Do not
+                    // turn that cheap copy into a new owned string.
+                    *existing = source.clone();
+                } else {
+                    existing.do_extend(source)?;
+                }
+            }
+            (Register::Value(Value::Blob(existing)), Value::Blob(source)) => {
+                existing.do_extend(source)?;
+            }
+            (destination, source) => *destination = Register::Value(source.clone()),
+        }
+        Ok(())
+    }
 }
 
 /// A row is a the list of registers that hold the values for a filtered row. This row is a pointer, therefore

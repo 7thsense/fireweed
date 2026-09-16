@@ -11325,11 +11325,39 @@ pub fn op_copy(
         },
         insn
     );
-    for i in 0..=*extra_amount {
-        state.registers[*dst_reg + i] = state.registers[*src_reg + i].clone();
-    }
+    copy_register_range(&mut state.registers, *src_reg, *dst_reg, *extra_amount)?;
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
+}
+
+fn copy_register_range(
+    registers: &mut [Register],
+    source: usize,
+    destination: usize,
+    extra: usize,
+) -> Result<()> {
+    // Preserve sequential copy behavior even if the ranges overlap.
+    for offset in 0..=extra {
+        let src = source + offset;
+        let dst = destination + offset;
+        if src == dst {
+            // Still validate the register index for malformed bytecode.
+            let _ = &registers[src];
+            continue;
+        }
+        let (source, destination) = if src < dst {
+            let (left, right) = registers.split_at_mut(dst);
+            (&left[src], &mut right[0])
+        } else {
+            let (left, right) = registers.split_at_mut(src);
+            (&right[0], &mut left[dst])
+        };
+        match source {
+            Register::Value(value) => destination.copy_from_value(value)?,
+            other => *destination = other.clone(),
+        }
+    }
+    Ok(())
 }
 
 /// Reopening a cursor slot invalidates any deferred seek that points to it or
@@ -13293,7 +13321,11 @@ pub fn op_variable(
     _pager: &Arc<Pager>,
 ) -> Result<InsnFunctionStepResult> {
     load_insn!(Variable { index, dest }, insn);
-    state.registers[*dest].set_value(state.get_parameter(*index));
+    let value = state
+        .parameters
+        .get(index.get() - 1)
+        .unwrap_or(&Value::Null);
+    state.registers[*dest].copy_from_value(value)?;
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
 }
@@ -16932,6 +16964,99 @@ mod tests {
     use crate::translate::collate::CollationSeq;
     use crate::vdbe::BranchOffset;
     use crate::{Database, DatabaseOpts, MemoryIO, IO};
+
+    #[test]
+    fn test_register_copy_reuses_buffers_and_preserves_independence() {
+        let mut text = String::with_capacity(128);
+        text.push_str("old destination");
+        let text_ptr = text.as_ptr();
+        let mut blob = std::vec::Vec::with_capacity(128);
+        blob.extend_from_slice(b"old blob");
+        let blob_ptr = blob.as_ptr();
+        let mut registers = std::vec![
+            Register::Value(Value::Text(crate::types::Text::new("new text".to_owned()))),
+            Register::Value(Value::Blob(b"new blob".to_vec())),
+            Register::Value(Value::Text(crate::types::Text::new(text))),
+            Register::Value(Value::Blob(blob)),
+        ];
+        copy_register_range(&mut registers, 0, 2, 1).unwrap();
+        assert_eq!(registers[0], registers[2]);
+        assert_eq!(registers[1], registers[3]);
+        match &registers[2] {
+            Register::Value(Value::Text(value)) => assert_eq!(value.as_str().as_ptr(), text_ptr),
+            _ => panic!("expected text"),
+        }
+        match &registers[3] {
+            Register::Value(Value::Blob(value)) => assert_eq!(value.as_ptr(), blob_ptr),
+            _ => panic!("expected blob"),
+        }
+        registers[0] = Register::Value(Value::Null);
+        registers[1] = Register::Value(Value::Blob(b"changed".to_vec()));
+        assert_eq!(registers[2].get_value(), &Value::from_text("new text"));
+        assert_eq!(registers[3].get_value(), &Value::Blob(b"new blob".to_vec()));
+    }
+
+    #[test]
+    fn test_register_copy_preserves_overlapping_range_behavior() {
+        for (source, destination) in [(0, 1), (1, 0), (0, 0)] {
+            let mut actual = std::vec![
+                Register::Value(Value::from_text("a")),
+                Register::Value(Value::from_text("bb")),
+                Register::Value(Value::from_text("ccc")),
+            ];
+            let mut expected = actual.clone();
+            for offset in 0..=1 {
+                expected[destination + offset] = expected[source + offset].clone();
+            }
+            copy_register_range(&mut actual, source, destination, 1).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn test_register_copy_parameter_growth_null_and_subtype() {
+        let stmt = prepare_test_statement();
+        let mut state = ProgramState::new(1, 0);
+        let insn = Insn::Variable {
+            index: std::num::NonZeroUsize::new(1).unwrap(),
+            dest: 0,
+        };
+        let mut values = std::vec![
+            Value::from_text("small"),
+            Value::Blob(std::vec![7; 8192]),
+            Value::Blob(std::vec![8; 3]),
+            Value::Null,
+            Value::from_text("large".repeat(2048)),
+        ];
+        #[cfg(feature = "json")]
+        values.push(Value::Text(crate::types::Text::json(
+            "{\"ok\":true}".into(),
+        )));
+        values.push(Value::from_text("normal owned text".to_owned()));
+        values.push(Value::from_text("static text"));
+        values.push(Value::from_i64(42));
+        for value in values {
+            state.parameters = std::vec![value.clone()];
+            op_variable(stmt.get_program(), &mut state, &insn, stmt.get_pager()).unwrap();
+            assert_eq!(state.registers[0].get_value(), &value);
+            if let Value::Text(expected) = &value {
+                let Value::Text(actual) = state.registers[0].get_value() else {
+                    panic!("expected text")
+                };
+                assert_eq!(actual.subtype, expected.subtype);
+                if matches!(&expected.value, std::borrow::Cow::Borrowed(_)) {
+                    assert!(matches!(&actual.value, std::borrow::Cow::Borrowed(_)));
+                }
+            }
+            state.parameters.clear();
+            assert_eq!(state.registers[0].get_value(), &value);
+        }
+        op_variable(stmt.get_program(), &mut state, &insn, stmt.get_pager()).unwrap();
+        assert!(
+            state.registers[0].is_null(),
+            "unbound parameters remain NULL"
+        );
+    }
 
     fn prepare_test_statement() -> Statement {
         let io: Arc<dyn IO> = Arc::new(MemoryIO::new());
