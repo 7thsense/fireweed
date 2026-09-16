@@ -1,5 +1,41 @@
 # Campaign qualification and performance plan
 
+## Stop a duplicate column-cache experiment; inspect metric reads (2026-09-16)
+
+A cursor-owned incremental column-offset cache was implemented with no borrowed
+buffer pointers or shared mutable record cache. Two decoder tests passed and
+the debug native library suite completed **2,122 passes, 16 ignored, zero
+failures**. A native SQL integration regression was drafted but not executed.
+No Fireweed campaign or performance comparison used this candidate.
+
+History review then identified the earlier atomic record-position cache removed
+in `a3b24317`. Its baseline/candidate/candidate/baseline comparison found only
+0.84% mean CPU reduction without a useful repeatable workflow gain. The new
+cursor-owned variant avoids atomic packing and resumes after the previous field,
+but repeats the same underlying optimization. That difference alone is not
+sufficient evidence to justify another expensive validation/benchmark cycle.
+Remove all three edited runtime/test files back to `d3031ab8`; preserve the patch
+and native logs as `fireweed-cursor-column-cache-abandoned.patch.gz` and
+`fireweed-column-cache-native-{tests,full}.log.gz`. No new capacity claim follows.
+
+A more direct opportunity appears in `MetricsDelta::capture`: it reads addressed
+rows to discover their pre-apply states even when successful authority-first
+claim SQL must validate every named row as active Pending. Claim-only generations
+also classify their final state as unresolved, forcing an after-read although
+successful authority-first application establishes Leased. The normal and fused
+claim paths enforce exact moved-row counts and Pending/superseded guards.
+
+Next test counter inference for those validated claims, retaining contiguous
+fresh-position checks and the existing transactional rollback boundary. Infer a
+row's initial Pending state only when its first command is an authority-first
+claim; prior mutations, purges, mixed unsupported commands, conditional claims,
+replays and missing/superseded rows require conservative handling. Successful
+command validation must precede applying the counter delta. Native/public tests
+must compare persisted metrics with an independent row scan and verify failures
+roll back counters and rows together. No log format, durability barrier or public
+API needs to change for this candidate.
+
+
 ## Repeated 10k qualification achieved; 12.5k remains open (2026-09-16)
 
 All four sequential runs use clean `5cff73d4`, binary
