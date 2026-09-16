@@ -1,0 +1,43 @@
+{
+  "scope": "Direct scalar/array JSON metadata decode candidate; no performance claim",
+  "artifacts": [
+    {
+      "artifact": "fireweed-direct-json-core-tests.log.gz",
+      "sha256": "cc6c460de795500d8db94d1eb6815741e01fc8930f1e411c1cfa49c494dbad67"
+    },
+    {
+      "artifact": "fireweed-direct-json-core-full-tests.log.gz",
+      "sha256": "ffac2d206860ff803735dc08a24a18e651e4f830034559ba5aa6af8f6604eb17"
+    },
+    {
+      "artifact": "fireweed-direct-json-public-tests.log.gz",
+      "sha256": "273bdffec2811ed7c15dd9da2fae95d67796d494e26b6cdac0e28f9032932377"
+    },
+    {
+      "artifact": "fireweed-direct-json-build.log.gz",
+      "sha256": "914f2754f050c5ac67ba830f54861ae155fa553afe34a149c9b2f3770fd87539"
+    }
+  ],
+  "test_counts_pass_fail_ignore": {
+    "core-tests": [
+      31,
+      0,
+      0
+    ],
+    "core-full-tests": [
+      121,
+      0,
+      0
+    ],
+    "public-tests": [
+      12,
+      0,
+      0
+    ],
+    "build": [
+      0,
+      0,
+      0
+    ]
+  }
+}

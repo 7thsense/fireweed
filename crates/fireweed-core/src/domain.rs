@@ -446,14 +446,78 @@ impl serde::Serialize for MetadataValue {
 impl<'de> serde::Deserialize<'de> for MetadataValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         if deserializer.is_human_readable() {
-            let value = serde_json::Value::deserialize(deserializer)?;
-            metadata_value_from_json(value).map_err(serde::de::Error::custom)
+            deserializer.deserialize_any(MetadataValueJsonVisitor)
         } else {
             Ok(MetadataValueWire::deserialize(deserializer)?.into())
         }
     }
 }
 
+// Scalar and array values need no intermediate serde_json tree. Objects keep
+// the compatibility decoder for legacy tags, decimal objects and wrappers.
+struct MetadataValueJsonVisitor;
+
+impl<'de> serde::de::Visitor<'de> for MetadataValueJsonVisitor {
+    type Value = MetadataValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a metadata value")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(MetadataValue::Null)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(MetadataValue::Null)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(MetadataValue::Bool(value))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(MetadataValue::Integer(value))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        i64::try_from(value)
+            .map(MetadataValue::Integer)
+            .map_err(|_| E::custom("metadata integer exceeds i64"))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Self::Value, E> {
+        Err(E::custom(
+            "metadata number must be an integer or decimal object",
+        ))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(MetadataValue::String(value.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(MetadataValue::String(value))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(4096));
+        while let Some(value) = sequence.next_element::<MetadataValue>()? {
+            values.push(value);
+        }
+        Ok(MetadataValue::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        let value = <serde_json::Value as serde::Deserialize>::deserialize(
+            serde::de::value::MapAccessDeserializer::new(map),
+        )?;
+        metadata_value_from_json(value).map_err(serde::de::Error::custom)
+    }
+}
 fn metadata_from_json_value(value: serde_json::Value) -> Result<Metadata, String> {
     match value {
         serde_json::Value::Object(mut map) => {
@@ -2319,6 +2383,76 @@ mod native_metadata_compatibility {
                 );
             }
             values = vec![nested];
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_metadata_json_tests {
+    use super::*;
+
+    fn compare(raw: &str) {
+        let reference = serde_json::from_str::<serde_json::Value>(raw)
+            .map_err(|e| e.to_string())
+            .and_then(metadata_value_from_json);
+        let actual = serde_json::from_str::<MetadataValue>(raw);
+        match (reference, actual) {
+            (Ok(expected), Ok(actual)) => assert_eq!(actual, expected, "{raw}"),
+            (Err(_), Err(_)) => {}
+            (expected, actual) => {
+                panic!("decoder disagreement for {raw}: {expected:?} vs {actual:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn direct_json_matches_tree_decoder_for_scalars_arrays_and_legacy_objects() {
+        let inputs = [
+            "null",
+            "true",
+            "false",
+            "0",
+            "-0",
+            "-9223372036854775808",
+            "9223372036854775807",
+            "9223372036854775808",
+            "18446744073709551615",
+            "18446744073709551616",
+            "-9223372036854775809",
+            "1.0",
+            "1e0",
+            "1e999",
+            r#""escaped \u0000 \u03bb \"""#,
+            "[]",
+            "{}",
+            r#"{"Null":7}"#,
+            r#"{"Bool":true}"#,
+            r#"{"Bool":1}"#,
+            r#"{"Integer":2}"#,
+            r#"{"Integer":1.5}"#,
+            r#"{"String":"λ"}"#,
+            r#"{"String":false}"#,
+            r#"{"Array":[1,{"String":"x"},null]}"#,
+            r#"{"Object":{"entries":{"x":[1,2,3]}}}"#,
+            r#"{"mantissa":1234,"scale":2}"#,
+            r#"{"Number":{"mantissa":1234,"scale":2}}"#,
+            r#"{"entries":false}"#,
+            r#"{"x":1,"x":2}"#,
+            r#"{"mantissa":1,"scale":2,"extra":true}"#,
+            "[",
+            "[1,]",
+            "[1.5]",
+            "[9223372036854775808]",
+        ];
+        for raw in inputs {
+            compare(raw);
+            compare(&format!("[{raw}]"));
+            compare(&format!("[null,[{raw}],false]"));
+        }
+        let mut nested = serde_json::json!([null, false, 0, "λ\0".repeat(4096), [1, 2, 3]]);
+        for depth in 0..8 {
+            compare(&nested.to_string());
+            nested = serde_json::json!([depth, nested, {"Object":{"entries":{"x":[1,2,3]}}}]);
         }
     }
 }

@@ -1,5 +1,35 @@
 # Campaign qualification and performance plan
 
+## Direct scalar/array metadata JSON decoding candidate (2026-09-16)
+
+Relational metadata decoding deserializes a map of `MetadataValue` entries. Each
+entry previously became a `serde_json::Value` first; natural arrays then allocated
+a second vector while converting their children. The campaign persists an array
+of top times, so this path is exercised during real projection reads. The existing
+allocator profile attributes work to metadata decoding during addressed planning,
+claim rendering and retained-item reporting; it does not quantify the saving of
+this particular change.
+
+The candidate deserializes scalar and array entries directly into their final
+metadata types. Objects still use the existing compatibility decoder, preserving
+legacy tags, decimal objects and wrappers. Binary/postcard encoding and decoding,
+stored JSON, SQL, public response contents, workload and qualification gates are
+unchanged. The old tree conversion remains the test oracle: values and rejection
+behavior agree for integer limits, floats, malformed JSON, escaped strings,
+legacy forms, decimal objects and nested arrays. All **31 core library tests
+pass**. The complete core suite passes **121 tests**, with 0 existing ignores;
+all **12 public campaign/primitive/recovery tests pass**, and the standalone
+workload builds successfully. Validation output and hashes are archived in
+`fireweed-direct-json-validation-manifest.json`. Performance remains unmeasured.
+The next diagnostic uses control/candidate/candidate/control ordering to balance
+first-versus-last placement within four serial runs.
+
+A separate build observation explains repeated native compilation: Turso's
+`build.rs` watches repository HEAD and embeds it in `sqlite_source_id()`, so a
+documentation-only commit can invalidate the native crate. This build behavior
+has not been changed as part of the decoder experiment. Build/test activity must
+still finish before workload measurement begins.
+
 ## Reject response ownership after reversed-order controls (2026-09-16)
 
 The reverse-order screen completed correctly:
