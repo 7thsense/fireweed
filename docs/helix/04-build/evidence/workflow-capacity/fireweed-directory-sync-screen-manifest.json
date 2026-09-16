@@ -1,0 +1,132 @@
+{
+  "measured_head": "5b65a281c16f4d23c535aa424b164b1bc312bc35",
+  "binary_sha256": "11bce25e1799f5ba91c93444ce817a4eddfd60223e978915d04a4c167a4ad26e",
+  "scope": "Complete serial diagnostic ABBA; same logical work. Candidate shares fewer than 0.5% of directory barriers; total sync calls +0.13%, mean rate -1.24%, CPU pairs inconsistent. Candidate rejected without sustained qualification.",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-directory-sync-screen-fireweed-analyze-directory-sync-sharing.py.gz",
+      "sha256": "8ce327f2f29ba49c44b383d4bd05f1781cd43e2d84a3a0d10a784d064a33d8f1"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-fireweed-analyze-lease-index-counters.py.gz",
+      "sha256": "92ad3a1ef3e86b449c28757bf18fdaffde1428b4e17083ca797da959116bc3d7"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-fireweed-directory-sync-sharing-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-fireweed-directory-sync-sharing-counters-runner.log.gz",
+      "sha256": "e15306ea1b950a870f64428657e120a65fce2b2960c4b0b74413785a9c38c655"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-fireweed-run-directory-sync-sharing-counters.py.gz",
+      "sha256": "a2a9bed001cb2757a64c1ee17f40530b0102f3f30f3dd10cf43d1cae7469f7e7"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-analysis.json.gz",
+      "sha256": "f177a692ad4ff283e42c96d7ad0e4cd698ca974770052af19169cb6766ad15ec"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-1-device-summary.json.gz",
+      "sha256": "8ecf100ece58538686080ca74f620696dcca760fad354e5a318b0e204484efee"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-1-device.jsonl.gz",
+      "sha256": "c741a6891deea7bd839466aeeff99ffc656ec9b4a6d64e260f40ba9da744901f"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-1-perf.csv.gz",
+      "sha256": "cb10599fd75cb3409f7dffc3482dd91d2c1fed69f17a3c0201d082d736b08cdd"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-1-provenance.json.gz",
+      "sha256": "95153c785eea530298916ab591d35073a50dcc46ce540dd51f7330d80d4c372a"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-1-threads.jsonl.gz",
+      "sha256": "d193d5dc0a48f50047fa4b186795cdfdfda8de86801eb13fded0e5dff70eec0d"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-1.json.gz",
+      "sha256": "c0cfc983cb5c665053254052ea29a833654a54d4b6cb6efeb5fe0e2927c672cf"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-2-device-summary.json.gz",
+      "sha256": "ad04132d7687799a74bb31ee457711f1e7455b7da56fb8a48b40ff5a4011b5f2"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-2-device.jsonl.gz",
+      "sha256": "a6b7f562aa655ae57b563afcdc3e4eecf6a9d455566e9d80084dff29d3854746"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-2-perf.csv.gz",
+      "sha256": "f53d6e9e0e2c87b5e35525de6d076eb3ec5c390116ed0287ef5de3a256d5239e"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-2-provenance.json.gz",
+      "sha256": "95153c785eea530298916ab591d35073a50dcc46ce540dd51f7330d80d4c372a"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-2-threads.jsonl.gz",
+      "sha256": "9d4513f882aa2f8c5a4614862b0429f5051719219e523f3cee7bc5bef98f0881"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-candidate-2.json.gz",
+      "sha256": "642bf7b71ec5c8b1bc74e7715eb9dcebf6bdd4317220d3b9afe30b2262e8820a"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-1-device-summary.json.gz",
+      "sha256": "4a15aa76ffd8677d9b3ef444a36d36b4983f43b4e6f76a5d89219f37300cdaa9"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-1-device.jsonl.gz",
+      "sha256": "9b8a2813f5057f2c03ca7b09365049838cb66a504eb54996695925b156717522"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-1-perf.csv.gz",
+      "sha256": "7b5bce624480d34ad8b829065cf88733e383de6c42066b19c164e2039c14ddec"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-1-provenance.json.gz",
+      "sha256": "b98cfdd97b3a97382b5b2ea121c29dc7e22628cbd7854121033a8c86ca33ca0d"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-1-threads.jsonl.gz",
+      "sha256": "87a1f50d987df29cbf72c04215e58a0151e1de4b3691dc26f8f8ee63f32ea8a8"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-1.json.gz",
+      "sha256": "3bec3b0ce216f595478c9d896dc54a902148cb0db5ea9d526d737561f603ec9e"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-2-device-summary.json.gz",
+      "sha256": "6e817c2f5b9858e609e1b332f268651421fa1c31a4ec9959f18b13364dc04b8c"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-2-device.jsonl.gz",
+      "sha256": "3f77b159e7fddd11bceb264b18f922a017063d0c1fc9c6075334227ba1581a0b"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-2-perf.csv.gz",
+      "sha256": "ebd4f09ba9e3fc52e9925a04f094c3785363aaf184fdceae4a77266ea500ec49"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-2-provenance.json.gz",
+      "sha256": "b98cfdd97b3a97382b5b2ea121c29dc7e22628cbd7854121033a8c86ca33ca0d"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-2-threads.jsonl.gz",
+      "sha256": "831a0087de080e0e88372813fbbbba1d874816cc75119161cc6b445dc6cbca1b"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-control-2.json.gz",
+      "sha256": "2f3eb4055b45dd1c27532afc570614137c4bf30c4a582dd87e254da6c151f2f8"
+    },
+    {
+      "artifact": "fireweed-directory-sync-screen-summary.json.gz",
+      "sha256": "56eb0821c2b126ba51ebafda9443e66b234000fa545acc6204f6e3937c3a0fad"
+    }
+  ]
+}

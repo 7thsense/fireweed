@@ -1,0 +1,11 @@
+{
+  "scope": "45 log contract tests pass after rollback. Production source under crates and vendor/object-log/src matches af87903b, whose 12 public workflow/recovery tests already passed; those unchanged tests were not rerun. Independent concurrent-publication test retained.",
+  "restored_blob_sha256": "d7543685d3e297c6df49d043519445fe3a60ed92926d381e68c17b4a02c183ab",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-directory-sync-rollback-contracts.log.gz",
+      "sha256": "8bf6945f974830e973e0948062a7c9e6576c576b093a6d4b998d078cc1018c76"
+    }
+  ]
+}

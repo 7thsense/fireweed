@@ -1,5 +1,28 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Directory-sync experiment leaves the capacity budget unchanged (2026-09-16)
+
+The serial ABBA screen shares only 28/11,090 and 55/11,048 successful publication
+barriers in the two candidate runs (0.252% and 0.498%). Mean total file-plus-
+directory sync calls increase slightly, from 22,068 to 22,096.5 per million
+recipients, due to object-grouping variation. These are native durable-barrier
+calls, not block-device IOPS. At 12.5k recipients/sec they imply about 275.85
+versus 276.21 such calls/sec if that workload cost remained constant.
+
+Published data/manifest/metadata bytes are effectively unchanged at 1.802 GB per
+million recipients. This is application publication volume, distinct from requested
+projection WAL bytes and host-device writes; do not sum these accounting layers.
+Mean throughput is 1.24% lower and CPU results disagree between pairs. The candidate
+is removed without sustained qualification. Neither the existing sequential disk
+baseline nor the retained lease-index CPU/write budget changes.
+
+A useful next isolation test should replay actual captured campaign objects through
+LocalBlobStore, with original byte contents and file-size/dependency structure.
+Synthetic zeros or a single large final-sync write do not model these publications.
+Such a replay must disclose its omitted application/projection/serialization work
+and cannot qualify campaign throughput. Full screen evidence is in
+`fireweed-directory-sync-screen-manifest.json`.
+
 ## Shared-runtime qualification rejected; retained budget unchanged (2026-09-16)
 
 The two complete untraced 8M campaigns with shared flush runtimes cost

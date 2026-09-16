@@ -8,7 +8,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 /// Durable-media accounting for the flush budget controller (TD-004).
@@ -192,43 +192,6 @@ impl BlobStore for MemoryBlobStore {
     }
 }
 
-/// Concurrent publishers may share a directory barrier, but only for renames
-/// completed before that barrier starts. Failed syncs never advance coverage.
-#[derive(Default)]
-struct DirectorySync {
-    renamed: AtomicU64,
-    durable: Mutex<u64>,
-}
-
-impl DirectorySync {
-    fn register_rename(&self) -> std::io::Result<u64> {
-        self.renamed
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
-            .map(|previous| previous + 1)
-            .map_err(|_| std::io::Error::other("directory rename generation exhausted"))
-    }
-
-    /// Returns whether this caller performed the sync. The mutex stays held
-    /// through completion so followers cannot acknowledge an in-progress sync.
-    fn sync_through(
-        &self,
-        ticket: u64,
-        sync: impl FnOnce() -> std::io::Result<()>,
-    ) -> std::io::Result<bool> {
-        let mut durable = self
-            .durable
-            .lock()
-            .map_err(|_| std::io::Error::other("directory sync poisoned"))?;
-        if *durable >= ticket {
-            return Ok(false);
-        }
-        let covered = self.renamed.load(Ordering::Acquire);
-        sync()?;
-        *durable = covered;
-        Ok(true)
-    }
-}
-
 /// Filesystem-backed [`BlobStore`] rooted at a directory.
 ///
 /// Single-node. Writes are **durable-on-return**: each `put` / `put_chunks`:
@@ -236,7 +199,6 @@ impl DirectorySync {
 /// 2. [`std::fs::File::sync_data`] (fdatasync on Unix) so payload bytes are durable  
 /// 3. `rename` into place  
 /// 4. `fsync` the parent directory so the directory entry survives power loss  
-/// Concurrent writes to the same parent may share step 4, without added linger.
 ///
 /// (On macOS, true device durability may need `F_FULLFSYNC`; Linux `sync_data` /
 /// dir `sync_all` is the intended contract.)
@@ -245,7 +207,6 @@ pub struct LocalBlobStore {
     root: Arc<PathBuf>,
     media_ops: Arc<AtomicU64>,
     bytes_written: Arc<AtomicU64>,
-    directory_syncs: Arc<Mutex<BTreeMap<PathBuf, Weak<DirectorySync>>>>,
 }
 
 impl LocalBlobStore {
@@ -255,24 +216,7 @@ impl LocalBlobStore {
             root: Arc::new(root.into()),
             media_ops: Arc::new(AtomicU64::new(0)),
             bytes_written: Arc::new(AtomicU64::new(0)),
-            directory_syncs: Arc::new(Mutex::new(BTreeMap::new())),
         }
-    }
-
-    fn directory_sync(&self, parent: &Path) -> std::io::Result<Arc<DirectorySync>> {
-        let mut syncs = self
-            .directory_syncs
-            .lock()
-            .map_err(|_| std::io::Error::other("directory sync registry poisoned"))?;
-        if let Some(sync) = syncs.get(parent).and_then(Weak::upgrade) {
-            return Ok(sync);
-        }
-        // Keep only in-flight owners; distinct historical object directories
-        // must not grow a permanent registry.
-        syncs.retain(|_, sync| sync.strong_count() > 0);
-        let sync = Arc::new(DirectorySync::default());
-        syncs.insert(parent.to_path_buf(), Arc::downgrade(&sync));
-        Ok(sync)
     }
 
     fn path_for(&self, key: &str) -> Result<PathBuf, ObjectLogError> {
@@ -284,13 +228,9 @@ impl LocalBlobStore {
 
     /// Durable publish: temp → sync_data → rename → dir fsync. No full pre-merge
     /// of `chunks` (streams them to the temp file).
-    fn durable_publish_chunks(
-        path: PathBuf,
-        chunks: Vec<Bytes>,
-        sync: Arc<DirectorySync>,
-    ) -> std::io::Result<(u64, bool)> {
-        // Opt-in diagnostic only: observe publication without adding barriers.
-        // Directory sync time includes waiting for a shared barrier. Failed puts remain errors;
+    fn durable_publish_chunks(path: PathBuf, chunks: Vec<Bytes>) -> std::io::Result<u64> {
+        // Opt-in diagnostic only: preserve the exact publication operations and
+        // ordering. No paths or payloads are emitted. Failed puts remain errors;
         // phase records below describe successful publications only.
         static TRACE: OnceLock<bool> = OnceLock::new();
         let trace =
@@ -325,26 +265,23 @@ impl LocalBlobStore {
             data_sync_us = elapsed();
         }
         std::fs::rename(&tmp, &path)?;
-        let ticket = sync.register_rename()?;
         let rename_us = elapsed(); // Includes closing the data file.
         let directory = std::fs::File::open(parent)?;
         let dir_open_us = elapsed();
-        let dir_sync_performed = sync.sync_through(ticket, || directory.sync_all())?;
+        directory.sync_all()?;
         let dir_sync_us = elapsed();
         if let Some(started) = started {
             eprintln!(
-                "local_publish bytes={byte_len} mkdir_us={mkdir_us} create_us={create_us} write_us={write_us} data_sync_us={data_sync_us} rename_us={rename_us} dir_open_us={dir_open_us} dir_sync_us={dir_sync_us} dir_sync_ops={} total_us={}",
-                u8::from(dir_sync_performed),
+                "local_publish bytes={byte_len} mkdir_us={mkdir_us} create_us={create_us} write_us={write_us} data_sync_us={data_sync_us} rename_us={rename_us} dir_open_us={dir_open_us} dir_sync_us={dir_sync_us} total_us={}",
                 started.elapsed().as_micros()
             );
         }
-        Ok((byte_len, dir_sync_performed))
+        Ok(byte_len)
     }
 
-    fn record_put(&self, (byte_len, dir_sync_performed): (u64, bool)) {
-        // Every successful write synced its data; count shared directory syncs once.
-        self.media_ops
-            .fetch_add(1 + u64::from(dir_sync_performed), Ordering::Relaxed);
+    fn record_put(&self, byte_len: u64) {
+        // Two media ops: file data sync + parent directory sync.
+        self.media_ops.fetch_add(2, Ordering::Relaxed);
         self.bytes_written.fetch_add(byte_len, Ordering::Relaxed);
     }
 
@@ -352,12 +289,9 @@ impl LocalBlobStore {
         &self,
         path: PathBuf,
         chunks: Vec<Bytes>,
-    ) -> Result<(u64, bool), ObjectLogError> {
-        let sync = self
-            .directory_sync(path.parent().expect("object path has a parent"))
-            .map_err(|e| ObjectLogError::StorageUnavailable(e.to_string()))?;
+    ) -> Result<u64, ObjectLogError> {
         let run = move || {
-            Self::durable_publish_chunks(path, chunks, sync)
+            Self::durable_publish_chunks(path, chunks)
                 .map_err(|e| ObjectLogError::StorageUnavailable(e.to_string()))
         };
         match tokio::runtime::Handle::try_current() {
@@ -378,8 +312,8 @@ impl LocalBlobStore {
 impl BlobStore for LocalBlobStore {
     async fn put(&self, key: &str, value: Bytes) -> Result<(), ObjectLogError> {
         let path = self.path_for(key)?;
-        let publication = self.publish_async(path, vec![value]).await?;
-        self.record_put(publication);
+        let byte_len = self.publish_async(path, vec![value]).await?;
+        self.record_put(byte_len);
         Ok(())
     }
 
@@ -389,8 +323,8 @@ impl BlobStore for LocalBlobStore {
             1 => self.put(key, chunks.into_iter().next().unwrap()).await,
             _ => {
                 let path = self.path_for(key)?;
-                let publication = self.publish_async(path, chunks).await?;
-                self.record_put(publication);
+                let byte_len = self.publish_async(path, chunks).await?;
+                self.record_put(byte_len);
                 Ok(())
             }
         }
@@ -489,76 +423,4 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Res
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod directory_sync_tests {
-    use super::*;
-
-    #[test]
-    fn one_successful_sync_covers_all_preexisting_renames() {
-        let sync = DirectorySync::default();
-        let first = sync.register_rename().unwrap();
-        let second = sync.register_rename().unwrap();
-        assert!(sync.sync_through(first, || Ok(())).unwrap());
-        assert!(
-            !sync
-                .sync_through(second, || panic!(
-                    "already covered rename must not sync twice"
-                ))
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn rename_during_sync_requires_another_successful_barrier() {
-        let sync = DirectorySync::default();
-        let first = sync.register_rename().unwrap();
-        let mut later = None;
-        assert!(
-            sync.sync_through(first, || {
-                later = Some(sync.register_rename().unwrap());
-                Ok(())
-            })
-            .unwrap()
-        );
-        assert!(sync.sync_through(later.unwrap(), || Ok(())).unwrap());
-    }
-
-    #[test]
-    fn failed_sync_cannot_acknowledge_any_covered_rename() {
-        let sync = DirectorySync::default();
-        let first = sync.register_rename().unwrap();
-        let second = sync.register_rename().unwrap();
-        let failed = sync.sync_through(first, || {
-            Err(std::io::Error::other("injected fsync failure"))
-        });
-        assert!(failed.is_err());
-        assert!(sync.sync_through(second, || Ok(())).unwrap());
-        assert!(
-            !sync
-                .sync_through(first, || panic!("second sync covered both"))
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn distinct_directories_have_independent_barriers_and_retire() {
-        let store = LocalBlobStore::new("unused-test-root");
-        let a = store.directory_sync(Path::new("a")).unwrap();
-        let a_again = store.clone().directory_sync(Path::new("a")).unwrap();
-        let b = store.directory_sync(Path::new("b")).unwrap();
-        assert!(Arc::ptr_eq(&a, &a_again));
-        let a_ticket = a.register_rename().unwrap();
-        let b_ticket = b.register_rename().unwrap();
-        assert!(a.sync_through(a_ticket, || Ok(())).unwrap());
-        assert!(b.sync_through(b_ticket, || Ok(())).unwrap());
-        let weak = Arc::downgrade(&a);
-        drop(a);
-        drop(a_again);
-        drop(b);
-        assert!(weak.upgrade().is_none());
-        let _next = store.directory_sync(Path::new("next")).unwrap();
-        assert_eq!(store.directory_syncs.lock().unwrap().len(), 1);
-    }
 }

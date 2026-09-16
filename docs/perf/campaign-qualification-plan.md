@@ -1,5 +1,54 @@
 # Campaign qualification and performance plan
 
+## Directory-sync sharing rejected: too little concurrent coverage (2026-09-16)
+
+All four serial one-million-row diagnostic runs finish with exit zero and identical
+logical campaign counts. Both candidate runs use clean `5b65a281`, executable
+`11bce25e1799f5ba91c93444ce817a4eddfd60223e978915d04a4c167a4ad26e`.
+Controls use the preserved clean `4f4acde0` executable. Publication/VFS tracing and
+user-mode perf counters match across the four runs; this is not qualification.
+
+| Run | Recipients/sec | CPU-ms/recipient | Publications | Directory syncs avoided |
+| --- | ---: | ---: | ---: | ---: |
+| Control 1 | 16,668.46 | 0.855165 | 11,060 | 0 |
+| Candidate 1 | 15,505.34 | 0.897354 | 11,090 | 28 (0.252%) |
+| Candidate 2 | 14,666.95 | 0.874748 | 11,048 | 55 (0.498%) |
+| Control 2 | 13,881.71 | 0.940339 | 11,008 | 0 |
+
+The small number of shared barriers is direct evidence from successful native
+LocalBlobStore publications. Mean total file-plus-directory sync calls actually
+rise 0.13% (22,068 to 22,096.5) because grouping produces slightly more objects.
+Mean throughput falls 1.24%, CPU cost falls 1.30%, instructions fall 0.73%, RSS
+rises 1.93%, and logical WAL bytes fall 0.13%. CPU worsens in the first pair and
+improves in the second; these results do not establish a useful causal gain.
+There is no basis for spending a sustained qualification run on this candidate.
+
+Restore `blob.rs` byte-for-byte from `af87903b`, removing the coordination state,
+trace field and its implementation-specific unit tests. Retain the independent
+64-object concurrent publication/reopen/accounting test. All 45 log contract tests
+pass after rollback. Production source under `crates/` and `vendor/object-log/src/`
+matches `af87903b`; its already-passing public workflow/recovery tests were not
+repeated. Candidate validation separately includes 49 log and 12 public tests,
+plus the two intentionally rejected unsafe coverage mutations. The rejected binary
+is preserved at `/tmp/fireweed-workload-directory-sync-sharing-rejected`.
+Evidence: `fireweed-directory-sync-screen-manifest.json`,
+`fireweed-directory-sync-validation-manifest.json`, and
+`fireweed-directory-sync-rollback-validation.json`.
+
+The packer already groups commands, and each queue's metadata permit spans epoch
+validation, durable produce and high-water publication. The measured publication
+concurrency supplies very little remaining opportunity to share directory barriers.
+Do not infer that increasing in-flight limits or dropping barriers is safe or useful.
+The next diagnostic should capture a real campaign's immutable data/manifest
+objects and replay their exact bytes through the native LocalBlobStore publication
+API, preserving per-store data-before-manifest dependencies across 64 stores.
+Preload source bytes outside timing and verify destination contents afterward;
+report exclusions (application/Turso work, serialization, online stage barriers,
+and any mutable metadata writes) explicitly. This isolates publication cost and
+compression/file-size effects without substituting a synthetic-zero bandwidth
+number for the real workflow. It is an isolation diagnostic, never a replacement
+for the unchanged original-row qualification or evidence that its target is met.
+
 ## Directory-sync sharing candidate: barrier tests pass, performance pending (2026-09-16)
 
 LocalBlobStore now registers a generation only after a file has been fdatasynced
