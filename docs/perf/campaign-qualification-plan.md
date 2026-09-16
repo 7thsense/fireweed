@@ -1,5 +1,28 @@
 # Campaign qualification and performance plan
 
+## Bound active projection transactions across stores (2026-09-16)
+
+The candidate adds process-wide admission to the actual `apply_owned` path,
+independent of which Tokio runtime supplies its blocking worker. It allows up to
+`std::thread::available_parallelism()` active owned applies (16 logical CPUs on
+this host). It first acquires the per-store writer, then admission; waiters for
+one busy store therefore cannot occupy all global slots. Once submitted, the
+owned task retains both writer and admission through commit/rollback even if its
+response waiter is cancelled. Cancellation while awaiting admission releases the
+writer without starting a transaction. Existing pre-transaction wait telemetry
+includes admission waiting. No host, log-runtime, batch, row-model or gate setting
+changes.
+
+Three focused tests pass: a busy store leaves capacity for another store;
+cancelling a globally queued apply releases its writer without leaking capacity;
+and independent stores obey the cap and release their writers on admission
+closure. The adapter library plus real cancellation, concurrency and recovery
+suites also pass; complete output and hashes are in
+`fireweed-apply-admission-tests-manifest.json`. Public campaign/retention/recovery
+checks and an alternating one-cycle counter screen follow. The cap is an
+experiment motivated by observed scheduling pressure, not a proven optimum or
+throughput improvement. Repeated eight-cycle qualification remains required.
+
 ## Reject record-buffer reuse; inspect projection apply concurrency (2026-09-16)
 
 Four serial original-row million-recipient screens completed correctly with no

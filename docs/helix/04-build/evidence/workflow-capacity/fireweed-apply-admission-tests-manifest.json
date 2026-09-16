@@ -1,0 +1,13 @@
+{
+  "artifacts": [
+    {
+      "artifact": "fireweed-apply-admission-focused.log.gz",
+      "sha256": "8916c09c1d6f8c3b060914ad4a1feeba03b41b8f939d28b798464c3e5ae74568"
+    },
+    {
+      "artifact": "fireweed-apply-admission-adapter-tests.log.gz",
+      "sha256": "4824b77e414c50ce4bbd619bbb46e67d93ecae9898f6243b1264d578324b94bd"
+    }
+  ],
+  "scope": "global admission candidate; performance not yet measured"
+}

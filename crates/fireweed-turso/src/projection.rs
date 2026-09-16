@@ -1663,6 +1663,34 @@ fn collect_api001_updates(commands: &[CommandEnvelope]) -> Option<Vec<&UpdateFie
     Some(updates)
 }
 
+/// Bound CPU-heavy projection transactions across stores independently of the
+/// caller's Tokio runtime. Per-store serialization precedes global admission so
+/// waiters for one busy store cannot consume every cross-store slot.
+fn apply_admission() -> Arc<tokio::sync::Semaphore> {
+    static ADMISSION: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(ADMISSION.get_or_init(|| {
+        let limit = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Arc::new(tokio::sync::Semaphore::new(limit))
+    }))
+}
+
+async fn acquire_apply_writer<T>(
+    writer: Arc<Mutex<T>>,
+    admission: Arc<tokio::sync::Semaphore>,
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<T>,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    tokio::sync::AcquireError,
+> {
+    let connection = writer.lock_owned().await;
+    let permit = admission.acquire_owned().await?;
+    Ok((connection, permit))
+}
+
 async fn apply_owned(
     writer: Arc<Mutex<Connection>>,
     live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
@@ -1684,7 +1712,10 @@ async fn apply_owned(
     // response waiter; it retains both the writer and transaction to completion.
     let total_started = Instant::now();
     let writer_wait_started = Instant::now();
-    let connection = writer.lock_owned().await;
+    let (connection, admission_permit) = acquire_apply_writer(writer, apply_admission())
+        .await
+        .map_err(storage)?;
+    // Admission queueing is included in the existing pre-transaction wait metric.
     let writer_wait_us = duration_us(writer_wait_started.elapsed());
     // The facade also supports non-Tokio executors. Keep one fallback runtime
     // alive so admitted applies survive their response waiters in that cell too.
@@ -1706,6 +1737,9 @@ async fn apply_owned(
     // client. Commit/checkpoint must not occupy an application runtime worker:
     // a busy projection otherwise delays unrelated log acknowledgements/timers.
     handle.spawn_blocking(move || crate::tx::block_on_owned_apply(async move {
+    // Keep admission with the detached owner through commit/rollback, even if
+    // the response waiter is cancelled after this task has been submitted.
+    let _admission_permit = admission_permit;
     let mut connection = connection;
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
@@ -7500,5 +7534,90 @@ mod owned_claim_decode_tests {
                 class_s_item_from_owned_values(values.into_iter(), 99, &HashSet::new()).is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod apply_admission_tests {
+    use super::*;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn apply_admission_waiters_for_one_writer_leave_other_store_capacity() {
+        let gate = Arc::new(Semaphore::new(1));
+        let first = Arc::new(Mutex::new(()));
+        let held = Arc::clone(&first).lock_owned().await;
+        let mut waiting = Box::pin(acquire_apply_writer(first, Arc::clone(&gate)));
+        assert!(
+            poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(gate.available_permits(), 1);
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            acquire_apply_writer(Arc::new(Mutex::new(())), Arc::clone(&gate)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(second);
+        drop(waiting);
+        drop(held);
+        assert_eq!(gate.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_admission_cancellation_while_queued_releases_writer() {
+        let gate = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&gate).acquire_owned().await.unwrap();
+        let writer = Arc::new(Mutex::new(()));
+        let mut waiting = Box::pin(acquire_apply_writer(Arc::clone(&writer), Arc::clone(&gate)));
+        assert!(
+            poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(writer.try_lock().is_err());
+        drop(waiting);
+        assert!(writer.try_lock().is_ok());
+        assert_eq!(gate.available_permits(), 0);
+        drop(held);
+        assert_eq!(gate.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_admission_caps_independent_stores_and_releases_on_close() {
+        let gate = Arc::new(Semaphore::new(2));
+        let first = acquire_apply_writer(Arc::new(Mutex::new(())), Arc::clone(&gate))
+            .await
+            .unwrap();
+        let second = acquire_apply_writer(Arc::new(Mutex::new(())), Arc::clone(&gate))
+            .await
+            .unwrap();
+        let writer = Arc::new(Mutex::new(()));
+        let mut third = Box::pin(acquire_apply_writer(Arc::clone(&writer), Arc::clone(&gate)));
+        assert!(
+            poll_fn(|cx| Poll::Ready(third.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(first);
+        let third = tokio::time::timeout(Duration::from_secs(1), third)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(gate.available_permits(), 0);
+        drop((second, third));
+        assert_eq!(gate.available_permits(), 2);
+        gate.close();
+        assert!(
+            acquire_apply_writer(Arc::clone(&writer), gate)
+                .await
+                .is_err()
+        );
+        assert!(writer.try_lock().is_ok());
     }
 }
