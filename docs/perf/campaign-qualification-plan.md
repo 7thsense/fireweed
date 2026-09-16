@@ -1,5 +1,32 @@
 # Campaign qualification and performance plan
 
+## Bounded manifest companion candidate validated (2026-09-16)
+
+The candidate allows up to five milliseconds of grouping opportunity when the
+ready successful head has an already-uploading immediate successor. It never
+waits for a new producer, does not delay an already-ready multi-object group,
+and bypasses the wait on shutdown, failed/unfinished heads, failed successors,
+or single-object sequencers. The deadline stays attached to the head; later
+arrivals cannot renew it. Scheduling delays can exceed this decision budget,
+so five milliseconds is not an end-to-end latency guarantee.
+
+Ready-prefix grouping, manifest format, offsets, acknowledgments, error
+propagation, byte admission and recovery use their existing paths. New tests
+exercise exact deadline expiry, non-extension by arrivals, immediate grouping
+when ready, and the bypass conditions. The 36 focused engine/blob checks and
+seven manifest/sequencer checks pass. The broader release suite passes **325
+checks**, with four existing diagnostics ignored and two unconfigured live-S3
+checks filtered. Public campaign, chunking, reporting, durability and log-only
+recovery tests remain included. All tests/builds ran sequentially.
+
+No performance benefit is claimed yet. The comparison is candidate/control/
+candidate, one million original-row recipients each, using identical VFS and
+user-mode hardware counters. Preserve control `83e48da6...` (source `78d36c7c`)
+and compare durable manifest counts as well as CPU and rate. A short screen
+cannot establish repeated eight-cycle qualification. Evidence: the three
+`fireweed-commit-companion-*-tests.log.gz` validation logs.
+
+
 ## Publication phases: synchronization dominates; diagnostic clears rates (2026-09-16)
 
 Clean `78d36c7c`, binary `83e48da6...`, completes the unchanged eight-cycle
