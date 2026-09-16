@@ -8,7 +8,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 /// Durable-media accounting for the flush budget controller (TD-004).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -228,23 +229,53 @@ impl LocalBlobStore {
     /// Durable publish: temp → sync_data → rename → dir fsync. No full pre-merge
     /// of `chunks` (streams them to the temp file).
     fn durable_publish_chunks(path: PathBuf, chunks: Vec<Bytes>) -> std::io::Result<u64> {
+        // Opt-in diagnostic only: preserve the exact publication operations and
+        // ordering. No paths or payloads are emitted. Failed puts remain errors;
+        // phase records below describe successful publications only.
+        static TRACE: OnceLock<bool> = OnceLock::new();
+        let trace =
+            *TRACE.get_or_init(|| std::env::var_os("OBJECT_LOG_LOCAL_PUBLISH_TRACE").is_some());
+        let started = trace.then(Instant::now);
+        let mut phase = started;
+        let mut elapsed = || {
+            phase.map_or(0, |before| {
+                let now = Instant::now();
+                phase = Some(now);
+                now.duration_since(before).as_micros()
+            })
+        };
         let parent = path.parent().expect("object path has a parent");
         std::fs::create_dir_all(parent)?;
+        let mkdir_us = elapsed();
         let mut tmp = path.clone().into_os_string();
         tmp.push(TMP_SUFFIX);
         let tmp = PathBuf::from(tmp);
         let mut byte_len = 0u64;
+        let (create_us, write_us, data_sync_us);
         {
             let mut f = std::fs::File::create(&tmp)?;
+            create_us = elapsed();
             for chunk in &chunks {
                 f.write_all(chunk)?;
                 byte_len += chunk.len() as u64;
             }
+            write_us = elapsed();
             // fdatasync on Unix: data durable; dir fsync below covers the name.
             f.sync_data()?;
+            data_sync_us = elapsed();
         }
         std::fs::rename(&tmp, &path)?;
-        std::fs::File::open(parent)?.sync_all()?;
+        let rename_us = elapsed(); // Includes closing the data file.
+        let directory = std::fs::File::open(parent)?;
+        let dir_open_us = elapsed();
+        directory.sync_all()?;
+        let dir_sync_us = elapsed();
+        if let Some(started) = started {
+            eprintln!(
+                "local_publish bytes={byte_len} mkdir_us={mkdir_us} create_us={create_us} write_us={write_us} data_sync_us={data_sync_us} rename_us={rename_us} dir_open_us={dir_open_us} dir_sync_us={dir_sync_us} total_us={}",
+                started.elapsed().as_micros()
+            );
+        }
         Ok(byte_len)
     }
 

@@ -1,5 +1,28 @@
 # Campaign qualification and performance plan
 
+## Local log publication phase instrumentation (2026-09-16)
+
+`OBJECT_LOG_LOCAL_PUBLISH_TRACE=1` enables successful-publication timings in
+LocalBlobStore: directory creation, temporary-file creation, writes, fdatasync,
+close/rename, directory open, directory fsync and total elapsed time. It emits
+byte counts but no paths or payloads. Failed operations retain their original
+error propagation; they do not emit a successful phase record. The switch is
+cached on first use, so set it before process startup. Disabled tracing makes
+no clock calls. The harness records the switch in diagnostic provenance.
+
+The same publication operations and durability barriers remain in order; this
+is attribution instrumentation, not a throughput optimization. All 78 object-log
+library tests pass with tracing enabled, including local reopen/snapshot and
+failure handling checks; two unconfigured live-S3 tests are filtered. The trace
+contains 164 successful publication records with valid phase/total timing bounds.
+All 17 harness tests pass separately. Logs are archived as
+`fireweed-local-publish-{trace-test,trace-contracts,harness-tests}.log.gz`.
+
+Next run the unchanged eight-cycle million-resident campaign with these timings
+and explicit diagnostic provenance. Distinguish elapsed synchronization latency
+from CPU time and avoid adding overlapping timings across stores.
+
+
 ## Interleaved fusion comparison and joint trace (2026-09-16)
 
 Clean source `7e999e9d`, binary `14a0ddad...`, was compared serially with
