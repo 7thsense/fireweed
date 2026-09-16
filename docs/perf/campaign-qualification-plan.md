@@ -1,5 +1,37 @@
 # Campaign qualification and performance plan
 
+## Compact stored priority candidate: correctness passes, performance pending (2026-09-16)
+
+The next bounded candidate replaces verbose priority enum JSON in the projection
+column with tagged arrays. Timestamp values sampled from this campaign save
+34 bytes per stored priority. This is a column-size calculation, not a measured
+WAL, physical-write or throughput improvement. Sort keys, metadata, public serde,
+log serialization, durability and workload/gates are unchanged.
+
+The dedicated projection decoder accepts existing object-form rows and compact
+arrays. Direct typed sequence decoding preserves signed 128-bit decimals and
+scale; malformed tags, missing/extra fields and numeric coercions fail closed.
+All six relational priority writers use the dedicated encoder, including fused
+replacements and regular updates. Existing rows do not need a rewrite. Older
+binaries cannot read new compact rows; downgrade requires rebuilding the disposable
+projection from the unchanged log, not reusing the new projection file.
+
+Validation: the compact decode test failed before implementation; afterward all
+11 relational tests, 76 native tests and 12 public workload tests pass, with two
+existing native tests ignored. Native mixed-format coverage exercises timestamp,
+integer, decimal and text rows across reopen, Keep/Set/clear, payload enrichment
+and independent expected eligibility order. Public tests cover campaign chunks,
+windows, reporting, discovered retention, primitives and log-only recovery.
+Raw logs and verified hashes are in
+`fireweed-compact-priority-validation-manifest.json`.
+
+Next run the serial control/candidate/candidate/control one-million-recipient
+counter/VFS screen against the retained lease-index executable
+`5fae9e11e803ab456411bbf3a1cb29f40fb52e47cbb689563d1fce6e2c6085c0`
+(source `1b8cb97c`). Performance is pending, and neither the screen nor these
+correctness checks establish the repeated 12.5k qualification target.
+
+
 ## Lease-index sustained results: base target passes, stretch remains open (2026-09-16)
 
 All four serial workload children exited zero on clean `1b8cb97c`, executable

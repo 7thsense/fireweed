@@ -1,0 +1,44 @@
+{
+  "scope": "Compact projection priority candidate correctness; performance pending",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-compact-priority-red.log.gz",
+      "sha256": "656a52b4d0d4498dded7615ba9b7cd61fb81922e578437136a09fdab2eee723c"
+    },
+    {
+      "artifact": "fireweed-compact-priority-green.log.gz",
+      "sha256": "a52f6b5342646c87a23b76441a89c484cc2d1a41ed1de999fff6e29f728c0903"
+    },
+    {
+      "artifact": "fireweed-compact-priority-native.log.gz",
+      "sha256": "d494cc180892f8130d5074a4aa80c3719cf20f1ee61ff1204b6d2289b2c007a2"
+    },
+    {
+      "artifact": "fireweed-compact-priority-public.log.gz",
+      "sha256": "002dc4b5b2f0192c79f7ac82ae3361b0dcf73cf45815cb6f8b067ff6970b500f"
+    }
+  ],
+  "counts_pass_fail_ignore": {
+    "red": [
+      1,
+      1,
+      0
+    ],
+    "green": [
+      11,
+      0,
+      0
+    ],
+    "native": [
+      76,
+      0,
+      2
+    ],
+    "public": [
+      12,
+      0,
+      0
+    ]
+  }
+}
