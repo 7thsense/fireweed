@@ -1,5 +1,30 @@
 # Campaign qualification and performance plan
 
+## Owned Turso parameters validated; performance comparison pending (2026-09-16)
+
+The candidate adds `RelTx::execute_owned` with a default borrowing implementation,
+and Turso implementations that move text/blob buffers into bound values. Resolved
+lease-clearing replacements, general row inserts and payload upserts consume
+their existing temporary vectors. Borrowed callers remain supported. The observed
+adapter retains statement counts, bind counts and phase timing for this path;
+SQL, apply transaction boundaries, authoritative-log encoding and semantics are
+unchanged.
+
+**320 release tests pass**, including the expanded cached-statement test:
+1,024 owned text/blob inserts, verification after rebinding, borrowed NULL
+updates, uniqueness failure, rollback and a fresh transaction. The full local
+set also covers public strict/async durability, projection deletion, original-row
+campaigns, differential histories, leases and log-only recovery. Four existing
+diagnostics are ignored and two unconfigured live-S3 checks are filtered.
+The five additional tests versus the previous 315-test set come from explicitly
+including the relational crate. Evidence: `fireweed-owned-params-validation.log.gz`.
+
+No benchmark overlapped the build or tests. Next rebuild the canonical workload
+binary and compare untraced one-cycle candidate/control/candidate runs on the
+default filesystem policy, recording exact executable and source provenance.
+These screens estimate CPU/allocation benefit, not sustained qualification.
+Only subsequent full repeated runs can establish the 10k/12.5k milestones.
+
 ## More workers increase WAL traffic; rejected (2026-09-16)
 
 The same `dcaf90ac...` executable on clean source `f0e54a2f` completed the full

@@ -128,7 +128,7 @@ fn apply_clearing_item_replacements(
             RelValue::Text(tenant.clone()),
             RelValue::Text(queue.clone()),
         ]);
-        let changed = crate::rel_exec(tx, &clearing_item_replacements_sql(chunk.len()), params)?;
+        let changed = crate::rel_exec_owned(tx, &clearing_item_replacements_sql(chunk.len()), params)?;
         if changed != chunk.len() {
             return Err(EngineError::Conflict);
         }
@@ -2025,7 +2025,7 @@ fn upsert_item_payloads(
         return Ok(());
     }
     let values = vec!["(?,?,?,?)"; count].join(",");
-    crate::rel_exec(
+    crate::rel_exec_owned(
         tx,
         &format!(
             "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
@@ -2147,7 +2147,7 @@ pub fn insert_item_specs(
                 RelValue::Integer(base_seq + offset as i64 + i as i64),
             ]);
         }
-        crate::rel_exec(tx, &sql, &flat)?;
+        crate::rel_exec_owned(tx, &sql, flat)?;
     }
     upsert_item_payloads(
         tx,

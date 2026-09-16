@@ -1588,6 +1588,27 @@ impl RelTx for ObservedTursoRel<'_> {
         result
     }
 
+    fn execute_owned(&self, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
+        let bind_count = params.len();
+        let started = Instant::now();
+        let result = self.inner.execute_owned(sql, params);
+        trace_sql(
+            sql,
+            bind_count,
+            result.as_ref().copied().unwrap_or(0),
+            started.elapsed(),
+        );
+        let elapsed = duration_us(started.elapsed());
+        let mut phases = self
+            .phases
+            .lock()
+            .expect("Turso RelTx phase mutex poisoned");
+        phases.update_side_us = phases.update_side_us.saturating_add(elapsed);
+        drop(phases);
+        record_statement(self.statement_shape.as_ref(), sql, bind_count, true);
+        result
+    }
+
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
         let started = Instant::now();
         let result = self.inner.query(sql, params);

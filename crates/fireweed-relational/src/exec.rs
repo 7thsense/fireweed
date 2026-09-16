@@ -14,10 +14,20 @@ pub trait RelTx {
 
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize>;
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>>;
+
+    /// Consume temporary parameters when the driver can bind their buffers directly.
+    /// Borrowing adapters retain their existing execution semantics.
+    fn execute_owned(&self, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
+        self.execute(sql, &params)
+    }
 }
 
 pub fn rel_exec(tx: &impl RelTx, sql: &str, params: impl AsRef<[RelValue]>) -> EngineResult<usize> {
     tx.execute(sql, params.as_ref())
+}
+
+pub fn rel_exec_owned(tx: &impl RelTx, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
+    tx.execute_owned(sql, params)
 }
 
 pub fn rel_query(

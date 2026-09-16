@@ -22,14 +22,10 @@ impl<'a> ApplyTursoRel<'a> {
     }
 }
 
-impl RelTx for ApplyTursoRel<'_> {
-    fn prefer_point_updates(&self) -> bool {
-        true
-    }
-
-    fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
+impl ApplyTursoRel<'_> {
+    fn execute_values(&self, sql: &str, params: Vec<Value>) -> EngineResult<usize> {
         if !USE_LOCAL_RT.get() {
-            return self.inner.execute(sql, params);
+            return self.inner.execute_values(sql, params);
         }
         // Keep a fixed positional-bind shape for each reused execution object.
         // The SDK resets both VM state and bindings before execute.
@@ -55,11 +51,25 @@ impl RelTx for ApplyTursoRel<'_> {
             // execute resets VM cursors before rebinding; nothing escapes the
             // apply's connection/transaction or overlaps another statement.
             statement
-                .execute(params.iter().map(to_turso).collect::<Vec<_>>())
+                .execute(params)
                 .await
                 .map(|changed| changed as usize)
                 .map_err(storage)
         })
+    }
+}
+
+impl RelTx for ApplyTursoRel<'_> {
+    fn prefer_point_updates(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
+        self.execute_values(sql, params.iter().map(to_turso).collect())
+    }
+
+    fn execute_owned(&self, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
+        self.execute_values(sql, params.into_iter().map(into_turso).collect())
     }
 
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
@@ -115,7 +125,7 @@ mod apply_statement_reuse_tests {
         let connection = database.connect().unwrap();
         connection
             .execute(
-                "CREATE TABLE reuse_test(id INTEGER PRIMARY KEY, value TEXT UNIQUE)",
+                "CREATE TABLE reuse_test(id INTEGER PRIMARY KEY, value TEXT UNIQUE, payload BLOB)",
                 (),
             )
             .await
@@ -125,16 +135,35 @@ mod apply_statement_reuse_tests {
             plain.execute("BEGIN", &[]).unwrap();
             {
                 let cached = ApplyTursoRel::new(&connection);
-                let insert = "INSERT INTO reuse_test VALUES(?1,?2)";
+                let insert = "INSERT INTO reuse_test VALUES(?1,?2,?3)";
                 for id in 0..1024 {
                     assert_eq!(
                         cached
-                            .execute(
+                            .execute_owned(
                                 insert,
-                                &[RelValue::Integer(id), RelValue::Text(format!("value-{id}"))]
+                                vec![
+                                    RelValue::Integer(id),
+                                    RelValue::Text(format!("value-{id}")),
+                                    RelValue::Blob(vec![id as u8; (id as usize % 257) + 1]),
+                                ],
                             )
                             .unwrap(),
                         1
+                    );
+                }
+                // Rebinding the cached statement must not change previously
+                // inserted text/blob buffers after their input vectors are gone.
+                for id in [0_i64, 511, 1023] {
+                    let rows = cached
+                        .query(
+                            "SELECT value,payload FROM reuse_test WHERE id=?1",
+                            &[RelValue::Integer(id)],
+                        )
+                        .unwrap();
+                    assert_eq!(rows[0].get::<String>(0).unwrap(), format!("value-{id}"));
+                    assert_eq!(
+                        rows[0].get::<Vec<u8>>(1).unwrap(),
+                        vec![id as u8; (id as usize % 257) + 1]
                     );
                 }
                 let update = "UPDATE reuse_test SET value=?2 WHERE id=?1";
@@ -150,7 +179,10 @@ mod apply_statement_reuse_tests {
                 // dropping the cache must release all statement state.
                 assert!(
                     cached
-                        .execute(insert, &[RelValue::Integer(0), RelValue::Null])
+                        .execute(
+                            insert,
+                            &[RelValue::Integer(0), RelValue::Null, RelValue::Null],
+                        )
                         .is_err()
                 );
             }
@@ -166,7 +198,7 @@ mod apply_statement_reuse_tests {
                 let cached = ApplyTursoRel::new(&connection);
                 cached
                     .execute(
-                        "INSERT INTO reuse_test VALUES(?1,?2)",
+                        "INSERT INTO reuse_test VALUES(?1,?2,NULL)",
                         &[RelValue::Integer(1), RelValue::Text("fresh".into())],
                     )
                     .unwrap();
@@ -190,6 +222,16 @@ pub fn to_turso(value: &RelValue) -> Value {
         RelValue::Real(value) => Value::Real(*value),
         RelValue::Text(value) => Value::Text(value.clone()),
         RelValue::Blob(value) => Value::Blob(value.clone()),
+    }
+}
+
+fn into_turso(value: RelValue) -> Value {
+    match value {
+        RelValue::Null => Value::Null,
+        RelValue::Integer(value) => Value::Integer(value),
+        RelValue::Real(value) => Value::Real(value),
+        RelValue::Text(value) => Value::Text(value),
+        RelValue::Blob(value) => Value::Blob(value),
     }
 }
 
@@ -326,13 +368,8 @@ fn turso_reltx_worker() -> &'static TursoRelTxWorker {
     })
 }
 
-impl RelTx for TursoRel<'_> {
-    fn prefer_point_updates(&self) -> bool {
-        true
-    }
-
-    fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
-        let params: Vec<Value> = params.iter().map(to_turso).collect();
+impl TursoRel<'_> {
+    fn execute_values(&self, sql: &str, params: Vec<Value>) -> EngineResult<usize> {
         if USE_LOCAL_RT.get() {
             return block_on_local(async {
                 let mut stmt = self.0.prepare_cached(sql).await.map_err(storage)?;
@@ -351,6 +388,20 @@ impl RelTx for TursoRel<'_> {
                 .map(|changed| changed as usize)
                 .map_err(storage)
         })
+    }
+}
+
+impl RelTx for TursoRel<'_> {
+    fn prefer_point_updates(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
+        self.execute_values(sql, params.iter().map(to_turso).collect())
+    }
+
+    fn execute_owned(&self, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
+        self.execute_values(sql, params.into_iter().map(into_turso).collect())
     }
 
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
