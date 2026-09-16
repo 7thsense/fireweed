@@ -1,5 +1,40 @@
 # Campaign qualification and performance plan
 
+## Write attribution: WAL dominates projection write calls (2026-09-16)
+
+The complete 64-store/eight-cycle diagnostic used unchanged `dcaf90ac...`,
+clean source `414f73b9`, default filesystem policy and only
+`FIREWEED_PROJECTION_IO_TRACE=1`. All 64 WAL and 64 main-file handles reported
+close-time totals with zero write errors:
+
+| Projection file class | Requested bytes | Write calls | Accumulated VFS time | Longest call |
+| --- | ---: | ---: | ---: | ---: |
+| WAL | 56,684,381,376 | 33,136 | 575.762 s | 7.044 s |
+| Main/other | 2,068,824,064 | 30,791 | 67.530 s | 4.698 s |
+
+These times overlap across stores and include time blocked inside synchronous
+VFS calls; they are neither CPU cost nor additive wall-time attribution. There
+were 675 WAL calls and 92 main-file calls above 100 ms. WAL appends account for
+96.5% of requested projection bytes and 89.5% of accumulated projection write
+call time. This makes reducing WAL page versions a better next hypothesis than
+assuming main-file checkpoint writes alone explain the slowdown. Log publication
+was not instrumented in this run and remains an attribution gap.
+
+The diagnostic completes at 12,339.50 recipients/sec, 648.955 seconds process
+wall, 0.98060 CPU-ms/recipient and 19.23 GiB peak RSS. Cycles 4 and 7 fail even
+the 10k floor (9,598 and 9,829); all non-rate checks pass. Do not count this traced
+run as performance qualification. Host writes total 31.30 GiB, illustrating why
+requested VFS bytes cannot substitute for physical write counters. Full evidence
+is `fireweed-canonical-64-write-trace*`.
+
+Next compare four workers per campaign with the same tracing, 64 stores, all
+million rows, eight cycles, handler/storage batch limits and reporting. More
+ready commands may allow the existing bounded apply coordinator to combine more
+page changes into a transaction; this is a hypothesis, not a claimed benefit.
+The 8,192-item, envelope, byte, contiguous-prefix and coverage bounds remain
+unchanged. Keep the canonical two-worker runner until a candidate passes
+repeated untraced qualification.
+
 ## Fewer stores reduce CPU cost but not late stalls (2026-09-16)
 
 An unchanged `dcaf90ac...` binary, clean source `88ae2078`, ran the same

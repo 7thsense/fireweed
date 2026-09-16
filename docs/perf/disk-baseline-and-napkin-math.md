@@ -1,5 +1,23 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Distinguish logical projection writes from device writes (2026-09-16)
+
+The complete traced canonical campaign requests **7,085.55 WAL bytes plus
+258.60 main-file bytes per recipient**, versus approximately **4,201.3 host-device
+write bytes/recipient**. At 12,500 recipients/sec these correspond to **87.55 MiB/sec
+of projection VFS writes**, before log writes, and approximately **50.08 MiB/sec
+host-device writes** for the observed complete workload. Compression, caching,
+filesystem metadata and unrelated host writes make these different accounting
+layers; do not add them or treat either as an independent device ceiling.
+
+WAL VFS calls total 575.76 seconds across 64 stores, main-file calls 67.53 seconds;
+individual calls reach 7.04/4.70 seconds. These overlapping times identify where
+projection calls block but cannot account for all wall time or exclude durable
+log waits. Further optimization should measure fewer WAL page versions per
+recipient, CPU cost and the unchanged end-to-end gates together. Evidence:
+`fireweed-canonical-64-write-trace-accounting.json.gz` and full qualification-plan
+entry. Neither performance milestone is repeatedly met.
+
 ## Repeated canonical run updates the estimate (2026-09-16)
 
 The final clean candidate failed sustained qualification: 13,579 and 12,016
