@@ -1,5 +1,34 @@
 # Campaign qualification and performance plan
 
+## Response ownership screen: fewer instructions, throughput unresolved (2026-09-16)
+
+Four serial original-row million-recipient diagnostics completed correctly.
+
+| Run | Recipients/sec | CPU-ms/recipient | User instructions (trillions) |
+| --- | ---: | ---: | ---: |
+| Control 1 | 16,389.15 | 0.86660 | 2.65339 |
+| Candidate 1 | 14,927.37 | 0.86689 | 2.61078 |
+| Control 2 | 14,485.86 | 0.92582 | 2.70578 |
+| Candidate 2 | 13,806.84 | 0.95728 | 2.67294 |
+
+Candidate instructions fell 1.61% and 1.21%; user cycles fell 3.62% and 1.60%.
+CPU time changed +0.03% and +3.40%; throughput fell 8.92% and 4.69%.
+RSS improved in the first pair but worsened in the second. This does not prove
+throughput or memory improvement. Unlike the rejected admission cap, which
+increased instructions by 7.40% and 8.98%, this candidate reduces measured CPU
+work in both pairs. A reverse candidate/control/candidate/control screen follows
+to counter the fixed run-order confound before accepting or rejecting it.
+All settings and the preserved control executable remain the same.
+
+The first candidate also had more observed I/O waiting: IO-full pressure 4.92%
+versus 0.15%, and mean host write-request latency 12.11 ms versus 2.76 ms.
+These are host observations, not proof that disk hardware or this code change
+caused the throughput difference. No SSD settings or workload gates change.
+`fireweed-member-ownership-screen-manifest.json` archives all raw reports,
+provenance, counters, device samples, runner source and calculations. Candidate
+source is `2a88cf2e`, binary `19b72a8…`; controls use `9124cfd…`. Sustained
+12,500 recipients/sec remains unqualified.
+
 ## Retain generation responses while extracting append requests (2026-09-16)
 
 A more detailed offline allocator caller report of the existing eight-cycle

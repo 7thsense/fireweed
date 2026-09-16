@@ -1,0 +1,105 @@
+{
+  "scope": "One-cycle diagnostic screens only; instruction/cycle reduction but wall regression; reverse-order comparison required",
+  "artifacts": [
+    {
+      "artifact": "fireweed-member-ownership-screen-analysis.json.gz",
+      "sha256": "9aa3a8f6720ca62a6c817f677855dbd4d634e2a6a00482bbce64d61b60773d18"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-1-device-summary.json.gz",
+      "sha256": "2bdbda580eb57d82ec4894caed3ada79c143b10d786a85812aa3f16ed5102876"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-1-device.jsonl.gz",
+      "sha256": "893065a544979a6526f097ae2aec09fe7739a9b7ec0df21dabc937b89cae5869"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-1-perf.csv.gz",
+      "sha256": "d508234b4eea761f8d1b3fc9086decff6709c1ab9b39716b90ea54abcb9e30a9"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-1-provenance.json.gz",
+      "sha256": "5ff0c282084c130a9f19845556abb8b46b769696f5b71458450540eec1709438"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-1.json.gz",
+      "sha256": "5b38cbac2b1df39875d82899bed459b00e918eebfa44321026cdb05e8b71d56a"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-2-device-summary.json.gz",
+      "sha256": "b57657d1896f02c13b49c0ff492ad4074803010c373a8c66842890fe14d2899d"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-2-device.jsonl.gz",
+      "sha256": "b4539c3ca3ab34265aaeb0159800e3109c96282599be0c8bf54ffd1cf17f2383"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-2-perf.csv.gz",
+      "sha256": "7915814e48eed10468225cf559a22d246da8b2161f002e9e99020096c4fa6ed5"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-2-provenance.json.gz",
+      "sha256": "5ff0c282084c130a9f19845556abb8b46b769696f5b71458450540eec1709438"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-candidate-2.json.gz",
+      "sha256": "db0e1dbec052af0b7ef13e90156bffc09ec3232dbe7a65a2f9e3d2bb367fd133"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-1-device-summary.json.gz",
+      "sha256": "c79a9aff83541bc9d836c56528b74d1038e9e80829e678e3d7bb16bc9d1fa2a7"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-1-device.jsonl.gz",
+      "sha256": "9f1ca472fb7ab155da5dcfc2c7b9cd5d6e2ec6d64fbeadc785a8091da85c6a05"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-1-perf.csv.gz",
+      "sha256": "b7ea4665cbbf93ab44518f24b423afd3f49895e7c8ea1cdfac54623f9ad2813e"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-1-provenance.json.gz",
+      "sha256": "ea9481e6690ccded4d5e43afd3bd325b0f0e35a621601e7e701a93de426bb9ef"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-1.json.gz",
+      "sha256": "1444023de07e1e2e288e9d5b34613f66ed0547a07397fb7915a6ff8bae0c88c9"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-2-device-summary.json.gz",
+      "sha256": "396d0fa1e6cc30e461b79619f825dd510d8e3c1cb5aa195467f66dc8f5730ca9"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-2-device.jsonl.gz",
+      "sha256": "3eb74be8f7a8395a66a4dafc6541df20cacdbd00c0f33c57010fabf605bbde7f"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-2-perf.csv.gz",
+      "sha256": "7e851ed2b7d4e3fdcc2c4d27536af82667f11401a5e0dc6ec7ac0e5c076d270c"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-2-provenance.json.gz",
+      "sha256": "ea9481e6690ccded4d5e43afd3bd325b0f0e35a621601e7e701a93de426bb9ef"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-control-2.json.gz",
+      "sha256": "5979930f153242099063e54dfcffaae78a6426a4834fbc68b0b8ac8fff8c237f"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-summary.json.gz",
+      "sha256": "d30f07e8fea2875555cc8bd191fb4fe2ef93a47a13bb1823219665969df68b5e"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-fireweed-run-member-ownership-counters.py.gz",
+      "sha256": "2ee28bfd936f978a6292ebc6f15c76b8fa11efbd075aa322471c5b6695643151"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-fireweed-member-ownership-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+    },
+    {
+      "artifact": "fireweed-member-ownership-screen-fireweed-member-ownership-counters-runner.log.gz",
+      "sha256": "34af49696390c476ea9bc60889db7787d76aee79eb46a93fd1f6331e2b3af02d"
+    }
+  ]
+}
