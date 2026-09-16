@@ -1,0 +1,59 @@
+{
+  "file": "/tmp/fireweed-campaign-trim-flush1-s64-w2-eight.json",
+  "head": "23d8d89a04884908814e4ecb46c4db1f5d8b1657",
+  "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+  "exit_code": 0,
+  "process_wall_s": 610.7649321930003,
+  "recipients_per_s": 13125.775900606825,
+  "cpu_s": 7960.2702420000005,
+  "rss_gib": 19.132980346679688,
+  "targets": {
+    "10000": {
+      "passed": true,
+      "failed_checks": [],
+      "cycle_rates": [
+        14970.577601549907,
+        15856.150750198967,
+        14901.181737359615,
+        14552.149055602527,
+        11160.696536579622,
+        11566.27670280312,
+        11841.683307518722,
+        13282.10412955171
+      ]
+    },
+    "12500": {
+      "passed": false,
+      "failed_checks": [
+        {
+          "name": "cycle_4_slowest_campaign_equivalent_rate",
+          "passed": false,
+          "actual": 11160.696536579622,
+          "required": 12500
+        },
+        {
+          "name": "cycle_5_slowest_campaign_equivalent_rate",
+          "passed": false,
+          "actual": 11566.27670280312,
+          "required": 12500
+        },
+        {
+          "name": "cycle_6_slowest_campaign_equivalent_rate",
+          "passed": false,
+          "actual": 11841.683307518722,
+          "required": 12500
+        }
+      ],
+      "cycle_rates": [
+        14970.577601549907,
+        15856.150750198967,
+        14901.181737359615,
+        14552.149055602527,
+        11160.696536579622,
+        11566.27670280312,
+        11841.683307518722,
+        13282.10412955171
+      ]
+    }
+  }
+}

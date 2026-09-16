@@ -1,5 +1,19 @@
 # Campaign qualification and performance plan
 
+## One-worker runtime rejected after repaired-storage control (2026-09-15)
+
+The `OBJECT_LOG_FLUSH_RUNTIME_THREADS=1` eight-cycle control completes correctly
+at **13,126 recipients/sec**, with **11,161/sec** in the slowest cycle. All 10k
+gates pass; stretch throughput fails in cycles 4, 5 and 6. CPU cost increases to
+0.9950 ms/recipient, versus 0.9545 ms in the preceding default-runtime run;
+peak RSS is 19.13 GiB. This does not establish a benefit from reducing runtime
+threads on the repaired host. Retain the default eight workers per store.
+Evidence: `fireweed-campaign-trim-flush1-s64-w2-eight*` and its summary.
+
+The next diagnostic samples CPU execution in a shorter representative campaign
+with the default runtime. Profiling results are not qualification runs; full
+eight-cycle repetition remains required for any retained optimization.
+
 ## Memory-attributed repeat and runtime control (2026-09-15)
 
 The unchanged 64-store/eight-cycle campaign with external memory sampling
