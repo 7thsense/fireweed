@@ -2466,13 +2466,19 @@ impl MappedSharedWalCoordination {
             .expect("shared WAL frame index block missing");
         let mappings = self.frame_index_blocks.read();
         let visible_slots = Self::visible_frame_index_slots(&mappings, len, max_frame);
-        if visible_slots == 0 {
+        let first_slot = if min_frame == 0 {
+            0
+        } else {
+            Self::visible_frame_index_slots(&mappings, len, min_frame - 1)
+        };
+        if visible_slots <= first_slot {
             return Vec::new();
         }
         let mut seen_pages = std::collections::BTreeSet::new();
         let mut entries = Vec::new();
         let last_block = (visible_slots - 1) / FRAME_INDEX_BLOCK_CAPACITY;
-        for block_index in (0..=last_block).rev() {
+        let first_block = first_slot / FRAME_INDEX_BLOCK_CAPACITY;
+        for block_index in (first_block..=last_block).rev() {
             let block_start_slot = block_index * FRAME_INDEX_BLOCK_CAPACITY;
             let visible_entries = visible_slots
                 .saturating_sub(block_start_slot)
@@ -3960,6 +3966,23 @@ mod tests {
         mapped.record_frame(9, boundary + 1);
         mapped.record_frame(13, boundary + 2);
 
+        assert_eq!(
+            mapped.iter_latest_frames(boundary + 1, boundary + 2),
+            vec![(9, boundary + 1), (13, boundary + 2)]
+        );
+        assert_eq!(
+            mapped.iter_latest_frames(boundary + 2, boundary + 2),
+            vec![(13, boundary + 2)]
+        );
+        assert!(
+            mapped
+                .iter_latest_frames(boundary + 3, boundary + 2)
+                .is_empty()
+        );
+        assert_eq!(
+            mapped.iter_latest_frames(boundary, boundary + 1),
+            vec![(7, boundary), (9, boundary + 1)]
+        );
         assert_eq!(
             mapped.iter_latest_frames(0, boundary + 2),
             vec![

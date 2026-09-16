@@ -619,6 +619,16 @@ pub trait Wal: Debug + Send + Sync {
     /// Begin a read transaction.
     /// Returns whether the database state has changed since the last read transaction.
     fn begin_read_tx(&self) -> Result<bool>;
+    /// Cached pages may survive only a provably append-only snapshot advance.
+    /// None requests the established full invalidation (also the default for
+    /// alternate WAL implementations). The result names every changed page.
+    fn cache_invalidation_pages(
+        &self,
+        _previous: (u32, u64),
+        _cached_pages: usize,
+    ) -> Option<Vec<u64>> {
+        None
+    }
     /// MVCC helper: check if WAL state changed without starting a read tx.
     fn mvcc_refresh_if_db_changed(&self) -> bool;
 
@@ -3271,6 +3281,37 @@ impl Wal for WalFile {
                 }
             }
         }
+    }
+
+    fn cache_invalidation_pages(
+        &self,
+        previous: (u32, u64),
+        cached_pages: usize,
+    ) -> Option<Vec<u64>> {
+        let state = self.connection_state();
+        let snapshot = state.snapshot;
+        let (previous_generation, previous_frame) = previous;
+        if state.read_guard == ReadGuardKind::None
+            || previous_generation != snapshot.checkpoint_seq
+            || previous_frame == 0
+            || previous_frame >= snapshot.max_frame
+            || snapshot.nbackfills > previous_frame
+            // Bound enumeration work by the cache that would otherwise clear.
+            // Each changed frame can introduce at most one changed page.
+            || snapshot.max_frame - previous_frame >= cached_pages as u64
+        {
+            return None;
+        }
+        // The read guard pins this generation, and committed prefixes cannot be
+        // overwritten. Include all writes after the old snapshot; the frozen
+        // upper bound excludes newer/uncommitted writer frames.
+        Some(
+            self.coordination
+                .iter_latest_frames(previous_frame + 1, snapshot.max_frame)
+                .into_iter()
+                .map(|(page, _)| page)
+                .collect(),
+        )
     }
 
     fn mvcc_refresh_if_db_changed(&self) -> bool {

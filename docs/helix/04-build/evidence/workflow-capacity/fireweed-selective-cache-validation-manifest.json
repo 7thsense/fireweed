@@ -1,0 +1,32 @@
+{
+  "purpose": "Selective Turso reader page cache correctness validation; performance unmeasured",
+  "base_commit": "5ab53a631235c3eb7f94f7b62e875fbab5709e1c",
+  "artifacts": [
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-native-focused.log.gz",
+      "uncompressed_sha256": "a3ce2755d59e36eeb95418fca6a98006a5022584cfed13a759cf46b60edcde6f",
+      "uncompressed_bytes": 4938
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-native-full.log.gz",
+      "uncompressed_sha256": "63dc122aaddf209e5cc8581e12aae71ae508c8b9e3a558867369e607df47bffa",
+      "uncompressed_bytes": 172495
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-local-validation.log.gz",
+      "uncompressed_sha256": "f1e55d559c925178f44b81dd5ead98eb8eeec87fe6c1deb0241a2ca2d7a0b8fa",
+      "uncompressed_bytes": 48282
+    }
+  ],
+  "native": {
+    "passed": 2122,
+    "failed": 0,
+    "ignored": 16
+  },
+  "fireweed_release": {
+    "passed": 328,
+    "failed": 0,
+    "ignored": 4,
+    "filtered": 2
+  }
+}

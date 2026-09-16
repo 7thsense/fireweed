@@ -1,5 +1,35 @@
 # Campaign qualification and performance plan
 
+## Selective Turso reader-cache candidate (2026-09-16)
+
+The read-trace investigation now has an implemented candidate. On a strictly
+forward read snapshot within the same WAL generation, the pager uses the
+in-memory committed frame index to discard changed pages and retain unchanged
+ones. Cursor and schema invalidation remain in place. Restart, unavailable
+history, backfill beyond the previous snapshot, dirty/pending state, failed
+cache deletion and alternate WAL implementations retain full invalidation.
+Enumeration is attempted only when the intervening frame count is smaller than
+the cache entry count. Shared-index enumeration skips blocks wholly before the
+requested frame range; it does not read raw WAL frames.
+
+Two new native Turso tests exercise both legacy in-process coordination and
+separate database handles with shared coordination. They verify unchanged-page
+identity, fresh committed values, stable active snapshots, writer and reader
+rollback, reused uncommitted frames, schema/index changes, checkpoint restart,
+backfill and dropped/recreated table pages. The shared-index block-boundary test
+also covers narrow and empty ranges. No SQLite fixture was introduced.
+
+Focused tests pass, and the complete native debug suite passes **2,122 tests,
+zero failures, 16 ignored** in 231.76 seconds. Fireweed release validation passes
+**328 tests, zero failures, four ignored and two live-S3 tests filtered**. This
+includes strict/async public durability with log-only rebuild and the CLI campaign,
+primitive and recovery suites. Runs were sequential. Logs and decompressed hashes
+are archived in `fireweed-selective-cache-validation-manifest.json`. Performance
+comparison remains pending. This is a correctness-tested candidate,
+**not a demonstrated speedup or a completed stretch qualification**. Preserve
+control binary `a287648d51d4b45ac0c19ce8632ccb4e5025b8a10d9e7916d39beff103295262`
+for serial comparison; the workload, durability and acceptance gates are unchanged.
+
 ## Eight-cycle read trace: OS-cached WAL traffic and full invalidation (2026-09-16)
 
 Clean `0ea4fc24`, binary

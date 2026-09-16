@@ -2924,11 +2924,30 @@ impl Pager {
         let Some(wal) = self.wal.as_ref() else {
             return Ok(());
         };
+        let previous = wal.connection_wal_pos();
         let changed = wal.begin_read_tx()?;
         if changed {
-            // Someone else changed the database -> assume our page cache is invalid (this is default SQLite behavior, we can probably do better with more granular invalidation)
-            self.clear_page_cache(false);
-            // Invalidate cached schema cookie to force re-read on next access
+            let cached_pages = self.page_cache.read().len();
+            let clean = self.dirty_pages.read().is_empty() && self.pending_reads.read().is_empty();
+            let selective = clean
+                && wal
+                    .cache_invalidation_pages(previous, cached_pages)
+                    .is_some_and(|pages| {
+                        // Cursors can retain page/record references independently
+                        // of the cache. Preserve the existing invalidation boundary.
+                        self.invalidate_all_cursors();
+                        let mut cache = self.page_cache.write();
+                        pages.into_iter().all(|page| {
+                            usize::try_from(page)
+                                .is_ok_and(|page| cache.delete(PageCacheKey::new(page)).is_ok())
+                        })
+                    });
+            if !selective {
+                // Restart, lost history, rollback/in-flight state, alternate WAL,
+                // or a pinned entry retains the established full-clear behavior.
+                self.clear_page_cache(false);
+            }
+            // Invalidate cached schema cookie to force re-read on next access.
             self.set_schema_cookie(None);
         }
         Ok(())
@@ -6650,5 +6669,191 @@ mod checkpoint_phase_tests {
             ),
             "resuming after the post-sync gap must install a valid durable backfill proof"
         );
+    }
+}
+
+#[cfg(test)]
+mod selective_read_cache_tests {
+    use super::*;
+    use crate::{Database, DatabaseOpts, PlatformIO, Value};
+
+    fn fixture(shared: bool) -> (tempfile::TempDir, Arc<Connection>, Arc<Connection>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let open = || {
+            Database::open_file_with_flags(
+                Arc::new(PlatformIO::new().unwrap()),
+                path.to_str().unwrap(),
+                OpenFlags::Create,
+                DatabaseOpts::new().with_multiprocess_wal(shared),
+                None,
+            )
+            .unwrap()
+        };
+        let db = open();
+        let writer = db.connect().unwrap();
+        writer.wal_auto_actions_disable();
+        writer
+            .execute("CREATE TABLE hot(id INTEGER PRIMARY KEY, v INTEGER)")
+            .unwrap();
+        writer.execute("INSERT INTO hot VALUES(1, 1)").unwrap();
+        writer
+            .execute("CREATE TABLE cold(id INTEGER PRIMARY KEY, v BLOB)")
+            .unwrap();
+        writer.execute("BEGIN").unwrap();
+        for id in 1..=32 {
+            writer
+                .execute(format!("INSERT INTO cold VALUES({id}, zeroblob(6000))"))
+                .unwrap();
+        }
+        writer.execute("COMMIT").unwrap();
+        // Separate Database handles exercise the persisted coordination index;
+        // the legacy mode instead uses the same in-process database instance.
+        let reader = if shared {
+            open().connect().unwrap()
+        } else {
+            db.connect().unwrap()
+        };
+        reader.wal_auto_actions_disable();
+        (dir, writer, reader)
+    }
+
+    fn rows(connection: &Arc<Connection>, sql: &str) -> Vec<Vec<Value>> {
+        connection.prepare(sql).unwrap().run_collect_rows().unwrap()
+    }
+
+    fn number(connection: &Arc<Connection>, sql: &str) -> i64 {
+        let values = rows(connection, sql);
+        let Value::Numeric(crate::numeric::Numeric::Integer(value)) = values[0][0] else {
+            panic!("expected integer")
+        };
+        value
+    }
+
+    fn warm_cold(connection: &Arc<Connection>) -> PageRef {
+        let root = number(
+            connection,
+            "SELECT rootpage FROM sqlite_schema WHERE name='cold'",
+        );
+        let values = rows(connection, "SELECT v FROM cold ORDER BY id");
+        assert_eq!(values.len(), 32);
+        for row in values {
+            let Value::Blob(bytes) = &row[0] else {
+                panic!("expected blob")
+            };
+            assert_eq!(bytes.as_slice(), &[0; 6000]);
+        }
+        connection
+            .get_pager()
+            .page_cache
+            .write()
+            .get(&PageCacheKey::new(root as usize))
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn selective_read_cache_preserves_unchanged_pages_and_fresh_snapshot_values() {
+        for shared in [false, true] {
+            let (_dir, writer, reader) = fixture(shared);
+            let cold = warm_cold(&reader);
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 1);
+            writer.execute("UPDATE hot SET v=2 WHERE id=1").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 2);
+            assert!(
+                cold.is_loaded(),
+                "unmodified cached root was discarded, shared={shared}"
+            );
+            let root = warm_cold(&reader);
+            assert!(
+                Arc::ptr_eq(&cold, &root),
+                "the retained root must be the same cache entry"
+            );
+
+            reader.execute("BEGIN").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 2);
+            writer.execute("UPDATE hot SET v=3 WHERE id=1").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 2);
+            reader.execute("COMMIT").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 3);
+            assert!(cold.is_loaded());
+
+            writer.execute("BEGIN").unwrap();
+            writer.execute("UPDATE hot SET v=4 WHERE id=1").unwrap();
+            writer.execute("ROLLBACK").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 3);
+            writer.execute("UPDATE hot SET v=5 WHERE id=1").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 5);
+            reader.execute("BEGIN").unwrap();
+            reader.execute("UPDATE hot SET v=6 WHERE id=1").unwrap();
+            reader.execute("ROLLBACK").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 5);
+            assert_eq!(number(&writer, "SELECT v FROM hot WHERE id=1"), 5);
+
+            writer.execute("CREATE INDEX hot_v ON hot(v)").unwrap();
+            assert_eq!(
+                number(
+                    &reader,
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='hot_v'"
+                ),
+                1
+            );
+            assert_eq!(
+                number(&reader, "SELECT v FROM hot INDEXED BY hot_v WHERE v=5"),
+                5
+            );
+        }
+    }
+
+    #[test]
+    fn selective_read_cache_falls_back_across_checkpoint_restart_and_page_reuse() {
+        for shared in [false, true] {
+            let (_dir, writer, reader) = fixture(shared);
+            let cold = warm_cold(&reader);
+            let checkpoint = rows(&writer, "PRAGMA wal_checkpoint(TRUNCATE)");
+            assert_eq!(checkpoint[0][0], Value::from_i64(0));
+            writer.execute("UPDATE hot SET v=8 WHERE id=1").unwrap();
+            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 8);
+            assert!(
+                !cold.is_loaded(),
+                "restart must discard old-generation cache pages"
+            );
+            let cold = warm_cold(&reader);
+            writer.execute("BEGIN").unwrap();
+            for id in 2..=100 {
+                writer
+                    .execute(format!("INSERT INTO hot VALUES({id}, {id})"))
+                    .unwrap();
+            }
+            writer.execute("COMMIT").unwrap();
+            let checkpoint = rows(&writer, "PRAGMA wal_checkpoint(PASSIVE)");
+            assert_eq!(checkpoint[0][0], Value::from_i64(0));
+            assert_eq!(number(&reader, "SELECT COUNT(*) FROM hot"), 100);
+            assert!(
+                !cold.is_loaded(),
+                "backfill beyond the old snapshot must force full invalidation"
+            );
+
+            warm_cold(&reader);
+            writer.execute("DROP TABLE cold").unwrap();
+            assert_eq!(
+                number(
+                    &reader,
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='cold'"
+                ),
+                0
+            );
+            writer
+                .execute("CREATE TABLE cold(id INTEGER PRIMARY KEY, v BLOB)")
+                .unwrap();
+            writer
+                .execute("INSERT INTO cold VALUES(99, x'010203')")
+                .unwrap();
+            let values = rows(&reader, "SELECT id, v FROM cold");
+            assert_eq!(
+                values,
+                vec![vec![Value::from_i64(99), Value::Blob(vec![1, 2, 3])]]
+            );
+        }
     }
 }
