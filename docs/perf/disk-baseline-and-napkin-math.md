@@ -1,5 +1,70 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Full projection disk/RAM isolation: CPU work remains (2026-09-16)
+
+The serial disk/RAM/RAM/disk comparison is complete. Each run uses the same
+clean `1fc73b97` executable (`6961d4208d1510767f9b26d4f6729b4837ad4da3f7c271bce7112e9bf50a99b4`)
+and existing high-level campaign: 1M resident original rows, eight cycles,
+64 stores, persisted enrichment, scheduled chunk delivery, faults, reporting,
+verification and retention. RAM projections split across two existing tmpfs
+mounts; the authoritative log stays on disk. All logical work counts match.
+
+| Placement/run | Overall recipients/sec | Minimum cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| Disk 1 | 15,203.37 | 13,360.82 | 0.89743 | 19.892 |
+| RAM 1 | 14,507.69 | 13,497.12 | 0.93976 | 19.225 |
+| RAM 2 | 15,247.18 | 14,142.97 | 0.93802 | 20.652 |
+| Disk 2 replacement | 15,172.95 | 13,608.94 | 0.90799 | 19.539 |
+
+All runs pass every workload gate at 12.5k. Of 2,279 checks, disk runs fail only
+the diagnostic-override eligibility check; RAM additionally fails the required
+on-disk projection check. These are traced diagnostic results, **not repeated
+production qualification**. That goal still requires canonical untraced runs.
+
+RAM changes mean throughput -2.05%, CPU time +4.01%, user instructions +0.83%,
+user cycles -0.69%, and logical WAL bytes -0.13%. Sampled host writes fall from
+30.06/28.20 GiB for disk to 15.37/15.95 GiB for RAM. Removing projection device
+I/O does not improve sustained throughput here. This supports prioritizing CPU
+and synchronization work; it does not prove that I/O never matters. Timing,
+clock frequency, publication grouping and host/media state vary across runs.
+Host counters omit startup/tail and are not process-attributed. RAM file pages
+are additional to process RSS: peak allocated projections are 26.96/27.66 GiB.
+
+At 12,500 complete recipients/sec, disk observations imply **11.22–11.35 CPU
+seconds/sec**, **45.13–48.09 MiB/sec sampled host writes**, **81.34 MiB/sec logical
+WAL requests**, **21.86 MiB/sec immutable log payload**, and **273.51 file-plus-
+directory sync calls/sec**. These are separate accounting layers; do not add
+logical WAL bytes to host writes. CPU time is logical-core occupancy, not a
+claim that 16 SMT threads provide 16 independent physical cores. The earlier
+182.63 MiB/sec sustained direct-write observation is a different access pattern;
+its quotient with these byte rates is not a valid workflow capacity prediction.
+The RAM experiment directly tests placement without assuming that quotient.
+
+The original final disk attempt failed in observer PID discovery before any
+usable report. The workload was confirmed gone before retrying only that run.
+The replacement scans children of all perf threads for the exact executable
+and log root, with a 30-second discovery deadline; attachment succeeded and all
+64 WALs were observed. The cause of the original discovery miss is not established.
+Original failed files and traceback are preserved separately, with explicit
+source mapping. The archived v2 recorder has a latent error-path string/list bug
+(`errors.append`) if attachment fails; it was not exercised in the successful
+replacement. Future recorder use must repair that branch and retain failed data.
+
+Next candidate: the log engine's empty-queue worker currently wakes every 1 ms.
+Live-thread snapshots show 15.1M/17.7M voluntary context switches in 64 flush
+threads and 337/367 CPU-seconds in those threads during disk/RAM observations.
+These snapshots omit terminated threads and include useful work and active-I/O
+polling; they are not a savings estimate. Test an indefinite condition-variable
+wait only when no queued or in-flight work exists, retaining notifications,
+batching, ordering and durability. Measure before claiming improvement.
+
+Evidence: `fireweed-split-projection-full-manifest.json` contains 53 compressed
+artifacts, all verified against SHA-256 of decompressed bytes: reports, counters,
+allocation/quota samples, original failure, replacement provenance, analyzers,
+runner/recorder sources, clean build log and thread snapshots. No host settings,
+quota, SSD options or workflow gates changed.
+
+
 ## Split-mount campaign fixture ready for sustained isolation (2026-09-16)
 
 `crates/fireweed-workload/examples/projection_isolation.rs` is a diagnostic client

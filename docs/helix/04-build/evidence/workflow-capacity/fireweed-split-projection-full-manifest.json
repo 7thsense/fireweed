@@ -1,0 +1,273 @@
+{
+  "scope": "Serial eight-cycle disk/RAM/RAM/disk diagnostic; final disk control retried after observer attachment failure. Not production qualification.",
+  "source_head": "1fc73b97ecb4addc5888ec3f982bc3867676e890",
+  "binary_sha256": "6961d4208d1510767f9b26d4f6729b4837ad4da3f7c271bce7112e9bf50a99b4",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-1-allocation-samples.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-1-allocation-samples.jsonl",
+      "sha256": "a73e3f5f17e338e9eab027d0f172e6801293889670f2a71bb0711aabe203b41b"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-1-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-1-device-summary.json",
+      "sha256": "d8a5fdccde31de76e3c4143fd3854ee9ff3fcfb683c273475a38e82ec4672ba3"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-1-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-1-device.jsonl",
+      "sha256": "8afee7cbbe2b57c810daeed51b4866ef8eda7275e0409a84f6c163a5b0dcef9c"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-1-perf.csv.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-1-perf.csv",
+      "sha256": "676c46ee8fead1f53ccd8b7227fdea338db771ce98f131e7bdd17e5cb0b79990"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-1-provenance.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-1-provenance.json",
+      "sha256": "2de09ee3975631c04d5a9e029379b90b0d31652608681b17403141cbf892ec02"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-1.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-1.json",
+      "sha256": "03ebe5cc057c3125d28bea241b376ff98b2cb818de84e5f318506d56660c06e2"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-2-allocation-samples.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-2-allocation-samples.jsonl",
+      "sha256": "b3332f9d1967c6cc4173b2665b95b1700ecec888eb1f70a55162eaed4e9a45f9"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-2-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-2-device-summary.json",
+      "sha256": "098576e5f27fefc5f19cb2291426e1b7164ffe57eb52c5422fa01bb474bd2346"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-2-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-2-device.jsonl",
+      "sha256": "7212c26886222878392d91b165ab9400fbdeb8fc174e585fcca49604fa8f00ee"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-2-perf.csv.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-2-perf.csv",
+      "sha256": "f2ff64900a62c3244cd097e249cb93570a85edced8200846f761d8ebd14e785c"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-2-provenance.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-2-provenance.json",
+      "sha256": "3528ece2664d3b1cb2e432925e4a92fb4ab584e5510801067f5edfec548acce2"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-candidate-2.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/candidate-2.json",
+      "sha256": "8ffccd87292fa5876bf39f475e102f616887ae5d9a34a5791b63e043358bed19"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-1-allocation-samples.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-1-allocation-samples.jsonl",
+      "sha256": "c7f01a9b0ba97b2f5f50713b7aa2ea9035e69689b54b20e80decef4cb4ea4409"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-1-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-1-device-summary.json",
+      "sha256": "bfb91f3b728d8c19fa15779e799f4dcd95975653ff7fae1a8ad1274b80724830"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-1-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-1-device.jsonl",
+      "sha256": "8f1f34ef349fba89d2fb01b07db31e8239c613be4375459bbd0b7a048f8a547d"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-1-perf.csv.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-1-perf.csv",
+      "sha256": "d59899df9c83525ea2794bbd5eed4c8e0e65538ae694588ebc2c085806362369"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-1-provenance.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-1-provenance.json",
+      "sha256": "7b16c6aff4dd6d01166d89515bfbb54798ed1c18e483e9670449c87972ce6d17"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-1.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-1.json",
+      "sha256": "c91ff349d0b4a1e704e76b1c9a9a9a432554c196662e5fde86f9f4b5af5430d9"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-2-allocation-samples.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-2-allocation-samples.jsonl",
+      "sha256": "6e48ba8dab5e363bf30488cb43a1dcedfdc44fe595ac33ab9af5f172bb3d8795"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-2-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-2-device-summary.json",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-2-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-2-device.jsonl",
+      "sha256": "251ec9a0c4c5f681988b8766d97d1a3e72d1fc5516f9323c051bcf2132f3818a"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-2-perf.csv.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-2-perf.csv",
+      "sha256": "5585d2cdeda3e0723937db0d7bfc241a18c37136a282f1f37d64cd861e8b82b6"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-2-provenance.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-2-provenance.json",
+      "sha256": "cddb8ac2530cb742fe51d987ca511e1a219d613e54e71a36ceec74fc1c5c6e08"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-control-2.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/control-2.json",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-preflight.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/preflight.json",
+      "sha256": "0af2e402f457c7f90501e1f333d6ce4910220515ef90fd00823d92b0f5b93c0e"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-original-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-sustained-20260916/summary.json",
+      "sha256": "d95d2bccf7de872c7bd157491299223c536c852bd39412526e91e5bb27706752"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-control-2-allocation-samples.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/control-2-allocation-samples.jsonl",
+      "sha256": "f55e7e162cfa27a2a74d19be5f5c914abafe9c60801bc5db50265041414cfb15"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-control-2-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/control-2-device-summary.json",
+      "sha256": "78d66df4222bc4f258b40bfd3faad81e2eeff8182f3e6d613971772b2ef5fd51"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-control-2-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/control-2-device.jsonl",
+      "sha256": "f14e2f874f40c5658ab2ac18a63ff1aeac71922bd6d3f9361285e09355a0c897"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-control-2-perf.csv.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/control-2-perf.csv",
+      "sha256": "b413b0f377ce8152d0a216730b75610e949f447ed295c2c3f752d798a66ee27e"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-control-2-provenance.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/control-2-provenance.json",
+      "sha256": "1d7a5283cf4572ee98c89bea065e3f4a9fa915d2be88145942a40db5df2a75c0"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-control-2.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/control-2.json",
+      "sha256": "517e428dd1f56a8d66ef77664834f3dc56ef16385758941afc31c442de510b0c"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-preflight.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/preflight.json",
+      "sha256": "aa1c5c71f0707d8715ab7d5d9c40053bec09c65ddbec18ad88dcf12a80f82f82"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-retry-summary.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-final-control-retry-20260916/summary.json",
+      "sha256": "30a75ea5db8e165367722f07620d3c0c4597622457e7bdcb9c5b712c6b67aaba"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-projection-full-analysis.json.gz",
+      "source_path": "/tmp/fireweed-split-projection-full-analysis.json",
+      "sha256": "3e48317b8f9b3c0a6c5ad9fece729381a55821737ebc4a4d16f6316387d30fbc"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-run-split-projection-isolation.py.gz",
+      "source_path": "/tmp/fireweed-run-split-projection-isolation.py",
+      "sha256": "2ae7bfd8a954b616424d3645771157aaa69bd40382ced5a13f889659fb2259eb"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-run-final-control-retry.py.gz",
+      "source_path": "/tmp/fireweed-run-final-control-retry.py",
+      "sha256": "9e326b42ddb45ce1648fa936441952465159a518c8bd1b01a0b34f5965f41cec"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-projection-recorder.py.gz",
+      "source_path": "/tmp/fireweed-split-projection-recorder.py",
+      "sha256": "26a4a255656c798bf5f2211fe20329b01d6c70679e4203532d32d9efcd41312a"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-projection-recorder-v2.py.gz",
+      "source_path": "/tmp/fireweed-split-projection-recorder-v2.py",
+      "sha256": "48d62df6f499564cf52c4e8cd59563e20314fe0c80ed6fb1b965f3d0fc83f8ac"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-projection-clean-build.log.gz",
+      "source_path": "/tmp/fireweed-split-projection-clean-build.log",
+      "sha256": "b5c18a6dc9fd7763f783c882402ed2d66df5005c0fb8d8e15d50683886835b46"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-projection-full-runner.log.gz",
+      "source_path": "/tmp/fireweed-split-projection-full-runner.log",
+      "sha256": "d6adc25553cbe180261064cb3a80f71f6f6d523296c4f02fe98175585436a566"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-final-control-retry-runner.log.gz",
+      "source_path": "/tmp/fireweed-final-control-retry-runner.log",
+      "sha256": "560d8fd5de790c140f62407d69d121121c0357f3104eb65f6204d4836a2c7a19"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-analyze-split-projection-isolation.py.gz",
+      "source_path": "/tmp/fireweed-analyze-split-projection-isolation.py",
+      "sha256": "a80a0bc72b9249ab9f4d978d9fa01e369bce0f33793b50355a95686d783cfc8c"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-analyze-projection-isolation-sustained-base.py.gz",
+      "source_path": "/tmp/fireweed-analyze-projection-isolation-sustained-base.py",
+      "sha256": "f55ac55cdff6c8732505d58c2c8c27ba93b2e6b03768aa3426a960adc533b7db"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-combine-split-projection.py.gz",
+      "source_path": "/tmp/fireweed-combine-split-projection.py",
+      "sha256": "5d4fe309223ab3caecc6cc7111fb569c45850914a26d6911ee587b64df41f6ee"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-control-1-thread-switch-snapshot.json.gz",
+      "source_path": "/tmp/fireweed-split-control-1-thread-switch-snapshot.json",
+      "sha256": "f264e6043bdc9df83aacd9bfbd13bd9f0e93e875334de93eb8b4678881ed3afc"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-control-1-thread-cpu-snapshot.json.gz",
+      "source_path": "/tmp/fireweed-split-control-1-thread-cpu-snapshot.json",
+      "sha256": "3089f4ec365eb8e7fa3766bccd6f868cbed6e797a31f71477a3f4dbdd92cea55"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-control-1-thread-wait-snapshot.json.gz",
+      "source_path": "/tmp/fireweed-split-control-1-thread-wait-snapshot.json",
+      "sha256": "2ca7147f2ad09b4c99e2125762e57c797c340e07191f638fd1862e3c15cb1c35"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-split-candidate-1-thread-attribution.json.gz",
+      "source_path": "/tmp/fireweed-split-candidate-1-thread-attribution.json",
+      "sha256": "ad69c36a8aef3d4f79784541ea2801ba350f34b09bd00d05ec0bd28fc961f391"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-device-monitor-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-monitor-v3.py",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-device-summary-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-summary-v3.py",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-fireweed-read-user-quota.py.gz",
+      "source_path": "/tmp/fireweed-read-user-quota.py",
+      "sha256": "3d7f73cb52647b8538375828ef5eec8f20ce860a237fc65ea066dcbfb2f52b27"
+    },
+    {
+      "artifact": "fireweed-split-projection-full-source-mapping.json.gz",
+      "source_path": "target/workflow-capacity/split-projection-combined-20260916/source-mapping.json",
+      "sha256": "2cce5d80a17b949db90cdd197f4ccb964fbc7437a2fd6cc55cd513057cc1f7b5"
+    }
+  ]
+}
