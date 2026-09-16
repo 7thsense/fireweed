@@ -1,5 +1,38 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Rejected compact priority experiment does not change the retained budget (2026-09-16)
+
+A compact projection-only timestamp representation saved 34 column bytes and
+reduced mean requested WAL writes by 5.76% in a balanced, serial one-cycle screen:
+6,713.23 to 6,326.73 bytes per recipient. At 12.5k recipients/sec that would be
+80.03 versus 75.42 MiB/sec of logical WAL writes. It did not establish an equivalent
+physical saving, CPU improvement or repeatable throughput improvement. The format
+change is removed; these candidate numbers are not the retained capacity budget.
+
+The candidate's two untraced 8M campaigns cost 0.885654/0.910395 CPU-ms per
+recipient: a conditional 11.071/11.380 CPU-seconds/sec at 12.5k. Sampled host writes
+were 30.875/30.331 GiB, or 4,144/4,071 bytes per recipient and 49.400/48.529 MiB/sec
+at the target. Across the two runs, host writes differ by only -0.34% from the
+preceding retained pair, versus a much larger logical VFS reduction. Those layers
+must not be equated or added; host counters also include other processes and omit
+short observation startup/tail gaps.
+
+The first candidate campaign passes every 12.5k gate. The repeat averages
+13,412/sec but fails cycle four at 11,864/sec; all non-rate and five-primitive
+checks pass. Both pass every 10k gate. Mean sustained rate is 1.30% below the
+preceding retained pair and CPU cost 0.17% above it, within substantial run
+variation. This does not establish either a causal regression or a useful gain.
+
+The repeat's maximum-busy observed rolling window is near its beginning, not the
+failed checkpoint cycle: 11.975 seconds at 98.03% busy, 48.80 MiB/sec writes,
+902.27 write IOPS, 134.62 ms mean write-request latency and 121.75 mean outstanding
+I/Os, while the workload consumes 5.86 CPU-seconds/sec. This demonstrates storage-
+path queueing during the run, not a device bandwidth ceiling or the cause of the
+failed cycle. The sequential disk baselines and retained lease-index budget below
+remain unchanged. Complete calculations and evidence are in
+`fireweed-compact-priority-results-manifest.json`.
+
+
 ## Current sustained lease-index budget and remaining gap (2026-09-16)
 
 The two untraced 8M-recipient campaigns cost **0.880054 / 0.912916 CPU-ms per

@@ -1,6 +1,90 @@
 # Campaign qualification and performance plan
 
-## Compact stored priority candidate: correctness passes, performance pending (2026-09-16)
+## Compact priority format rejected after complete measurement (2026-09-16)
+
+Restore production priority codecs and all six writers exactly to `9339e1b9`.
+The candidate reduced logical WAL bytes but did not establish a sustained CPU,
+physical-write or throughput improvement sufficient to justify another projection
+format. Keep native Turso regression coverage for all four priority types across
+reopen, payload enrichment, priority preservation/replacement/clearing and expected
+eligibility order. Eight focused native/public recovery tests pass on the restored
+code. The earlier facade SQLite test port remains in `61b4b80f`; this experiment
+adds no SQLite backend coverage.
+
+The serial control/candidate/candidate/control one-cycle screen used clean
+`e6c9ce25` and candidate executable
+`e315db6b5b6b1e7cdb4a35c16cb353a44eaf0728d86132847465a7b29214c76d`, versus
+retained lease-index executable
+`5fae9e11e803ab456411bbf3a1cb29f40fb52e47cbb689563d1fce6e2c6085c0` from
+`1b8cb97c`. All children exited zero, all 128 campaigns' logical counts match,
+and user-mode counters have 100% running coverage. Identical VFS/perf tracing
+makes these diagnostic runs, not qualification.
+
+| Run | Recipients/sec | CPU-ms/recipient | Instructions, trillions | Requested WAL bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Control 1 | 16,437.81 | 0.851850 | 2.591683 | 6,624,084,488 |
+| Candidate 1 | 16,281.55 | 0.850283 | 2.585943 | 6,271,074,648 |
+| Candidate 2 | 15,100.79 | 0.929397 | 2.656588 | 6,382,388,808 |
+| Control 2 | 13,414.40 | 0.940059 | 2.639519 | 6,802,381,608 |
+
+Mean logical WAL bytes decrease **5.76%**, with a decrease in both pairs. Mean
+CPU time changes -0.68%, instructions +0.22%, cycles +0.87%, RSS +3.37%, and
+rate +5.13%. Large control timing variation prevents treating the rate difference
+as a stable gain. Host writes do not repeat the VFS reduction: candidate/control
+pairs are 2.877/3.269 and 3.083/2.787 GiB, with opposite signs and monitor gaps.
+
+The complete untraced qualification then used the same clean candidate and binary
+for both eight-million-recipient campaigns and both million-row primitive suites.
+Every child exited zero; the wrapper exited one for the single stretch failure.
+Both campaigns pass all **10k** gates. The first passes all **12.5k** gates;
+the repeat fails only cycle four's rate. All non-rate checks pass, including full
+row/outcome verification, reporting, due-claim latency, WAL limits, materialized
+main-file stability and RSS stability. There are 2,278 checks per campaign target.
+
+| Candidate campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| First | 14,789.93 | 13,064.85 | 0.885654 | 18.923 |
+| Repeat | 13,412.06 | 11,863.58 | 0.910395 | 18.972 |
+
+First cycle minima: 17,195.97 / 16,009.76 / 15,822.55 / 16,019.94 /
+13,539.11 / 16,032.59 / 13,723.51 / 13,064.85. Repeat minima: 12,573.65 /
+15,596.98 / 16,024.76 / 15,559.21 / **11,863.58** / 12,586.87 /
+13,050.69 / 13,733.85. Every store first checkpoints in cycle four. The repeat's
+slowest campaign spends 10.83/24.73/33.87/0.23/9.33 seconds in
+load/prepare/delivery/verify/purge within an 84.286-second total that also includes
+other work and barriers. A timestamp association is not proof that checkpoint
+execution itself accounts for the missing 4.286 seconds.
+
+| Primitive | First rows/sec | Repeat rows/sec |
+| --- | ---: | ---: |
+| Insert | 43,496 | 38,335 |
+| Enrich by key | 43,383 | 32,703 |
+| Schedule by ID | 53,854 | 54,666 |
+| Claim and complete | 45,541 | 82,264 |
+| Purge | 62,258 | 60,896 |
+
+All five primitive counts/windows/rates pass the strengthened gate in both runs.
+Against the preceding retained qualification, arithmetic mean campaign rate is
+1.30% lower, CPU cost 0.17% higher and sampled host writes only 0.34% lower.
+These sequential, variable runs do not establish a regression either, but provide
+no convincing sustained improvement to justify retaining the format change.
+
+The current retained baseline and its napkin budget remain the lease-index results
+below: repeated 10k passes, repeated 12.5k still open. Do not promote the rejected
+candidate's smaller VFS budget or its higher worst-cycle rate into retained claims.
+Next investigate whether native checkpoint execution blocks foreground progress
+and how that interacts with durable-log publication. Preserve checkpoint/WAL
+budgets and workload semantics; establish the execution path before changing it.
+This is a code investigation, not another SSD setting or a proven diagnosis.
+
+The complete screen, qualification reports, device samples, scripts, rejected
+binary provenance and restored-code test log are archived with verified hashes in
+`fireweed-compact-priority-results-manifest.json`. Candidate correctness logs remain
+in `fireweed-compact-priority-validation-manifest.json`. No benchmark, test or
+build overlapped another workload; no host/storage settings changed.
+
+
+## Compact stored priority candidate validation (subsequently rejected; 2026-09-16)
 
 The next bounded candidate replaces verbose priority enum JSON in the projection
 column with tagged arrays. Timestamp values sampled from this campaign save

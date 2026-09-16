@@ -1,0 +1,277 @@
+{
+  "scope": "Rejected compact projection priority experiment: balanced one-cycle diagnostic screen and complete serial untraced repeated 8M campaign/five-primitive qualification",
+  "decision": "Restore production codecs and writers to 9339e1b9; retain native all-priority-type reopen/update/order regression coverage. Logical WAL reduction did not establish a sustained performance or physical-write improvement.",
+  "candidate_source": "e6c9ce25b519284a13feaee1e1b05063757947b7",
+  "candidate_binary_sha256": "e315db6b5b6b1e7cdb4a35c16cb353a44eaf0728d86132847465a7b29214c76d",
+  "control_source": "1b8cb97cc75fc35d7367371d9b663da622c2d5ff",
+  "control_binary_sha256": "5fae9e11e803ab456411bbf3a1cb29f40fb52e47cbb689563d1fce6e2c6085c0",
+  "hash_scope": "decompressed artifact bytes",
+  "restored_recovery_test_counts_pass_fail_ignore": [
+    8,
+    0,
+    0
+  ],
+  "candidate_validation_manifest": "fireweed-compact-priority-validation-manifest.json",
+  "artifacts": [
+    {
+      "artifact": "fireweed-compact-priority-screen-analysis.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/analysis.json",
+      "sha256": "0e50045eeabb49898288da5273b915384ddd094b78f06fcce8ccbe7130571ea5"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-1-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-1-device-summary.json",
+      "sha256": "a052c3be68c8b2824d00b909e1203bbcebd5b8d76a3da59d8e4ba9395110cc2f"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-1-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-1-device.jsonl",
+      "sha256": "5c7aded9715b64d436cbea4b034ca4caa0bdadac465bc39782f2f64e71db28d0"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-1-perf.csv.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-1-perf.csv",
+      "sha256": "0538ef718fdf37f39e6908399ae4d02fb00101aa4be6e5c22bd5c403b3ed1104"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-1-provenance.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-1-provenance.json",
+      "sha256": "b7e668fbb937a0514be141793fa187bf49c3f551f4342e3eaa4e42688d7d3a68"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-1.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-1.json",
+      "sha256": "41f091f7d59b5710c938c7462109afa27f8b279eb584761fc91065fb8a66f553"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-2-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-2-device-summary.json",
+      "sha256": "a5eaef2ea348098203a4e2a0237dfa53a4d79c2d4a2365f542950dbf7570fb82"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-2-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-2-device.jsonl",
+      "sha256": "f07926f1af6715e0978b54ff900f51b3a8a6d97999bd4e1f18da4fd47e938daa"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-2-perf.csv.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-2-perf.csv",
+      "sha256": "9f887a7267c994f5c593d72d67dc7747907891ee2f64cfb1a4b596198dd7125f"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-2-provenance.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-2-provenance.json",
+      "sha256": "b7e668fbb937a0514be141793fa187bf49c3f551f4342e3eaa4e42688d7d3a68"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-candidate-2.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/candidate-2.json",
+      "sha256": "6aeb95b3ef37bf279dd5b8d16ce96bb2cd7ceb6402cbd52f8b02738fb7f8b9ff"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-1-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-1-device-summary.json",
+      "sha256": "56b2087f46dc2169fae7038d6dcfea6ad4e3829814e645f36c78aaee862160bb"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-1-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-1-device.jsonl",
+      "sha256": "3d49b1988ad772154b67edadc9c9e05798937430c1529bc6e00f5c38c598d2de"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-1-perf.csv.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-1-perf.csv",
+      "sha256": "2afdc64d38385cbbc4143a25fe71c23e1cc636ab521a1545b857e1353525c298"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-1-provenance.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-1-provenance.json",
+      "sha256": "1b4b7f8f0944bf6c47bdad34bef13053810107e8f47a0e9a25eb964011aa8c81"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-1.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-1.json",
+      "sha256": "b4e6b1b0adf5793d78afcee6c2d23730da3205087b6d36766e38c13d27031b9d"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-2-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-2-device-summary.json",
+      "sha256": "09d50d9d512254007939c66addcbfb8dfb14458cf14bb54faa89c8a60f836bf4"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-2-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-2-device.jsonl",
+      "sha256": "1aa70b5cd56d3fd40ed531133475d4f34cf036075368709e7844d918f3442f60"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-2-perf.csv.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-2-perf.csv",
+      "sha256": "88ac879346a31aefc8cdab052224cc7edf2cf6bf6fc79ff4ea5e0e9fbd421ef7"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-2-provenance.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-2-provenance.json",
+      "sha256": "1b4b7f8f0944bf6c47bdad34bef13053810107e8f47a0e9a25eb964011aa8c81"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-control-2.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/control-2.json",
+      "sha256": "c5a3a599ef6ce6450ec5360306235c8bd02598b7e903dd84ccb0cfab6306bac0"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-summary.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-counters-20260916/summary.json",
+      "sha256": "bed713cb13cd5dad07e9047024bf88ec067c2afca1f3c0bfa6c0823a8c531bc9"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-campaign-1.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/campaign-1.json",
+      "sha256": "ed2aa48829626f8748d6ec39545faac5b75d38096ea6e5074c12f9b75919a3f0"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-campaign-2.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/campaign-2.json",
+      "sha256": "cd501d7494023179df35c962c5f62c862a9820227a3e314d9b4e09641a22cbaa"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-checkpoint-analysis-1.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/checkpoint-analysis-1.json",
+      "sha256": "bd124a05a644768955bd75f478f294c590444a2d6fcb6f33b26afe1a2e322960"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-checkpoint-analysis-2.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/checkpoint-analysis-2.json",
+      "sha256": "ae34fd16e95b85f5d68f704123a110c2c16b899c15bf05ac8e776bbc9168d81b"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-primitives-1.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/primitives-1.json",
+      "sha256": "a28efee6a6cd0ef15d85e806cdf529e5265124385e31c9cd21e514309b1b79c6"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-primitives-2.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/primitives-2.json",
+      "sha256": "ee2f220fd230d1bb1bf52710fbb74d0d2c6a34fce37a3eba7a3a1467cd3b1dfb"
+    },
+    {
+      "artifact": "fireweed-compact-priority-sustained-qualification-summary.json.gz",
+      "source_path": "target/workflow-capacity/compact-priority-untraced-repeat-20260916/qualification-summary.json",
+      "sha256": "cac02d3480847fe18a326c30432b09a92bceae434226a0a0a3181e83e87fdccc"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-1-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-1-device.jsonl",
+      "sha256": "ddbda512e775e194135d3f654e1df52cfc3ddecad8c870008c84a1c21baa1a38"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-1-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-1-device-summary.json",
+      "sha256": "6da3144a5b2a30c55883d6bfd4d3c5d5a7b7fc8aa38d83b445b0522d251d1a11"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-2-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-2-device.jsonl",
+      "sha256": "2fd8f2a0489fceb7c38bf98991064be07af8179cc8f57f9edf30fa3aa2c6543a"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-2-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-2-device-summary.json",
+      "sha256": "e5b8278d95e7a6d31482fe7820c7297c7d336bf1d16e66e54c3d5c9e34a834f5"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-3-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-3-device.jsonl",
+      "sha256": "b5b17520d01637402c5a71cc60fdedf1cf26d20eea526db22c5e9e41e6157bc9"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-3-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-3-device-summary.json",
+      "sha256": "97ef656130e1ee7da58e5969dec2107b0fb0af80c44e10eea1249c602e4e81da"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-4-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-4-device.jsonl",
+      "sha256": "e7578d54b4f095bc062f5075f779589b622862dfab672f293ddf6d9d5eca5d1b"
+    },
+    {
+      "artifact": "fireweed-compact-priority-untraced-qualification-phase-4-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phase-4-device-summary.json",
+      "sha256": "9c185e4028bdd2a4758a09f3cf1a8425e3c447ab80cea1b70624127a4a719d45"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-run-compact-priority-counters.py.gz",
+      "source_path": "/tmp/fireweed-run-compact-priority-counters.py",
+      "sha256": "c4a1d03f0d33cb794099314ed99fd7b10083a06324e3d3804dc768ac6f72dc1e"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-counter-recorder.py.gz",
+      "source_path": "/tmp/fireweed-compact-priority-counter-recorder.py",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-build.log.gz",
+      "source_path": "/tmp/fireweed-compact-priority-build.log",
+      "sha256": "68d5a5e07dc5ac6a85b77a1d6ba93cf322e16d9febd043110bb38abf0d568674"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-counters-runner.log.gz",
+      "source_path": "/tmp/fireweed-compact-priority-counters-runner.log",
+      "sha256": "e6d3227b3307c7ff053bace03a225996362a3e82848d8d53867edc2b327fd56e"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-run-compact-priority-untraced-qualification.py.gz",
+      "source_path": "/tmp/fireweed-run-compact-priority-untraced-qualification.py",
+      "sha256": "f61a3029f67fd6635844cd5b6a645613c440d1b50c99dde0fc17e6fb873ec586"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-untraced-qualification-runner.log.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-runner.log",
+      "sha256": "581071b87dfb47114f62375d4102b908d07596ca42d5c8ecc0b8dda8b1c132c9"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-untraced-qualification-wrapper.log.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-wrapper.log",
+      "sha256": "384e80dafa33e1d3c8774eafebdb9b346a7acc9ea91d89ba9986c7f909925c00"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-untraced-qualification-phases.json.gz",
+      "source_path": "/tmp/fireweed-compact-priority-untraced-qualification-phases.json",
+      "sha256": "372b89540b1247c71026fdeeb85811ff3406952c19c429144a3142251c71c0fe"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-analyze-compact-priority-qualification.py.gz",
+      "source_path": "/tmp/fireweed-analyze-compact-priority-qualification.py",
+      "sha256": "899690c186b68aade123cfcf704c95bbff6ffe291110872d0692ac69a81478cd"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-summarize-direct-json-qualification.py.gz",
+      "source_path": "/tmp/fireweed-summarize-direct-json-qualification.py",
+      "sha256": "32d1165f1f108be1ca43e0b6ef8c42f9dd74f5bb05ffc42586624818eecf33e1"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-device-monitor-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-monitor-v3.py",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-device-summary-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-summary-v3.py",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-rejected-binary.json.gz",
+      "source_path": "/tmp/fireweed-compact-priority-rejected-binary.json",
+      "sha256": "e727aa843139db44c16fd96f3da9e52a61424ad479566867c6918ce9a2f23216"
+    },
+    {
+      "artifact": "fireweed-compact-priority-result-fireweed-compact-priority-restored-tests.log.gz",
+      "source_path": "/tmp/fireweed-compact-priority-restored-tests.log",
+      "sha256": "105e5eb07d6f5acc6d2e57998c1e23f6d9ceb93548ff647761b96477e41d6e5b"
+    },
+    {
+      "artifact": "fireweed-compact-priority-screen-analyzer.py.gz",
+      "source_path": "/tmp/fireweed-analyze-lease-index-counters.py",
+      "sha256": "92ad3a1ef3e86b449c28757bf18fdaffde1428b4e17083ca797da959116bc3d7"
+    }
+  ]
+}

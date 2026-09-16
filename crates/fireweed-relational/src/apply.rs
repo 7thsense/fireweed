@@ -17,8 +17,8 @@ use serde_json::Value as JsonValue;
 use crate::{
     RelRow, RelTx, RelValue, TypedIndexRows, elig_sort, fields_from_json, fields_to_json,
     has_blocked_gates, lease_hash, metadata_to_json, observe_push_for_claim_scan,
-    observe_uniform_schedule_for_claim_scan, parse_priority, parse_priority_ref, parse_state, parts,
-    priority_to_json, reset_claim_scan_hint, state_str, to_json, ts_nanos, ts_nanos_opt,
+    observe_uniform_schedule_for_claim_scan, parse_priority, parse_state, parts,
+    reset_claim_scan_hint, state_str, to_json, ts_nanos, ts_nanos_opt,
 };
 
 pub use crate::RELATIONAL_BATCH as SQLITE_BATCH;
@@ -100,7 +100,7 @@ fn apply_clearing_item_replacements(
             params.extend([
                 item.item_id.to_string().into(),
                 state_str(values.state).into(),
-                values.priority.as_ref().map(priority_to_json).transpose()?.into(),
+                values.priority.as_ref().map(to_json).transpose()?.into(),
                 elig_sort(&values.priority, &definition.priority_model).into(),
                 values.not_before.map(ts_nanos).into(),
                 ts_nanos(values.eligible_since).into(),
@@ -2134,7 +2134,7 @@ pub fn insert_item_specs(
                 RelValue::Text(q.clone()),
                 RelValue::Text(item.item_id.to_string()),
                 RelValue::Text(item.client_item_key.as_str().to_string()),
-                opt_text(item.priority.as_ref().map(priority_to_json).transpose()?),
+                opt_text(item.priority.as_ref().map(to_json).transpose()?),
                 RelValue::Blob(elig_sort(&item.priority, model)),
                 opt_int(not_before),
                 RelValue::Integer(not_before.unwrap_or(now_n)),
@@ -4433,7 +4433,7 @@ fn try_apply_operation_shaped_api001_batch(
                     unreachable!("shape requires priority replacement")
                 };
                 values.push(RelValue::opt_text(
-                    priority.as_ref().map(priority_to_json).transpose()?,
+                    priority.as_ref().map(to_json).transpose()?,
                 ));
                 values.push(RelValue::Blob(elig_sort(priority, model)));
             }
@@ -4923,7 +4923,7 @@ fn apply_update_fields_batch_sql(
             metadata_json = metadata_to_json(metadata)?;
         }
         if let ScheduleUpdate::Set(next) = &update.set_priority {
-            priority_json = next.as_ref().map(priority_to_json).transpose()?;
+            priority_json = next.as_ref().map(to_json).transpose()?;
         }
         if let ScheduleUpdate::Set(next) = &update.set_not_before {
             not_before = (*next).map(ts_nanos);
@@ -5378,7 +5378,7 @@ fn apply_command_sql_with_claims(
                     metadata_json = metadata_to_json(metadata)?;
                 }
                 if let ScheduleUpdate::Set(next) = &c.set_priority {
-                    priority_json = next.as_ref().map(priority_to_json).transpose()?;
+                    priority_json = next.as_ref().map(to_json).transpose()?;
                 }
                 if let ScheduleUpdate::Set(next) = &c.set_not_before {
                     not_before = (*next).map(ts_nanos);
@@ -5386,7 +5386,13 @@ fn apply_command_sql_with_claims(
                         eligible_since = not_before.unwrap_or(now_n).max(now_n);
                     }
                 }
-                let priority = parse_priority_ref(priority_json.as_deref())?;
+                let priority = priority_json
+                    .as_deref()
+                    .map(|raw| {
+                        serde_json::from_str(raw)
+                            .map_err(|error| EngineError::Storage(error.to_string()))
+                    })
+                    .transpose()?;
                 let priority_sort = elig_sort(
                     &priority,
                     &queues
@@ -6303,7 +6309,7 @@ fn apply_command_sql_with_claims(
                     }
                     ResolvedItemMutationAction::Replace(values)
                     | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
-                        let priority_json = values.priority.as_ref().map(priority_to_json).transpose()?;
+                        let priority_json = values.priority.as_ref().map(to_json).transpose()?;
                         let priority_sort = elig_sort(
                             &values.priority,
                             &queues

@@ -244,7 +244,7 @@ async fn snapshot_tail_recovery_skips_overlap_and_applies_only_the_contiguous_ta
 }
 
 #[tokio::test]
-async fn mixed_legacy_and_compact_priorities_reopen_update_and_order() {
+async fn priority_types_reopen_update_and_order() {
     use bytes::Bytes;
     use fireweed_conformance::{envelope, item, ts};
     use fireweed_core::{DecimalValue, PriorityModelKind, PriorityValue};
@@ -305,27 +305,6 @@ async fn mixed_legacy_and_compact_priorities_reopen_update_and_order() {
             )
             .await
             .unwrap();
-        let raw = store
-            .query(
-                "SELECT priority FROM fireweed_items ORDER BY item_id",
-                vec![],
-            )
-            .await
-            .unwrap();
-        assert!(raw.iter().all(
-            |row| matches!(&row.values[0], turso::Value::Text(value) if value.starts_with('['))
-        ));
-        // Simulate a pre-upgrade row without touching its independently encoded sort key.
-        store
-            .execute(
-                "UPDATE fireweed_items SET priority=?1 WHERE item_id=?2",
-                vec![
-                    serde_json::to_string(&low).unwrap().into(),
-                    ids[0].to_string().into(),
-                ],
-            )
-            .await
-            .unwrap();
         drop(store);
         let store = TursoRelational::open(TursoConfig::local(&path))
             .await
@@ -340,13 +319,13 @@ async fn mixed_legacy_and_compact_priorities_reopen_update_and_order() {
                 .unwrap(),
             ids
         );
-        // Keep must decode legacy rows; changing and clearing must update the actual eligibility order.
+        // Preserve priorities across payload enrichment, then replace and clear them.
         for (sequence, priority, expected, order) in [
             (1, ScheduleUpdate::Keep, Some(low.clone()), ids.clone()),
             (
                 2,
-                ScheduleUpdate::Set(Some(low.clone())),
-                Some(low.clone()),
+                ScheduleUpdate::Set(Some(high.clone())),
+                Some(high.clone()),
                 ids.clone(),
             ),
             (3, ScheduleUpdate::Set(None), None, vec![ids[1], ids[0]]),
