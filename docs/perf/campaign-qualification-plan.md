@@ -1,5 +1,52 @@
 # Campaign qualification and performance plan
 
+## Final repeated qualification failed (2026-09-16)
+
+The canonical serial four-run qualification completed on clean source
+`64eb686f03ece8df75c3452be5c1a0b4d3cca066`, executable
+`dcaf90ac65ca719923bc000fd55b61eda531662729fde27a9f8b25b77e5eb525`.
+Both campaigns passed correctness, reporting, latency, WAL, database-size and
+RSS-stability gates, but failed the fixed 12,500/sec throughput requirement:
+
+| Campaign | Overall recipients/sec | Slowest cycle equivalent/sec | CPU-ms/recipient |
+| --- | ---: | ---: | ---: |
+| 1 | 13,579 | 11,286 | 0.97178 |
+| 2 | 12,016 | 9,065 | 1.01089 |
+
+Campaign 2 also fails the 10,000/sec cycle floor. Neither milestone is repeatedly
+qualified. Both million-row primitive runs pass all primitive gates: insert
+34,390/46,048, key enrichment 33,820/44,673, and scheduling 48,205/54,395 rows/sec.
+All four reports have identical clean source and binary identities. Full reports
+and failed checks are preserved in `fireweed-final-register-reuse-*`; external
+one-second device observations are in `fireweed-final-qualification-phase-*`.
+The monitor is external and its disk counters are host-wide, not attribution to
+Fireweed alone. No tests, builds or benchmarks overlapped these workloads.
+
+The canonical runner uses default co-located log/projection roots inheriting
+mount `compress=zstd:3`. Earlier manual candidate runs additionally forced a
+`compression=zstd` property on a separate private projection directory. This is
+a configuration difference, so the prior passing run is not a controlled
+comparison against this series. Absence of the explicit inode compression flag
+does not establish absence of compression.
+
+After all four workloads exited, the exact archived 8 GiB Python calibrations
+ran serially, direct then buffered, without TRIM or settings changes. Direct
+private-file NOCOW/O_DIRECT writes reached **912.77 MiB/sec** (8.975 s);
+normal buffered Btrfs writes reached **317.77 MiB/sec** (25.780 s). Both include
+fdatasync and verify first/last blocks. These tests establish sequential
+headroom at calibration time, not small-object durable-write or checkpoint
+latency. They do not justify calling the campaign's 47–55 MiB/sec average a
+raw device bandwidth ceiling. Campaign mean write-request latency rose from
+6.23 to 27.37 ms; primitive runs observed 32.96/30.72 ms. Those are observed I/O
+waiting symptoms, not an identified root cause.
+
+Next isolate application I/O shape: correlate checkpoint/write bursts with
+slow stages, and compare fewer physical stores using the unchanged million-row,
+eight-cycle workload and stage limits. Keep host configuration and filesystem
+policy fixed. Preserve failed candidates; require repeated full passes before
+claiming qualification. The Turso migration and log-derived receipt repair
+remain validated by 315 local release tests and 16 harness tests.
+
 ## Upgrade repair validated; final qualification next (2026-09-15)
 
 Normal startup now repairs old 32-byte push fingerprints from the original

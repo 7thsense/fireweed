@@ -1,5 +1,30 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Repeated canonical run updates the estimate (2026-09-16)
+
+The final clean candidate failed sustained qualification: 13,579 and 12,016
+complete recipients/sec overall, with slowest cycles 11,286 and 9,065/sec.
+Measured CPU costs are 0.97178 and 1.01089 CPU-ms/recipient. At 12,500/sec,
+these imply **12.15–12.64 CPU-seconds/sec**, compared with actual process
+occupancy **13.18 and 12.14 CPU-seconds/sec**. The second run cannot attain the
+target at its observed CPU cost and occupancy. Increasing occupancy or reducing
+cost is necessary; aggregate averages do not guarantee the cycle fairness gate.
+
+Host writes were 31.48 and 30.74 GiB for eight million lifecycles, approximately
+4.23 and 4.13 kB/recipient, implying about **50.4 and 49.2 MiB/sec** at 12,500/sec.
+Host counters include other activity. These are retrospective measured resource
+budgets, not independent hardware ceilings. An unchanged serial 8 GiB calibration
+afterward measured **912.77 MiB/sec direct** and **317.77 MiB/sec buffered**.
+Sequential bandwidth is therefore not demonstrated to be the campaign limit;
+small-write latency, checkpoint bursts, CPU and coordination need attribution.
+Earlier manually forced projection compression also differs from this canonical
+configuration and must not be silently treated as identical.
+
+See [the qualification record](campaign-qualification-plan.md) and archived
+`fireweed-final-register-reuse-*`, `fireweed-final-qualification-phase-*`, and
+`fireweed-post-qualification-*` for source identities, full failures and samples.
+Both the repeated 10k and 12.5k milestones remain open.
+
 ## Latest sustained candidate: one full pass, repetition pending
 
 The register-buffer reuse candidate (`a9605e58...`, source `6b55ef72`) completes

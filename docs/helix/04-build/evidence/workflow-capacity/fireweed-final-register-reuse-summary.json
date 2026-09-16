@@ -1,0 +1,162 @@
+[
+  {
+    "run": "campaign-1.json",
+    "head": "64eb686f03ece8df75c3452be5c1a0b4d3cca066",
+    "dirty": false,
+    "binary_sha256": "dcaf90ac65ca719923bc000fd55b61eda531662729fde27a9f8b25b77e5eb525",
+    "passed": false,
+    "failed_checks": [
+      {
+        "name": "cycle_6_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 12078.489594955086,
+        "required": 12500
+      },
+      {
+        "name": "cycle_7_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 11286.017095158975,
+        "required": 12500
+      }
+    ],
+    "process_wall_s": 589.7986068730024,
+    "cpu_s": 7774.260809,
+    "result_rate": 13579.082284265187,
+    "primitive_phases": null
+  },
+  {
+    "run": "campaign-2.json",
+    "head": "64eb686f03ece8df75c3452be5c1a0b4d3cca066",
+    "dirty": false,
+    "binary_sha256": "dcaf90ac65ca719923bc000fd55b61eda531662729fde27a9f8b25b77e5eb525",
+    "passed": false,
+    "failed_checks": [
+      {
+        "name": "overall_campaign_recipients_per_s",
+        "passed": false,
+        "actual": 12016.312425545722,
+        "required": 12500
+      },
+      {
+        "name": "cycle_0_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 12393.444785075659,
+        "required": 12500
+      },
+      {
+        "name": "cycle_4_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 9064.76957074825,
+        "required": 12500
+      },
+      {
+        "name": "cycle_5_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 11854.114136170114,
+        "required": 12500
+      },
+      {
+        "name": "cycle_6_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 12181.886626316817,
+        "required": 12500
+      },
+      {
+        "name": "cycle_7_slowest_campaign_equivalent_rate",
+        "passed": false,
+        "actual": 11852.079565417576,
+        "required": 12500
+      }
+    ],
+    "process_wall_s": 666.3328281089998,
+    "cpu_s": 8087.090373,
+    "result_rate": 12016.312425545722,
+    "primitive_phases": null
+  },
+  {
+    "run": "primitives-1.json",
+    "head": "64eb686f03ece8df75c3452be5c1a0b4d3cca066",
+    "dirty": false,
+    "binary_sha256": "dcaf90ac65ca719923bc000fd55b61eda531662729fde27a9f8b25b77e5eb525",
+    "passed": true,
+    "failed_checks": [],
+    "process_wall_s": 99.49687812000047,
+    "cpu_s": 531.2325020000001,
+    "result_rate": null,
+    "primitive_phases": [
+      {
+        "phase": "insert",
+        "records": 1000000,
+        "records_per_s": 34390.21701922893,
+        "wall_window_s": 29.078036915000002
+      },
+      {
+        "phase": "enrich_by_key",
+        "records": 1000000,
+        "records_per_s": 33819.87622315178,
+        "wall_window_s": 29.568410995999997
+      },
+      {
+        "phase": "schedule_by_id",
+        "records": 1000000,
+        "records_per_s": 48205.217283475075,
+        "wall_window_s": 20.744642516999996
+      },
+      {
+        "phase": "claim_and_complete",
+        "records": 1000000,
+        "records_per_s": 75027.96403073242,
+        "wall_window_s": 13.328363803000002
+      },
+      {
+        "phase": "purge",
+        "records": 1000000,
+        "records_per_s": 57868.02070435724,
+        "wall_window_s": 17.280701635
+      }
+    ]
+  },
+  {
+    "run": "primitives-2.json",
+    "head": "64eb686f03ece8df75c3452be5c1a0b4d3cca066",
+    "dirty": false,
+    "binary_sha256": "dcaf90ac65ca719923bc000fd55b61eda531662729fde27a9f8b25b77e5eb525",
+    "passed": true,
+    "failed_checks": [],
+    "process_wall_s": 88.32743693900557,
+    "cpu_s": 530.873067,
+    "result_rate": null,
+    "primitive_phases": [
+      {
+        "phase": "insert",
+        "records": 1000000,
+        "records_per_s": 46048.115392762185,
+        "wall_window_s": 21.716415351
+      },
+      {
+        "phase": "enrich_by_key",
+        "records": 1000000,
+        "records_per_s": 44673.11791519864,
+        "wall_window_s": 22.384826640000004
+      },
+      {
+        "phase": "schedule_by_id",
+        "records": 1000000,
+        "records_per_s": 54395.168336378774,
+        "wall_window_s": 18.383985758
+      },
+      {
+        "phase": "claim_and_complete",
+        "records": 1000000,
+        "records_per_s": 44688.63734605603,
+        "wall_window_s": 22.377052857000002
+      },
+      {
+        "phase": "purge",
+        "records": 1000000,
+        "records_per_s": 62188.94909023907,
+        "wall_window_s": 16.080027314000006
+      }
+    ]
+  }
+]
