@@ -1094,6 +1094,8 @@ pub enum BtreePageAllocMode {
 
 /// This will keep track of the state of current cache commit in order to not repeat work
 struct CommitInfo {
+    // Opt-in diagnostic: post-publication auto-checkpoint wall time, including I/O yields.
+    checkpoint_trace: Option<(std::time::Instant, u128)>,
     completions: Vec<Completion>,
     completion_group: Option<Completion>,
     state: CommitState,
@@ -1113,6 +1115,7 @@ enum PageSource {
 
 impl CommitInfo {
     fn reset(&mut self) {
+        self.checkpoint_trace = None;
         self.completions.clear();
         self.completion_group = None;
         self.state = CommitState::PrepareWal;
@@ -1644,6 +1647,7 @@ impl Pager {
             subjournal: RwLock::new(None),
             savepoints: Arc::new(RwLock::new(Vec::new())),
             commit_info: RwLock::new(CommitInfo {
+                checkpoint_trace: None,
                 completions: Vec::new(),
                 completion_group: None,
                 state: CommitState::PrepareWal,
@@ -3084,6 +3088,26 @@ impl Pager {
                         connection.get_sync_mode(),
                         false,
                     );
+                    if !matches!(&checkpoint_result, Ok(IOResult::IO(_))) {
+                        if let Some((started, started_unix_us)) =
+                            self.commit_info.write().checkpoint_trace.take()
+                        {
+                            let elapsed_us = started.elapsed().as_micros();
+                            match &checkpoint_result {
+                                Ok(IOResult::Done(result)) => eprintln!(
+                                    "auto_checkpoint db={:?} started_unix_us={} elapsed_us={} result=ok max_frame={} total_backfilled={} checkpoint_backfilled={}",
+                                    connection.db.path, started_unix_us, elapsed_us,
+                                    result.wal_max_frame, result.wal_total_backfilled,
+                                    result.wal_checkpoint_backfilled,
+                                ),
+                                Err(_) => eprintln!(
+                                    "auto_checkpoint db={:?} started_unix_us={} elapsed_us={} result=error",
+                                    connection.db.path, started_unix_us, elapsed_us,
+                                ),
+                                Ok(IOResult::IO(_)) => unreachable!(),
+                            }
+                        }
+                    }
                     match checkpoint_result {
                         Ok(IOResult::IO(io)) => return Ok(IOResult::IO(io)),
                         Ok(IOResult::Done(_)) => complete_commit(),
@@ -4383,6 +4407,15 @@ impl Pager {
                     let need_checkpoint = allowed_auto_actions.contains(WalAutoActions::Checkpoint)
                         && wal.should_checkpoint();
                     if need_checkpoint {
+                        // The existing VFS trace flag is already recorded as an unqualified
+                        // diagnostic by the workload recorder. No clock reads when disabled.
+                        commit_info.checkpoint_trace =
+                            std::env::var_os("FIREWEED_PROJECTION_IO_TRACE").map(|_| {
+                                (std::time::Instant::now(),
+                                 std::time::SystemTime::now()
+                                     .duration_since(std::time::UNIX_EPOCH)
+                                     .unwrap_or_default().as_micros())
+                            });
                         commit_info.state = CommitState::AutoCheckpoint;
                     }
                     return Ok(IOResult::Done(()));

@@ -1,5 +1,38 @@
 # Campaign qualification and performance plan
 
+## Measure foreground auto-checkpoint elapsed time (2026-09-16)
+
+Source inspection establishes a blocking path: native `Pager::commit_tx` runs its
+`AutoCheckpoint` state before returning completion, and Fireweed's `apply_owned`
+retains the writer mutex through `transaction.commit().await`. This does not
+establish how much campaign time that path costs. Existing apply traces combine
+WAL commit and checkpoint time, so the next diagnostic separates that phase.
+
+An opt-in timer, enabled by the existing `FIREWEED_PROJECTION_IO_TRACE` flag,
+records each auto-checkpoint's database path, start wall-clock timestamp, elapsed
+microseconds, terminal status and frame/backfill positions. The timer starts after
+WAL publication and includes transaction-lock release, checkpoint I/O yields and
+scheduling delays through the terminal checkpoint result. It excludes subsequent
+savepoint cleanup and trace emission. It measures elapsed foreground occupancy,
+not pure CPU, device service time or bytes; frame positions are not physical
+write counts. Timers reset on commit cleanup, and the disabled path reads no clock.
+No checkpoint threshold, WAL limit, reader ownership or durability rule changes.
+The recorder already identifies this flag as a diagnostic override, so these runs
+cannot pass qualification.
+
+The native 24-pooled-reader/WAL-freeze regression passes with trace emission and
+successful checkpoint events. Its temporary filesystem is RAM-backed: this checks
+trace execution and preserved reader behavior, not local disk performance. Raw
+output and verified digest are recorded in
+`fireweed-auto-checkpoint-trace-validation.json`.
+
+Next measure the complete original-row 1M-resident/8M-recipient campaign on the
+repository filesystem, with identical batches, handlers, workers, reporting,
+retention and fixed checkpoint budget. Compare actual per-store checkpoint delays
+with the remaining cycle budget before considering background execution. No
+explicit checkpoint calls are added to reader construction or production paths.
+
+
 ## Compact priority format rejected after complete measurement (2026-09-16)
 
 Restore production priority codecs and all six writers exactly to `9339e1b9`.

@@ -1,0 +1,12 @@
+{
+  "scope": "Native pooled-reader regression under opt-in checkpoint trace; tmpfs correctness smoke, not device/performance evidence",
+  "test_counts_pass_fail_ignore": [
+    1,
+    0,
+    0
+  ],
+  "checkpoint_events": 32,
+  "hash_scope": "decompressed bytes",
+  "artifact": "fireweed-auto-checkpoint-trace-test.log.gz",
+  "sha256": "ae042758eace044975b25e5b7c5b60fd97e5408584e458a83536f8da906a2981"
+}
