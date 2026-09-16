@@ -1,0 +1,108 @@
+{
+  "scope": "Rejected runtime pooling candidate: first 8M campaign passes every gate; repeat fails base and stretch rate gates. Both primitive suites pass all five floors. All workload processes exit zero.",
+  "measured_head": "2e3674d3d6b30c67ce2905fd9623bf03d706936d",
+  "binary_sha256": "c627a3f1a1cbe51bcccd883411ce1292c378482dbcddbcf12879e23e10b19097",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-analyze-shared-log-runtime-qualification.py.gz",
+      "sha256": "4f1b72408e106746f0734c41f2f8ed972fe4352b4733d4bdf77e76d8fa74be4b"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-device-monitor-v3.py.gz",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-device-summary-v3.py.gz",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-run-shared-log-runtime-untraced-qualification.py.gz",
+      "sha256": "05e0d4c89f657a9f7ee869767441dec4b2ffa31991f11bc4e901ea7d52a7accf"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-1-device-summary.json.gz",
+      "sha256": "5d3a563a5d6c903231dc24c700af58b21569defd2126569b29b16a6859cbe701"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-1-device.jsonl.gz",
+      "sha256": "cd283657623744a4f6f691185a72fb0e069d06c93873abe8683ac7c567fef269"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-2-device-summary.json.gz",
+      "sha256": "37171cb4d26055fadc1a9c9fc102d8be7a0a26c3cb1e47019d43fde2a581b3e1"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-2-device.jsonl.gz",
+      "sha256": "c54c0a63ba28ebd176ded1280813a4a580f23363b1340605ed49117f1772bc78"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-3-device-summary.json.gz",
+      "sha256": "c0e97b5e11a2dc13da0d3bf0009b9cc3a7c1a8fb625a2d9fc4149492ab8141ae"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-3-device.jsonl.gz",
+      "sha256": "78d85db94b7448652f622f53f959c9f3e00144d862ab02188f077792c979fa04"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-4-device-summary.json.gz",
+      "sha256": "fd025afbd00dd50130033eddd9ea1125557979201699d2d670806fcb4bafbb65"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phase-4-device.jsonl.gz",
+      "sha256": "00757ee19542e8bbe06e06790044f8d88187fb7960aa8af234eb8892b9b2bcb5"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-phases.json.gz",
+      "sha256": "3d0f3e554e8ea8998f702052e67eac5c2d55a5447a12a5f13cd9339e1188a679"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-shared-log-runtime-untraced-qualification-runner.log.gz",
+      "sha256": "75e631f190930b36a7aa2063a2f127b15efc8d53202b72f5664bd242b8002e76"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-fireweed-summarize-direct-json-qualification.py.gz",
+      "sha256": "32d1165f1f108be1ca43e0b6ef8c42f9dd74f5bb05ffc42586624818eecf33e1"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-qualify-workflow-capacity.sh.gz",
+      "sha256": "18fd4d7e756fa66f5fcbb65ca7323e31527e9cf42a495fdfc9489b9f76927c1c"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-workflow-capacity.py.gz",
+      "sha256": "7c3e6e107796136c8baf8c808bd67832d4c8cda4a33de4f835b7fc006d21c4a8"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-workflow_capacity_gate.py.gz",
+      "sha256": "eeaccd3ce59e9adfa3bd66ece0d49d8d1c59f01406c758286e4aa54c06bc2aa6"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-campaign-1.json.gz",
+      "sha256": "ec2e8702490431037fbf5e18377f5e371a662dea5299694744e28cd5e3ef18fe"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-campaign-2.json.gz",
+      "sha256": "af4c497fa0ed601a0d9670c46f19ad0b2bb39f1befc468f36237feacf9221c33"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-checkpoint-analysis-1.json.gz",
+      "sha256": "8365083edfb2db46e495b7421b83e6787dfe9ec8741bc854a90105aa3b334971"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-checkpoint-analysis-2.json.gz",
+      "sha256": "1125844bc70c980484e8453133dd8fc962092b2be418145ac063c0b6c2cf8f49"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-primitives-1.json.gz",
+      "sha256": "65237b0d21a10d01672a120543560634f233b25d726c629a5f19a1834d743780"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-primitives-2.json.gz",
+      "sha256": "cd3ca9e50cd000f1e591ac2e0e81498c9f0aec5d91715471b9c719efb9211f24"
+    },
+    {
+      "artifact": "fireweed-shared-log-runtime-sustained-qualification-summary.json.gz",
+      "sha256": "b80f79fdb0b680628dc37ed4536e862344d95324a1f8b5c3918b4d65ac8183c0"
+    }
+  ]
+}

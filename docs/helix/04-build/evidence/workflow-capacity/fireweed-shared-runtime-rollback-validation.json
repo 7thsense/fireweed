@@ -1,0 +1,15 @@
+{
+  "base_head": "2e3674d3d6b30c67ce2905fd9623bf03d706936d",
+  "scope": "Runtime pooling removed; per-engine construction restored. Startup fail-closed and explicit accepted-upload draining retained. 44 log contracts plus 12 public campaign/primitive/recovery tests pass; none failed/ignored.",
+  "hash_scope": "decompressed bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-shared-runtime-rollback-contracts.log.gz",
+      "sha256": "af72c88bd309a5e7ae08d976dae53d3b73d24548d845bbc9d45be5436edacfa5"
+    },
+    {
+      "artifact": "fireweed-shared-runtime-rollback-public.log.gz",
+      "sha256": "59ee55e55249be1582ad92fa8d6756aa21b74b6dbb71f6ad649c037e8658a1ff"
+    }
+  ]
+}

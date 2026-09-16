@@ -8,8 +8,8 @@ use crate::{
     BlobStore, CommitBatch, CommitOutcome, IndexEntry, ObjectLogError, PartitionKey, Sequencer,
 };
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -680,41 +680,6 @@ async fn recover_data_object_counter(
     Ok(max)
 }
 
-// A synchronous committer occupies a blocking worker while its I/O is pending.
-// Bound owners per runtime so committers leave room in Tokio's blocking I/O pool.
-const MAX_ENGINES_PER_FLUSH_RUNTIME: usize = 64;
-
-// Engines with the same worker configuration share execution resources, not queues,
-// budgets or commit order. Weak entries let the last owning flush thread shut its
-// runtime down outside an async context; closing one engine never closes a sibling.
-fn shared_flush_runtime(worker_threads: usize) -> Arc<tokio::runtime::Runtime> {
-    type Registry = Mutex<HashMap<usize, Vec<Weak<tokio::runtime::Runtime>>>>;
-    static RUNTIMES: OnceLock<Registry> = OnceLock::new();
-    let mut runtimes = RUNTIMES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("flush runtime registry");
-    let pools = runtimes.entry(worker_threads).or_default();
-    pools.retain(|runtime| runtime.strong_count() > 0);
-    for pool in pools.iter() {
-        if pool.strong_count() < MAX_ENGINES_PER_FLUSH_RUNTIME {
-            if let Some(runtime) = pool.upgrade() {
-                return runtime;
-            }
-        }
-    }
-    let runtime = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(worker_threads)
-            .thread_name("object-log-io")
-            .enable_all()
-            .build()
-            .expect("flush runtime"),
-    );
-    pools.push(Arc::downgrade(&runtime));
-    runtime
-}
-
 fn flush_loop<S>(
     shared: Arc<Shared<S::Meta>>,
     blob: Arc<dyn BlobStore>,
@@ -736,7 +701,11 @@ fn flush_loop<S>(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or_else(|| max_inflight.min(8));
-    let rt = shared_flush_runtime(worker_threads);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .expect("flush runtime");
     // Resume the data-object counter past any keys already under `prefix`. Restarting
     // at 0 on reopen overwrites sealed objects while manifests still point at the old
     // byte ranges → RangeOutOfBounds / mid-JSON EOF on fetch (fireweed-481d3e43).
@@ -885,8 +854,8 @@ fn flush_loop<S>(
     }
 }
 
-/// A panicked committer cannot safely resume sequencing. Close admission and
-/// fail queued callers/barriers rather than leaving them waiting on a dead job.
+/// Close admission and fail queued callers/barriers after an unrecoverable
+/// startup or commit failure. Return started uploads for explicit draining.
 fn fail_engine_and_take_pending_uploads<M>(
     shared: &Arc<Shared<M>>,
     pending: &mut VecDeque<FlushWork<M>>,
@@ -1358,25 +1327,6 @@ mod flush_barrier_tests {
     use super::*;
 
     #[test]
-    fn runtime_pool_caps_concurrent_engine_owners_and_retires() {
-        let runtimes: Vec<_> = (0..=MAX_ENGINES_PER_FLUSH_RUNTIME)
-            .map(|_| shared_flush_runtime(2))
-            .collect();
-        assert!(
-            runtimes[..MAX_ENGINES_PER_FLUSH_RUNTIME]
-                .iter()
-                .all(|rt| Arc::ptr_eq(rt, &runtimes[0]))
-        );
-        assert!(!Arc::ptr_eq(&runtimes[0], runtimes.last().unwrap()));
-        let weak = [
-            Arc::downgrade(&runtimes[0]),
-            Arc::downgrade(runtimes.last().unwrap()),
-        ];
-        drop(runtimes);
-        assert!(weak.iter().all(|runtime| runtime.upgrade().is_none()));
-    }
-
-    #[test]
     fn failure_only_rejects_barriers_covering_its_enqueue_position() {
         let error = ObjectLogError::Sequencer("manifest failed".into());
         let mut queue = Queue::<()> {
@@ -1812,19 +1762,17 @@ mod ready_commit_group_tests {
         );
     }
 
-    struct RuntimeRecordingStore {
+    struct FailureInjectingStore {
         inner: Arc<dyn BlobStore>,
-        runtimes: Mutex<HashSet<String>>,
         second_upload_gate: Mutex<Option<(std::sync::mpsc::SyncSender<()>, oneshot::Receiver<()>)>>,
         second_upload_completed: std::sync::atomic::AtomicBool,
         fail_data_listing: std::sync::atomic::AtomicBool,
     }
 
-    impl RuntimeRecordingStore {
+    impl FailureInjectingStore {
         fn new(inner: Arc<dyn BlobStore>) -> Self {
             Self {
                 inner,
-                runtimes: Mutex::new(HashSet::new()),
                 second_upload_gate: Mutex::new(None),
                 second_upload_completed: std::sync::atomic::AtomicBool::new(false),
                 fail_data_listing: std::sync::atomic::AtomicBool::new(false),
@@ -1833,14 +1781,8 @@ mod ready_commit_group_tests {
     }
 
     #[async_trait]
-    impl BlobStore for RuntimeRecordingStore {
+    impl BlobStore for FailureInjectingStore {
         async fn put(&self, key: &str, value: Bytes) -> Result<(), ObjectLogError> {
-            if key.starts_with("data/") {
-                self.runtimes
-                    .lock()
-                    .unwrap()
-                    .insert(tokio::runtime::Handle::current().id().to_string());
-            }
             let gate = if key == "data/00000000000000000002" {
                 self.second_upload_gate.lock().unwrap().take()
             } else {
@@ -1891,7 +1833,7 @@ mod ready_commit_group_tests {
         let key = "data/00000000000000000001";
         let original = Bytes::from_static(b"existing immutable object");
         inner.put(key, original.clone()).await.unwrap();
-        let store = Arc::new(RuntimeRecordingStore::new(inner.clone()));
+        let store = Arc::new(FailureInjectingStore::new(inner.clone()));
         store
             .fail_data_listing
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1939,17 +1881,17 @@ mod ready_commit_group_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn engines_share_runtime_but_commit_and_close_independently() {
+    async fn engines_commit_and_close_independently() {
         let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = oneshot::channel();
-        let a_blob = Arc::new(RuntimeRecordingStore::new(Arc::new(GatedManifestStore {
+        let a_blob = Arc::new(FailureInjectingStore::new(Arc::new(GatedManifestStore {
             inner: MemoryBlobStore::new(),
             entered: entered_tx,
             release: Mutex::new(Some(release_rx)),
             fail: false,
             panic_on_commit: false,
         })));
-        let b_blob = Arc::new(RuntimeRecordingStore::new(Arc::new(MemoryBlobStore::new())));
+        let b_blob = Arc::new(FailureInjectingStore::new(Arc::new(MemoryBlobStore::new())));
         let mut config = FlushConfig::default();
         config.max_batches = 1;
         config.max_inflight_flushes = 4;
@@ -2023,11 +1965,6 @@ mod ready_commit_group_tests {
             ]
         );
         tokio::task::spawn_blocking(move || drop(a)).await.unwrap();
-        let a_ids = a_blob.runtimes.lock().unwrap().clone();
-        let b_ids = b_blob.runtimes.lock().unwrap().clone();
-        assert_eq!(a_ids.len(), 1);
-        assert_eq!(b_ids.len(), 1);
-        assert_eq!(a_ids, b_ids, "actual data PUTs must use one flush runtime");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2036,7 +1973,7 @@ mod ready_commit_group_tests {
         let (manifest_release_tx, manifest_release_rx) = oneshot::channel();
         let (upload_entered_tx, upload_entered_rx) = std::sync::mpsc::sync_channel(1);
         let (upload_release_tx, upload_release_rx) = oneshot::channel();
-        let store = Arc::new(RuntimeRecordingStore::new(Arc::new(GatedManifestStore {
+        let store = Arc::new(FailureInjectingStore::new(Arc::new(GatedManifestStore {
             inner: MemoryBlobStore::new(),
             entered: manifest_entered_tx,
             release: Mutex::new(Some(manifest_release_rx)),

@@ -1,5 +1,30 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Shared-runtime qualification rejected; retained budget unchanged (2026-09-16)
+
+The two complete untraced 8M campaigns with shared flush runtimes cost
+**0.865807 / 0.919543 CPU-ms per recipient**: conditional CPU demand of
+**10.823 / 11.494 CPU-seconds/sec** at 12.5k recipients/sec. Sampled host writes
+are **31.225 / 29.071 GiB**, or **4,191 / 3,902 bytes per recipient** and
+**49.959 / 46.514 MiB/sec** at that target. These are host-wide counters with
+short startup/tail observation gaps, not projection-only traffic. Do not add them
+to logical VFS bytes or use them as independent hardware ceilings.
+
+The first campaign passes all stretch checks; the repeat averages 12,043.94/sec
+and its worst cycle falls to 8,907.78/sec, failing even the base floor. All non-rate
+checks and both five-operation primitive suites pass. Mean CPU cost is only 0.42%
+below the preceding retained pair and mean throughput 3.89% lower; the earlier
+short screen's CPU/thread savings did not establish sustained qualification.
+Runtime pooling is removed, while the independent log startup/draining fixes remain.
+
+The repeat's busiest observed 11.242-second window shows 99.98% device busy,
+38.12 MiB/sec writes, 235.28 ms mean write latency and 281.09 outstanding I/Os,
+with only 1.43 workload CPU-seconds/sec. Queueing explains why average CPU/byte
+budgets alone cannot predict minimum cycle rates; it does not establish a
+38 MiB/sec SSD limit or isolate filesystem, flush and controller service costs.
+The historical sequential disk baselines and retained lease-index budget below
+remain the applicable reference. Evidence: `fireweed-shared-log-runtime-sustained-manifest.json`.
+
 ## Foreground checkpoint timing: measured cost, not a disk ceiling (2026-09-16)
 
 A complete 8M diagnostic on retained behavior records 106 auto-checkpoint attempts

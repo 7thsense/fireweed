@@ -1,5 +1,68 @@
 # Campaign qualification and performance plan
 
+## Shared runtime rejected after sustained qualification (2026-09-16)
+
+The complete serial qualification on clean `2e3674d3`, executable
+`c627a3f1a1cbe51bcccd883411ce1292c378482dbcddbcf12879e23e10b19097`, finishes all
+four workload children with exit zero. Both million-row primitive suites pass
+all five floors. The first 8M campaign passes every 12.5k gate; the repeat fails
+one 10k gate and five 12.5k gates. The wrapper correctly exits one. No diagnostics,
+concurrent benchmark/build, host tuning or workload/gate changes were used.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| First | 15,419.08 | 13,449.95 | 0.865807 | 19.522 |
+| Repeat | 12,043.94 | 8,907.78 | 0.919543 | 17.234 |
+
+First-run cycle minima: 16,656.68 / 17,426.69 / 16,367.24 / 16,296.94 /
+14,272.88 / 15,235.40 / 16,279.17 / 13,449.95. Repeat: **11,546.32** /
+16,012.35 / 13,483.57 / 13,702.46 / **8,907.78 / 10,334.28 / 11,938.45** /
+14,945.76. At 12.5k the repeat fails overall rate and cycles zero, four, five and
+six; at 10k only cycle four fails. All other checks pass, including independent
+row outcomes, reporting, due-claim latency, retention, sampled WAL budget,
+materialized/stable projection files and RSS stability (2,278 checks per target).
+
+| Primitive | First rows/sec | Repeat rows/sec |
+| --- | ---: | ---: |
+| Insert | 47,137 | 45,442 |
+| Enrich by key | 42,573 | 42,907 |
+| Schedule by ID | 51,604 | 62,993 |
+| Claim and complete | 43,621 | 45,609 |
+| Purge | 62,181 | 63,952 |
+
+Against the preceding retained lease-index pair, mean rate is 3.89% lower,
+CPU cost only 0.42% lower and RSS 5.65% lower. This sequential comparison does not
+isolate causality from run variation, but supplies no sustained throughput gain
+and fails base qualification. Remove runtime pooling and its implementation-only
+identity/capacity assertions. Restore the former per-engine runtime construction;
+retain independent engine close/commit coverage, explicit accepted-upload draining
+on failure, and fail-closed counter initialization with their regression tests.
+The rejected binary is preserved at `/tmp/fireweed-workload-shared-log-runtime-rejected`.
+After rollback, all 44 log contract tests and 12 public campaign/primitive/recovery
+tests pass, with zero failures or ignored tests. Logs and hashes are in
+`fireweed-shared-runtime-rollback-validation.json`.
+
+The repeat's maximum-busy sampled window starts 340.946 seconds into observation:
+11.242 seconds at 99.98% busy, 38.12 MiB/sec writes, 1,194.66 write IOPS,
+235.28 ms mean write-request latency, 281.09 weighted outstanding I/Os and just
+1.43 workload CPU-seconds/sec. These are host-wide counters; latency includes
+queueing. They demonstrate storage-path waiting, not a device bandwidth ceiling
+or a proof that pooling caused the stall. No hardware tuning is justified by this
+comparison. Reports, full gate results, raw device samples and reproduction scripts
+are archived in `fireweed-shared-log-runtime-sustained-manifest.json`.
+
+Next investigate redundant directory durability barriers in LocalBlobStore.
+Every write currently fdatasyncs its temporary file, renames it, and separately
+fsyncs the parent. A bounded experiment may let already-completed renames share a
+successful parent sync, with no added linger. It must preserve file-sync-before-
+rename ordering and acknowledge each write only after a sync that started after
+its rename. Tests must distinguish renames before versus during a sync, prohibit
+advancing coverage after failure, and isolate different directories. Then measure
+actual sync reduction and an unchanged serial screen before sustained qualification.
+This is a proposed experiment, not an implemented optimization or accepted gain.
+The retained performance evidence remains repeated 10k on the lease-index baseline;
+repeated 12.5k remains unproved.
+
 ## Shared-runtime screen and log startup failure (2026-09-16)
 
 The serial control/candidate/candidate/control screen is complete on candidate
