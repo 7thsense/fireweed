@@ -1,5 +1,28 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Guarded-counter sustained budget and remaining gap (2026-09-16)
+
+The untraced repeated qualification retains every 10k gate but still misses
+12.5k on four cycles of the second campaign. First/repeat overall rates are
+15,108 / 12,888/sec; worst cycles are 13,922 / 11,996/sec. The remaining worst
+cycle needs **4.20% more throughput**, or **4.03% less elapsed processing time**.
+The goal is not complete. See [qualification evidence](campaign-qualification-plan.md).
+
+Measured CPU cost is **0.91004 / 0.96094 ms/recipient**. At the fixed 12.5k
+target that requires **11.38 / 12.01 CPU-seconds/sec**. Sampled host writes are
+**4,166 / 4,123 bytes/recipient**, equivalent to **49.66 / 49.15 MiB/sec** at
+12.5k. These are resource budgets derived from this workload, not independent
+hardware ceilings. The longer sequential calibration does not capture file and
+directory synchronization or establish a sole cause of campaign variance.
+
+The repeat has comparable write volume but 16.59 ms mean device write-request
+latency versus 5.16 ms initially; device busy rises 31.74% to 53.48% and CPU
+cost increases 5.59%. Keep both effects in the model. The adjacent diagnostic
+comparison demonstrated about 6% fewer instructions from guarded-counter
+inference, but that improvement alone has not removed the sustained stretch gap.
+No SSD settings, log durability barriers, workload scope or qualification gates
+changed to obtain these measurements.
+
 ## Guarded-counter candidate CPU budget (2026-09-16)
 
 One-cycle diagnostic candidate/control/candidate measurements reduce instructions

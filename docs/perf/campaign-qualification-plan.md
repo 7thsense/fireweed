@@ -1,5 +1,53 @@
 # Campaign qualification and performance plan
 
+## Guarded-counter repeated qualification: 10k passes, stretch still open (2026-09-16)
+
+Canonical campaign/primitive/campaign/primitive execution from clean `f931a497`
+uses binary `94adbef091a89a54df649805542fbd7128dfa4769a7b06b96420c269efc29fe8`
+in all four records, with empty diagnostics and child exit zero. The canonical
+script rebuilt the executable before running; its hash differs from the preceding
+explicit `SOURCE_DATE_EPOCH=1789179522` diagnostic build. Do not identify those
+executables as byte-identical. Runtime source is the guarded-counter candidate.
+No concurrent benchmark/build, manual TRIM or host changes ran during workloads.
+
+| Campaign | Overall/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB | 10k | 12.5k |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| First | 15,107.95 | 13,921.58 | 0.910039 | 18.8975 | Pass | Pass |
+| Repeat | 12,887.70 | 11,996.39 | 0.960937 | 18.6873 | Pass | Fail |
+
+The repeat fails only cycle rate checks 4–7 (zero-based): 11,996.39,
+12,411.71, 12,426.41 and 12,190.80/sec. Every correctness, fairness/reporting,
+WAL, checkpoint/main-file and RSS check passes. Both primitive runs pass every
+gate. Wrapper exit one represents the stretch-rate failures, not a child crash.
+Worst-cycle time is 83.3584 seconds per million: meeting 80 seconds requires
+**4.198% more throughput / 4.029% less wall time**. The earlier baseline worst
+was 11,712/sec (6.73% throughput gap); this comparison is observational across
+qualifications, not an isolated causal estimate. The adjacent diagnostic
+candidate/control/candidate counter comparison remains the direct CPU evidence.
+
+| Primitive, batch 1000 | First records/sec | Repeat records/sec |
+| --- | ---: | ---: |
+| Insert | 45,327 | 45,172 |
+| Enrich by key | 42,831 | 43,110 |
+| Schedule by ID | 54,314 | 54,249 |
+| Claim and complete | 44,529 | 43,359 |
+| Purge | 157,420 | 148,496 |
+
+Sampled host writes are 31.036 / 30.719 GiB, averaging 60.17 / 50.73 MiB/sec.
+Mean device write-request latency rises 5.16 to 16.59 ms and busy time 31.74%
+to 53.48%; CPU cost also rises. Host counters include all host activity and omit
+small observation edges. These correlations do not prove SSD bandwidth is the
+exclusive remaining bottleneck or justify host tuning. Retain the six-percent
+instruction reduction, keep the goal active, and examine remaining projection
+CPU work alongside synchronization variance. A passing first run alone does not
+meet the repeated stretch requirement.
+
+Archive manifest: `fireweed-authority-metrics-untraced-repeat-manifest.json`
+(18 raw reports, samples/summaries, exact runner/parser and logs; decompressed
+SHA-256 hashes). Read-only report summarization occurred during the qualification;
+no additional measured workload ran. All four final reports were reevaluated
+against both fixed targets after workloads completed.
+
 ## Guarded-counter comparison supports sustained qualification (2026-09-16)
 
 Sequential candidate/control/candidate used clean `ebd55df0`, candidate binary

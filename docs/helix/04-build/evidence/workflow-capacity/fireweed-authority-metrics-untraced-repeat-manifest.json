@@ -1,0 +1,92 @@
+[
+  {
+    "artifact": "fireweed-authority-metrics-untraced-repeat-campaign-1.json.gz",
+    "source_sha256": "05d918998715974ad19d4de48e7046cccaf4b506e5fbeb9b532c03c97c4185c5",
+    "bytes": 5365577
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-repeat-primitives-1.json.gz",
+    "source_sha256": "8cf1d6f6d3327d906c3a0cfe6677b04f05817e2e9201e166a36bc1d1a5d3aa38",
+    "bytes": 150573
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-repeat-campaign-2.json.gz",
+    "source_sha256": "16f9527cffe161eb28535bc0bd1682be804991fc3c2c5a599aa5f164811899d3",
+    "bytes": 5439675
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-repeat-primitives-2.json.gz",
+    "source_sha256": "8acd7378a0a8c6f5ea896d60f647038d605acc04837ff59c72ff27dc2a17c8b3",
+    "bytes": 149933
+  },
+  {
+    "artifact": "fireweed-run-authority-metrics-untraced-qualification.py.gz",
+    "source_sha256": "802ff5e67cd0c8335f5424614ee496b3bdbc81088ce93788f9317b1f93a0da9b",
+    "bytes": 2865
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-runner.log.gz",
+    "source_sha256": "622076d107f8846f3cff1b9cb396f33dd729a3ba7f00bead019181fd5a075024",
+    "bytes": 14532
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-wrapper.log.gz",
+    "source_sha256": "3d058b3be73e2488a0c2191acf13cf76e649bcc0d71b960d0124660216c5a52f",
+    "bytes": 273
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phases.json.gz",
+    "source_sha256": "317981b8f47d42b623f98bcb1dcba9a32ee514d2e63a5f9fac08dd9fb9e53f3a",
+    "bytes": 3094
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-summary.json.gz",
+    "source_sha256": "99a4d6cf412082bb8c85c682dfe216f85910ce4f7f84e27eaf511426cf3031f3",
+    "bytes": 8518
+  },
+  {
+    "artifact": "fireweed-summarize-untraced-repeat.py.gz",
+    "source_sha256": "575a39ff33a256dc7626c2478b550f64d8a794a87988a5143de19a4bcbab5d34",
+    "bytes": 1304
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-4-device.jsonl.gz",
+    "source_sha256": "25945556db7caa4b0b46565491bd99dfc427cd723b19599dec003b5ac20c3a80",
+    "bytes": 94286
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-3-device.jsonl.gz",
+    "source_sha256": "48bdc9cb812394dbc75b4e39762370c52052394c0a1e6f307225240eba1f841a",
+    "bytes": 685952
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-2-device.jsonl.gz",
+    "source_sha256": "af6dfe6c8358ff7d19d406af2c7bfd70e87b60f6ca90fd26a09a9fa4ea31b8e9",
+    "bytes": 95209
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-1-device.jsonl.gz",
+    "source_sha256": "56a868d1443fe71a2d555a021089c5697cb1d303ae0ecca4bc877f155e1a826c",
+    "bytes": 596413
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-4-device-summary.json.gz",
+    "source_sha256": "dfd324c2c2d0944f9db8f02a3e0fe7329daeb1866640c00ef9838b45493a2506",
+    "bytes": 915
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-3-device-summary.json.gz",
+    "source_sha256": "143a57772a598c046ef984f9a6c853fba95896402dee0c65bc8973d73966e0c1",
+    "bytes": 907
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-2-device-summary.json.gz",
+    "source_sha256": "21b9346ae8cf464e518807689d242e14b836cfbf676f40e9454930fffeb45ff6",
+    "bytes": 899
+  },
+  {
+    "artifact": "fireweed-authority-metrics-untraced-qualification-phase-1-device-summary.json.gz",
+    "source_sha256": "a30deebf4257b324079015f5906466be30cf7e90a08772b5ba14d888f6afe40e",
+    "bytes": 905
+  }
+]
