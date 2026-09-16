@@ -1,5 +1,25 @@
 # Campaign qualification and performance plan
 
+## CPU profile and register-copy candidate (2026-09-15)
+
+The installed pacman `perf` 7.2.3 samples a one-cycle, 64-store default-runtime
+campaign at 99 Hz (`cpu-clock:u`): **74,182 samples, zero losses**. This is a
+flat user-CPU diagnostic, not a qualification result or an off-CPU analysis.
+Self attribution includes `_mi_page_malloc_zero` 6.96%, `mi_free` 2.24%,
+Turso `op_column` 5.17%, `Program::normal_step` 4.47%, B-tree move/seek and
+record comparison, and `op_copy` 0.78%. Helpers inherited profiling too;
+the report retains DSO attribution to distinguish Fireweed from the runner.
+Evidence: `fireweed-trim-cpu-profile.json`, `fireweed-trim-cpu-self.txt`,
+`fireweed-trim-cpu.perf.data.gz`, and `fireweed-campaign-trim-cpu-s64-w2-one*`.
+
+The next bounded candidate reuses existing owned text/blob buffers for VDBE
+register copies and parameter loads. It must retain independent ownership,
+text subtypes, unbound-parameter NULL behavior, static-text allocation-free
+copies, and sequential overlap semantics. The initial three native regressions
+passed; a subsequent static-text fast-path refinement is rebuilding. No
+performance improvement or retained runtime change is claimed yet. Broader
+correctness checks and a short comparison precede full campaign qualification.
+
 ## One-worker runtime rejected after repaired-storage control (2026-09-15)
 
 The `OBJECT_LOG_FLUSH_RUNTIME_THREADS=1` eight-cycle control completes correctly
