@@ -1,0 +1,219 @@
+{
+  "schema": "performance-evidence/v1",
+  "source_head_before_fix": "9b9f0772677aba12d0e253b31f8902e731c0e9f4",
+  "diagnostic_only": true,
+  "balanced_comparison_complete": false,
+  "fix_source_patch_sha256": "1e03b04ae9d6470caf18e6e3ef1897a42e542d8911c1ce20da3ffe979b8c7468",
+  "validation": {
+    "native_passed": 61,
+    "native_existing_ignored_sql_diagnostics": 2,
+    "public_passed": 12,
+    "regression_reproduced_stuck_writer_before_connection_fix": true
+  },
+  "artifacts": [
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-analyze-projection-io-isolation-sustained.py.gz",
+      "source": "/tmp/fireweed-analyze-projection-io-isolation-sustained.py",
+      "sha256_decompressed": "8514fe44e3052519709beaed93c4ffa3ab3fb53fa830cea0923a8338dae0062b",
+      "uncompressed_bytes": 3865
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-analyze-projection-isolation-sustained-base.py.gz",
+      "source": "/tmp/fireweed-analyze-projection-isolation-sustained-base.py",
+      "sha256_decompressed": "f55ac55cdff6c8732505d58c2c8c27ba93b2e6b03768aa3426a960adc533b7db",
+      "uncompressed_bytes": 2696
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-device-monitor-v3.py.gz",
+      "source": "/tmp/fireweed-device-monitor-v3.py",
+      "sha256_decompressed": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1",
+      "uncompressed_bytes": 1522
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-device-summary-v3.py.gz",
+      "source": "/tmp/fireweed-device-summary-v3.py",
+      "sha256_decompressed": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8",
+      "uncompressed_bytes": 1458
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-primary-error-fix.patch.gz",
+      "source": "/tmp/fireweed-primary-error-fix.patch",
+      "sha256_decompressed": "1e03b04ae9d6470caf18e6e3ef1897a42e542d8911c1ce20da3ffe979b8c7468",
+      "uncompressed_bytes": 7617
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-primary-error-native-suite.log.gz",
+      "source": "/tmp/fireweed-primary-error-native-suite.log",
+      "sha256_decompressed": "7db348d25ef9d1b4bbf2f4eb92a4b88b38566539a50f700795572db5738c2a0c",
+      "uncompressed_bytes": 16651
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-primary-error-public-suite.log.gz",
+      "source": "/tmp/fireweed-primary-error-public-suite.log",
+      "sha256_decompressed": "2eda37d3f6c60c29211043184986bdd02aaa4f5547bfae3d75ac1fff5a72a6d6",
+      "uncompressed_bytes": 15755
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-primary-error-regression-green.log.gz",
+      "source": "/tmp/fireweed-primary-error-regression-green.log",
+      "sha256_decompressed": "6c005163f0f062a21a370cab7389321a24196550012787eb4099071c8a14093d",
+      "uncompressed_bytes": 10233
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-primary-error-regression-red.log.gz",
+      "source": "/tmp/fireweed-primary-error-regression-red.log",
+      "sha256_decompressed": "df4d0f47b53026f6309fbb633b9666c3290a2bfa389d263a2d89a836d10c24e1",
+      "uncompressed_bytes": 11307
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-projection-io-isolation-sustained-recorder.py.gz",
+      "source": "/tmp/fireweed-projection-io-isolation-sustained-recorder.py",
+      "sha256_decompressed": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+      "uncompressed_bytes": 9015
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-projection-io-isolation-sustained-runner.log.gz",
+      "source": "/tmp/fireweed-projection-io-isolation-sustained-runner.log",
+      "sha256_decompressed": "d97fa43b6a3c0ab15bd2a381bffefe2384dbe15f6616349ddd20e567d0a11058",
+      "uncompressed_bytes": 6932479
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-projection-isolation-quota-preflight.json.gz",
+      "source": "/tmp/fireweed-projection-isolation-quota-preflight.json",
+      "sha256_decompressed": "51dad6ad3b99c8df6c140c23d1bdc26cf849ca5b2bb545acecb0211d4d10b67c",
+      "uncompressed_bytes": 668
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-projection-isolation-quota-preflight.log.gz",
+      "source": "/tmp/fireweed-projection-isolation-quota-preflight.log",
+      "sha256_decompressed": "d7d2dd59a16872f00a62fefa805c561b888d6ed43bef38be446eb99b1e4ad253",
+      "uncompressed_bytes": 136
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-projection-isolation-sustained-partial.json.gz",
+      "source": "/tmp/fireweed-projection-isolation-sustained-partial.json",
+      "sha256_decompressed": "35b4f94afc145f4bd11e397af2033eb5e392ed113048482cd51968cdb66444a0",
+      "uncompressed_bytes": 7908
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-read-user-quota.py.gz",
+      "source": "/tmp/fireweed-read-user-quota.py",
+      "sha256_decompressed": "3d7f73cb52647b8538375828ef5eec8f20ce860a237fc65ea066dcbfb2f52b27",
+      "uncompressed_bytes": 1831
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-run-projection-io-isolation-sustained.py.gz",
+      "source": "/tmp/fireweed-run-projection-io-isolation-sustained.py",
+      "sha256_decompressed": "d5789b79ad88faaff36e00e85acc8d6cb48003128ef9480d318cec2b6ec01aeb",
+      "uncompressed_bytes": 7602
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-run-projection-isolation-quota-aware.py.gz",
+      "source": "/tmp/fireweed-run-projection-isolation-quota-aware.py",
+      "sha256_decompressed": "70c357c5e76bed6de93cede75cd2474004a2eeeac6c0f837a520adfb2fc7365c",
+      "uncompressed_bytes": 8760
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-tmpfs-capacity-with-quotas.json.gz",
+      "source": "/tmp/fireweed-tmpfs-capacity-with-quotas.json",
+      "sha256_decompressed": "e06c5d1370bda5a5d171a02eed83442a33ccad6ed320ab0fe8fd18455a027e95",
+      "uncompressed_bytes": 1205
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-fireweed-tmpfs-user-quota.json.gz",
+      "source": "/tmp/fireweed-tmpfs-user-quota.json",
+      "sha256_decompressed": "3f61d39e9ae59ad22c8f9018d688779e7f79f97d29936539947df741b2a4191e",
+      "uncompressed_bytes": 310
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-device-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-device-summary.json",
+      "sha256_decompressed": "338f61e7cdf2105ffa21c2184607976952027357055c92a16ee922befe9afcca",
+      "uncompressed_bytes": 905
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-device.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-device.jsonl",
+      "sha256_decompressed": "af80276815e4b28248ee216476811f0be1266d51fb8e7ea572976b3706341c89",
+      "uncompressed_bytes": 296464
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-perf.csv.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-perf.csv",
+      "sha256_decompressed": "5ec5976b3cfe5a73a1bfb6cdeb659ec28e18b26913fa5571308794b24d09c075",
+      "uncompressed_bytes": 140
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-provenance.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-provenance.json",
+      "sha256_decompressed": "1c5517b156af63aba207efab83032faff303ff5e868a7c49fba5839703c19094",
+      "uncompressed_bytes": 553
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-threads.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-threads.jsonl",
+      "sha256_decompressed": "c2ddfc5cdd9421ffe4c0383ad463ca79511abec4c38fc5f7e967274536bfeb99",
+      "uncompressed_bytes": 18682
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-tmpfs-allocation-samples.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-tmpfs-allocation-samples.jsonl",
+      "sha256_decompressed": "514004e9190cc97399902577586c3dc62c7422b6c977c3b867a99505e0b9f466",
+      "uncompressed_bytes": 37976
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1-tmpfs-storage.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1-tmpfs-storage.json",
+      "sha256_decompressed": "d86c8e2eff5b57cd989892590b1f562aa5f3aab3c92cf6724b814256bdf6eba4",
+      "uncompressed_bytes": 14283
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-candidate-1.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/candidate-1.json",
+      "sha256_decompressed": "7c313ed0f6b1dbf95639f46e452a4428d3ca081d735ce1bf48dc57eac0c7c393",
+      "uncompressed_bytes": 7216272
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-control-1-device-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/control-1-device-summary.json",
+      "sha256_decompressed": "130fca885de08da4908c4d74fb68c63902d736ff23da93bc002cc6a48d120af9",
+      "uncompressed_bytes": 901
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-control-1-device.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/control-1-device.jsonl",
+      "sha256_decompressed": "45216111c7fd1855d7ceaab87746bc74009ff1179ce09a2a49568a71a3eb9c77",
+      "uncompressed_bytes": 611447
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-control-1-perf.csv.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/control-1-perf.csv",
+      "sha256_decompressed": "b619bb7c03fcac0fea1a02e0c422e8da8409c5e4c4a3f82898c94866ce8732d8",
+      "uncompressed_bytes": 141
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-control-1-provenance.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/control-1-provenance.json",
+      "sha256_decompressed": "982abd83f1ef299fd09bc876dc8fafd3e09693d71fcfa3f6140011cc5c3089e3",
+      "uncompressed_bytes": 552
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-control-1-threads.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/control-1-threads.jsonl",
+      "sha256_decompressed": "18b76f88ba978a698582248e5930ed0a559685194fd6fe0ffafcf0cb12702215",
+      "uncompressed_bytes": 36944
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-control-1.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/control-1.json",
+      "sha256_decompressed": "ed7ad6f81a76a341c9ada10a13a110bf7d822bff706d6c8f88f49ca38131c348",
+      "uncompressed_bytes": 17773034
+    },
+    {
+      "artifact": "fireweed-projection-isolation-quota-failure-failure-analysis.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-sustained-20260916/failure-analysis.json",
+      "sha256_decompressed": "512544eff372154c9da5428ce6b1791898510b032d51c58ff551682afc271298",
+      "uncompressed_bytes": 8090
+    }
+  ]
+}

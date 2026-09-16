@@ -85,8 +85,13 @@ impl Connection {
     pub(crate) async fn maybe_handle_dangling_tx(&self) -> Result<()> {
         match self.dangling_tx.load(Ordering::SeqCst) {
             DropBehavior::Rollback => {
-                let mut stmt = self.prepare("ROLLBACK").await?;
-                stmt.execute(()).await?;
+                // A statement or I/O error can already have aborted the transaction.
+                // Retrying ROLLBACK then fails forever and hides the original error
+                // from every subsequent operation on this connection.
+                if !self.is_autocommit()? {
+                    let mut stmt = self.prepare("ROLLBACK").await?;
+                    stmt.execute(()).await?;
+                }
                 self.dangling_tx
                     .store(DropBehavior::Ignore, Ordering::SeqCst);
             }

@@ -107,16 +107,21 @@ impl RebuildableFile {
         let Some(trace) = &self.1 else {
             return write();
         };
-        Self::traced_call(&trace.totals, bytes, write)
+        Self::traced_call(trace.class, "write", &trace.totals, bytes, write)
     }
 
     fn traced_call(
+        class: &str,
+        operation_name: &str,
         totals: &Mutex<IoTotals>,
         bytes: usize,
         operation: impl FnOnce() -> Result<Completion>,
     ) -> Result<Completion> {
         let started = Instant::now();
         let result = operation();
+        if let Err(error) = &result {
+            eprintln!("projection_io_error class={class} operation={operation_name} requested_bytes={bytes} error={error:?}");
+        }
         // On Unix PlatformIO completes reads/writes synchronously, including
         // the completion callback. This is VFS-call elapsed time, not device
         // service time, physical bytes, or a count of page-cache misses.
@@ -184,7 +189,9 @@ impl File for RebuildableFile {
             return self.0.pread(pos, c);
         };
         let bytes = c.as_read().buf().as_slice().len();
-        Self::traced_call(&trace.read_totals, bytes, || self.0.pread(pos, c))
+        Self::traced_call(trace.class, "read", &trace.read_totals, bytes, || {
+            self.0.pread(pos, c)
+        })
     }
     fn pwrite(&self, pos: u64, buffer: Arc<Buffer>, c: Completion) -> Result<Completion> {
         self.traced_write(buffer.as_slice().len(), || self.0.pwrite(pos, buffer, c))

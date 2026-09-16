@@ -1,5 +1,73 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Sustained projection isolation stops at a user quota; repair error handling (2026-09-16)
+
+The first disk control of the exact-binary eight-cycle comparison exits zero at
+**15,249.17 complete recipients/sec**, with **13,734.96/sec** as its minimum cycle.
+All 2,277 other checks pass at the stretch target; the diagnostic-override check
+correctly rejects qualification. Process CPU is 0.90203 ms/recipient and peak RSS
+20.248 GiB. Sampled host writes total 29.130 GiB over 522.949 seconds. Scaled to
+12.5k recipients/sec, this run implies **11.28 CPU-seconds/sec** and **46.61 MiB/sec
+host writes**, not a device ceiling. The workload writes 50.878 GiB of logical
+projection WAL; logical and host bytes must remain separate accounting layers.
+
+The first tmpfs run exits one after three complete cycles and 24 of 128 campaign
+reports in cycle three. There is **no eight-cycle tmpfs throughput result** and
+the remaining two comparison runs were not started. It records 27 VFS write errors,
+no automatic checkpoint events, 18.017 GiB peak RSS and 24.885 GiB allocated
+projection files. The last reported error is an async projection poison caused by
+`cannot rollback - no transaction is active`.
+
+The quota arithmetic identifies the diagnostic's missed capacity constraint:
+
+| Quantity | Bytes |
+| --- | ---: |
+| User quota hard limit (`quotactl_fd`, UID 1000) | 26,720,665,600 |
+| Failed projection file allocation | 26,719,604,736 |
+| Other user allocation after projection cleanup | 1,060,864 |
+| Remaining quota | **0** |
+
+The runner had observed more than 6.22 GiB of filesystem-wide free space and its
+1 GiB guard never fired. `/dev/shm` has `usrquota` enabled. The allocated projection
+plus the remaining user's files exactly equal the independently queried hard
+limit. This strongly identifies quota exhaustion, although the original errno
+was not preserved. This is not evidence of SSD exhaustion or a sustained tmpfs
+performance gain. Linux documents user quota enforcement separately from the
+mount's total size: [tmpfs quota documentation](https://www.kernel.org/doc/html/latest/filesystems/tmpfs.html).
+
+A quota-aware preflight now takes the minimum of filesystem free space and the
+user's remaining quota (conservatively including the soft limit). A read-only
+check rejects this placement before starting any workload: the completed disk
+control's aggregate per-store WAL peaks plus main files and 1 GiB reserve require
+33,433,305,528 bytes, versus 26,719,604,736 available under the quota. No mount,
+quota, SSD, kernel or TRIM settings changed. The stopped diagnostic retained its
+authoritative log at `target/workflow-capacity/failed-run-z67ommsa`; its temporary
+projection files were cleaned by the original runner after recording allocation.
+
+The failure exposed two real error-path defects. Fireweed's apply rollback could
+replace the original statement error with the rollback error. Turso's dropped-
+transaction cleanup could then attempt another rollback on an already-aborted
+transaction forever, preventing the next transaction from starting. Preserve the
+original error alongside any rollback failure, and clear deferred rollback when
+the connection is already in autocommit. Actual open transactions still roll back.
+The optional projection I/O trace now emits the underlying read/write error.
+Normal successful apply, WAL, log and checkpoint behavior is unchanged.
+
+A native Turso regression using `INSERT OR ROLLBACK` first reproduced the stuck
+writer. With the fix, it preserves the original constraint error, rolls back all
+failed writes, preserves an ordinary epoch-fence error, and successfully commits
+a subsequent transaction. The native library suite passes **61 tests**, with two
+existing explicitly ignored SQL comparison diagnostics. All **12 public campaign/primitive/recovery tests pass** (including recovery
+child helpers). No performance improvement is attributed to this error-path fix.
+
+Archive: `fireweed-projection-isolation-quota-failure-manifest.json`. The interrupted
+comparison does not replace repeated on-disk qualification. Continue the isolation
+using a high-level workload fixture that distributes the same 64 projections over
+the existing `/tmp` and `/dev/shm` tmpfs mounts, each below its independently checked
+quota, with identical code for the disk controls. Record combined tmpfs allocation
+and RSS separately. This changes diagnostic placement only; it is not a production
+RAM-projection proposal or a relaxation of workload/qualification gates.
+
 ## Exact-binary projection I/O isolation (2026-09-16)
 
 Four serial disk/tmpfs/tmpfs/disk one-cycle campaigns use the same preserved

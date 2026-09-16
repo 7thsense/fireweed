@@ -38,6 +38,17 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
 }
 
+// Keep the statement failure visible when Turso has already aborted the transaction.
+async fn rollback_preserving_error(
+    transaction: turso::transaction::Transaction<'_>,
+    error: EngineError,
+) -> EngineError {
+    match transaction.rollback().await {
+        Ok(()) => error,
+        Err(rollback) => storage(format!("{error}; rollback also failed: {rollback}")),
+    }
+}
+
 /// Optional slow-statement diagnostics; never includes parameter values.
 pub(crate) fn trace_sql(sql: &str, binds: usize, rows: usize, elapsed: Duration) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1774,8 +1785,9 @@ async fn apply_owned(
                 }
             };
             if position.backend_epoch < floor {
-                transaction.rollback().await.map_err(storage)?;
-                return Err(EngineError::EpochFenced);
+                return Err(
+                    rollback_preserving_error(transaction, EngineError::EpochFenced).await,
+                );
             }
             floors.insert(position.queue.clone(), floor.max(position.backend_epoch));
         }
@@ -1783,8 +1795,7 @@ async fn apply_owned(
 
     for envelope in &commands {
         if let Err(error) = validate_minimal_command(envelope) {
-            transaction.rollback().await.map_err(storage)?;
-            return Err(error);
+            return Err(rollback_preserving_error(transaction, error).await);
         }
     }
     for position in &positions {
@@ -1848,8 +1859,7 @@ async fn apply_owned(
     {
         Ok(result) => result,
         Err(error) => {
-            transaction.rollback().await.map_err(storage)?;
-            return Err(error);
+            return Err(rollback_preserving_error(transaction, error).await);
         }
     };
     grouped_shards = next_grouped;
@@ -7500,5 +7510,78 @@ mod owned_claim_decode_tests {
                 class_s_item_from_owned_values(values.into_iter(), 99, &HashSet::new()).is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod apply_error_preservation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn auto_rollback_preserves_primary_error_and_writer_remains_reusable() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let mut connection = database.connect().unwrap();
+        connection
+            .execute("CREATE TABLE rollback_probe(id INTEGER PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        transaction
+            .execute("INSERT INTO rollback_probe VALUES(1)", ())
+            .await
+            .unwrap();
+        let primary = transaction
+            .execute("INSERT OR ROLLBACK INTO rollback_probe VALUES(1)", ())
+            .await
+            .unwrap_err();
+        let primary_text = primary.to_string();
+        let reported = rollback_preserving_error(transaction, storage(primary))
+            .await
+            .to_string();
+        assert!(
+            reported.contains(&primary_text),
+            "primary error lost: {reported}"
+        );
+        assert!(
+            reported.contains("rollback also failed"),
+            "expected already-aborted transaction: {reported}"
+        );
+
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        transaction
+            .execute("INSERT INTO rollback_probe VALUES(2)", ())
+            .await
+            .unwrap();
+        assert!(matches!(
+            rollback_preserving_error(transaction, EngineError::EpochFenced).await,
+            EngineError::EpochFenced
+        ));
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        transaction
+            .execute("INSERT INTO rollback_probe VALUES(3)", ())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let mut rows = connection
+            .query("SELECT id FROM rollback_probe ORDER BY id", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            3
+        );
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "failed transactions left rows behind"
+        );
     }
 }
