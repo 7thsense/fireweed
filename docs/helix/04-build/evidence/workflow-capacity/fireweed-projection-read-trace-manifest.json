@@ -35,11 +35,6 @@
     "bytes": 1055
   },
   {
-    "artifact": "fireweed-projection-read-trace-summary.json.gz",
-    "source_sha256": "a2cd3da7836aac48652692cb652e28e35997e9a8a84fcf32781c69365117996c",
-    "bytes": 1740
-  },
-  {
     "artifact": "fireweed-projection-read-trace-build.log.gz",
     "source_sha256": "ad505afeeafc215e4bf80834cca687b7d3579168b8996abd855f096001e89234",
     "bytes": 14269

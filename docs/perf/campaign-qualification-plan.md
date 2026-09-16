@@ -44,7 +44,7 @@ blindly using it could add more reads than it saves. Compare in-memory index loo
 cost against the pages that would otherwise be discarded. This remains an
 unimplemented hypothesis, not a speedup claim or authorization to relax isolation.
 
-Manifest `fireweed-projection-read-trace-manifest.json` covers ten raw reports,
+Manifest `fireweed-projection-read-trace-manifest.json` covers nine raw reports,
 device samples/summary, exact runner/parser and build/run logs; hashes identify
 decompressed contents. The repeated stretch goal remains active. The last
 untraced qualified baseline still has a 4.2% worst-cycle gap.
