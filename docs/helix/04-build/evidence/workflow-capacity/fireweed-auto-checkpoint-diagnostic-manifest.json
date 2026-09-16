@@ -1,0 +1,74 @@
+{
+  "scope": "Full on-disk original-row 1M-resident/8M diagnostic with checkpoint and VFS traces; not qualification",
+  "source": "4f4acde08a76d2a94ecbc08443a49d9f38003e39",
+  "binary_sha256": "9f54d1207211f5c12104bac95e70289479d2fdecd53baa7562926ae60e6a3763",
+  "decision": "Do not prioritize background checkpoint execution from this trace; largest per-store delay 1.590187s and slowest checkpoint-cycle store only 0.115326s. Indirect I/O contention remains unmeasured.",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-analysis.json.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/analysis.json",
+      "sha256": "a410a83800df267f28e249ae4ebf5586d21590aab581060abd6a6d658afb30cb"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-campaign.json.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/campaign.json",
+      "sha256": "e1a15d5fd07d52ef834e151c1d146713d9edc1dea3796ac1dd99c1bf0431f7f9"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-checkpoint-events.json.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/checkpoint-events.json",
+      "sha256": "88b823fb4791fc008b1a13b2a26dc43b0cca23684bf59c33f95947c29e79f3c8"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-device-summary.json.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/device-summary.json",
+      "sha256": "54308873aca83d055063759db5f4e61705405c2d75fb1b649ad4d88b425c0e6f"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-device.jsonl.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/device.jsonl",
+      "sha256": "90a9d6f2f4388d6f29f84722b901f9f44a4b63e069e8f01138345cfb529e2c1f"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-preserved-binary.json.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/preserved-binary.json",
+      "sha256": "d70781bb0bd53e71b453d426131af3fc19d57442073819f2b5e835da822bf86c"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-provenance.json.gz",
+      "source_path": "target/workflow-capacity/auto-checkpoint-diagnostic-20260916/provenance.json",
+      "sha256": "c6f403c99ee1f8e08fb8368420883b3e79ea52797f6e95f1d7b34ded5bed2eb0"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-fireweed-auto-checkpoint-diagnostic-build.log.gz",
+      "source_path": "/tmp/fireweed-auto-checkpoint-diagnostic-build.log",
+      "sha256": "8ac19c05af52a809296239fb1c149ba0749659c06b17d070ad258b4f2f89ddef"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-fireweed-auto-checkpoint-diagnostic-runner.log.gz",
+      "source_path": "/tmp/fireweed-auto-checkpoint-diagnostic-runner.log",
+      "sha256": "cca1797f2c70d4609843a65a2b2c71edf9edcc4465d793e72c2ac4df5a36b237"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-fireweed-run-auto-checkpoint-diagnostic.py.gz",
+      "source_path": "/tmp/fireweed-run-auto-checkpoint-diagnostic.py",
+      "sha256": "f941dceefae93ec1fad21a97b22d0c2e5c836688e2eba52530e78c519c3b7dae"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-fireweed-analyze-auto-checkpoints.py.gz",
+      "source_path": "/tmp/fireweed-analyze-auto-checkpoints.py",
+      "sha256": "855fbf5880778b83c9e1a0913eef467b40b6a5b70fd92ca3be1d131541252b40"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-fireweed-device-monitor-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-monitor-v3.py",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-auto-checkpoint-diagnostic-fireweed-device-summary-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-summary-v3.py",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    }
+  ]
+}

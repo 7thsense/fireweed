@@ -1,5 +1,24 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Foreground checkpoint timing: measured cost, not a disk ceiling (2026-09-16)
+
+A complete 8M diagnostic on retained behavior records 106 auto-checkpoint attempts
+across 64 stores. Maximum cumulative foreground checkpoint time for any store is
+1.590187 seconds; the slowest store in the checkpoint cycle spends 0.115326 seconds
+there within a 68.805-second cycle. The 13.711741-second cross-store sum overlaps
+and must not be subtracted from campaign wall time. Median attempt time is 71.972 ms.
+These observations weaken direct checkpoint blocking as the next optimization
+target; they do not bound other runs or isolate indirect log/projection I/O contention.
+
+The diagnostic writes 30.935 GiB at the host device over 511.071 observed seconds,
+with 35.76% average device busy and 5.805 ms mean write-request latency. Neither
+this average nor the much shorter checkpoint timings establishes a device ceiling.
+All rate/resource checks pass, but tracing explicitly disqualifies the run. Keep
+the retained untraced CPU/bandwidth budgets and repeated-qualification status below;
+do not use a faster diagnostic to declare the 12.5k goal achieved. Full evidence
+is in `fireweed-auto-checkpoint-diagnostic-manifest.json`.
+
+
 ## Rejected compact priority experiment does not change the retained budget (2026-09-16)
 
 A compact projection-only timestamp representation saved 34 column bytes and

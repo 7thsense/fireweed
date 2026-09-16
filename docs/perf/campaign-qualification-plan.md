@@ -1,5 +1,59 @@
 # Campaign qualification and performance plan
 
+## Checkpoint timing does not justify background execution as the next fix (2026-09-16)
+
+The complete traced campaign on clean `4f4acde0`, executable
+`9f54d1207211f5c12104bac95e70289479d2fdecd53baa7562926ae60e6a3763`, exits zero
+with all eight million original recipients processed and verified. Overall rate
+is 15,620.86/sec, CPU cost 0.871341 ms/recipient and peak RSS 19.479 GiB.
+All 2,278 stretch checks except the diagnostic-override check pass. That explicit
+failure is correct: this run is **not qualification**, and the goal remains open.
+Cycle minima are 17,145.74 / 15,986.84 / 16,113.76 / 16,047.51 / 14,532.84 /
+15,356.52 / 16,236.76 / 15,817.55 recipients/sec.
+
+There are 106 auto-checkpoint attempts, all within the interval between complete
+cycle-three and cycle-four report groups. All 64 stores report successful
+checkpointing: 101 attempts succeed, while five fail in 8–12 microseconds and
+are followed by success. The trace does not record their error causes; do not
+classify them as I/O failures or assume a specific busy condition. These are
+post-commit maintenance results, not failed campaign commands.
+
+Median attempt time is **0.071972 seconds**, maximum attempt **1.570503 seconds**,
+and maximum cumulative time for any store **1.590187 seconds**. The sum across
+all stores is 13.711741 seconds, but those operations overlap and that sum is
+not lost wall time. The slowest campaign in cycle four belongs to store four:
+its whole cycle takes **68.805 seconds**, while that store spends only
+**0.115326 seconds** in measured checkpoint execution. No further auto-checkpoint
+attempts occur during cycles five through seven.
+
+This confirms the foreground blocking path but weakens it as the main explanation
+for multi-second deficits in the slower untraced runs. It does not establish an
+upper bound for other hardware states or exclude indirect contention between
+projection writes and durable-log publication. Do not change checkpoint thresholds,
+add background checkpoint ownership or revisit reader-construction checkpointing
+on this evidence. Checkpoint writes already sort pages and group contiguous pages
+into vectored writes (`WriteBatch` / `write_pages_vectored`); missing batching is
+not an established issue either.
+
+The next bounded candidate is sharing **log flush runtimes across engines**, not
+reducing workers separately within every engine (the earlier one-worker experiment
+was rejected). `vendor/object-log/src/engine.rs::flush_loop` constructs its own
+Tokio runtime per engine, normally eight workers; the campaign has 64 engines.
+That implies 512 runtime workers before flush threads, blocking I/O and other
+runtimes. This is structural evidence and a hypothesis about overhead, not proof
+of a bottleneck. A candidate must preserve per-engine in-flight limits, commit
+order, completion ownership, independent shutdown and durability, and must be
+screened with identical instrumentation before sustained qualification.
+
+The exact current executable is preserved at
+`/tmp/fireweed-workload-before-shared-log-runtime` for that comparison. Full report,
+checkpoint events, analysis, device samples, scripts and binary provenance are
+archived with verified hashes in `fireweed-auto-checkpoint-diagnostic-manifest.json`.
+The latest retained untraced qualification remains the lease-index pair below:
+repeated 10k passes, repeated 12.5k unproved. No source edits, other workloads,
+compilation or storage-setting changes overlapped this diagnostic.
+
+
 ## Measure foreground auto-checkpoint elapsed time (2026-09-16)
 
 Source inspection establishes a blocking path: native `Pager::commit_tx` runs its
