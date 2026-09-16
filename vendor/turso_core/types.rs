@@ -2418,7 +2418,7 @@ where
 /// 3. **Sort order**: Applies ascending/descending order to comparison result
 /// 4. **Length comparison**: If strings are equal, compares lengths
 /// 5. **Remaining fields**: If first field is equal and more fields exist,
-///    continues decoding at the next header and data positions
+///    delegates to `compare_records_generic()` with `skip=1`
 fn compare_records_string<V, I>(
     serialized: &ImmutableRecord,
     unpacked: I,
@@ -2445,7 +2445,7 @@ where
         )));
     }
 
-    let (first_serial_type, serial_bytes) = read_varint(&payload[offset_1st_serialtype..])?;
+    let (first_serial_type, _) = read_varint(&payload[offset_1st_serialtype..])?;
 
     let serialtype_is_string = first_serial_type >= 13 && (first_serial_type & 1) == 1;
     if !serialtype_is_string {
@@ -2490,16 +2490,7 @@ where
             }
 
             if unpacked.len() > 1 {
-                let field_limit = unpacked.len().min(index_info.key_info.len());
-                return compare_record_fields(
-                    payload,
-                    unpacked.skip(1),
-                    &index_info.key_info[1..field_limit],
-                    header_size,
-                    offset_1st_serialtype + serial_bytes,
-                    data_start + string_len,
-                    tie_breaker,
-                );
+                return compare_records_generic(serialized, unpacked, index_info, 1, tie_breaker);
             }
             Ok(tie_breaker)
         }
@@ -2579,38 +2570,15 @@ where
         }
     }
 
+    let mut field_idx = skip;
     let field_limit = unpacked.len().min(index_info.key_info.len());
-    if skip >= field_limit {
-        return Ok(tie_breaker);
-    }
-    compare_record_fields(
-        payload,
-        unpacked.skip(skip),
-        &index_info.key_info[skip..field_limit],
-        header_end,
-        header_pos,
-        data_pos,
-        tie_breaker,
-    )
-}
 
-/// Continue at an already decoded record position. In particular, an equal first
-/// text key must not cause its header and serial type to be decoded a second time.
-#[inline(always)]
-fn compare_record_fields<V: AsValueRef>(
-    payload: &[u8],
-    unpacked: impl Iterator<Item = V>,
-    keys: &[KeyInfo],
-    header_end: usize,
-    mut header_pos: usize,
-    mut data_pos: usize,
-    tie_breaker: std::cmp::Ordering,
-) -> Result<std::cmp::Ordering> {
-    for (rhs_value, key_info) in unpacked.zip(keys) {
-        if header_pos >= header_end {
+    // assumes that that the `unpacked' iterator was not skipped outside this function call`
+    for rhs_value in unpacked.skip(skip) {
+        let rhs_value = &rhs_value.as_value_ref();
+        if field_idx >= field_limit || header_pos >= header_end {
             break;
         }
-        let rhs_value = &rhs_value.as_value_ref();
         let (serial_type_raw, bytes_read) = read_varint(&payload[header_pos..])?;
         header_pos += bytes_read;
 
@@ -2628,14 +2596,14 @@ fn compare_record_fields<V: AsValueRef>(
         };
 
         let comparison = match (&lhs_value, rhs_value) {
-            (ValueRef::Text(lhs_text), ValueRef::Text(rhs_text)) => {
-                key_info.collation.compare_strings(lhs_text, rhs_text)
-            }
+            (ValueRef::Text(lhs_text), ValueRef::Text(rhs_text)) => index_info.key_info[field_idx]
+                .collation
+                .compare_strings(lhs_text, rhs_text),
 
             _ => lhs_value.cmp(rhs_value),
         };
 
-        let final_comparison = match key_info.sort_order {
+        let final_comparison = match index_info.key_info[field_idx].sort_order {
             SortOrder::Asc => comparison,
             SortOrder::Desc => comparison.reverse(),
         };
@@ -2643,6 +2611,8 @@ fn compare_record_fields<V: AsValueRef>(
         if final_comparison != std::cmp::Ordering::Equal {
             return Ok(final_comparison);
         }
+
+        field_idx += 1;
     }
 
     Ok(tie_breaker)

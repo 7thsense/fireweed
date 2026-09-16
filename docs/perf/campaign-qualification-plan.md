@@ -1,5 +1,46 @@
 # Campaign qualification and performance plan
 
+## Reject the record-comparison continuation candidate (2026-09-16)
+
+The serial control/candidate/control/candidate screen completed four one-million
+recipient campaigns with the original workload, no trace overrides, and successful
+correctness exits. Counters cover the workload process and threads; these one-cycle
+runs are diagnostic, not sustained qualification. Controls use preserved
+`2e8f8ff5` binary `9124cfd…`; candidates use clean `2b70c01a` binary `98a232f…`.
+Full hashes, commands and provenance are in the archived reports.
+
+| Run | Recipients/sec | CPU-ms/recipient | User instructions (trillions) | User cycles / user CPU-ns |
+| --- | ---: | ---: | ---: | ---: |
+| Control 1 | 16,511.27 | 0.85909 | 2.64889 | 3.103 |
+| Candidate 1 | 16,153.67 | 0.88146 | 2.66145 | 3.044 |
+| Control 2 | 13,956.02 | 0.94625 | 2.66423 | 2.769 |
+| Candidate 2 | 14,714.56 | 0.96251 | 2.70107 | 2.729 |
+
+Both candidate pairs increase CPU time (+2.60%, +1.72%) and instructions
+(+0.47%, +1.38%). Wall-rate results disagree in direction. This does not justify
+retaining the fast path: production `types.rs` is restored byte-for-byte to
+`61b4b80f` before its test module. Retain the 48,600-case independent ordering
+oracle, which passes on the restored implementation. Candidate validation before
+rejection was 2,124 native tests and 239 public/library/workflow tests, all passing
+(16 and 3 existing ignores respectively). No performance gain is claimed.
+
+A useful next lead is **variation within the identical control**: user cycles
+fall from 2.266T to 2.211T while user CPU time rises from 730.29s to 798.33s.
+Their ratio drops from 3.103 to 2.769 cycles per user CPU-ns. This is consistent
+with a lower effective clock, but is not proof of thermal throttling; wrapper
+accounting and counter semantics must be considered. `ref-cycles:u` is not
+supported on this Ryzen 7 4800H. The next sustained control should record CPU
+frequency/temperature alongside counters and device telemetry, without changing
+host settings, to distinguish CPU-rate drift from additional software work or
+I/O waits. Fixed single-run CPU-ms budgets must not silently assume boost speed
+persists indefinitely.
+
+The 27-artifact `fireweed-record-continuation-manifest.json` includes all raw
+reports, counter CSVs, device observations, exact runner/recorder sources, build
+and public validation logs. Restoration output is archived separately as
+`fireweed-record-continuation-restoration.log.gz`. The repeated 12.5k goal remains
+unmet; no workload gate or target was relaxed.
+
 ## Active-backend CPU profile and record-comparison candidate (2026-09-16)
 
 The full eight-cycle profile uses the preserved `2e8f8ff5` control binary

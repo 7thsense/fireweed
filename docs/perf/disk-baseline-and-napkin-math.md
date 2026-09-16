@@ -1,5 +1,19 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Repeated CPU-cost observations (2026-09-16)
+
+The record-comparison candidate was rejected: both alternating pairs increased
+instructions and CPU time. Identical control binaries measured **0.8591 and
+0.9463 CPU-ms/recipient**, corresponding to **10.739 and 11.828 CPU-seconds/sec**
+at 12.5k recipients/sec. User cycles per user CPU-ns fell from 3.103 to 2.769;
+this is consistent with an effective-clock change, not proof of its cause.
+Temperature/frequency telemetry during a sustained control is the next check.
+Do not turn one observed CPU cost or short burst clock into a hardware ceiling.
+The previous 0.8910 profile-derived budget remains an explicitly conditional
+observation, not a fixed machine constant. See the campaign plan and
+`fireweed-record-continuation-manifest.json` for all four runs and provenance.
+
+
 ## Active-backend CPU budget (2026-09-16)
 
 The full 8M-recipient, eight-cycle control profile measured 0.891019 CPU-ms per

@@ -1,0 +1,199 @@
+{
+  "artifacts": [
+    {
+      "artifact": "fireweed-record-continuation-control-1-provenance.json.gz",
+      "sha256": "5bda435ce1534cd84307170fd8f6b15c3b548cf391bb85c7cc081e8ef5c9ebf2",
+      "decompressed_bytes": 456
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-1.json.gz",
+      "sha256": "040da5066bb842b2d79966f64006291ed22441ff7b81985f495274b43f74883d",
+      "decompressed_bytes": 669869
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-1-device-summary.json.gz",
+      "sha256": "c517dd96ddf546dc8ae4dadac7fa16f0fcb159a027900bc179b4027e98ad08d9",
+      "decompressed_bytes": 885
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-1-provenance.json.gz",
+      "sha256": "61ce95b1cb915ef2824777a57fcfb2745e09d931732757523360a4dd8f7b50ed",
+      "decompressed_bytes": 488
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-1.json.gz",
+      "sha256": "6d508b5df346321affe2e387b984105e60d6d68c3c2f2947bda9b1213399bcf6",
+      "decompressed_bytes": 674844
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-1-device-summary.json.gz",
+      "sha256": "c1ff342c136e92fab1ac512e538a601f395e1ddb89edea14aaa63da4a1c2e850",
+      "decompressed_bytes": 915
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-2-provenance.json.gz",
+      "sha256": "5bda435ce1534cd84307170fd8f6b15c3b548cf391bb85c7cc081e8ef5c9ebf2",
+      "decompressed_bytes": 456
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-2.json.gz",
+      "sha256": "ffd567e1d8cda14e15ce332054a627c5576694e9d1bf355ead46b1cc5de76c86",
+      "decompressed_bytes": 683367
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-2-device-summary.json.gz",
+      "sha256": "c5ae4468e132f8936deb05b346162b34c39edae1d21b06744dfd6d3ed94c4605",
+      "decompressed_bytes": 866
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-2-provenance.json.gz",
+      "sha256": "61ce95b1cb915ef2824777a57fcfb2745e09d931732757523360a4dd8f7b50ed",
+      "decompressed_bytes": 488
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-2.json.gz",
+      "sha256": "61edd8083f277d9b9c81a14bb10e770a97d529fa43c310063deed55ca401d866",
+      "decompressed_bytes": 684468
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-2-device-summary.json.gz",
+      "sha256": "8a93240b78567b7d053a5414c58f514be86e087cc6042f1e6ef02115e797c157",
+      "decompressed_bytes": 871
+    },
+    {
+      "artifact": "fireweed-record-continuation-summary.json.gz",
+      "sha256": "f8352fa4d6cd03b204587f033e970ff633f248824a66f61bf959660a0bbeb7c8",
+      "decompressed_bytes": 1132
+    },
+    {
+      "artifact": "fireweed-record-continuation-analysis.json.gz",
+      "sha256": "e4aba089658502729112d7d03782efdf093094f08d1cfb0f8e0001dd6072362e",
+      "decompressed_bytes": 1663
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-1-device.jsonl.gz",
+      "sha256": "34df2b7e6a2ad56e99960815854076962f85f4db433034697976db6bc5e59bf5",
+      "decompressed_bytes": 69495
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-1-device.jsonl.gz",
+      "sha256": "b1234e1aa856cc9d9faee120442ac09dbf535f1f88d01bdef6bebf1e769e6484",
+      "decompressed_bytes": 71704
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-2-device.jsonl.gz",
+      "sha256": "8d918b5bb7ccdbed267086da7626ba5f88226e6904f0a401962e5995090a3cee",
+      "decompressed_bytes": 81024
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-2-device.jsonl.gz",
+      "sha256": "5ee0babd955c22e38ca8d202aebf0c34c4ebda40919abe961a151e1f837ffe43",
+      "decompressed_bytes": 77523
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-1-perf.csv.gz",
+      "sha256": "a441549665b2d818436e9660d03d9a5305552d435da621a294799060eeb609e6",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-1-perf.csv.gz",
+      "sha256": "fa7bb43249308a144fb0aeb700374ad118f81c553d2184bde115d1e5e4d3f3e2",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-continuation-control-2-perf.csv.gz",
+      "sha256": "6c1ac69428d4edaeae79031aea76554e5940ee762508d9ea1e76f40a932e1566",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-continuation-candidate-2-perf.csv.gz",
+      "sha256": "b995a4c37b758e277d05d040bbbf26e54f27d0973188e91e7d751983fd96ea69",
+      "decompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-record-continuation-fireweed-run-record-continuation-counters.py.gz",
+      "sha256": "971ebb0d7410007dd41ba8235ad6bd43a6a7b7ac1bcc01be8e1918f024598152",
+      "decompressed_bytes": 5193
+    },
+    {
+      "artifact": "fireweed-record-continuation-fireweed-record-continuation-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+      "decompressed_bytes": 9015
+    },
+    {
+      "artifact": "fireweed-record-continuation-fireweed-record-continuation-counters-runner.log.gz",
+      "sha256": "21951ee46bf24a19bf486862c925026ed87c433e372724b76aaf5514911efef7",
+      "decompressed_bytes": 1093
+    },
+    {
+      "artifact": "fireweed-record-continuation-fireweed-record-continuation-public-tests.log.gz",
+      "sha256": "6eb50d71ec3f025def0bc1f41a32669fbe5cb99f395a79ea011c29d1b210c8b6",
+      "decompressed_bytes": 38435
+    },
+    {
+      "artifact": "fireweed-record-continuation-fireweed-record-continuation-build.log.gz",
+      "sha256": "da55308a2d6188a4716891259f5d1c62adb7977e4f275b8a5f61932068628c0a",
+      "decompressed_bytes": 14269
+    }
+  ],
+  "analysis": {
+    "classification": "one-cycle diagnostic screen; not qualification",
+    "rows": [
+      {
+        "run": "control-1",
+        "rate": 16511.26972366746,
+        "user_cpu_s": 730.293005,
+        "system_cpu_s": 128.799672,
+        "cpu_ms_per_recipient": 0.859092677,
+        "cycles": 2266196340074,
+        "instructions": 2648889328363,
+        "cycles_per_user_ns": 3.1031330227159986,
+        "exit_code": 0
+      },
+      {
+        "run": "candidate-1",
+        "rate": 16153.670597767094,
+        "user_cpu_s": 750.370915,
+        "system_cpu_s": 131.087172,
+        "cpu_ms_per_recipient": 0.881458087,
+        "cycles": 2284260918466,
+        "instructions": 2661450936637,
+        "cycles_per_user_ns": 3.044175717373054,
+        "exit_code": 0
+      },
+      {
+        "run": "control-2",
+        "rate": 13956.024231613037,
+        "user_cpu_s": 798.334135,
+        "system_cpu_s": 147.916802,
+        "cpu_ms_per_recipient": 0.946250937,
+        "cycles": 2210512645682,
+        "instructions": 2664229696076,
+        "cycles_per_user_ns": 2.768906587818646,
+        "exit_code": 0
+      },
+      {
+        "run": "candidate-2",
+        "rate": 14714.557516591312,
+        "user_cpu_s": 819.70372,
+        "system_cpu_s": 142.806585,
+        "cpu_ms_per_recipient": 0.962510305,
+        "cycles": 2237032828731,
+        "instructions": 2701067412374,
+        "cycles_per_user_ns": 2.7290748768725854,
+        "exit_code": 0
+      }
+    ],
+    "decision": "reject candidate; both pairs increase CPU time and instructions",
+    "paired_changes": [
+      {
+        "cpu_pct": 2.6033757007569047,
+        "instructions_pct": 0.47422171018987047
+      },
+      {
+        "cpu_pct": 1.7182934636290836,
+        "instructions_pct": 1.3826779407292156
+      }
+    ]
+  }
+}
