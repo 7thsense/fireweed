@@ -1,5 +1,54 @@
 # Campaign qualification and performance plan
 
+## Eight-cycle read trace: OS-cached WAL traffic and full invalidation (2026-09-16)
+
+Clean `0ea4fc24`, binary
+`a287648d51d4b45ac0c19ce8632ccb4e5025b8a10d9e7916d39beff103295262`, completes
+all eight million recipients at **14,805.44/sec**, with **13,361.81/sec** slowest
+cycle, **0.906722 CPU-ms/recipient** and **18.982 GiB** peak RSS. Every rate,
+correctness, fairness/reporting and storage/memory gate passes. The diagnostic
+flag/provenance is the sole failing qualification check: **this is not a repeated
+untraced qualification result**. No cache settings, workload limits or host options
+changed; no concurrent build/benchmark ran.
+
+| VFS class | Read calls | Requested read bytes | Accumulated VFS read elapsed seconds |
+| --- | ---: | ---: | ---: |
+| Main/other | 2,587,569 | 10,592,396,288 | 24.739 |
+| WAL | 39,274,701 | 160,869,175,296 | 386.867 |
+| Total | 41,862,270 | 171,461,571,584 | 411.606 |
+
+No immediate VFS read/write errors were recorded. WAL writes request
+54,610,002,576 bytes and main writes 2,070,343,680 bytes. The host records only
+**0.003918 GiB (about 4 MiB) of device reads** during its sampled interval, versus
+31.734 GiB writes. Thus the VFS read volume is overwhelmingly served above the
+physical device; do not call 171.46 GB an SSD-read workload. Accumulated VFS elapsed
+time overlaps across threads, includes callback/scheduling time, and is neither
+CPU time nor an additive decomposition of campaign wall time. There is no claim
+that eliminating all these reads is possible or would save 411 wall seconds.
+
+Source review supplies a stronger hypothesis than merely enlarging a cache:
+`Pager::begin_read_tx` calls `clear_page_cache(false)` whenever WAL snapshot state
+changes, and invalidates the schema cookie. A larger cap cannot preserve cached
+pages through this full clear. Writer/serving caps remain 128 MiB; 16 driver plus
+eight outcome readers each have 4 MiB. Raising every pool cache to 16 MiB adds an
+18 GiB theoretical cap across 64 stores, without evidence it avoids those clears.
+No cache-cap trial is justified yet.
+
+Next investigate preserving demonstrably unchanged pages across append-only WAL
+snapshot advances, while retaining cursor/schema invalidation and conservative
+full clears on restart, checkpoint-history loss, rollback, MVCC and any ambiguous
+state. This is an engine-coherence change requiring native cross-connection,
+checkpoint/restart, rollback and snapshot tests before campaign measurement.
+The existing `Wal::changed_pages_after` helper reads each intervening raw frame;
+blindly using it could add more reads than it saves. Compare in-memory index lookup
+cost against the pages that would otherwise be discarded. This remains an
+unimplemented hypothesis, not a speedup claim or authorization to relax isolation.
+
+Manifest `fireweed-projection-read-trace-manifest.json` covers ten raw reports,
+device samples/summary, exact runner/parser and build/run logs; hashes identify
+decompressed contents. The repeated stretch goal remains active. The last
+untraced qualified baseline still has a 4.2% worst-cycle gap.
+
 ## Measure projection reads before changing pooled-cache budgets (2026-09-16)
 
 The previous turn produced progress by rejecting an unsupported decoder speedup

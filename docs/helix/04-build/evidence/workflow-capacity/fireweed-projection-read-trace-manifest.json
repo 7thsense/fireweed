@@ -1,0 +1,52 @@
+[
+  {
+    "artifact": "fireweed-projection-read-trace-provenance.json.gz",
+    "source_sha256": "870dcc81dd763490d6533cc19456f39e24994d3f6eee3511a99515e86a12325d",
+    "bytes": 364
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-campaign.json.gz",
+    "source_sha256": "cbdd33e70e4f4e6194638e4b4947e6df4a98db8187b42fb4ef27c0201c978dd5",
+    "bytes": 5040542
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-device-summary.json.gz",
+    "source_sha256": "b15d629279867199a7dd26a810ea0cfb900d9a45bb52b7a37d716afa9ef95575",
+    "bytes": 908
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-summary.json.gz",
+    "source_sha256": "a2cd3da7836aac48652692cb652e28e35997e9a8a84fcf32781c69365117996c",
+    "bytes": 1740
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-device.jsonl.gz",
+    "source_sha256": "a25eee1b7722ff982b2e8036d9e4a665b3fd86e5eef37179e36ded7dadca14ec",
+    "bytes": 630032
+  },
+  {
+    "artifact": "fireweed-run-projection-read-trace.py.gz",
+    "source_sha256": "34bc5962aa5df80802dd72db363b41402dc4c8940526582e43e92ca654b284fe",
+    "bytes": 2725
+  },
+  {
+    "artifact": "fireweed-summarize-projection-read-trace.py.gz",
+    "source_sha256": "6fbc5ba609409296104181a4fce215561e68950f1c0a9d17c4a209bf9b6149a4",
+    "bytes": 1055
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-summary.json.gz",
+    "source_sha256": "a2cd3da7836aac48652692cb652e28e35997e9a8a84fcf32781c69365117996c",
+    "bytes": 1740
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-build.log.gz",
+    "source_sha256": "ad505afeeafc215e4bf80834cca687b7d3579168b8996abd855f096001e89234",
+    "bytes": 14269
+  },
+  {
+    "artifact": "fireweed-projection-read-trace-runner.log.gz",
+    "source_sha256": "f86d3d2cd98793687181167c274186994f2887e6a6d3e55c6b482e61874d97ed",
+    "bytes": 175
+  }
+]

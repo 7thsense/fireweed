@@ -1,5 +1,22 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Read amplification above the device (2026-09-16)
+
+The eight-cycle diagnostic requests **5.233 VFS reads / 21,433 read bytes per
+recipient**: 41.86 million calls and 171.46 GB total. At 12.5k/sec, that is about
+**65,410 calls/sec and 255.50 MiB/sec of requested reads**. Host device reads are
+only about 4 MiB over the whole sampled run, so these are software/OS-cache
+traffic budgets, not SSD bandwidth requirements. Do not add them to physical
+write demand or use them to declare device saturation.
+
+CPU costs 0.90672 ms/recipient, implying **11.33 CPU-seconds/sec** at 12.5k.
+All traced cycle rates exceed 12.5k, but the recording is diagnostic and cannot
+establish repeated untraced capacity. Accumulated read-call elapsed time includes
+callbacks, scheduling and overlap; it does not establish recoverable CPU or wall
+time. Full reader-cache invalidation on WAL snapshot changes is a concrete code
+path to investigate before enlarging bounded caches. Isolation and fallback
+behavior remain mandatory. See the [read-trace record](campaign-qualification-plan.md).
+
 ## Decoder screen supplies no new capacity estimate (2026-09-16)
 
 The serial combined linear-purge/owned-decoder screen is inconclusive: candidate
