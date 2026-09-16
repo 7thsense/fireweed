@@ -115,3 +115,46 @@ async fn local_blob_store_put_is_durable_and_readable_across_instances() {
         vec!["seg/000".to_string()]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_local_publications_preserve_every_object_and_media_accounting() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalBlobStore::new(dir.path());
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut expected_bytes = 0;
+    for id in 0..64 {
+        let value = format!("original-object-{id}");
+        expected_bytes += value.len() as u64;
+        let writer = store.clone();
+        tasks.spawn(async move {
+            let bytes = Bytes::from(value);
+            writer
+                .put_chunks(
+                    &format!("parent-{}/{id}", id % 2),
+                    vec![bytes.slice(..4), bytes.slice(4..)],
+                )
+                .await
+                .unwrap();
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    let stats = store.take_media_op_stats().unwrap();
+    assert_eq!(stats.bytes, expected_bytes);
+    // Each file sync remains mandatory; each parent needs at least one sync.
+    // The exact amount of sharing depends on real scheduling and filesystem I/O.
+    assert!((66..=128).contains(&stats.media_ops));
+    drop(store);
+    let reopened = LocalBlobStore::new(dir.path());
+    assert_eq!(reopened.list("").await.unwrap().len(), 64);
+    for id in 0..64 {
+        assert_eq!(
+            reopened
+                .get(&format!("parent-{}/{id}", id % 2))
+                .await
+                .unwrap(),
+            Some(Bytes::from(format!("original-object-{id}")))
+        );
+    }
+}

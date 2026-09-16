@@ -1,0 +1,19 @@
+{
+  "base_head": "af87903b",
+  "scope": "Directory sync sharing candidate: 49 log contract tests pass. Two incorrect coverage mutations are rejected by the intended tests. Public workflow tests and performance measurements pending.",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-directory-sync-contracts.log.gz",
+      "sha256": "4375eda46858782b95b390fcd10208b03bb8ced48d1de4fd3f2834b54fcbfac7"
+    },
+    {
+      "artifact": "fireweed-directory-sync-mutation-advance-before-success.log.gz",
+      "sha256": "5664d7db8fb4c4f97b85d93ef34770836f461b390b90ee8bc2346aecc0096efe"
+    },
+    {
+      "artifact": "fireweed-directory-sync-mutation-include-later-renames.log.gz",
+      "sha256": "183d1eff7b403a5a62cc8ad07b70e3a1e2bcb6ae4b14147b19adabf5f13936eb"
+    }
+  ]
+}

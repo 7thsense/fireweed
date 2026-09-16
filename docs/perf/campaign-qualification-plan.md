@@ -1,5 +1,44 @@
 # Campaign qualification and performance plan
 
+## Directory-sync sharing candidate: barrier tests pass, performance pending (2026-09-16)
+
+LocalBlobStore now registers a generation only after a file has been fdatasynced
+and renamed. Under a per-parent mutex, a directory fsync snapshots the already-
+registered generations, performs the syscall, and advances durable coverage only
+on success. Followers whose generation is covered can then return without another
+directory fsync. A rename registered during the syscall needs a subsequent sync.
+There is no added linger, no file-sync removal, and no publication/manifest format
+change. Different parent directories have separate coverage; cloned stores share
+it. A weak registry retains only in-flight owners and prunes retired directories
+on cache misses, avoiding growth with historical object directories.
+
+This preserves the explicit parent-directory barrier described by the
+[Linux fsync documentation](https://man7.org/linux/man-pages/man2/fsync.2.html).
+The source ordering, rather than any assumption about a filesystem-specific
+implicit directory flush, determines which renames may acknowledge. The diagnostic
+`dir_sync_ops` field reports zero/one actual directory sync for each successful
+publication. Media accounting counts every file sync and each performed directory
+sync once. `dir_sync_us` includes time waiting for shared coverage; overlapping
+publisher timings are not additive wall time.
+
+All 49 log contract tests pass. New tests cover pending renames, arrivals during
+sync, failure without coverage advancement, directory isolation/retirement, and
+64 concurrent real publications followed by independent reopen/read verification.
+Two deliberate incorrect implementations (coverage before syscall success and
+including later renames) fail their respective tests. Evidence:
+`fireweed-directory-sync-validation-manifest.json`. Public campaign/primitive/
+log-only-recovery validation is next, followed by an unchanged one-million-row
+serial ABBA screen with matching publication/VFS traces and perf counters.
+
+The preserved clean control is `4f4acde0`, executable
+`9f54d1207211f5c12104bac95e70289479d2fdecd53baa7562926ae60e6a3763`, at
+`/tmp/fireweed-workload-before-directory-sync-sharing`. Its normal successful
+flush path matches the restored per-engine runtime path. The candidate additionally
+retains the independent startup-error and failed-committer draining fixes; the
+screen's successful operations do not exercise those failure branches. Neither
+unit sharing nor a traced screen is sustained qualification. Both fixed targets
+and all existing workload/resource gates remain unchanged.
+
 ## Shared runtime rejected after sustained qualification (2026-09-16)
 
 The complete serial qualification on clean `2e3674d3`, executable
