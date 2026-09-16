@@ -1,0 +1,86 @@
+[
+  {
+    "file": "fireweed-commit-companion-counters-candidate-1-provenance.json.gz",
+    "uncompressed_sha256": "d3cc1c1ed87e22ea0459eb14de460078fac9c0f00f12516f565e384a513101b0"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-1.json.gz",
+    "uncompressed_sha256": "53a17afb0a844d027f8214850c6ff126ace0f321101a036f87d020ad2d5b9f3f"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-1-perf.csv.gz",
+    "uncompressed_sha256": "88608cc4522c474296c604428293a35c9a5e1286d7be76aca4ba629190f47d1c"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-1-device.jsonl.gz",
+    "uncompressed_sha256": "fbd3ac65224bb44a34018f163251b5a63e6dc24b27420d3277654091f82b5839"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-1-device-summary.json.gz",
+    "uncompressed_sha256": "904bfc150f5711b9d6e364565b9c02f4bcf57cee98af437513e82458754d46a9"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-control-provenance.json.gz",
+    "uncompressed_sha256": "42ae82d380ba7fc228850d466581b72b579844dec611203a5558c2c6c6274c1d"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-control.json.gz",
+    "uncompressed_sha256": "a983ff3809ba9fb501bc5d65c5591f946ecde1a0fcc2578bf33cb78cfbc89891"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-control-perf.csv.gz",
+    "uncompressed_sha256": "e20ec2f0c63cfcdad5acc46e9b66bd04fd67a5a2f58a997e01956d7be0608b92"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-control-device.jsonl.gz",
+    "uncompressed_sha256": "1c3f2dacc92e358a9239b32e74a1f46a4e704a122c733d28edcbda65b9903c5e"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-control-device-summary.json.gz",
+    "uncompressed_sha256": "333488853b830a8979bdf827193ffc718f067ef4c8e05f40efbe8bd70a5ce456"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-2-provenance.json.gz",
+    "uncompressed_sha256": "d3cc1c1ed87e22ea0459eb14de460078fac9c0f00f12516f565e384a513101b0"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-2.json.gz",
+    "uncompressed_sha256": "98dcc1820bc4d904eaec2f9d7467ae1e2b8360108188ee9125b503ae3c8ce0fd"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-2-perf.csv.gz",
+    "uncompressed_sha256": "eb42932e5de89ad4f99f49527abe1aa2647273cb220f19b7b9814b30882fd028"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-2-device.jsonl.gz",
+    "uncompressed_sha256": "29aa2e8043a02d1a6defe2901541d1d5ab2511145839be0d8021547659e50414"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-candidate-2-device-summary.json.gz",
+    "uncompressed_sha256": "fa40259281bbef30409eb16738aadceb6b9fc4d3574c645a6a8258257699b6e4"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-summary.json.gz",
+    "uncompressed_sha256": "5a5c0b29456df5025107ff6fe354fc8869e8b1e9187c4ed19c861e84e4b95ebd"
+  },
+  {
+    "file": "fireweed-commit-companion-counters-accounting.json.gz",
+    "uncompressed_sha256": "5eb8e2be480314f00ec8999a727390454b971ae33c497b5f6d784dc0b3bb5a78"
+  },
+  {
+    "file": "fireweed-run-commit-companion-counters.py",
+    "uncompressed_sha256": "49233be1e23ad1512330e5ec15154c352870e32feef58df8794077fb06b226a4"
+  },
+  {
+    "file": "fireweed-commit-companion-counter-recorder.py",
+    "uncompressed_sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+  },
+  {
+    "file": "fireweed-summarize-commit-companion.py",
+    "uncompressed_sha256": "f046b0226c15952e4f384da446e8b75b55dee5d7bf31c980416ac36bad8cda71"
+  },
+  {
+    "file": "fireweed-commit-companion-canonical-build.log.gz",
+    "uncompressed_sha256": "f05b032b6123a393a9a129d276001d194c4df3fa99ab51d5bed10180f5480c6f"
+  }
+]

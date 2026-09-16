@@ -1,5 +1,39 @@
 # Campaign qualification and performance plan
 
+## Reject companion wait; resume repeated untraced qualification (2026-09-16)
+
+Clean candidate `78d03aec`, binary `bad4707b...`, was compared serially with
+preserved `83e48da6...` (source `78d36c7c`). Each ran the same million-row,
+one-cycle, 64-store/two-worker campaign, with identical VFS and user-mode hardware
+counters. Counters had 100% running coverage; no builds or workloads overlapped.
+
+| Run | Recipients/sec | CPU-ms/recipient | Data objects | Manifests | Estimated data/manifest sync calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Candidate | 15,673.91 | 0.91235 | 5,536 | 5,449 | 21,970 |
+| Control | 14,489.28 | 0.94175 | 5,537 | 5,449 | 21,972 |
+| Candidate repeat | 14,182.35 | 1.01242 | 5,532 | 5,401 | 21,866 |
+
+The first candidate produces exactly as many manifests as control. The repeat
+reduces estimated data/manifest sync calls by only 0.48%, while CPU cost and
+throughput are worse than control. User instructions per recipient are
+2,797,156 / 2,842,811 / 2,862,395, also straddling control. WAL requested bytes
+are 6,551,947,408 / 6,572,209,568 / 6,596,624,688. This does not establish a
+repeatable benefit or justify the extra latency. Remove the wait and its
+candidate-specific tests; restore the engine byte-for-byte to `78d36c7c`.
+Validation evidence is retained, as are the unchanged workflow gates.
+
+Raw reports, counters, monitors, provenance, exact runner/recorder, summary and
+build log are archived under `fireweed-commit-companion-counters-*` and companion
+artifacts; the evidence manifest hashes uncompressed contents. These one-cycle
+diagnostics qualify neither milestone. No host changes were made.
+
+The retained implementation most recently cleared every rate/resource gate in
+an eight-cycle instrumented run. Next use the canonical qualification script
+for two untraced eight-cycle campaigns and two varied-payload primitive runs,
+without intervening tuning or simultaneous work. A failure remains a failure;
+do not substitute the passing diagnostic for these repeatability requirements.
+
+
 ## Bounded manifest companion candidate validated (2026-09-16)
 
 The candidate allows up to five milliseconds of grouping opportunity when the

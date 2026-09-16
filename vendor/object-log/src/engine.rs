@@ -715,7 +715,6 @@ fn flush_loop<S>(
     let mut pending: VecDeque<FlushWork<S::Meta>> = VecDeque::new();
     let mut active_puts = 0usize;
     let mut committing: Option<CommitJob> = None;
-    let mut commit_companion_wait = None;
     let mut shutdown = false;
 
     loop {
@@ -783,15 +782,7 @@ fn flush_loop<S>(
             made_progress = true;
         }
 
-        if committing.is_none()
-            && !wait_for_commit_companion(
-                &pending,
-                commit_group_limit,
-                shutdown,
-                &mut commit_companion_wait,
-                Instant::now(),
-            )
-        {
+        if committing.is_none() {
             if let Some(work) = take_ready_commit_group(&mut pending, commit_group_limit) {
                 if max_inflight == 1 {
                     // Preserve the low-overhead single-flight path.
@@ -885,34 +876,6 @@ fn abort_failed_commit_worker<M>(
     }
     q.force_flush = false;
     shared.cv.notify_all();
-}
-
-/// Briefly let an already-uploading immediate successor join a durable head.
-/// Never wait for new admission or delay an already-ready group. The deadline
-/// belongs to the head, so additional arrivals cannot extend it. Sequenced
-/// acknowledgments still happen in finish_flush_work after the manifest commit.
-fn wait_for_commit_companion<M>(
-    pending: &VecDeque<FlushWork<M>>,
-    max_objects: usize,
-    shutdown: bool,
-    waiting: &mut Option<(u64, Instant)>,
-    now: Instant,
-) -> bool {
-    const MAX_WAIT: Duration = Duration::from_millis(5);
-    let eligible = !shutdown
-        && max_objects > 1
-        && pending.len() > 1
-        && pending[0].put_result.as_ref().is_some_and(Result::is_ok)
-        && pending[1].put_result.is_none();
-    if !eligible {
-        *waiting = None;
-        return false;
-    }
-    let head = pending[0].max_seq;
-    if waiting.as_ref().is_none_or(|(seq, _)| *seq != head) {
-        *waiting = Some((head, now));
-    }
-    now.saturating_duration_since(waiting.as_ref().unwrap().1) < MAX_WAIT
 }
 
 /// Combine only an already-ready contiguous success prefix. Never wait to fill
@@ -1411,129 +1374,6 @@ mod ready_commit_group_tests {
         );
         work.put_result = Some(Ok(Duration::from_millis(n)));
         (work, key, chunks, rx)
-    }
-
-    #[test]
-    fn companion_wait_is_bounded_and_does_not_delay_idle_or_ready_work() {
-        let now = Instant::now();
-        let mut waiting = None;
-        let mut pending = VecDeque::from([work(1, Durability::Sequenced).0]);
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        let mut second = work(2, Durability::Sequenced).0;
-        second.put_result = None;
-        pending.push_back(second);
-        assert!(wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        pending.push_back(work(3, Durability::Sequenced).0);
-        assert!(wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now + Duration::from_millis(4)
-        ));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now + Duration::from_millis(5)
-        ));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now + Duration::from_secs(1)
-        ));
-        // A completed successor is grouped immediately, without spending the grace.
-        pending[1].put_result = Some(Ok(Duration::ZERO));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        assert!(waiting.is_none());
-        let group = take_ready_commit_group(&mut pending, 8).unwrap();
-        assert_eq!(group.data_objects, 3);
-    }
-
-    #[test]
-    fn companion_wait_bypasses_shutdown_custom_sequencers_and_failed_prefixes() {
-        let now = Instant::now();
-        let mut waiting = None;
-        let mut second = work(2, Durability::Sequenced).0;
-        second.put_result = None;
-        let mut pending = VecDeque::from([work(1, Durability::Sequenced).0, second]);
-        assert!(wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            true,
-            &mut waiting,
-            now
-        ));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            1,
-            false,
-            &mut waiting,
-            now
-        ));
-        pending[0].put_result = None;
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        pending[0].put_result = Some(Err(ObjectLogError::StorageUnavailable(
-            "failed head".into(),
-        )));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        pending[0].put_result = Some(Ok(Duration::ZERO));
-        pending[1].put_result = Some(Err(ObjectLogError::StorageUnavailable(
-            "failed companion".into(),
-        )));
-        assert!(!wait_for_commit_companion(
-            &pending,
-            8,
-            false,
-            &mut waiting,
-            now
-        ));
-        assert_eq!(
-            take_ready_commit_group(&mut pending, 8)
-                .unwrap()
-                .data_objects,
-            1
-        );
     }
 
     #[test]
