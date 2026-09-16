@@ -1,0 +1,114 @@
+{
+  "scope": "Four serial one-million-recipient diagnostic runs; modest CPU improvement advances to sustained qualification",
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-lease-index-screen-analysis.json.gz",
+      "sha256": "4714f0876b56703048379e96e8264ab939195bb281df984dd72302cfc8036d1e"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-1-device-summary.json.gz",
+      "sha256": "5e4c8bf3c0b8d5fdad03dd797a64d6e4cb8349dcbbbead4876efe3d3cf5ba29b"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-1-device.jsonl.gz",
+      "sha256": "dad99b1b2c7205ade3ab6fdba1ad0b7c314976fdae18eb620b9c6ff1c6c5d23f"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-1-perf.csv.gz",
+      "sha256": "83d87df22904b009e199814e00484ac6d2dacbb16c11200d1fdaca6d980da45d"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-1-provenance.json.gz",
+      "sha256": "dccb788f8e38864bdeb153044780a65150a9ba7192233ad559cc84ff6e062226"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-1.json.gz",
+      "sha256": "0d03b20d4523bed81bf64c4bd2c62f531a3180a17a9039c33ec2a7e5c9e3d62b"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-2-device-summary.json.gz",
+      "sha256": "bfe093a35a26feeedd8eeea05f2091efd96c5ab612383250027f8bb34f633785"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-2-device.jsonl.gz",
+      "sha256": "0c403c13bef0a87e2807d48c1f1eaac80fca58b7368efc95f89b60372525d3a4"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-2-perf.csv.gz",
+      "sha256": "5a8bd6d68359382caf45c8301cc43fddd80e438c8024b309fa7d35694932a3cd"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-2-provenance.json.gz",
+      "sha256": "dccb788f8e38864bdeb153044780a65150a9ba7192233ad559cc84ff6e062226"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-candidate-2.json.gz",
+      "sha256": "a35e5088ea156e11ccf675ed75cff3bac65de672381a32f2340b09ccb6ed0154"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-1-device-summary.json.gz",
+      "sha256": "c4cdbae3b516ae71b724bbdd682bfe7c4b191495e7d486bcd52fb2e3749703e8"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-1-device.jsonl.gz",
+      "sha256": "21c44a1fc929a01345354d613b28e0b2c7c968bce6d67788f5a730437b240515"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-1-perf.csv.gz",
+      "sha256": "d96c8f133a45634acb2582c9215050f7b7c6f4423b6b33e87f860fde90ef2d35"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-1-provenance.json.gz",
+      "sha256": "7a1f783780625fe5cb86e0a426204b7545d114e4c7fdd2b6d63e81cdc5ce31f8"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-1.json.gz",
+      "sha256": "f187dc22bacc60a0b57bd3e85e8b738e26051bf3591a00920468be4a0673db98"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-2-device-summary.json.gz",
+      "sha256": "3f65996b820d6d3e3919f9117b3bbea034f06ec2300372e3fe0dcaaea66c9db1"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-2-device.jsonl.gz",
+      "sha256": "37b35f41c950bbaf4e66409d7d5c4faa31744db8286b422cb3e42eb7d3104dd7"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-2-perf.csv.gz",
+      "sha256": "de467a2f50fa078739123a770f4581a3278de6b1ee6383e35ab32c61e312b665"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-2-provenance.json.gz",
+      "sha256": "7a1f783780625fe5cb86e0a426204b7545d114e4c7fdd2b6d63e81cdc5ce31f8"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-control-2.json.gz",
+      "sha256": "9c4223dda4bda359b2caa164cac3b3058b0faf7df2ac424eacc0f055656a7854"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-summary.json.gz",
+      "sha256": "af65592c1a25eee0d8a03218ffaca3b145432102e9ca09b4aeabd4c5bf5b4d5f"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-fireweed-run-lease-index-counters.py.gz",
+      "sha256": "cd48c9fc3168d0226cdc8f7f1886d605ccdf345e0e753cd432eb2a4e8adfdde9"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-fireweed-lease-index-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-fireweed-analyze-lease-index-counters.py.gz",
+      "sha256": "92ad3a1ef3e86b449c28757bf18fdaffde1428b4e17083ca797da959116bc3d7"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-fireweed-lease-index-build.log.gz",
+      "sha256": "5acb1c7e39e373185a4424542ae307ce7e2884910749ba0a467eb68a5ea07273"
+    },
+    {
+      "artifact": "fireweed-lease-index-screen-fireweed-lease-index-counters-runner.log.gz",
+      "sha256": "fccd9a9df6d5ad1413133ffe157c1069af8384162de77b1fc97baa3fc78d7725"
+    }
+  ]
+}

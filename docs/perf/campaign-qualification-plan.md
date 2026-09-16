@@ -1,5 +1,39 @@
 # Campaign qualification and performance plan
 
+## Lease-index screen improves CPU; sustained qualification follows (2026-09-16)
+
+The complete serial control/candidate/candidate/control screen uses the original
+million-row metadata/timestamp-priority campaign, 64 stores, two workers and two
+loaders per campaign. Candidate source is clean `5e41dfc4`, executable
+`76c2bbe999fbb5d96a327e0e5afd897c300a639aa13216ac1e7f60a7880b4b42`;
+control is the preserved `2e8f8ff5` executable `9124cfd7...`. Both enable identical
+projection VFS accounting and user-mode instruction/cycle counters. Every child
+exits zero, all write-error counters are zero, hardware-counter running coverage
+is 100%, and all 128 campaigns perform identical logical work across all four runs.
+
+| Run | Recipients/sec | CPU-ms/recipient | User instructions (trillions) | Requested WAL bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Control 1 | 15,575.62 | 0.883208 | 2.685732 | 6,583,481,888 |
+| Candidate 1 | 15,923.56 | 0.878957 | 2.643084 | 6,596,583,488 |
+| Candidate 2 | 15,007.26 | 0.905949 | 2.642492 | 6,554,209,288 |
+| Control 2 | 14,541.42 | 0.953333 | 2.710068 | 6,630,165,608 |
+
+Candidate arithmetic means improve rate **2.70%**, CPU time **2.81%**, instructions
+**2.04%** and cycles **1.38%**. Paired CPU reductions are 0.48% and 4.97%; paired
+instruction reductions are 1.59% and 2.49%. This supports a modest CPU improvement,
+with substantial control timing variation. WAL bytes improve only 0.48% on average
+(one pair increases 0.20%, the other decreases 1.15%), so this is not demonstrated
+relief from the sustained write stalls. Peak RSS means differ by only -0.21%.
+
+These one-cycle instrumented observations do not qualify either sustained target.
+Retain the candidate for the unchanged serial campaign/primitive/campaign/primitive
+qualification: each campaign processes eight million recipients with one million
+resident, and every primitive must process one million rows at 10k/sec under the
+strengthened count/window/rate gate. No tracing or runtime override is enabled in
+qualification. Archive complete reports, device samples, counter CSVs, exact
+recorder/runner, analysis and build log in `fireweed-lease-index-screen-manifest.json`.
+
+
 ## Consolidated lease-index candidate validated (2026-09-16)
 
 Native ordinary-expiry and pending-lease reads are queue-scoped and return item-ID

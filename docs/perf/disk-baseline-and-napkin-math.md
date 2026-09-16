@@ -1,5 +1,26 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Lease-index CPU screen updates the conditional estimate (2026-09-16)
+
+Four serial one-million-recipient diagnostic runs yield mean CPU costs of
+**0.918270 ms/recipient for controls** and **0.892453 for the consolidated-index
+candidate**. At 12.5k recipients/sec, holding those costs constant would require
+**11.478 versus 11.156 CPU-seconds/sec**, a saving of about 0.323. Both pairs
+reduce instructions, by 1.59% and 2.49%; average wall rate improves 2.70%.
+
+Requested projection WAL writes average 6,606.82 versus 6,575.40 bytes/recipient,
+only a 0.48% reduction. At 12.5k that corresponds to 78.76 versus 78.39 MiB/sec
+of logical WAL writes, before other projection/log activity and filesystem
+compression/coalescing. These are VFS bytes, not host-device writes. The change
+therefore supports a modest CPU-budget improvement, not a claim that storage
+stalls or the sustained rate gap are solved. Existing disk baselines remain intact.
+
+The workload counts match across all four runs; both variants use identical
+instrumentation, which prevents qualification. The unchanged repeated eight-cycle
+campaign and all-five-primitive qualification follows without tracing. Evidence
+and reproducible calculations: `fireweed-lease-index-screen-manifest.json`.
+
+
 ## Checkpoint scheduling did not qualify; updated resource demand (2026-09-16)
 
 Two complete untraced eight-cycle campaigns with staggered checkpoint windows
