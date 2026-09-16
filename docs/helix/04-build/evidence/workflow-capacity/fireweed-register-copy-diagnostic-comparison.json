@@ -1,0 +1,40 @@
+{
+  "runs": [
+    {
+      "tag": "trim-register-copy-one",
+      "head": "2b0ad4868a6ef4e413804aeaa8555260d983b831",
+      "binary_sha256": "a9605e586caea9beb5877dc6b1fa9f7d2cff0d78ee76a8121bc3aba64c055124",
+      "exit_code": 0,
+      "recipients_per_s": 15604.775148332454,
+      "cpu_ms_per_recipient": 0.9070694669999999,
+      "rss_gib": 13.48611068725586,
+      "process_wall_s": 64.33677652099868
+    },
+    {
+      "tag": "trim-register-copy-control-one",
+      "head": "2b0ad4868a6ef4e413804aeaa8555260d983b831",
+      "binary_sha256": "be319723be6ee3e617fe0e3694045a589d86bb60dfa8f612357d7f24f5d9a030",
+      "exit_code": 0,
+      "recipients_per_s": 15156.747455707748,
+      "cpu_ms_per_recipient": 0.9142355750000001,
+      "rss_gib": 12.868904113769531,
+      "process_wall_s": 66.39106828299919
+    },
+    {
+      "tag": "trim-register-copy-one-repeat",
+      "head": "2b0ad4868a6ef4e413804aeaa8555260d983b831",
+      "binary_sha256": "a9605e586caea9beb5877dc6b1fa9f7d2cff0d78ee76a8121bc3aba64c055124",
+      "exit_code": 0,
+      "recipients_per_s": 15363.067462199386,
+      "cpu_ms_per_recipient": 0.9188756679999999,
+      "rss_gib": 13.064224243164062,
+      "process_wall_s": 65.40631676500197
+    }
+  ],
+  "qualification": false,
+  "notes": [
+    "Serial, unprofiled, one million recipients per run, one cycle each; no repeated-cycle stability claim.",
+    "Control binary predates both register reuse and logged push fingerprint fix; not an isolated attribution experiment.",
+    "Candidate rates +2.96% and +1.36% versus the single control; CPU cost straddles control, so sustained benefit remains unproven."
+  ]
+}

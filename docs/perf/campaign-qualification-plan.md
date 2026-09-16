@@ -1,5 +1,26 @@
 # Campaign qualification and performance plan
 
+## Unprofiled register-reuse diagnostic comparison (2026-09-15)
+
+Three sequential, unprofiled one-cycle million-recipient campaigns compare the
+new `a9605e58...` executable with the preserved `be319723...` baseline:
+
+| Run | Recipients/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: |
+| Candidate | 15,605 | 0.90707 | 13.49 |
+| Preserved baseline | 15,157 | 0.91424 | 12.87 |
+| Candidate repeat | 15,363 | 0.91888 | 13.06 |
+
+All three finish correctly. Candidate throughput is 1.36–2.96% above the single
+control, but CPU cost straddles it; this does not establish a sustained benefit.
+The baseline also predates the fingerprint correctness fix, so this is not an
+isolated causal estimate for register reuse. Baseline executable provenance is
+explicitly marked diagnostic. One-cycle runs cannot satisfy qualification's
+repeated-cycle storage, RSS and fairness checks. Proceed to the unchanged
+64-store/eight-cycle campaign before deciding whether to retain this candidate.
+Evidence: `fireweed-register-copy-diagnostic-comparison.json` and
+`fireweed-campaign-trim-register-copy-*`.
+
 ## Retired SQLite tests and durable request identity (2026-09-15)
 
 The broader release invocation exposed stale `public_durability_matrix` calls
