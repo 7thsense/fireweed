@@ -1,5 +1,40 @@
 # Campaign qualification and performance plan
 
+## Active-backend CPU profile and record-comparison candidate (2026-09-16)
+
+The full eight-cycle profile uses the preserved `2e8f8ff5` control binary
+(`9124cfd715be116ce28c5ed83ded45fb0773c9ff45772dfab8e54614999acf61`),
+recorded from clean `acd4a9ab` at 19 Hz with 2048-byte DWARF stacks. It completed
+8 million original-row recipients at 15,360.74/sec overall, with 0.8910 CPU-ms
+per recipient and 19.475 GiB peak RSS. CPU accounting includes the perf wrapper.
+Every 12.5k workload/resource check passes except the deliberately disqualifying
+diagnostic-provenance check. This is a profile, not a repeated qualification.
+
+The recording contains 171,068 samples; the self report shows zero lost samples.
+Self CPU: allocation 6.12%, column extraction 5.61%, VM stepping 4.58%, generic
+record comparison 2.65%, and in-process WAL latest-frame iteration **0.34%**.
+Inclusive CPU: index seeking 14.81%, column extraction 13.50%, record comparison
+6.68%. Inclusive categories overlap and short stacks truncate ancestry; these
+percentages cannot be added or directly compared with earlier 4096-byte-stack
+profiles. WAL iteration is active but too small to be the principal next target.
+
+A bounded candidate in `types.rs` resumes record comparison after an equal first
+text key using the already decoded header/data positions. The prior string path
+re-entered the generic comparator, reparsed the record header and skipped the
+same first field again. Remaining fields share one comparison loop, preserving
+collation, sort order and prefix-key tie handling. The new decoded-value oracle
+covers 48,600 combinations of text prefixes, mixed field values, sort direction,
+collation, record/key lengths and tie outcomes. It passes. The full native Turso suite also passes: **2,124 passed,
+16 ignored**. Public workflow and performance validation of this candidate
+remain pending; no improvement is
+claimed from source inspection or the focused test.
+
+Profile evidence, raw perf parts, report commands, recorder and device monitor
+sources, and the complete gate results are listed in
+`fireweed-active-wal-profile-manifest.json`. Reconstruct the raw recording by
+concatenating the decompressed parts in manifest order. The unwind shim is used
+only by offline `perf report`, never by the measured workload.
+
 ## Retire disabled SQLite facade fixtures (2026-09-16)
 
 The facade no longer retains `cfg(any())` SQLite tests or its unreachable

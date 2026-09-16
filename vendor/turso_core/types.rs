@@ -2418,7 +2418,7 @@ where
 /// 3. **Sort order**: Applies ascending/descending order to comparison result
 /// 4. **Length comparison**: If strings are equal, compares lengths
 /// 5. **Remaining fields**: If first field is equal and more fields exist,
-///    delegates to `compare_records_generic()` with `skip=1`
+///    continues decoding at the next header and data positions
 fn compare_records_string<V, I>(
     serialized: &ImmutableRecord,
     unpacked: I,
@@ -2445,7 +2445,7 @@ where
         )));
     }
 
-    let (first_serial_type, _) = read_varint(&payload[offset_1st_serialtype..])?;
+    let (first_serial_type, serial_bytes) = read_varint(&payload[offset_1st_serialtype..])?;
 
     let serialtype_is_string = first_serial_type >= 13 && (first_serial_type & 1) == 1;
     if !serialtype_is_string {
@@ -2490,7 +2490,16 @@ where
             }
 
             if unpacked.len() > 1 {
-                return compare_records_generic(serialized, unpacked, index_info, 1, tie_breaker);
+                let field_limit = unpacked.len().min(index_info.key_info.len());
+                return compare_record_fields(
+                    payload,
+                    unpacked.skip(1),
+                    &index_info.key_info[1..field_limit],
+                    header_size,
+                    offset_1st_serialtype + serial_bytes,
+                    data_start + string_len,
+                    tie_breaker,
+                );
             }
             Ok(tie_breaker)
         }
@@ -2570,15 +2579,38 @@ where
         }
     }
 
-    let mut field_idx = skip;
     let field_limit = unpacked.len().min(index_info.key_info.len());
+    if skip >= field_limit {
+        return Ok(tie_breaker);
+    }
+    compare_record_fields(
+        payload,
+        unpacked.skip(skip),
+        &index_info.key_info[skip..field_limit],
+        header_end,
+        header_pos,
+        data_pos,
+        tie_breaker,
+    )
+}
 
-    // assumes that that the `unpacked' iterator was not skipped outside this function call`
-    for rhs_value in unpacked.skip(skip) {
-        let rhs_value = &rhs_value.as_value_ref();
-        if field_idx >= field_limit || header_pos >= header_end {
+/// Continue at an already decoded record position. In particular, an equal first
+/// text key must not cause its header and serial type to be decoded a second time.
+#[inline(always)]
+fn compare_record_fields<V: AsValueRef>(
+    payload: &[u8],
+    unpacked: impl Iterator<Item = V>,
+    keys: &[KeyInfo],
+    header_end: usize,
+    mut header_pos: usize,
+    mut data_pos: usize,
+    tie_breaker: std::cmp::Ordering,
+) -> Result<std::cmp::Ordering> {
+    for (rhs_value, key_info) in unpacked.zip(keys) {
+        if header_pos >= header_end {
             break;
         }
+        let rhs_value = &rhs_value.as_value_ref();
         let (serial_type_raw, bytes_read) = read_varint(&payload[header_pos..])?;
         header_pos += bytes_read;
 
@@ -2596,14 +2628,14 @@ where
         };
 
         let comparison = match (&lhs_value, rhs_value) {
-            (ValueRef::Text(lhs_text), ValueRef::Text(rhs_text)) => index_info.key_info[field_idx]
-                .collation
-                .compare_strings(lhs_text, rhs_text),
+            (ValueRef::Text(lhs_text), ValueRef::Text(rhs_text)) => {
+                key_info.collation.compare_strings(lhs_text, rhs_text)
+            }
 
             _ => lhs_value.cmp(rhs_value),
         };
 
-        let final_comparison = match index_info.key_info[field_idx].sort_order {
+        let final_comparison = match key_info.sort_order {
             SortOrder::Asc => comparison,
             SortOrder::Desc => comparison.reverse(),
         };
@@ -2611,8 +2643,6 @@ where
         if final_comparison != std::cmp::Ordering::Equal {
             return Ok(final_comparison);
         }
-
-        field_idx += 1;
     }
 
     Ok(tie_breaker)
@@ -3894,6 +3924,75 @@ mod tests {
                 &index_info,
                 test_name,
             );
+        }
+    }
+
+    #[test]
+    fn text_prefix_continuation_matches_decoded_ordering() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let tails = vec![
+            Value::Null,
+            Value::from_i64(-129),
+            Value::from_i64(0),
+            Value::from_i64(1),
+            Value::from_i64(i64::MAX),
+            Value::from_f64(1.5),
+            Value::Text(Text::new("")),
+            Value::Text(Text::new("Queue")),
+            Value::Text(Text::new("queue ")),
+            Value::Blob(vec![0, 255]),
+        ];
+        for tenant in ["".to_owned(), "tenant".to_owned(), "雪".repeat(80)] {
+            for direction in [SortOrder::Asc, SortOrder::Desc] {
+                for collation in [
+                    CollationSeq::Binary,
+                    CollationSeq::NoCase,
+                    CollationSeq::Rtrim,
+                ] {
+                    let index = create_index_info(
+                        3,
+                        vec![SortOrder::Asc, direction, direction],
+                        vec![CollationSeq::Binary, collation, CollationSeq::Binary],
+                    );
+                    for lhs_tail in &tails {
+                        for rhs_tail in &tails {
+                            let lhs = vec![
+                                Value::Text(Text::new(tenant.clone())),
+                                lhs_tail.clone(),
+                                Value::from_i64(42),
+                            ];
+                            let rhs = vec![
+                                Value::Text(Text::new(tenant.clone())),
+                                rhs_tail.clone(),
+                                Value::from_i64(43),
+                            ];
+                            for lhs_len in 1..=3 {
+                                let serialized = create_record(lhs[..lhs_len].to_vec());
+                                let lhs_refs: Vec<_> =
+                                    lhs[..lhs_len].iter().map(Value::as_ref).collect();
+                                for rhs_len in 1..=3 {
+                                    let rhs_refs: Vec<_> = rhs[..rhs_len]
+                                        .iter()
+                                        .map(Value::as_ref)
+                                        .collect();
+                                    for tie in [Less, Equal, Greater] {
+                                        let expected = compare_immutable_for_testing(
+                                            &lhs_refs,
+                                            &rhs_refs,
+                                            &index.key_info,
+                                            tie,
+                                        );
+                                        let actual = RecordCompare::String
+                                            .compare(&serialized, rhs_refs.iter(), &index, 0, tie)
+                                            .unwrap();
+                                        assert_eq!(actual, expected, "lhs={lhs_refs:?} rhs={rhs_refs:?} direction={direction:?} collation={collation:?} tie={tie:?}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

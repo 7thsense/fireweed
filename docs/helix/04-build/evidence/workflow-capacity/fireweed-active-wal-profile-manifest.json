@@ -1,0 +1,131 @@
+{
+  "classification": "diagnostic only; eight-cycle control profile; not qualification",
+  "raw_perf_sha256": "12dc0cb3de927b40a80f00d48964079374446b94c6be1eea60bd77594d818a18",
+  "raw_perf_ordered_parts": [
+    "fireweed-active-wal-profile-control-perf.data.part00.gz",
+    "fireweed-active-wal-profile-control-perf.data.part01.gz",
+    "fireweed-active-wal-profile-control-perf.data.part02.gz",
+    "fireweed-active-wal-profile-control-perf.data.part03.gz",
+    "fireweed-active-wal-profile-control-perf.data.part04.gz",
+    "fireweed-active-wal-profile-control-perf.data.part05.gz"
+  ],
+  "artifacts": [
+    {
+      "artifact": "fireweed-active-wal-profile-control.json.gz",
+      "sha256": "ed8351af76740caa8c8283a57eca646d463c9de91993088d7d6f0d69d123614c",
+      "decompressed_bytes": 4997612
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-provenance.json.gz",
+      "sha256": "f075f6d3c7f001019973938409035bcd74f879663cb47773b325bd2becd1b17b",
+      "decompressed_bytes": 509
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-device.jsonl.gz",
+      "sha256": "720450a36387c303ae1c488985f83d27fd803d961c0f028a789d6e9cabc1f173",
+      "decompressed_bytes": 599055
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-device-summary.json.gz",
+      "sha256": "c6e056db21051f9956192f272aebed0af417e141b87a6a585325b8834f3f7a9c",
+      "decompressed_bytes": 908
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-summary.json.gz",
+      "sha256": "f11db5be8f1a55ee83ac7c7dd479f3adf81b5195f3f2ce526e2dd8b7d47422aa",
+      "decompressed_bytes": 270
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-self.txt.gz",
+      "sha256": "128430eea744afc72cdf7e696e14bbb6cad0afb7fc773219b1ee30c01c0ebad0",
+      "decompressed_bytes": 156261
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-self-errors.txt.gz",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "decompressed_bytes": 0
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-inclusive.txt.gz",
+      "sha256": "a2e51b84bf55bb6adc8bebe47af53c67fde37c257a78c1bf3ccb31de376159ac",
+      "decompressed_bytes": 1431953
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-inclusive-errors.txt.gz",
+      "sha256": "39d354df46c97f6e8893c54191125b5f5a34b196805f50ee1c9c9955f5d640b3",
+      "decompressed_bytes": 95
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-column-annotate.txt.gz",
+      "sha256": "31c9cce2e07464da69c0af73edfc76384b56acc2fdf377a56c3e93db2613f821",
+      "decompressed_bytes": 124869
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-annotate-errors.txt.gz",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "decompressed_bytes": 0
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-fireweed-run-active-wal-profile.py.txt.gz",
+      "sha256": "80f4473d3d8ee7bbb5018d44bda07f925c66e9af88e466d6762a73bffe1f36d9",
+      "decompressed_bytes": 5070
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-fireweed-active-wal-profile-recorder.py.txt.gz",
+      "sha256": "fc2897a80ff8367e5233cdf47109c07d5b944c036115d2c9a32ffe266324e599",
+      "decompressed_bytes": 9037
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-fireweed-device-monitor-v3.py.txt.gz",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1",
+      "decompressed_bytes": 1522
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-fireweed-device-summary-v3.py.txt.gz",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8",
+      "decompressed_bytes": 1458
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-perf.data.part00.gz",
+      "sha256": "e142b609a617c9a1bbdce137eb69d98b6c74bb1ac5df8316a73364df302e5fe6",
+      "decompressed_bytes": 67108864
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-perf.data.part01.gz",
+      "sha256": "04953c1b28bdbce7e6f71ed9b2f10492391e147d243b11de1e77f8cecaf5ea50",
+      "decompressed_bytes": 67108864
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-perf.data.part02.gz",
+      "sha256": "e556961802bfd615e9a6ad23cd18a8cc897d464d6bad99027685c2566852eee9",
+      "decompressed_bytes": 67108864
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-perf.data.part03.gz",
+      "sha256": "180c28e0168ee489e1cc884abdac5345b5af1651e7df781eae51460ff5f9c10f",
+      "decompressed_bytes": 67108864
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-perf.data.part04.gz",
+      "sha256": "6c49955e09084066eb5e8e4804ae210424b1a9eb28c92eb3d9374212177694c9",
+      "decompressed_bytes": 67108864
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-control-perf.data.part05.gz",
+      "sha256": "11455c181980d7034e784b1c0c598a2aee262f72e09935e3b9c9693b2db42deb",
+      "decompressed_bytes": 54981776
+    },
+    {
+      "artifact": "fireweed-active-wal-profile-gate.json.gz",
+      "sha256": "9e7cc6d3fa0588990399195dd12b52935a867d163261ecacb83df84f73f84d83",
+      "decompressed_bytes": 328383
+    }
+  ],
+  "offline_commands": [
+    "perf report --stdio --no-children --sort symbol,dso --percent-limit 0.2 --call-graph none -i control-perf.data",
+    "LD_PRELOAD=/tmp/fireweed-perf-unwind-bias.so perf report --stdio --children --sort symbol,dso --percent-limit 0.2 --call-graph none -i control-perf.data",
+    "perf annotate --stdio -s turso_core::vdbe::execute::op_column -i control-perf.data"
+  ],
+  "unwind_shim_source": "fireweed-perf-unwind-bias.c.txt",
+  "note": "Preload is offline analysis only. 2048-byte sampled stacks can truncate inclusive ancestry; inclusive percentages overlap."
+}

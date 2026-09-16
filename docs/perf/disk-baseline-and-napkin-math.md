@@ -1,5 +1,29 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Active-backend CPU budget (2026-09-16)
+
+The full 8M-recipient, eight-cycle control profile measured 0.891019 CPU-ms per
+complete recipient (perf-wrapper CPU included). Holding that cost constant,
+10k recipients/sec consumes about **8.910 CPU-seconds/sec**, and 12.5k consumes
+**11.138 CPU-seconds/sec**. These are resource requirements, not achievable-rate
+predictions: barriers, serialization, queue fairness, I/O waits and CPU scaling
+still determine each cycle's rate. The diagnostic run passed the resource and
+workload checks but cannot qualify because profiling was enabled.
+
+Actual in-process WAL latest-frame iteration accounts for only **0.34% self
+CPU**. Even eliminating all of it saves at most roughly 0.0030 CPU-ms/recipient
+under this profile; it cannot explain or close the latest 7.41% worst-cycle rate
+gap by itself. Composite-index comparison is a stronger candidate: 6.68%
+inclusive CPU, including 2.65% self CPU in the generic comparator. These are
+sampled categories with overlapping ancestry, not independently additive costs.
+The candidate reuses decoded record positions after the first equal text key;
+its benefit remains unmeasured. No device ceiling is inferred from this profile.
+
+See `fireweed-active-wal-profile-manifest.json` in the workflow-capacity evidence
+directory for the raw recording, commands, gates and reports. Existing sustained
+write baselines and fixed campaign qualification targets remain unchanged.
+
+
 ## Correction: optimized the inactive WAL backend; remove that fast path (2026-09-16)
 
 The narrow-frame experiment targeted the wrong backend. Fireweed's
