@@ -1,5 +1,46 @@
 # Campaign qualification and performance plan
 
+## Owned-parameter comparison is inconclusive (2026-09-16)
+
+Clean candidate source `fa49f380`, executable
+`5d0ac2955435d238bb631b9e432e8834c6fe5d9f53964825f70d98097df9be8f`,
+was compared serially with preserved `dcaf90ac...` (build source `64eb686f`).
+Each run uses one million rows, 64 stores, two workers, all handler limits and
+public correctness checks, default co-located filesystem roots and no forced
+compression property. The adapted recorder selects an explicit executable and
+records its build-source provenance separately from the current recorder source.
+No runs overlap. These are one-cycle screens, not sustained qualification.
+
+| Untraced run | Recipients/sec | CPU-ms/recipient | Sampled mean CPU MHz |
+| --- | ---: | ---: | ---: |
+| Candidate | 15,985 | 0.88892 | 3,309 |
+| Control | 14,802 | 0.91175 | 3,061 |
+| Candidate repeat | 14,362 | 0.96974 | 2,871 |
+
+The candidate results straddle the control. Frequency samples average all logical
+CPUs and are not execution-weighted; do not use them as an exact normalization.
+A second serial comparison uses `perf stat` around only the workload process and
+its threads, excluding the recorder/monitor. Memory sampling follows the actual
+workload child rather than the perf wrapper. Both counters report 100% running
+coverage:
+
+| Counter run | User instructions/recipient | User cycles/recipient | Recipients/sec |
+| --- | ---: | ---: | ---: |
+| Candidate | 2,801,930 | 2,388,664 | 15,543 |
+| Control | 2,831,849 | 2,401,067 | 15,112 |
+| Candidate repeat | 2,857,474 | 2,364,057 | 13,783 |
+
+Again, executed-instruction counts straddle the control. Claims, nonempty batches
+and empty claims are identical; 1 Hz reporting performs 5,968 / 6,175 / 6,643
+reads as wall time varies. No isolated throughput or instruction-count benefit
+is established. The ownership transfer removes an unnecessary buffer clone and
+is correctness-validated, but is not presented as the solution to WAL stalls.
+Full raw reports, counters, monitors, provenance and recorder scripts are archived
+as `fireweed-owned-params-{comparison,counters}-*` and associated Python scripts.
+
+Next run the unchanged full eight-cycle candidate with tracing disabled and all
+10k/12.5k gates. Do not claim either milestone from these short screens.
+
 ## Owned Turso parameters validated; performance comparison pending (2026-09-16)
 
 The candidate adds `RelTx::execute_owned` with a default borrowing implementation,
