@@ -1,0 +1,87 @@
+[
+  {
+    "file": "fireweed-interleaved-untraced-repeat-campaign-1.json.gz",
+    "uncompressed_sha256": "df80d26fac0a99cfff225501a582037c2fda609fda2e465bda3cf28afc0385a5",
+    "uncompressed_bytes": 5358405
+  },
+  {
+    "file": "fireweed-interleaved-untraced-repeat-primitives-1.json.gz",
+    "uncompressed_sha256": "7964798d0c01eba3b3ca23a92dfd038892019082c2ade2942098878c840af080",
+    "uncompressed_bytes": 155463
+  },
+  {
+    "file": "fireweed-interleaved-untraced-repeat-campaign-2.json.gz",
+    "uncompressed_sha256": "4b9c651454f8eaa14df2eb59ac5e6795e3c1b1f7add5a05027e1418a1e59f67e",
+    "uncompressed_bytes": 5428272
+  },
+  {
+    "file": "fireweed-interleaved-untraced-repeat-primitives-2.json.gz",
+    "uncompressed_sha256": "738d8bf56fe21fc63b92d4241339e83add5d6088c2bedad5dcd05a5cac241969",
+    "uncompressed_bytes": 154324
+  },
+  {
+    "file": "fireweed-run-interleaved-untraced-qualification.py",
+    "uncompressed_sha256": "1b06fdf2ac25e7faa1a81d10859da5a23163d4ac72ae4bdcd476fa17192f2530",
+    "uncompressed_bytes": 2841
+  },
+  {
+    "file": "fireweed-summarize-untraced-repeat.py",
+    "uncompressed_sha256": "575a39ff33a256dc7626c2478b550f64d8a794a87988a5143de19a4bcbab5d34",
+    "uncompressed_bytes": 1304
+  },
+  {
+    "file": "fireweed-interleaved-untraced-repeat-summary.json.gz",
+    "uncompressed_sha256": "eb85d53a1724d95c9da6e2108d6d44a93f99563052ace4902f7453fcec6172ed",
+    "uncompressed_bytes": 8307
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-runner.log.gz",
+    "uncompressed_sha256": "a893b429b20da6e43ddffae4d53e43898aa3ee564aa43e0e0466c8e05cde6f60",
+    "uncompressed_bytes": 14188
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phases.json.gz",
+    "uncompressed_sha256": "ffc7ac233ab7b230c35b41c871a5e5647eb14957b0c1f0a23a7c0c8e3ed23b75",
+    "uncompressed_bytes": 3065
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-1-device.jsonl.gz",
+    "uncompressed_sha256": "c58c281362d7f9183c399faa67749e3b58ec70ec1b4186ed0554038a0ed6c7f4",
+    "uncompressed_bytes": 624459
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-1-device-summary.json.gz",
+    "uncompressed_sha256": "3eea87c9fbaaf0cd63cd7322929f0914b5ba2b87d4a9b4de62d8a926f63ddc36",
+    "uncompressed_bytes": 905
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-2-device.jsonl.gz",
+    "uncompressed_sha256": "d69bd677d7079544a7065ac3a1a476f51f05f2538b9988e59c8093329af751bb",
+    "uncompressed_bytes": 104505
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-2-device-summary.json.gz",
+    "uncompressed_sha256": "4e02d6797896033e96833d4db9beb338caaaef87bba310e57e7a0e6b8273e4d5",
+    "uncompressed_bytes": 904
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-3-device.jsonl.gz",
+    "uncompressed_sha256": "c702f0039e5c1c38457fedffbbdc6f7644ae0c83fa0c307d9c1721e8695bf9b4",
+    "uncompressed_bytes": 674966
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-3-device-summary.json.gz",
+    "uncompressed_sha256": "ff2ab9e2c0c3f91e3372ffbd70fe6b71a46588cd762af63f8ad595f580955b3d",
+    "uncompressed_bytes": 899
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-4-device.jsonl.gz",
+    "uncompressed_sha256": "730a9af8b7c2a503c1883b11092eb3ceb157eb8378cf03917a22bb721c043f07",
+    "uncompressed_bytes": 102307
+  },
+  {
+    "file": "fireweed-interleaved-untraced-qualification-phase-4-device-summary.json.gz",
+    "uncompressed_sha256": "675d73fdcfdc6072f319b3bf632ae4929ef3f715d56a1f8c36ffd6feb96400fd",
+    "uncompressed_bytes": 901
+  }
+]

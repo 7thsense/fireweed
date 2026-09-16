@@ -1,5 +1,55 @@
 # Campaign qualification and performance plan
 
+## Repeated 10k qualification achieved; 12.5k remains open (2026-09-16)
+
+All four sequential runs use clean `5cff73d4`, binary
+`83e48da6ebda99cc9351f43808a779a6aae5ec23995068ad54977db0af080147`,
+with no tracing, diagnostic override, runtime-thread override, host tuning or
+concurrent benchmark/build. The canonical script runs campaign 1, primitives 1,
+campaign 2, primitives 2. Each campaign has eight million total lifecycles with
+one million resident rows per cycle, 64 stores/two workers, original-row metadata,
+timestamp priorities, distinct handler limits, retries, reporting and retention.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | 10k qualification | 12.5k qualification |
+| --- | ---: | ---: | --- | --- |
+| First | 14,423.72 | 13,037.86 | Pass | Pass |
+| Second | 13,145.01 | 11,712.03 | Pass | Fail |
+
+The second campaign fails only the 12.5k rate checks for cycles 4/5/6:
+11,712.03 / 12,242.56 / 12,303.90/sec. Every correctness, reporting, fairness
+at the 10k floor, WAL, checkpoint and RSS gate passes in both runs. Rates are
+assessed per campaign in every cycle, not just as whole-run averages. The
+wrapper exits 1 because the stretch goal fails; all four workload processes
+exit successfully. Re-evaluation at the unchanged 10k target passes both.
+
+| Primitive, records/sec | First | Second |
+| --- | ---: | ---: |
+| Insert | 38,235.91 | 42,697.08 |
+| Enrich by key | 42,798.04 | 44,713.62 |
+| Schedule by ID | 104,621.60 | 107,900.40 |
+| Claim and complete | 42,725.43 | 42,292.93 |
+| Purge | 59,740.74 | 56,957.77 |
+
+Both million-row varied-payload primitive runs pass all gates. These rates use
+1,000-row public API batches across 32 stores; they are not individual unbatched
+request rates. No gate was relaxed to obtain the repeated 10k milestone.
+
+Campaign CPU costs are 0.94448 / 0.98161 ms per recipient; peak RSS is
+18.664 / 19.351 GiB. Host-wide writes are 31.140 / 29.853 GiB, with mean write
+request latency 5.80 / 14.86 ms and device busy time 33.40 / 50.02%. These
+samples omit short startup/tail intervals and do not isolate process I/O.
+The repeat writes fewer physical bytes yet takes longer: byte volume alone
+does not explain the timing. CPU demand and synchronization variance remain
+separate constraints. The slowest cycle needs 6.73% more throughput for 12.5k.
+
+Evidence: `fireweed-interleaved-untraced-repeat-{campaign,primitives}-{1,2}.json.gz`,
+independent both-target evaluation, exact runner, canonical build/run log and
+four device sample/summary pairs. The manifest hashes all uncompressed artifacts.
+The full stretch goal remains active. The next code review targets repeated
+record-header parsing in Turso Column execution; cache invalidation and record
+reuse must be proved before retaining an optimization.
+
+
 ## Reject companion wait; resume repeated untraced qualification (2026-09-16)
 
 Clean candidate `78d03aec`, binary `bad4707b...`, was compared serially with

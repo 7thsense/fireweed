@@ -1,5 +1,31 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Repeated 10k established; remaining stretch budget (2026-09-16)
+
+The canonical untraced pair now passes every **10k** campaign and primitive gate.
+Campaigns average 14,424 / 13,145 recipients/sec, with worst cycles 13,038 /
+11,712. Only the first campaign qualifies at 12.5k; the repeat misses three
+cycle-rate checks. See the [full qualification record](campaign-qualification-plan.md).
+This is progress on the fixed objective, not a replacement for the stretch goal.
+
+Measured CPU cost is **0.94448 / 0.98161 ms per recipient**, implying **11.81 /
+12.27 CPU-seconds/sec** at 12.5k. Host writes are about **4,180 / 4,007 bytes per
+recipient**, implying **49.82 / 47.77 MiB/sec** at that rate. The repeated run
+has lower total write volume but higher mean device write-request latency
+(14.86 versus 5.80 ms), and higher CPU cost. These are measured resource budgets,
+not independent capacity predictions or proof of a single bottleneck.
+
+The slowest cycle requires **6.73% more throughput**, equivalent to reducing
+its 85.377-second wall time by **6.30%** to reach 80 seconds per million rows.
+Keep both CPU reduction and synchronization variance in the model. The longer
+81.36 MiB/sec calibration interval bounds optimism about sequential headroom;
+it does not turn elapsed fsync time into a bandwidth measurement.
+
+Next inspect repeated header decoding in native Turso column access, already
+visible in the CPU profile. Preserve per-cycle fairness, reporting, durability
+and all resource gates in any subsequent comparison and repeated qualification.
+
+
 ## Publication-phase budget after a passing diagnostic (2026-09-16)
 
 The unchanged workflow with publication tracing costs **0.92693 CPU-ms per
