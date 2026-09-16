@@ -1,5 +1,104 @@
 # Campaign qualification and performance plan
 
+## Qualified: repeated 12,500 complete campaign recipients/sec (2026-09-16)
+
+**The fixed 10k target and 25% stretch target are both achieved in repeated
+canonical qualification.** Clean source `49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707`,
+CLI SHA-256 `0bc944811975d74f8199a4fbbda6c8057d33879ab3c1118d4db842749d5348c7`,
+completed the unchanged serial campaign/primitive/campaign/primitive runner with
+exit zero. Both eight-million-recipient campaigns pass all **2,278 checks** at
+12.5k; independent re-evaluation also passes at 10k. Both million-row primitive
+suites pass every 10k floor. All four reports identify the same clean source and
+binary, empty tracing/override diagnostics, and filesystem log/native Turso.
+
+| Measurement | Run 1 | Run 2 |
+| --- | ---: | ---: |
+| Complete campaign recipients/sec, overall | 15,816.54 | 13,989.98 |
+| Slowest cycle equivalent recipients/sec | 13,174.50 | 12,880.61 |
+| CPU-ms per complete recipient | 0.81836 | 0.85866 |
+| Peak process RSS, GiB | 20.377 | 19.166 |
+| Worst campaign/cycle progress-read p95, seconds | 0.524 | 0.626 |
+| Maximum due-to-claim latency, seconds | 11.304 | 12.470 |
+| Largest sampled per-store WAL, MiB | 457.32 | 460.91 |
+
+The sixteen cycle minima, in run order, are:
+`17929, 17775, 17343, 15867, 15663, 17411, 14709, 13175` and
+`13570, 14952, 16676, 16561, 13551, 13207, 13201, 12881` recipients/sec.
+The worst observed cycle clears 12.5k by **3.04%**. The repeat's lower throughput
+is retained in the result; this is measured qualification on this machine and
+workload, not an indefinite throughput guarantee or hardware ceiling.
+
+| Primitive, 1M rows each | Run 1 rows/sec | Run 2 rows/sec |
+| --- | ---: | ---: |
+| Insert | 44,040 | 39,373 |
+| Enrich by key | 40,960 | 37,825 |
+| Schedule by ID | 52,473 | 96,154 |
+| Claim and complete | 42,511 | 37,018 |
+| Purge | 58,799 | 54,054 |
+
+These are bounded batched high-level API operations across 32 stores, not
+individually synced, unbatched requests. Complete campaigns use 64 stores, two
+campaigns/store, two loaders/workers per campaign, 1M simultaneously resident
+original rows and eight cycles. Nominal varied payload is 1 KiB, metadata is
+persisted on the original row, stage handler limits remain 500/200/500, storage
+batch 1000 and discovered retention batch 8000. Four due windows, every-19th retry,
+every-31st permanent failure, one-second progress polling, final disposition
+verification and purge remain enabled. There are no workflow side-items.
+
+The terminal success code includes the full persisted payload/metadata/identity
+oracle and window-disposition checks. The independent gate recomputes expected
+failures, retries, claims, handler counts, work totals and per-cycle rates; it
+checks reporting latency/frequency, due-claim bounds, <=512 MiB WAL/store,
+materialized/stable main files and <=10% final-three RSS range. Virtual clock
+advances exclude only intentional calendar waiting; actual API work, handlers,
+oracles and coordination barriers remain inside elapsed time.
+
+Before these measurements, **12 public campaign/primitive/recovery tests passed**
+(including child-process helpers), with terminal metadata/top times/priority and
+outcomes rebuilt into a fresh projection from the log alone. The idle-wait
+regression failed on the original code; all **46 vendor log contract tests**
+passed after the fix. The source review aligns timestamp priority/eligibility
+with Snorri and legacy scheduled actions; fixture handlers are deterministic
+stubs, so external providers and network capacity are outside this measurement.
+
+The final code optimization is `ffd96612`: an idle log flush worker now waits
+for enqueue/shutdown notification when no uploads/commit are pending. Active-I/O
+handling, batching, log synchronization, ordering and projection durability policy
+are unchanged. The balanced screen reduced voluntary context switches 80.77%
+and CPU time in both pairs; the full untraced qualification establishes the
+required result. Earlier retained indexing and cache fixes also remain in place.
+
+### Updated sustained resource estimate
+
+On Forseti's Ryzen 7 4800H (8 physical cores/16 logical threads), 64 GiB RAM and
+Kingston NVMe through LUKS/Btrfs, the qualified runs imply **10.23–10.73 CPU
+seconds/sec at 12.5k recipients/sec**. Sampled host writes are 29.637/29.530 GiB
+per 8M recipients: **47.42/47.25 MiB/sec at the target**. Host counters omit
+startup/tail and are not process-attributed. The diagnostic full-length placement
+comparison separately measured about 81.34 MiB/sec logical WAL and 21.86 MiB/sec
+immutable log data at that rate; those are logical accounting layers, not extra
+physical bytes to add to host writes.
+
+The earlier 182.63 MiB/sec long direct-write baseline remains a different I/O
+pattern, not a divisor that predicts queue throughput. Moving the projections
+to RAM roughly halved host writes without improving full-workflow throughput.
+That experiment plus the measured scheduler reduction supports the CPU/scheduling
+fix; neither establishes that device latency can never limit the system. No SSD,
+TRIM, mount, quota, kernel or workflow-gate changes were used for this optimization.
+
+Reproduce with `CARGO_BUILD_JOBS=8 bash scripts/perf/qualify-workflow-capacity.sh NEW_DIR`.
+Keep builds, tests and measured workloads serial as in this evidence. The next
+release can use this qualified code; no release or push is part of this result.
+
+Evidence: `fireweed-idle-wait-qualified-manifest.json` archives **33** raw reports,
+device samples/summaries, public-test output, serial runner logs, the completion
+audit and source snapshots. Every compressed artifact was checked against its
+SHA-256 of decompressed bytes. `qualification-audit.json` verifies all four exits,
+both targets, same source/binary, clean tree, exact workload shape and serial
+runner success. Supporting manifests are `fireweed-idle-wait-validation-manifest.json`,
+`fireweed-idle-wait-screen-manifest.json` and `fireweed-split-projection-full-manifest.json`.
+
+
 ## Idle log wait: repeated CPU reduction in the serial screen (2026-09-16)
 
 The disk-backed control/candidate/candidate/control one-cycle screen completed

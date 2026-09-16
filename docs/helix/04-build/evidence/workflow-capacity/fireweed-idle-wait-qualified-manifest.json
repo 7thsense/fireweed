@@ -1,0 +1,185 @@
+{
+  "scope": "Successful canonical serial campaign/primitive/campaign/primitive qualification: two 8M original-row campaigns and two 1M-row five-phase primitive suites; untraced disk-backed log and native Turso.",
+  "qualified_source": "49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707",
+  "qualified_binary_sha256": "0bc944811975d74f8199a4fbbda6c8057d33879ab3c1118d4db842749d5348c7",
+  "campaign_target": 12500,
+  "primitive_target": 10000,
+  "campaign_gate_counts": [
+    2278,
+    2278
+  ],
+  "all_passed": true,
+  "public_test_counts_pass_fail_ignore": [
+    12,
+    0,
+    0
+  ],
+  "hash_scope": "decompressed artifact bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-idle-wait-qualified-campaign-1.json.gz",
+      "source_path": "target/workflow-capacity/idle-wait-untraced-repeat-20260916/campaign-1.json",
+      "sha256": "ff6120dfee4dd76122133a1aac2bea304b35178b6bd75e3f738b4fc7d9ca5b4e"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-campaign-2.json.gz",
+      "source_path": "target/workflow-capacity/idle-wait-untraced-repeat-20260916/campaign-2.json",
+      "sha256": "b858a7c203e282f0db0fa1c6b3218021ee691e0914f86455bce691c8e1221ba1"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-primitives-1.json.gz",
+      "source_path": "target/workflow-capacity/idle-wait-untraced-repeat-20260916/primitives-1.json",
+      "sha256": "871587908007748271eb6254a0808999deca52bf085a5f55095be8d6687f27de"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-primitives-2.json.gz",
+      "source_path": "target/workflow-capacity/idle-wait-untraced-repeat-20260916/primitives-2.json",
+      "sha256": "81bdcd6bb77426ae616d3f38c5a9cda514b8317e56df8025387745f9aa0d3051"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-qualification-audit.json.gz",
+      "source_path": "target/workflow-capacity/idle-wait-untraced-repeat-20260916/qualification-audit.json",
+      "sha256": "ab49809f44ec0daa6ed7a2b7221d4a80db56ce8f946d3a00cb1ebb9cbf1c6960"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-1-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-1-device.jsonl",
+      "sha256": "8360e09e3274b57dab36e830a7929cae8ceeccb90c872aa2fa45ce07479b17d6"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-1-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-1-device-summary.json",
+      "sha256": "00df79a8decfdb2b1ed12bb784c5f510450d92d48690cc4b569680d85d26c6f9"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-2-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-2-device.jsonl",
+      "sha256": "4531aad7973c9e587fc8ee4d322584ca535ead126716e57da23897c3e88ac1b2"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-2-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-2-device-summary.json",
+      "sha256": "d918bd346e5f961c739a50e3620c63930f7dc20894dcf91de791516fbc5e2d40"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-3-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-3-device.jsonl",
+      "sha256": "85d10e6fc8019cb0bd25884f2e36bd6ad89d44a7ea27b3013d78762b7d21b456"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-3-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-3-device-summary.json",
+      "sha256": "422610d0c1a8603c517e79297244bfb8676e4bccd23d4158bf176c1046e01a9c"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-4-device.jsonl.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-4-device.jsonl",
+      "sha256": "7ae6c791fe8501be4bcb1ca9d93d8e8ffa7466a3c448543695a0df96c8e7845a"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phase-4-device-summary.json.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phase-4-device-summary.json",
+      "sha256": "35b7a10f04eac457914276b61348ac9b211f454d133a2ac36563b668786aa091"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-public-tests.log.gz",
+      "source_path": "/tmp/fireweed-idle-wait-public-tests.log",
+      "sha256": "8b06fd53aa609f1526b105a268b70ec85c1699f4696e144a166b2386dbd8ab3a"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-validation-and-qualification.log.gz",
+      "source_path": "/tmp/fireweed-idle-wait-validation-and-qualification.log",
+      "sha256": "04d68541375af128e9a68bfb24032c3a9697cd324111a16d9bb7ad69a16bf262"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-runner.log.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-runner.log",
+      "sha256": "3b0f5288b513aa07779ebed80817c28634b0be446ccc9f738e7344236ab88622"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-untraced-qualification-phases.json.gz",
+      "source_path": "/tmp/fireweed-idle-wait-untraced-qualification-phases.json",
+      "sha256": "bf6d41c3de0b3ec1d941ac138fc5f085c4a33c5ab49e0ea8fb0e3663276bb4c9"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-validate-and-qualify-idle-wait.py.gz",
+      "source_path": "/tmp/fireweed-validate-and-qualify-idle-wait.py",
+      "sha256": "a7b6acc2fd7808e998c9ed5092e069a615882b97376792f2492f3aaa42befe27"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-run-idle-wait-untraced-qualification.py.gz",
+      "source_path": "/tmp/fireweed-run-idle-wait-untraced-qualification.py",
+      "sha256": "8aebb2277e4d5eae3338ec300a3e70cc7cf120cfc984927b060baa319b07d2ce"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-final-idle-wait-audit.py.gz",
+      "source_path": "/tmp/fireweed-final-idle-wait-audit.py",
+      "sha256": "0fff9b76f8fc025ed4ad946db9e0688d5e33c444adcc2e7b141040b4b7cc5c4d"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-idle-wait-final-audit.json.gz",
+      "source_path": "/tmp/fireweed-idle-wait-final-audit.json",
+      "sha256": "ab49809f44ec0daa6ed7a2b7221d4a80db56ce8f946d3a00cb1ebb9cbf1c6960"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-summarize-direct-json-qualification.py.gz",
+      "source_path": "/tmp/fireweed-summarize-direct-json-qualification.py",
+      "sha256": "32d1165f1f108be1ca43e0b6ef8c42f9dd74f5bb05ffc42586624818eecf33e1"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-device-monitor-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-monitor-v3.py",
+      "sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-fireweed-device-summary-v3.py.gz",
+      "source_path": "/tmp/fireweed-device-summary-v3.py",
+      "sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-scripts_perf_qualify-workflow-capacity.sh.gz",
+      "source_path": "scripts/perf/qualify-workflow-capacity.sh",
+      "sha256": "18fd4d7e756fa66f5fcbb65ca7323e31527e9cf42a495fdfc9489b9f76927c1c"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-scripts_perf_workflow-capacity.py.gz",
+      "source_path": "scripts/perf/workflow-capacity.py",
+      "sha256": "7c3e6e107796136c8baf8c808bd67832d4c8cda4a33de4f835b7fc006d21c4a8"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-scripts_perf_workflow_capacity_gate.py.gz",
+      "source_path": "scripts/perf/workflow_capacity_gate.py",
+      "sha256": "eeaccd3ce59e9adfa3bd66ece0d49d8d1c59f01406c758286e4aa54c06bc2aa6"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-scripts_perf_workflow_storage_monitor.py.gz",
+      "source_path": "scripts/perf/workflow_storage_monitor.py",
+      "sha256": "96886a7488c85912fb778cc4fab7859e37b9bdac94179789b7de2c0ca788bdf9"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-crates_fireweed-workload_src_campaign.rs.gz",
+      "source_path": "crates/fireweed-workload/src/campaign.rs",
+      "sha256": "b5ea01e647faf55c948e8edf5d950d71c3deff0ba1513dd4f5ac888d441cf3e7"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-crates_fireweed-workload_tests_campaign.rs.gz",
+      "source_path": "crates/fireweed-workload/tests/campaign.rs",
+      "sha256": "2727a4ff8daf5d859e295d53a891c6c8348a2c0143ec1da9dada050c1e3ff232"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-crates_fireweed-workload_tests_recovery.rs.gz",
+      "source_path": "crates/fireweed-workload/tests/recovery.rs",
+      "sha256": "03a41d90d09536ab6c97e15e849ca48d527f0c3c357e5da28221761994d9cd9d"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-crates_fireweed-workload_tests_primitives.rs.gz",
+      "source_path": "crates/fireweed-workload/tests/primitives.rs",
+      "sha256": "11ea04fec1bbb70940da9c38045b51f77028e307ead500454bb689bb46065920"
+    },
+    {
+      "artifact": "fireweed-idle-wait-qualified-source-vendor_object-log_src_engine.rs.gz",
+      "source_path": "vendor/object-log/src/engine.rs",
+      "sha256": "f563d83286992debe9761e46b700c944ae3cbd4b2250d8a30d23950476b26e8e"
+    }
+  ]
+}
