@@ -985,24 +985,10 @@ fn take_batch<M>(
             if !wait_when_empty {
                 return TakeBatch::Empty;
             }
-            let linger = {
-                let queued = q.bytes;
-                let last_enq = q.last_enqueue;
-                let oldest = q.oldest_enqueue;
-                drop(q);
-                let l = effective_linger(shared, config, queued, last_enq, oldest);
-                q = shared.queue.lock().expect("poisoned");
-                l
-            };
-            if linger.is_zero() {
-                q = shared.cv.wait(q).expect("poisoned");
-            } else {
-                let (guard, timeout) = shared.cv.wait_timeout(q, linger).expect("poisoned");
-                q = guard;
-                if timeout.timed_out() && q.items.is_empty() {
-                    return TakeBatch::Empty;
-                }
-            }
+            // No pending work needs a timer. Enqueue and shutdown change the
+            // predicate under this mutex and notify. Waiting without
+            // dropping/reacquiring it first also avoids a lost notification.
+            q = shared.cv.wait(q).expect("poisoned");
             continue;
         }
 
@@ -2439,5 +2425,98 @@ mod ready_commit_group_tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].location.object_id, "data/second");
         assert_eq!(sequencer.snapshot().manifest_count, 2);
+    }
+}
+
+#[cfg(test)]
+mod idle_batch_wait_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn empty_shared(config: FlushConfig) -> Arc<Shared<()>> {
+        Arc::new(Shared {
+            queue: Mutex::new(Queue {
+                items: VecDeque::new(),
+                bytes: 0,
+                bytes_in_use: 0,
+                shutdown: false,
+                next_seq: 1,
+                completed_through: 0,
+                first_failed: None,
+                force_flush: false,
+                flush_waiters: Vec::new(),
+                last_enqueue: None,
+                oldest_enqueue: None,
+            }),
+            cv: Condvar::new(),
+            max_buffered_bytes: config.max_buffered_bytes.max(config.max_bytes),
+            budget: Mutex::new(BudgetRuntime::new(config.budget)),
+            flush_config: config,
+        })
+    }
+
+    #[test]
+    fn idle_wait_has_no_periodic_empty_return_and_wakes_for_enqueue_or_shutdown() {
+        for linger in [Duration::ZERO, Duration::from_millis(1)] {
+            for shutdown in [false, true] {
+                let config = FlushConfig {
+                    linger,
+                    ..FlushConfig::default()
+                };
+                let shared = empty_shared(config);
+                let (started_tx, started_rx) = mpsc::channel();
+                let (result_tx, result_rx) = mpsc::channel();
+                let worker_shared = shared.clone();
+                let worker = std::thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    assert!(result_tx.send(take_batch(&worker_shared, config, true)).is_ok());
+                });
+                started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let early = result_rx.recv_timeout(Duration::from_millis(100));
+                let returned_while_idle = early.is_ok();
+                {
+                    let mut q = shared.queue.lock().unwrap();
+                    if shutdown {
+                        q.shutdown = true;
+                    } else {
+                        let payload = Bytes::from_static(b"first-after-idle");
+                        q.bytes = payload.len();
+                        q.bytes_in_use = payload.len();
+                        q.next_seq = 2;
+                        q.last_enqueue = Some(Instant::now());
+                        q.oldest_enqueue = q.last_enqueue;
+                        q.force_flush = true;
+                        q.items.push_back(Pending {
+                            partition: PartitionKey("p".into()),
+                            record_count: 1,
+                            payload,
+                            meta: (),
+                            durability: Durability::Buffered,
+                            responder: None,
+                            seq: 1,
+                        });
+                    }
+                    shared.cv.notify_all();
+                }
+                let result = early
+                    .or_else(|_| result_rx.recv_timeout(Duration::from_secs(2)))
+                    .unwrap();
+                worker.join().unwrap();
+                assert!(
+                    !returned_while_idle,
+                    "idle worker polled with linger={linger:?}"
+                );
+                match result {
+                    TakeBatch::Shutdown => assert!(shutdown),
+                    TakeBatch::Batch(items) => {
+                        assert!(!shutdown);
+                        assert_eq!(items.len(), 1);
+                        assert_eq!(items[0].payload.as_ref(), b"first-after-idle");
+                        assert_eq!(items[0].seq, 1);
+                    }
+                    TakeBatch::Empty => panic!("idle worker returned without work or shutdown"),
+                }
+            }
+        }
     }
 }

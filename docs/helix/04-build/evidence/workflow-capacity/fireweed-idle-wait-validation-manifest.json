@@ -1,0 +1,16 @@
+{
+  "scope": "Idle-only object-log notification wait: regression RED on original timer; full vendor contract suite GREEN after candidate",
+  "passed": 46,
+  "failed": 0,
+  "hash_scope": "decompressed bytes",
+  "artifacts": [
+    {
+      "artifact": "fireweed-idle-wait-red.log.gz",
+      "sha256": "dee3e0db3bd4a1b5bdca4a54c78538a029ad08d8177265825492fd7f237f225c"
+    },
+    {
+      "artifact": "fireweed-idle-wait-green.log.gz",
+      "sha256": "703192a99f1126f08e78d6e35b67a546e45c428c831388b94dc7b3cf88cc0114"
+    }
+  ]
+}

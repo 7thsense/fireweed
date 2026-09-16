@@ -1,5 +1,21 @@
 # Campaign qualification and performance plan
 
+## Idle log-worker wait candidate validated; performance pending (2026-09-16)
+
+The empty-queue path now waits for a condition-variable notification without
+periodic timeout when the flush loop has no pending upload or commit. Enqueue
+and shutdown modify the predicate under the same lock and notify. The wait
+atomically releases that lock, removing the previous unlock/relock gap. Nonempty
+batch linger, active-I/O polling, flush barriers and commit ordering are unchanged.
+
+The new regression fails on the old 1 ms idle timer and passes with the change.
+It checks no unsolicited empty return while idle, then enqueue/shutdown wakeup
+with both zero and 1 ms configured linger. The complete serial vendor contract
+suite passes **46 tests**, including blob, manifest, engine and sequencer tests.
+Evidence: `fireweed-idle-wait-validation-manifest.json`. Performance remains
+unmeasured; retain only if the balanced screen and full qualification justify it.
+
+
 ## Full projection disk/RAM isolation: CPU work remains (2026-09-16)
 
 The serial disk/RAM/RAM/disk comparison is complete. Each run uses the same
