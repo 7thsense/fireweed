@@ -1,5 +1,34 @@
 # Campaign qualification and performance plan
 
+## Repaired-host checkpoint staggering candidate (2026-09-16)
+
+The candidate derives each rebuildable projection's checkpoint budget from its
+configured database path using FNV-1a, in the **256–448 MiB** range. The same path
+keeps its budget across reopen; no new durable record, global counter or host
+setting is needed. `checkpoint_frames` uses the actual page size, and the
+existing 448 MiB upper budget remains. Standalone projections keep their existing
+1,000-frame policy; committed read-only connections keep automatic checkpointing
+disabled. The native log-backed writer applies and verifies this setting on the
+active path. The custom metadata JSON decoder has already been removed.
+
+The lower bound preserves a larger coalescing window than the earlier pre-repair
+192–448 MiB trial. This is a fresh scheduling experiment motivated by the measured
+all-store checkpoint burst, not evidence that staggering already improves
+throughput. Real adapter tests verify the applied setting for new and existing
+page sizes, reopen stability and the standalone policy; a 64-path check guards
+against all stores receiving one window. The adapter library plus cancellation,
+concurrency and recovery suites pass **66 tests, zero failures, two existing
+ignored diagnostics**. All **12 public campaign/primitive/recovery tests pass**;
+the standalone workload build passes. Logs and hashes are archived in
+`fireweed-staggered-checkpoints-repaired-validation-manifest.json`. Performance
+remains unmeasured.
+
+The unchanged repeated eight-cycle qualification will record the path-derived
+budgets alongside each workload's command and host-device measurements. Those
+budgets are calculated policy metadata, not independent live SQL observations.
+All workload counts, handler limits, fairness, log durability, reporting latency,
+WAL budget and storage/RSS stability gates remain required. No SSD settings change.
+
 ## Reject custom JSON decoder; measured checkpoint burst (2026-09-16)
 
 The first untraced eight-cycle campaign completed successfully at **13,673.93

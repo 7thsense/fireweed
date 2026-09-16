@@ -1,0 +1,34 @@
+{
+  "scope": "256\u2013448 MiB path-derived rebuildable projection checkpoint candidate; performance not yet measured",
+  "artifacts": [
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-adapter-tests.log.gz",
+      "sha256": "459ab93710945039043e138fb5c9d20b2bf1300730fa4c0e431a32c2e6ff6a05"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-public-tests.log.gz",
+      "sha256": "98dd9b631a85bd824eaeea8096bd15881564d3075e231e3dc35dfb472264a6e9"
+    },
+    {
+      "artifact": "fireweed-staggered-checkpoints-repaired-build.log.gz",
+      "sha256": "914f2754f050c5ac67ba830f54861ae155fa553afe34a149c9b2f3770fd87539"
+    }
+  ],
+  "counts_pass_fail_ignore": {
+    "adapter-tests": [
+      66,
+      0,
+      2
+    ],
+    "public-tests": [
+      12,
+      0,
+      0
+    ],
+    "build": [
+      0,
+      0,
+      0
+    ]
+  }
+}
