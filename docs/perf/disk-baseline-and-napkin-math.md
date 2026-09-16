@@ -1,5 +1,17 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Direct metadata JSON diagnostic budget (2026-09-16)
+
+The balanced four-run screen averages 0.910048 CPU-ms/recipient for controls
+and 0.906844 for the candidate. At 12.5k recipients/sec, holding those costs
+constant would require **11.376 versus 11.336 CPU-seconds/sec**. This 0.040
+CPU-second/sec difference is too small, relative to observed run variation,
+to claim that the sustained throughput gap is closed. The candidate's mean wall
+rate is 2.04% higher, but repeated eight-cycle qualification is still required.
+Logical-work accounting matches for all 128 campaigns in all four screens.
+The existing disk baseline and qualification gates remain unchanged. Evidence:
+`fireweed-direct-json-screen-manifest.json`.
+
 ## Response-copy experiment and CPU-cost uncertainty (2026-09-16)
 
 Eight serial one-cycle runs across both orderings reject the response-copy

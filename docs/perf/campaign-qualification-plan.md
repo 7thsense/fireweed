@@ -1,5 +1,38 @@
 # Campaign qualification and performance plan
 
+## Direct metadata JSON screen; advance to sustained measurement (2026-09-16)
+
+The serial control/candidate/candidate/control screen completed correctly.
+
+| Run order | Recipients/sec | CPU-ms/recipient | User instructions (trillions) |
+| --- | ---: | ---: | ---: |
+| Control 1 | 15,641.69 | 0.86472 | 2.67273 |
+| Candidate 1 | 14,918.02 | 0.91246 | 2.70436 |
+| Candidate 2 | 14,936.44 | 0.90123 | 2.66915 |
+| Control 2 | 13,614.89 | 0.95537 | 2.72386 |
+
+Arithmetic mean throughput improves 2.04%, CPU time falls 0.35%, instructions
+fall 0.43%, user cycles fall 1.60%, and peak RSS falls 0.53%. These small average
+differences do not establish a repeatable benefit against the control variation.
+Both candidate runs used the same `466c764…` executable from `13488cd8`.
+All four runs have identical item, claim, enrichment, disposition, retry, verify,
+purge and payload-accounting counts for all 128 campaigns. Complete outputs,
+provenance, counters, device telemetry and calculations are archived in
+`fireweed-direct-json-screen-manifest.json`.
+
+Proceed to the unchanged two eight-cycle campaign qualifications, each followed
+by the million-row primitive suite. This is an experiment to establish sustained
+behavior, not a claim that a 2% short-screen average closes the prior 7.4% gap.
+The code and all gates remain fixed during measurement. No hardware settings
+change, and the runtime has no diagnostic overrides during qualification.
+
+The prior baseline's slowest cycle (cycle 5, shard 37/campaign 1) spent 18.15 s
+loading, 33.04 s preparing, 25.72 s delivering, 0.24 s in final verification and
+5.79 s purging, within 85.93 s total. Some waits lie outside individual phase
+timers; delivery includes window barriers. The phase analysis is archived with
+the screen. Dropping the final verification cannot explain or close this gap;
+its independent row oracle remains mandatory.
+
 ## Direct scalar/array metadata JSON decoding candidate (2026-09-16)
 
 Relational metadata decoding deserializes a map of `MetadataValue` entries. Each

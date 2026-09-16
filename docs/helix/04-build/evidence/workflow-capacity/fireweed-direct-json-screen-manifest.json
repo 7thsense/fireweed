@@ -1,0 +1,109 @@
+{
+  "scope": "ABBA one-cycle screens; average differences small compared with run variation; sustained qualification pending",
+  "artifacts": [
+    {
+      "artifact": "fireweed-direct-json-screen-analysis.json.gz",
+      "sha256": "ac07a9366df31e77071ee60a48364d26a8a97beda0a43e8e69c2f4eb07ed7a23"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-1-device-summary.json.gz",
+      "sha256": "101006e0c1e628f253d5908816764eb520b157dfb40d0b8bfa3b36c21285771d"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-1-device.jsonl.gz",
+      "sha256": "89f6f8196d6476058265a96f6311e6a6219135af4015c7ecaecfbe083b7b0ae7"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-1-perf.csv.gz",
+      "sha256": "39ae9e4818b9335c39c6b0af73a30c82052c651bdce542b43f81167cd1208ea1"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-1-provenance.json.gz",
+      "sha256": "30c732f38f9baf5fc69051df059d797b1151dc55c87e54b2d273cd10d250922c"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-1.json.gz",
+      "sha256": "0c4cda8d7998b5499b6b9a83b716e760cfd0c4ea306d4fb02d393a92bf6c94f1"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-2-device-summary.json.gz",
+      "sha256": "c0777cc532e29dc2403fb6a4376b5142d7ad8a231ffd49eb04b7d539bd3d11f8"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-2-device.jsonl.gz",
+      "sha256": "00e31e8677420c331ab99b0df712e3f6c5b1ff9d9a06903835c1e33615e08fff"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-2-perf.csv.gz",
+      "sha256": "a87314dc9d2e21987791962f155e1145eb6890c10d1decc587079f0760b3718a"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-2-provenance.json.gz",
+      "sha256": "30c732f38f9baf5fc69051df059d797b1151dc55c87e54b2d273cd10d250922c"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-candidate-2.json.gz",
+      "sha256": "530ec77682f668dbd6266b3f21ae48f282158271bfa6a098141694f3c9ecb870"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-1-device-summary.json.gz",
+      "sha256": "320c8b0972300a1e64f7432bf0d7599b9829ced7aec21a7913e5668a20db851b"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-1-device.jsonl.gz",
+      "sha256": "501eacc9667e0c67f22b687cd2744527f431d04e3137c5cae719c0dc27349f06"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-1-perf.csv.gz",
+      "sha256": "c1bae450dba3bfa6a386574566ffcfce62a6e95804b93c35040a8facbe1e64be"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-1-provenance.json.gz",
+      "sha256": "d2f98db33d8e200b37ea733dde372d297f25e7e1f68c4369343606fc29041755"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-1.json.gz",
+      "sha256": "93548b2517744c81071fdef4280b23819a6b5817278cde2a57522d541755c39f"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-2-device-summary.json.gz",
+      "sha256": "fc502e6d6919bdfadbd03312b8eeaa726d6e9269c5e8d14f3746897a62158814"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-2-device.jsonl.gz",
+      "sha256": "54a9e51cbe7493f773c9bce55a14db24a38502f627d3cba1db85b9dfa37d7e26"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-2-perf.csv.gz",
+      "sha256": "da1750f22419cb11d6bd67439354dfd16d4c3b43b0076fae409ebc63aa2f44c2"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-2-provenance.json.gz",
+      "sha256": "d2f98db33d8e200b37ea733dde372d297f25e7e1f68c4369343606fc29041755"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-control-2.json.gz",
+      "sha256": "36974a41cd62ab7530d0e062d4e57ec8debe70b7b317bff95310533d00594eb0"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-prior-sustained-slowest-phase-analysis.json.gz",
+      "sha256": "5b9071364c9f03095667a2cb2497dc506ebd740b4cecd6d65cdebe49413f05c6"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-summary.json.gz",
+      "sha256": "05e3e5dac32fab80d4620aeeddf1895a3652f5cc43704d8abf810cee3150d17e"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-fireweed-run-direct-json-counters.py.gz",
+      "sha256": "16c1e1cd4921024cb3df150c704cb728f25501184e3c4c04935850fb0990843f"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-fireweed-direct-json-counter-recorder.py.gz",
+      "sha256": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e"
+    },
+    {
+      "artifact": "fireweed-direct-json-screen-fireweed-direct-json-counters-runner.log.gz",
+      "sha256": "c3c9ac0ea4c0740da9b78c33ab3920566edaa479d6d9a94230ebb8592fb35627"
+    }
+  ]
+}
