@@ -1,0 +1,172 @@
+[
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-1-provenance.json.gz",
+    "uncompressed_sha256": "335dab7af96bb2be939d8d456c8ecec323084f427b29d85caad87da8aa994cb1",
+    "uncompressed_bytes": 497
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-1.json.gz",
+    "uncompressed_sha256": "538e6c76531b9b87fb54aa39676be034a5e7a7434f66d12c77d924776d9352f6",
+    "uncompressed_bytes": 695154
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-1-perf.csv.gz",
+    "uncompressed_sha256": "a1eba41c055825be2d9e36219ff5090fc85efd45e78acb016d761d5426c8bf5f",
+    "uncompressed_bytes": 137
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-1-device.jsonl.gz",
+    "uncompressed_sha256": "c64621aa0a6ff1a4c858c2dbc0240fb872510b7c817cb84e17cbaef13b972c91",
+    "uncompressed_bytes": 72397
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-1-device-summary.json.gz",
+    "uncompressed_sha256": "7a451e5b23e1ecb1750f6f115af9d46303db0639df1f8a749d4ba8cec5981802",
+    "uncompressed_bytes": 911
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-control-provenance.json.gz",
+    "uncompressed_sha256": "328af30fdcfcaccdd1308f6a3af19ab1cdb039701f2605f6429939f2ddda49e8",
+    "uncompressed_bytes": 497
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-control.json.gz",
+    "uncompressed_sha256": "3b75f9baf9750acabfb7f07b9c2cf2e27fd4b2166710c6510ea2b9d58cb1600a",
+    "uncompressed_bytes": 701158
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-control-perf.csv.gz",
+    "uncompressed_sha256": "baba6e39ee075de9e1adde797bb069f72dfb112bc54e47c37ad91beb9d2781d1",
+    "uncompressed_bytes": 137
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-control-device.jsonl.gz",
+    "uncompressed_sha256": "c0026768ac7a82874499946d69450f09b847cb1699a9d88c5bb90f4b6c16b991",
+    "uncompressed_bytes": 75999
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-control-device-summary.json.gz",
+    "uncompressed_sha256": "312d2996052b39c2da20442f6deae7bd74f744d310622c0fa01d53400b8ac0cb",
+    "uncompressed_bytes": 864
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-2-provenance.json.gz",
+    "uncompressed_sha256": "335dab7af96bb2be939d8d456c8ecec323084f427b29d85caad87da8aa994cb1",
+    "uncompressed_bytes": 497
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-2.json.gz",
+    "uncompressed_sha256": "410253304384dee325d39922e62a8eb01051c640afd60bc8dd4b8a86c9e84a3c",
+    "uncompressed_bytes": 695515
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-2-perf.csv.gz",
+    "uncompressed_sha256": "59e2f70172ca582dc5a98b67bd77d46926a76d289ba0fd588ce18ac847d43531",
+    "uncompressed_bytes": 137
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-2-device.jsonl.gz",
+    "uncompressed_sha256": "e95250355b0387e7479d70b21e2829e1c345e7e492eab03ad3897af1e918dc53",
+    "uncompressed_bytes": 75923
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-candidate-2-device-summary.json.gz",
+    "uncompressed_sha256": "fd020614dec2059b4ed13fd1f1eeb7e8294d3dafe9317ad98aba8ce8b37451b2",
+    "uncompressed_bytes": 912
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-summary.json.gz",
+    "uncompressed_sha256": "c7df73538f5ab261f6d8a3830c55be615ef4f503856257a3576966140d7b6990",
+    "uncompressed_bytes": 918
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counters-accounting.json.gz",
+    "uncompressed_sha256": "a95fd0169fc2e926ab9e079b88b5c4e2fc0a2f628fc1c3a9c28278a2bc1018c8",
+    "uncompressed_bytes": 3210
+  },
+  {
+    "file": "fireweed-run-interleaved-fusion-counters.py",
+    "uncompressed_sha256": "2bfe9e836cdfddd523f6f3c863769ebdba6ebb28b9d92da27dea648c36175ec6",
+    "uncompressed_bytes": 5134
+  },
+  {
+    "file": "fireweed-interleaved-fusion-counter-recorder.py",
+    "uncompressed_sha256": "53c416640c76c2a5bc318ff66792f8aae246a0ded42bcf582309160a3ff57460",
+    "uncompressed_bytes": 8981
+  },
+  {
+    "file": "fireweed-interleaved-control-thread-snapshot.json.gz",
+    "uncompressed_sha256": "0605a10605b36a7c2cfa988cbc0ce4fb9f1dcdb7844cbe0639dd0f7096f085eb",
+    "uncompressed_bytes": 948
+  },
+  {
+    "file": "fireweed-interleaved-fusion-canonical-build.log.gz",
+    "uncompressed_sha256": "f3419ba67159e57789102e1f6cb08f5bd57e7bde8337698d316eeb07652f9e4e",
+    "uncompressed_bytes": 14293
+  },
+  {
+    "file": "fireweed-run-joint-log-projection-trace.py",
+    "uncompressed_sha256": "8c6db84e42f6017ca08b57184a55d0d2197a1e32982fb76676327b5cdc301ee8",
+    "uncompressed_bytes": 3048
+  },
+  {
+    "file": "fireweed-summarize-joint-trace.py",
+    "uncompressed_sha256": "d14fe01e1964d4f2f5614ba0ccc888caea79b108509f6f1486e64c7bf03d8481",
+    "uncompressed_bytes": 2978
+  },
+  {
+    "file": "fireweed-joint-trace-accounting.json.gz",
+    "uncompressed_sha256": "1d98c8a644bd26026341f8c0a827070484c78386df1f1640a87d9386d95c9b27",
+    "uncompressed_bytes": 43403
+  },
+  {
+    "file": "fireweed-joint-trace-gates.json.gz",
+    "uncompressed_sha256": "987472a972ff98bcd5778ed1083233837d6d1fed053fceec953d6d31a1e67569",
+    "uncompressed_bytes": 1730
+  },
+  {
+    "file": "fireweed-joint-log-projection-trace-phase-1-device-summary.json.gz",
+    "uncompressed_sha256": "b3054682eebc14eca1188148df0ff07dd37e7a7236551e72c99931d47c1273ba",
+    "uncompressed_bytes": 916
+  },
+  {
+    "file": "fireweed-joint-log-projection-trace-phase-1-device.jsonl.gz",
+    "uncompressed_sha256": "620209bbfa4c8931949331bcae35bba77c788b037ba9506fab1f8607377db1ae",
+    "uncompressed_bytes": 632414
+  },
+  {
+    "file": "fireweed-joint-log-projection-trace-phases.json.gz",
+    "uncompressed_sha256": "74ac3250e93e362f49428d3a5a857acbe4ce4c5bf334155959c0508087cf2c50",
+    "uncompressed_bytes": 1054
+  },
+  {
+    "file": "fireweed-joint-log-projection-trace-provenance.json.gz",
+    "uncompressed_sha256": "2c60dd175d3c3411d9e3b6b75f07df5100fba6d2e3224514eab5e105758a979f",
+    "uncompressed_bytes": 354
+  },
+  {
+    "file": "fireweed-sustained-sequential.py",
+    "uncompressed_sha256": "fab10b1633dc5a07fa2d619a493b22faa5cf0ae69ef1df6c2d735a205ffbe842",
+    "uncompressed_bytes": 3399
+  },
+  {
+    "file": "fireweed-device-monitor-v3.py",
+    "uncompressed_sha256": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1",
+    "uncompressed_bytes": 1522
+  },
+  {
+    "file": "fireweed-device-summary-v3.py",
+    "uncompressed_sha256": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8",
+    "uncompressed_bytes": 1458
+  },
+  {
+    "file": "fireweed-joint-log-projection-trace-20260916.json.gz",
+    "uncompressed_sha256": "bda9f993c403776cfa0d7b8933a52d4794bb5230ebbc5f8246601082a7e3d245",
+    "uncompressed_bytes": 20757978
+  },
+  {
+    "file": "fireweed-post-joint-sustained-direct-20260916.json.gz",
+    "uncompressed_sha256": "b8e28361958d47538401a171cd08bf993e14ba623c578ca81a14f859a2a3c844",
+    "uncompressed_bytes": 57482
+  }
+]

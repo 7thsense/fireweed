@@ -1,6 +1,62 @@
 # Campaign qualification and performance plan
 
-## Interleaved claim/mutation fusion validated; measurement pending (2026-09-16)
+## Interleaved fusion comparison and joint trace (2026-09-16)
+
+Clean source `7e999e9d`, binary `14a0ddad...`, was compared serially with
+preserved control `5d0ac295...` (runtime source `fa49f380`). All three runs use
+the same one-million-row original-row campaign, 64 stores and two workers.
+Projection VFS counters and user-mode hardware counters were enabled identically;
+hardware counters had 100% running coverage. No benchmarks or builds overlapped.
+
+| Run | Recipients/sec | CPU-ms/recipient | User instructions/recipient | Requested WAL bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Candidate | 15,748.64 | 0.91253 | 2,820,831 | 6,583,016,328 |
+| Control | 14,393.41 | 0.92814 | 2,845,657 | 6,588,570,088 |
+| Candidate repeat | 14,816.43 | 0.93004 | 2,809,280 | 6,533,741,128 |
+
+Instructions decrease 0.87–1.28% and WAL bytes 0.08–0.83%; CPU cost straddles
+control. Reporting reads differ (6,102 / 6,888 / 6,203), so not all instruction
+savings can be attributed to fusion. This is a small improvement candidate,
+not evidence that the sustained goal is achieved. The existing guarded fusion
+is retained with its interleaving correctness coverage.
+
+The subsequent eight-cycle joint log/apply/VFS trace completes eight million
+recipients at **14,028.16/sec** overall, **0.93407 CPU-ms/recipient**, and
+18.252 GiB peak RSS. Cycle rates are 15,985 / 16,549 / 16,303 / 15,967 /
+13,149 / 13,334 / 12,349 / **11,992/sec**. All workload/resource checks at 10k
+pass, but explicit diagnostic provenance rejects qualification. At 12.5k the
+last two cycle rates also fail. This is one instrumented run, not repeated
+untraced qualification, and neither milestone is declared complete.
+
+Mean segment publication grows from 53.2 ms in cycle zero to 257.8 ms in cycle
+seven; mean manifest publication grows from 44.4 to 170.9 ms. Producer wait
+means grow from 224.9 to 589.3 ms. Mean projection apply duration is roughly
+steady, 502.1 versus 492.1 ms, dominated by its update phase. Timing includes
+scheduling/waiting and overlaps across stores; these values are not CPU costs
+or additive elapsed time. Cycle zero includes startup. Publication timing does
+not yet separate write, fdatasync, rename and directory fsync.
+
+VFS totals: 55,926,029,456 WAL bytes in 32,434 calls, 2,077,458,432 main-file
+bytes in 27,844 calls, zero write errors. Accumulated WAL call time is 256.91 s
+(overlapping), with 320 calls at least 100 ms and a maximum 1.814 s. Host counters
+show 30.737 GiB written, 55.36 MiB/sec, 43.71% device busy, 10.32 ms mean write
+request, and 14.13 busy logical CPU-seconds/sec. Host counters include other
+processes and omit short startup/tail intervals.
+
+A one-time control thread snapshot records 985 threads, including 25 blocked
+in `wait_log_commit` and many sleeping on futexes. This is a snapshot, not proof
+that thread count causes the slowdown; the previous one-worker flush-runtime
+experiment already failed to improve performance and should not be repeated.
+Next isolate local log publication phases before changing commit grouping;
+retain all authoritative-log durability barriers and acknowledgment semantics.
+
+Evidence: `fireweed-interleaved-fusion-counters-*`,
+`fireweed-joint-log-projection-trace-*`, `fireweed-joint-trace-*`, exact runners,
+recorder, parser, thread snapshot and canonical build log. The evidence manifest
+records SHA-256 hashes of uncompressed artifact contents.
+
+
+## Interleaved claim/mutation fusion validation record (2026-09-16)
 
 The relational apply window now recognizes interleaved independent handlers,
 for example `Claim(A), Claim(B), Mutate(A), Claim(C), Mutate(B), Mutate(C)`.
@@ -24,10 +80,9 @@ campaign, primitive, durability and log-only recovery tests pass. The 17 harness
 tests passed separately. No build or test overlapped the remote benchmark.
 Evidence: `fireweed-interleaved-fusion-validation.log.gz`.
 
-No throughput or write-volume improvement is claimed. Next rebuild the canonical
-CLI and compare serially against preserved `5d0ac295...` using the unchanged
-million-row workflow and explicit binary/source identities. Keep the fixed 10k
-and 12.5k sustained targets, fairness, reporting and resource limits intact.
+The canonical rebuild and serial comparison have since completed; see the
+measurement above. The fixed 10k and 12.5k sustained targets, fairness, reporting
+and resource limits remain intact.
 
 ## Baldr unchanged-binary eight-cycle diagnostic (2026-09-16)
 

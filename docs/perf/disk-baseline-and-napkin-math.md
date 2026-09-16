@@ -1,5 +1,52 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Extended write calibration and joint campaign budget (2026-09-16)
+
+An immediate serial follow-up to the eight-cycle joint trace extended the same
+16 MiB-block private-file direct/NOCOW calibration beyond its previous 8 GiB
+burst. It requested at most 64 GiB, stopped after 180 seconds of writes, included
+final fdatasync, verified first/last block hashes, and removed its private file.
+No manual TRIM, host tuning, build or competing benchmark intervened. The buffer
+was generated before timing. Exact script and raw per-block timings are archived.
+
+**32.125 GiB completed in 180.125 seconds: 182.63 MiB/sec overall.** The first
+19 GiB averaged **884.81 MiB/sec**. The twentieth GiB averaged 179.93 MiB/sec;
+the next twelve complete GiB averaged **81.36 MiB/sec**, with individual full-GiB
+intervals spanning 58.41–117.82 MiB/sec. The remaining partial interval also
+completed. Python consumed 0.059 user + 2.977 system CPU-seconds, so Python
+execution cost does not explain this drop. Final fdatasync took 0.114 seconds.
+
+This is direct evidence that this device/filesystem stack does not sustain its
+roughly 900 MiB/sec burst rate across this longer write stream in its measured
+state. It does **not** identify NAND type, cache capacity, garbage collection,
+TRIM failure, or an indefinite steady-state ceiling. The test uses a contiguous
+NOCOW file; it does not reproduce campaign COW writes, compression, durable file
+publication or synchronization latency. A campaign slowdown cannot be assigned
+entirely to this measured bandwidth drop.
+
+The preceding traced campaign costs **0.93407 CPU-ms/recipient**, requiring
+**9.34 / 11.68 CPU-seconds/sec** at 10k / 12.5k. Actual process occupancy is
+13.09 CPU-seconds/sec. Its host-wide write volume is about **4,125 bytes per
+recipient**, implying **39.34 / 49.18 MiB/sec** at the two targets. Compared with
+the later 81.36 MiB/sec contiguous calibration interval, the stretch write budget
+has approximately **1.65x** bandwidth headroom, not the 18x suggested by the
+short 900 MiB/sec burst. This is a cross-workload resource comparison, not a
+capacity prediction: file-sync latency and competing reads can matter below
+sequential bandwidth saturation.
+
+Projection VFS requested **7,250 bytes/recipient** (WAL plus main-file writes),
+or **86.43 MiB/sec** at 12.5k. Do not compare that uncompressed logical byte
+count directly with the compressed physical-device counter or add the two.
+The full trace still misses the last two 12.5k cycle gates. Increasing log
+publication latency warrants phase-level investigation while preserving every
+log durability barrier; projection CPU work remains a separate optimization
+opportunity. No target or resource gate changes follow from this calibration.
+
+Evidence: `fireweed-post-joint-sustained-direct-20260916.json.gz`,
+`fireweed-sustained-sequential.py`, and the joint-trace artifacts listed in the
+[qualification record](campaign-qualification-plan.md).
+
+
 ## Baldr control separates a CPU budget from write latency (2026-09-16)
 
 The unchanged eight-cycle control on Baldr reaches 9,843/sec at **1.05739
