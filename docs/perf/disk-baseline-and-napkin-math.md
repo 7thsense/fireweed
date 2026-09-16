@@ -1,5 +1,29 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Owned-parameter repeat: target still requires sustained occupancy (2026-09-16)
+
+The current binary completes the two eight-million-recipient campaigns at
+14,071.58 and 11,312.26/sec, with slowest cycles 12,077.85 and 8,734.21/sec.
+Neither milestone is repeatedly met. CPU costs of 0.94603 / 0.98477 ms per
+recipient require **11.83 / 12.31 CPU-seconds per second** at the 12,500 target;
+actual process occupancy is **13.30 / 11.13**. These measured costs support a
+feasible CPU budget on this host, but the second run does not sustain it.
+Logical threads are not independent physical cores, and occupancy alone is not
+an independent prediction of scalable throughput.
+
+Host writes total 29.75 / 33.36 GiB: approximately 3,994 / 4,477 bytes per
+recipient, implying **47.61 / 53.37 MiB/sec** at the stretch target. Mean device
+write-request latency is 7.43 / 29.89 ms, with device busy 40.43% / 65.74%.
+These host-wide totals include other activity and exclude monitor startup/tail;
+they neither establish a sequential bandwidth ceiling nor identify the cause
+of the stalls. No host tuning was performed.
+
+A checksum-validated historical WAL sample puts an optimistic adjacent-pair
+page-elimination bound at 6.87%, before queue/readiness restrictions. That is
+insufficient evidence to attribute the campaign gap to transaction boundaries.
+See the current [qualification record](campaign-qualification-plan.md) for exact
+provenance, unchanged gates, serial primitive results and the next attribution work.
+
 ## Distinguish logical projection writes from device writes (2026-09-16)
 
 The complete traced canonical campaign requests **7,085.55 WAL bytes plus

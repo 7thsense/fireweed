@@ -1,5 +1,60 @@
 # Campaign qualification and performance plan
 
+## Owned-parameter repeated qualification fails (2026-09-16)
+
+All four serial runs used clean source `8be4986ab85071eb3864bb44b6edff29d7c125e3`
+and executable `5d0ac2955435d238bb631b9e432e8834c6fe5d9f53964825f70d98097df9be8f`.
+Runtime implementation is `fa49f380`; intervening commits record evidence.
+Canonical filesystem policy, 64 stores, two workers, eight million original-row
+lifecycles and all existing campaign checks are unchanged. No build, test or
+benchmark overlapped the sequence.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 14,071.58 | 12,077.85 | 0.94603 | 19.206 |
+| 2 | 11,312.26 | 8,734.21 | 0.98477 | 18.569 |
+
+Campaign 1 passes every 10k check, but cycles 6/7 miss 12.5k. Campaign 2 misses
+10k in cycles 4/7 (8,734.21 / 9,842.18/sec), and misses 12.5k overall and in
+cycles 2/4/5/6/7. Both pass every non-rate gate, including public correctness,
+reporting, recovery, fairness checks other than the cycle-rate floor, claim
+latency and WAL/database/RSS stability. **Neither repeated milestone is met.**
+
+| Primitive run | Insert/sec | Enrich by key/sec | Schedule by ID/sec |
+| --- | ---: | ---: | ---: |
+| 1, between campaigns | 115,334 | 104,108 | 104,548 |
+| 2, after campaign 2 | 38,147 | 39,231 | 55,970 |
+
+Both primitive runs pass all qualification gates. These are batched public API
+operations, not independent individually durable single-row RPCs. Host mean
+write-request latency increases from 7.43 to 29.89 ms between campaigns; primitive
+latencies are 1.74 and 39.69 ms. This is evidence of changing write service, not a
+proof of a specific device mechanism. No isolated benefit of parameter ownership
+is claimed. Reports, both target evaluations, external monitors and exact runners
+are archived under `fireweed-owned-params-repeat-*`, `fireweed-owned-params-eight-*`
+and `fireweed-owned-params-followup-*`.
+
+### Bound transaction-combining benefit before implementation
+
+After the series ended, an offline read of retained WALs from the earlier
+`fireweed-campaign-trim-register-copy-eight` run sampled shards 0/1/2. The parser
+validates the WAL header and every frame checksum/salt, reads at most 32,768
+frames per file, and excludes an incomplete trailing transaction. The 200
+complete transactions contain 96,720 frames, with no duplicate page within a
+transaction. Optimally choosing nonoverlapping adjacent transaction pairs could
+eliminate at most 6,648 frames (**6.87%**) in this sample. Fixed pairing saves
+1.75–7.17% per shard, depending on offset.
+
+This optimistic bound ignores queue identity, readiness, isolation and batch
+limits. It is a historical prefix of the final WAL generation, not representative
+coverage of every stage or a batching speedup measurement. It does not justify
+claiming cross-queue batching will close the worst-cycle gap (43.1% improvement
+needed from 8,734 to 12,500). Keep that proposal unimplemented for now. Next
+refresh CPU attribution on the current binary and measure log/apply waiting;
+do not repeat full qualification without a new candidate or diagnostic question.
+The bounded read-only parser and results are archived as
+`fireweed-wal-overlap.py.gz` and `fireweed-owned-params-wal-overlap.json.gz`.
+
 ## Owned-parameter comparison is inconclusive (2026-09-16)
 
 Clean candidate source `fa49f380`, executable
