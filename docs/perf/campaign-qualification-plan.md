@@ -1,5 +1,56 @@
 # Campaign qualification and performance plan
 
+## Exact-binary projection I/O isolation (2026-09-16)
+
+Four serial disk/tmpfs/tmpfs/disk one-cycle campaigns use the same preserved
+`4f4acde0` executable (`9f54d120…e6a3763`), with the authoritative log on Btrfs
+throughout. Each processes one million original recipients over 64 physical stores,
+with unchanged metadata/timestamp enrichment, stage limits, reporting, retries,
+verification and retention. All four exit zero and their per-campaign logical
+counts match. Both VFS/publication traces and user-mode CPU counters are enabled;
+these diagnostic runs are **not sustained qualification**.
+
+| Projection / order | Recipients/sec | CPU ms/recipient | Peak process RSS GiB | Tmpfs allocated GiB | Sampled host writes GiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Disk 1 | 16,030.05 | 0.88844 | 12.784 | — | 2.917 |
+| Tmpfs 1 | 17,000.75 | 0.86142 | 14.188 | 6.141 | 1.862 |
+| Tmpfs 2 | 16,919.21 | 0.86287 | 14.149 | 6.120 | 1.756 |
+| Disk 2 | 14,902.93 | 0.89157 | 14.205 | — | 3.341 |
+
+The two-run means improve throughput **9.66%** and CPU cost **3.13%** with
+projection tmpfs; user instructions fall only 0.59%, and user cycles are flat
+(+0.02%). Process RSS rises 4.99% and excludes the additional tmpfs allocation.
+Logical WAL bytes are nearly unchanged (+0.29%); each disk run writes about
+6.56 GB of WAL and only 256 KiB of main-database pages. Publication counts and
+bytes differ by less than 0.03%. This comparison changes filesystem placement,
+not the amount of logical workflow work.
+
+Disk control 2 has 12.49 ms mean host write-request latency versus 0.85 ms in
+control 1. Summed WAL VFS-call time rises from 14.33 to 93.31 seconds; summed
+publication time rises from 404.34 to 1,217.39 seconds. These calls overlap across
+stores and **cannot be added to wall time**. Host statistics cover the whole
+device, omit startup/tail samples and are not process-attributed. Order effects
+remain possible; the short ABBA supports an I/O contribution, not a precise
+causal decomposition or a device throughput ceiling.
+
+At 12.5k recipients/sec, this sample implies about **78.24 MiB/sec logical WAL**
+plus **21.48 MiB/sec immutable-log publications**, and **11.13 CPU-seconds/sec**
+at the disk runs' mean process CPU cost. Logical writes are not physical device
+writes; Btrfs compression/coalescing and publication barriers require separate
+accounting. This short-run resource estimate does not supersede the eight-cycle
+mixed-I/O measurements or prove the sustained stretch target.
+
+Next extend this exact-binary diagnostic through eight cycles, retaining disk
+logs and all workflow semantics. Check tmpfs capacity and sample its allocation
+separately from RSS; prior disk qualification's approximately 28.3 GiB aggregate
+per-store WAL peaks plus 1.84 GiB main files suggest it fits the existing 32 GiB
+mount, with limited margin. Abort cleanly if space becomes insufficient rather
+than changing host mounts or weakening workload gates. A tmpfs result remains
+ineligible for qualification and is not a proposed production deployment.
+
+Raw reports, counters, device samples, storage allocation, runner and analysis
+are archived in `fireweed-projection-io-isolation-screen-manifest.json`.
+
 ## Publication replay completes: substantial isolated headroom (2026-09-16)
 
 The native publication replay on clean `60bf12a1`, executable

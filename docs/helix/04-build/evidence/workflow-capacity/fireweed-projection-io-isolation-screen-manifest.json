@@ -1,0 +1,219 @@
+{
+  "schema": "performance-evidence/v1",
+  "diagnostic_only": true,
+  "same_logical_work": true,
+  "binary_sha256": "9f54d1207211f5c12104bac95e70289479d2fdecd53baa7562926ae60e6a3763",
+  "build_source_head": "4f4acde08a76d2a94ecbc08443a49d9f38003e39",
+  "artifacts": [
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-analyze-lease-index-counters.py.gz",
+      "source": "/tmp/fireweed-analyze-lease-index-counters.py",
+      "sha256_decompressed": "92ad3a1ef3e86b449c28757bf18fdaffde1428b4e17083ca797da959116bc3d7",
+      "uncompressed_bytes": 2638
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-analyze-projection-io-isolation.py.gz",
+      "source": "/tmp/fireweed-analyze-projection-io-isolation.py",
+      "sha256_decompressed": "ad169bed5bffa9f72468012f6e81c8d1e12e91c3ee8a8b361de7304b3b2e8c2e",
+      "uncompressed_bytes": 2667
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-device-monitor-v3.py.gz",
+      "source": "/tmp/fireweed-device-monitor-v3.py",
+      "sha256_decompressed": "240aee74b13034d0a7b81949232d80087f00c6040694104e5f73ed3f3ed54fe1",
+      "uncompressed_bytes": 1522
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-device-summary-v3.py.gz",
+      "source": "/tmp/fireweed-device-summary-v3.py",
+      "sha256_decompressed": "757f8d5fc530766af4cf2497fb1a7aefb6fbeade1d11f5031709fd880c5666a8",
+      "uncompressed_bytes": 1458
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-projection-io-isolation-counter-recorder.py.gz",
+      "source": "/tmp/fireweed-projection-io-isolation-counter-recorder.py",
+      "sha256_decompressed": "b678589d6d283ab37ba476bd7dee00041dd5ad17f3a6b9e6f81a4bfe91b2e36e",
+      "uncompressed_bytes": 9015
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-projection-io-isolation-runner.log.gz",
+      "source": "/tmp/fireweed-projection-io-isolation-runner.log",
+      "sha256_decompressed": "09cd322fbdd3937fd4ad0a709c5c7938c142a949d1838066b849713a0b760f05",
+      "uncompressed_bytes": 1173
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-fireweed-run-projection-io-isolation-counters.py.gz",
+      "source": "/tmp/fireweed-run-projection-io-isolation-counters.py",
+      "sha256_decompressed": "e371fbe105bd0a8e9f11a16875618765ab140c502a19f895c8b3ac53378b5fe1",
+      "uncompressed_bytes": 6737
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-analysis.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/analysis.json",
+      "sha256_decompressed": "f87ffab1332e16e7d40d519c95641b55227be1376a5f68bfe1ce79b4224c686c",
+      "uncompressed_bytes": 50566
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1-device-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1-device-summary.json",
+      "sha256_decompressed": "a28f0999baafe56384a92510f14557374a55e0a4e844f3a1a0cd4753cd89ac34",
+      "uncompressed_bytes": 905
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1-device.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1-device.jsonl",
+      "sha256_decompressed": "c73f060b3b68638ca1b465c7bad7333c134206a815f536ae955d6000a8a730a3",
+      "uncompressed_bytes": 68589
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1-perf.csv.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1-perf.csv",
+      "sha256_decompressed": "f1a84fb331228d0a55c6c4ff21c1cc14b6bf4728c38afe88b372d5f5a105e642",
+      "uncompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1-provenance.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1-provenance.json",
+      "sha256_decompressed": "45c0cdefd61b7145d7d3ecaf1099612f524c392b254c0995a6212cf96456d874",
+      "uncompressed_bytes": 541
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1-threads.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1-threads.jsonl",
+      "sha256_decompressed": "dd165054da90ab9aa01640c277fc7d5ca5cf2d7c31398d88a54b2596fa30ab46",
+      "uncompressed_bytes": 4240
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1-tmpfs-storage.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1-tmpfs-storage.json",
+      "sha256_decompressed": "803ae07ff4b908eee544f361e33f9f8c5a5e5a8cb742ed5e9750cc73dc72df37",
+      "uncompressed_bytes": 14264
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-1.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-1.json",
+      "sha256_decompressed": "2d21dd45c4d6d59dbacb1471a2ac9a6df807f0b736f07d5c12cd40d009850b9f",
+      "uncompressed_bytes": 2305380
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2-device-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2-device-summary.json",
+      "sha256_decompressed": "eda5a83d046f5099b0f9f71261a5fca5e0dc30bf111eea2200622bf4d6e34c9b",
+      "uncompressed_bytes": 918
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2-device.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2-device.jsonl",
+      "sha256_decompressed": "d1a70bed481dc56312bb5a749f4a402c31f523548179f3fc93ff4350695d32b9",
+      "uncompressed_bytes": 67605
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2-perf.csv.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2-perf.csv",
+      "sha256_decompressed": "f35e238c2928a5af349db54ffb9ae2dc2ef865406655eca596c659dc1a939760",
+      "uncompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2-provenance.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2-provenance.json",
+      "sha256_decompressed": "45c0cdefd61b7145d7d3ecaf1099612f524c392b254c0995a6212cf96456d874",
+      "uncompressed_bytes": 541
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2-threads.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2-threads.jsonl",
+      "sha256_decompressed": "b3d60852f40252c1b653e02b216a5adef3fbaf0dd4aa19dc64b00fce13a14d2c",
+      "uncompressed_bytes": 4240
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2-tmpfs-storage.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2-tmpfs-storage.json",
+      "sha256_decompressed": "f4d149f398d699da61d55e4eab9d815f593a86c9326d12a39fb3bb6d30002c80",
+      "uncompressed_bytes": 14270
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-candidate-2.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/candidate-2.json",
+      "sha256_decompressed": "a84f89e1fc5c4601856405ca5030ba72e3e0c61db6a8836a181fb01a82ae92eb",
+      "uncompressed_bytes": 2320446
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-1-device-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-1-device-summary.json",
+      "sha256_decompressed": "2b03eb0af68482e43abbc5b79fc125c312469269fdcbb3635be43433370d5332",
+      "uncompressed_bytes": 903
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-1-device.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-1-device.jsonl",
+      "sha256_decompressed": "9d3a8e7be953c927394ceb969ae41085fc8d642e6acd0109d8a068fb6d29c16f",
+      "uncompressed_bytes": 72243
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-1-perf.csv.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-1-perf.csv",
+      "sha256_decompressed": "aab29bc2d2c00eb8d8e35321844d2476d60ab2b095fff8abd4b8362000f9e32c",
+      "uncompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-1-provenance.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-1-provenance.json",
+      "sha256_decompressed": "2a962e88094984621b713c2b2dd2e2166feff40c7ad45376e9f23faf8f2c0a89",
+      "uncompressed_bytes": 540
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-1-threads.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-1-threads.jsonl",
+      "sha256_decompressed": "cf5a88c63db601298e0b00da745b5ec6dd2dccf6d66b4e7561f52907a66969b6",
+      "uncompressed_bytes": 4483
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-1.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-1.json",
+      "sha256_decompressed": "d97abb85d71ab60c6a9865152437bb932ca05131b3ca53e17b54eb4174fe598c",
+      "uncompressed_bytes": 2319511
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-2-device-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-2-device-summary.json",
+      "sha256_decompressed": "9b65ae6da522f4802625ccbad5255ca868f65c488a2d9d1874a24e2b88a8d9c5",
+      "uncompressed_bytes": 898
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-2-device.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-2-device.jsonl",
+      "sha256_decompressed": "e5565a97d391bf4f316f206eaa10a4eb49e9b6f5a28cdf5b028d5faa15a83c36",
+      "uncompressed_bytes": 73479
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-2-perf.csv.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-2-perf.csv",
+      "sha256_decompressed": "299de7116074604aebf0013d5b5f22e62360dac5085404b69ddc8da4e24f0ba1",
+      "uncompressed_bytes": 137
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-2-provenance.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-2-provenance.json",
+      "sha256_decompressed": "2a962e88094984621b713c2b2dd2e2166feff40c7ad45376e9f23faf8f2c0a89",
+      "uncompressed_bytes": 540
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-2-threads.jsonl.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-2-threads.jsonl",
+      "sha256_decompressed": "15ec7d930dbcc0240c27080f95de02bfb700b66889ef74bb9f50c3d9588f609f",
+      "uncompressed_bytes": 4836
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-control-2.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/control-2.json",
+      "sha256_decompressed": "d89440852c266f608117d9afe85c8b245f06473999f5b74002a298d0ac0cc617",
+      "uncompressed_bytes": 2321966
+    },
+    {
+      "artifact": "fireweed-projection-io-isolation-screen-summary.json.gz",
+      "source": "target/workflow-capacity/projection-io-isolation-counters-20260916/summary.json",
+      "sha256_decompressed": "c1b0d8f30e33b8a5a5f3f527cdb630764e3aef9c0386d73cfd12ebf0f0ec773e",
+      "uncompressed_bytes": 1212
+    }
+  ]
+}
