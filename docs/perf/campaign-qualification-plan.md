@@ -1,5 +1,36 @@
 # Campaign qualification and performance plan
 
+## Current-binary CPU attribution (2026-09-16)
+
+After the failed repeat and offline WAL read, a separate one-cycle million-row
+campaign sampled only the workload process with installed pacman `perf`: `cycles:u`,
+49 Hz, 4,096-byte DWARF stacks. Source `56789181`, runtime `fa49f380`, executable
+`5d0ac295...`; default filesystem policy and unchanged handler/reporting workload.
+This instrumented screen completed correctly at 15,692/sec, 0.90705 CPU-ms/recipient,
+and 14.114 GiB peak RSS. It is not qualification or a comparison speedup.
+
+There are 89,279 SAMPLE events, 96 reported LOST_SAMPLES and nine lost chunks.
+Sampling loss and truncated/unwound stacks limit attribution. The previously
+smoke-tested offline-only `fireweed-perf-unwind-bias.c.txt` shim corrects perf's
+module bias and synthetic-thread lookup; it was not loaded into the workload.
+Inclusive user-cycle percentages overlap: Turso `normal_step` 60.85%, index B-tree
+seek 14.72%, `op_column` 14.66%, accepted-claim realization 8.66%, addressed mutation
+planning 5.55%, public membership reporting 4.24%, retained-item query 3.87%.
+Allocator `_mi_page_malloc_zero` has 5.50% self attribution, `mi_free` 2.06%.
+User-cycle samples do not measure blocked time or kernel CPU.
+
+Source inspection also finds the same-queue join predicate stops waiting after
+*any* complete finalization or lease-invalidating mutation, even when a different
+claim in the selected prefix remains outstanding. Next test a bounded candidate
+that tracks those claimed item identities in command order, retaining the existing
+500 ms deadline, coverage bypass, queue fairness and generation budgets. This
+might avoid materializing intermediate leases; frequency and benefit are unproven.
+Do not extend the delay or change the workload to demonstrate a gain.
+
+Exact recorder, provenance, raw perf data, loss statistics, self/inclusive reports
+and device observations are archived as `fireweed-owned-params-profile-*` and
+`fireweed-run-owned-params-profile.py.gz`.
+
 ## Owned-parameter repeated qualification fails (2026-09-16)
 
 All four serial runs used clean source `8be4986ab85071eb3864bb44b6edff29d7c125e3`

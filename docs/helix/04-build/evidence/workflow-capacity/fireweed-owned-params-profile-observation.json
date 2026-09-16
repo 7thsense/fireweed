@@ -1,0 +1,14 @@
+{
+  "raw_perf_sha256": "41abda6b9836c02cbe40ff9c862699328ea09223dfa7bba43a5cf5aaca7333f5",
+  "raw_perf_bytes": 386437224,
+  "lost_samples": 96,
+  "lost_chunks": 9,
+  "event": "cycles:u",
+  "requested_frequency": 49,
+  "stack_bytes": 4096,
+  "offline_unwind_shim": "fireweed-perf-unwind-bias.c.txt",
+  "diagnostic_only": true,
+  "runtime_unmodified": true,
+  "inclusive_percentages_overlap": true,
+  "sample_events": 89279
+}
