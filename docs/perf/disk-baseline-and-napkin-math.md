@@ -1,5 +1,53 @@
 # Disk baseline and Fireweed capacity estimates
 
+## Selective cache untraced repeats: stretch still fails (2026-09-16)
+
+All four canonical runs use clean `2e8f8ff5` and executable
+`9124cfd715be116ce28c5ed83ded45fb0773c9ff45772dfab8e54614999acf61`, with empty
+diagnostics and successful workload exits. The shell qualification exits 1
+because the second campaign fails five per-cycle 12.5k rate checks. Both
+campaigns and both primitive runs pass every 10k check. No source, workload,
+cache-cap or host setting changed between runs, and none overlapped.
+
+| Campaign | Overall recipients/sec | Slowest cycle/sec | CPU-ms/recipient | Peak RSS GiB | 12.5k gates |
+| --- | ---: | ---: | ---: | ---: | --- |
+| First | 15,624.42 | 13,746.67 | 0.878902 | 19.812 | All pass |
+| Repeat | 12,752.16 | 11,927.47 | 0.927261 | 19.991 | Five cycle-rate failures |
+
+Repeat cycle rates are 12,285.35 / 13,908.45 / 15,152.13 / 15,352.31 /
+12,067.35 / 12,195.79 / 12,393.79 / 11,927.47. Correctness, due-to-claim,
+reporting, outcome reconciliation, WAL, checkpoint materialization,
+database stability and RSS checks all pass. The worst cycle needs **4.80%**
+more throughput (83.840 seconds down to 80), so the stretch goal remains open.
+
+Primitive rates (first/repeat rows/sec, million varied-payload rows, batch 1000):
+insert 45,958/43,068; enrich 43,115/44,303; schedule 57,011/108,421;
+claim/complete 47,044/44,942; purge 64,138/115,135. All exceed 10k, but purge
+is lower than the prior baseline; do not claim improvement in every primitive.
+These are batched public operations, not one durable transaction per row.
+
+At 12.5k, measured CPU cost requires **10.986/11.591 CPU-seconds/sec**.
+Host writes are 31.740/31.100 GiB at 63.65/50.79 MiB/sec. Mean write-request
+latency is 4.59/19.23 ms, busy time 31.80/57.15%, and full I/O pressure
+1.67/7.30%. CPU cost also increases in the repeat. These measurements show
+synchronization/CPU variability alongside write latency, not a proven physical
+bandwidth ceiling or a reason to change SSD settings. The prior traced read
+reduction remains real, but does not establish sustained stretch capacity.
+
+Code review identifies a next bounded hypothesis: `iter_latest_frames` bounds
+which blocks it visits, yet even a tiny changed-frame range still invokes
+`latest_entries_in_block`, scanning the full hash block and allocating maps,
+followed by a seen-page tree. Cache invalidation can instead enumerate only the
+visible changed slots for narrow ranges, preserving latest-per-page semantics
+and the conservative snapshot checks. This is not implemented or measured yet;
+verify range boundaries, duplicate pages and snapshot visibility before testing
+its CPU/throughput impact. No weakening of cache coherence or workload gates.
+
+Twenty artifacts in `fireweed-selective-cache-untraced-repeat-manifest.json`
+archive the four raw reports, summaries/budgets, device observations, exact
+runner/parser/qualification command and logs, with decompressed hashes.
+
+
 ## Selective cache measurement: fewer reads, modest CPU change (2026-09-16)
 
 Clean `141d4be7`, binary

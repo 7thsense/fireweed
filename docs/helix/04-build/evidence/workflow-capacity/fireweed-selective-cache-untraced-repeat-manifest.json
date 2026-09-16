@@ -1,0 +1,108 @@
+{
+  "source_head": "2e8f8ff509ae76e87ed52ac4d9301bd62dbca830",
+  "binary_sha256": "9124cfd715be116ce28c5ed83ded45fb0773c9ff45772dfab8e54614999acf61",
+  "all_10000_checks_pass": true,
+  "all_12500_checks_pass": false,
+  "artifacts": [
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-campaign-1.json.gz",
+      "uncompressed_sha256": "2e7e89724e23cd6601ec809fdfae896119efcc38adbf759d5b104d332a91e082",
+      "uncompressed_bytes": 5323736
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-primitives-1.json.gz",
+      "uncompressed_sha256": "5c353a2102090b0d71fc11ce586fb4ad1c562bcfc87c7544de7b950b3387c87a",
+      "uncompressed_bytes": 152182
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-campaign-2.json.gz",
+      "uncompressed_sha256": "87114e121b7a730ee5d6b0f323cb69df0f7404e5243fcc26e4e38f6dc2c51833",
+      "uncompressed_bytes": 5470363
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-primitives-2.json.gz",
+      "uncompressed_sha256": "9fec807a27bd5c7a7d81aff704f4318d750f130da9bd8ac41151f7b2b9112825",
+      "uncompressed_bytes": 149263
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-summary.json.gz",
+      "uncompressed_sha256": "9e8b7a4c5e4017d61ccf37f7942f0b0cb24262d8a77fde19d00fca55501bf3d4",
+      "uncompressed_bytes": 8742
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-budgets.json.gz",
+      "uncompressed_sha256": "affdbae341a02c3c6485c96dd8284c4c60f9edd8c7b67901c2212d1d80f552ff",
+      "uncompressed_bytes": 605
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-1-device.jsonl.gz",
+      "uncompressed_sha256": "3b24538b6ec8fe507a7c619d177ac18f0506564a3274766096fd3da68b55f010",
+      "uncompressed_bytes": 578365
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-1-device-summary.json.gz",
+      "uncompressed_sha256": "1783fddd61254ae44346c91676ccfb8807b58b55da4075d557b578047c7b3a04",
+      "uncompressed_bytes": 901
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-2-device.jsonl.gz",
+      "uncompressed_sha256": "d4d5aa3d7cd79517a234505a41008d4adec74e1ba46d3f2aeb2bbe419eeab578",
+      "uncompressed_bytes": 96471
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-2-device-summary.json.gz",
+      "uncompressed_sha256": "4d4d9f8e4152a18d8a73749fab081e7cf4b70e66fdbbc55c58fab37cab7545f4",
+      "uncompressed_bytes": 917
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-3-device.jsonl.gz",
+      "uncompressed_sha256": "7eebfd1df052931be08837aa3047beaecff37393b1c9b09f0460001026eb72e9",
+      "uncompressed_bytes": 689282
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-3-device-summary.json.gz",
+      "uncompressed_sha256": "9334a6ece137a7d06e9154f17e0cfd7159c50745041939354f96dbbce80bb340",
+      "uncompressed_bytes": 897
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-4-device.jsonl.gz",
+      "uncompressed_sha256": "4327cefa19e5344ae463e8d65ef048262096dbbe7cb7989bc61529c3255dc28c",
+      "uncompressed_bytes": 93150
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phase-4-device-summary.json.gz",
+      "uncompressed_sha256": "937a7b8bcc3269ffa5967f2fc6fdee8853d34a6aea06a104e413097a91b128eb",
+      "uncompressed_bytes": 916
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-run-selective-cache-untraced-qualification.py.gz",
+      "uncompressed_sha256": "8d1dc1cad8f95db2da3c3fedb94bd01258007fe24dd9a048dbb9f04671ec7914",
+      "uncompressed_bytes": 2857
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-summarize-untraced-repeat.py.gz",
+      "uncompressed_sha256": "575a39ff33a256dc7626c2478b550f64d8a794a87988a5143de19a4bcbab5d34",
+      "uncompressed_bytes": 1304
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-phases.json.gz",
+      "uncompressed_sha256": "e7f50fa6f0224fe004ad61a68f8aeeb7a0e2d3a64760313bd9f0e9a7823f689e",
+      "uncompressed_bytes": 3085
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-runner.log.gz",
+      "uncompressed_sha256": "77eb593e906366421bb4cfcdf034bad366fc88822a583304d5a2e0af552edca6",
+      "uncompressed_bytes": 14530
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-untraced-qualification-wrapper.log.gz",
+      "uncompressed_sha256": "a20a66c335bdf60a8779b738b0605525167779cb29a1b1cb0694fa523f9d04ce",
+      "uncompressed_bytes": 271
+    },
+    {
+      "path": "docs/helix/04-build/evidence/workflow-capacity/fireweed-selective-cache-qualification-command.sh.gz",
+      "uncompressed_sha256": "18fd4d7e756fa66f5fcbb65ca7323e31527e9cf42a495fdfc9489b9f76927c1c",
+      "uncompressed_bytes": 1576
+    }
+  ]
+}
