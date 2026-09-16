@@ -1,5 +1,44 @@
 # Campaign qualification and performance plan
 
+## Publication phases: synchronization dominates; diagnostic clears rates (2026-09-16)
+
+Clean `78d36c7c`, binary `83e48da6...`, completes the unchanged eight-cycle
+million-resident campaign at **14,863.73 recipients/sec**, with a **13,298.53/sec**
+slowest cycle. All workload/resource checks at 10k and 12.5k pass. Explicit
+instrumented provenance still rejects qualification; this is not a repeated
+untraced pass. Cycle rates are 16,515 / 15,730 / 16,302 / 15,603 / 13,299 /
+14,813 / 14,381 / 14,672. Peak RSS is 18.836 GiB; CPU cost is 0.92693
+ms/recipient. The runtime changes only add optional instrumentation.
+
+Across 87,983 successful local publications, fdatasync accounts for **54.06%**
+and directory fsync **35.03%** of accumulated elapsed publication time. Writes
+account for **0.82%**, rename/close 6.59%, create 3.22%, other phases under 1%.
+Mean fdatasync / directory fsync / total are 45.24 / 29.31 / 83.69 ms; p99 is
+597.30 / 319.49 / 1,195.47 ms. These timings overlap across shards and include
+scheduler delays; they are neither additive campaign wall time nor device-only
+service time. Failed publications do not produce a successful phase record.
+
+Host counters: 31.712 GiB written, 60.49 MiB/sec, 33.59% device busy, 5.316 ms
+mean write-request latency, and 14.877 host busy CPU-seconds/sec. The process
+uses 7,415.42 CPU-seconds over 538.65 seconds. Projection VFS requested
+54,671,802,576 WAL and 2,081,656,832 main-file bytes, with no write errors.
+These observations preserve the distinction between logical writes, host-wide
+physical writes, elapsed synchronization time and CPU demand.
+
+Next test a bounded five-millisecond wait only when a successful head already
+has an uploading immediate successor. Ready groups, idle work, custom
+single-object sequencers, failed prefixes and shutdown must bypass the wait.
+Additional arrivals must not extend its deadline. Existing manifests, ordering,
+byte admission, durable acknowledgment and failure handling stay intact.
+Retention depends on a serial publication-count/throughput comparison, not on
+this hypothesis alone. No host changes or overlapping workloads ran.
+
+Evidence: `fireweed-local-publish-trace-20260916.json.gz`,
+`fireweed-local-publish-{accounting,gates}.json.gz`, phase/device samples,
+provenance, runner, parser and build log, with uncompressed artifact hashes in
+`fireweed-local-publish-evidence-manifest.json`.
+
+
 ## Local log publication phase instrumentation (2026-09-16)
 
 `OBJECT_LOG_LOCAL_PUBLISH_TRACE=1` enables successful-publication timings in

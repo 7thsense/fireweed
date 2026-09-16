@@ -1,0 +1,42 @@
+[
+  {
+    "file": "fireweed-run-local-publish-trace.py",
+    "uncompressed_sha256": "b0c4ede9274440d9d2b0bc7cda11dc30f442ce4c8fd5cfd78c5d7965abed1606"
+  },
+  {
+    "file": "fireweed-summarize-local-publish-trace.py",
+    "uncompressed_sha256": "1be513abc7d130328b9023efc6067980cc7a2247d26444f2755e39b9103bfe61"
+  },
+  {
+    "file": "fireweed-local-publish-accounting.json.gz",
+    "uncompressed_sha256": "6ff0f0b97f6a385971f5cf8c137d431b03b3dff1e6d4482d995e72fa2ac56160"
+  },
+  {
+    "file": "fireweed-local-publish-gates.json.gz",
+    "uncompressed_sha256": "3c10b95854a23688ace660525b9ad3aa9611b750e7715320d914bcf01151d6cc"
+  },
+  {
+    "file": "fireweed-local-publish-canonical-build.log.gz",
+    "uncompressed_sha256": "42325e551bb96aae6fe0e51e7e14a93aff6846bb3aaa4a0955b3dfd2c4f23c1a"
+  },
+  {
+    "file": "fireweed-local-publish-trace-provenance.json.gz",
+    "uncompressed_sha256": "3d9d94b0b22866a6d8be3a22f1d4477ed45d7da719414e628fb5a16cb1cec7c4"
+  },
+  {
+    "file": "fireweed-local-publish-trace-phases.json.gz",
+    "uncompressed_sha256": "fcb4f59f1bc31e8c7e3b9195433c6dce0ea0ac9694548eac91186e5ad13f60cd"
+  },
+  {
+    "file": "fireweed-local-publish-trace-phase-1-device-summary.json.gz",
+    "uncompressed_sha256": "6233e1edadb86201c1ba34d2cf390a3500364d116b26f81b68f92ec989f4b4fb"
+  },
+  {
+    "file": "fireweed-local-publish-trace-phase-1-device.jsonl.gz",
+    "uncompressed_sha256": "37af2a494ac60959dd42757c4a0be560e8ab1add94c3b2ff81bb291cd91384ff"
+  },
+  {
+    "file": "fireweed-local-publish-trace-20260916.json.gz",
+    "uncompressed_sha256": "79b338ffb82c9138029db07060bbd1f34a91c227d7ffe4ffef92a82a3c53c766"
+  }
+]
