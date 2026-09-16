@@ -63,7 +63,7 @@ impl IO for RebuildableIo {
 }
 
 #[derive(Default)]
-struct WriteTotals {
+struct IoTotals {
     calls: u64,
     requested_bytes: u64,
     elapsed_us: u64,
@@ -74,15 +74,16 @@ struct WriteTotals {
     errors: u64,
 }
 
-struct WriteTrace {
+struct IoTrace {
     class: &'static str,
-    totals: Mutex<WriteTotals>,
+    totals: Mutex<IoTotals>,
+    read_totals: Mutex<IoTotals>,
 }
 
-struct RebuildableFile(Arc<dyn File>, Option<WriteTrace>);
+struct RebuildableFile(Arc<dyn File>, Option<IoTrace>);
 impl RebuildableFile {
     fn new(inner: Arc<dyn File>, path: &str) -> Self {
-        let trace = std::env::var_os("FIREWEED_PROJECTION_IO_TRACE").map(|_| WriteTrace {
+        let trace = std::env::var_os("FIREWEED_PROJECTION_IO_TRACE").map(|_| IoTrace {
             class: if path.ends_with("-wal") {
                 "wal"
             } else if std::path::Path::new(path).file_name()
@@ -93,6 +94,7 @@ impl RebuildableFile {
                 "main_or_other"
             },
             totals: Mutex::default(),
+            read_totals: Mutex::default(),
         });
         Self(inner, trace)
     }
@@ -105,15 +107,21 @@ impl RebuildableFile {
         let Some(trace) = &self.1 else {
             return write();
         };
+        Self::traced_call(&trace.totals, bytes, write)
+    }
+
+    fn traced_call(
+        totals: &Mutex<IoTotals>,
+        bytes: usize,
+        operation: impl FnOnce() -> Result<Completion>,
+    ) -> Result<Completion> {
         let started = Instant::now();
-        let result = write();
-        // PlatformIO on Unix completes pwrite/pwritev synchronously. This is
-        // time inside the VFS call, not physical-device service time or CPU time.
+        let result = operation();
+        // On Unix PlatformIO completes reads/writes synchronously, including
+        // the completion callback. This is VFS-call elapsed time, not device
+        // service time, physical bytes, or a count of page-cache misses.
         let elapsed_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        let mut totals = trace
-            .totals
-            .lock()
-            .expect("projection write trace poisoned");
+        let mut totals = totals.lock().expect("projection I/O trace poisoned");
         totals.calls += 1;
         totals.requested_bytes += bytes as u64;
         totals.elapsed_us += elapsed_us;
@@ -145,6 +153,22 @@ impl Drop for RebuildableFile {
                 t.over_100ms,
                 t.errors
             );
+            let reads = trace
+                .read_totals
+                .lock()
+                .expect("projection I/O trace poisoned");
+            eprintln!(
+                "projection_read class={} calls={} requested_bytes={} elapsed_us={} max_us={} over_1ms={} over_10ms={} over_100ms={} errors={}",
+                trace.class,
+                reads.calls,
+                reads.requested_bytes,
+                reads.elapsed_us,
+                reads.max_us,
+                reads.over_1ms,
+                reads.over_10ms,
+                reads.over_100ms,
+                reads.errors
+            );
         }
     }
 }
@@ -156,7 +180,11 @@ impl File for RebuildableFile {
         self.0.unlock_file()
     }
     fn pread(&self, pos: u64, c: Completion) -> Result<Completion> {
-        self.0.pread(pos, c)
+        let Some(trace) = &self.1 else {
+            return self.0.pread(pos, c);
+        };
+        let bytes = c.as_read().buf().as_slice().len();
+        Self::traced_call(&trace.read_totals, bytes, || self.0.pread(pos, c))
     }
     fn pwrite(&self, pos: u64, buffer: Arc<Buffer>, c: Completion) -> Result<Completion> {
         self.traced_write(buffer.as_slice().len(), || self.0.pwrite(pos, buffer, c))
@@ -251,9 +279,10 @@ mod tests {
             Arc::new(FailingFile {
                 syncs: AtomicUsize::new(0),
             }),
-            Some(WriteTrace {
+            Some(IoTrace {
                 class: "wal",
                 totals: Mutex::default(),
+                read_totals: Mutex::default(),
             }),
         );
         assert!(matches!(
@@ -276,6 +305,61 @@ mod tests {
         assert!(t.elapsed_us >= 10_000);
         assert!(t.max_us >= 10_000);
         assert!(t.over_10ms >= 1);
+    }
+
+    #[test]
+    fn read_trace_preserves_short_reads_callbacks_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projection.db");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let io = PlatformIO::new().unwrap();
+        let trace = || IoTrace {
+            class: "main_or_other",
+            totals: Mutex::default(),
+            read_totals: Mutex::default(),
+        };
+        let file = RebuildableFile(
+            io.open_file(path.to_str().unwrap(), OpenFlags::None, false)
+                .unwrap(),
+            Some(trace()),
+        );
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let observed = callbacks.clone();
+        let buffer = Arc::new(Buffer::new_temporary(16));
+        let completion = Completion::new_read(buffer.clone(), move |result| {
+            let (buffer, bytes) = result.unwrap();
+            assert_eq!(bytes, 8);
+            assert_eq!(&buffer.as_slice()[..8], b"abcdefgh");
+            observed.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        let completion = file.pread(0, completion).unwrap();
+        io.wait_for_completion(completion.clone()).unwrap();
+        assert!(completion.succeeded());
+        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+        let totals = file.1.as_ref().unwrap().read_totals.lock().unwrap();
+        assert_eq!(
+            (totals.calls, totals.requested_bytes, totals.errors),
+            (1, 16, 0)
+        );
+        assert_eq!(file.1.as_ref().unwrap().totals.lock().unwrap().calls, 0);
+        drop(totals);
+
+        let failing = RebuildableFile(
+            Arc::new(FailingFile {
+                syncs: AtomicUsize::new(0),
+            }),
+            Some(trace()),
+        );
+        assert!(matches!(
+            failing.pread(0, Completion::new_read(buffer, |_| None)),
+            Err(turso_core::LimboError::Busy)
+        ));
+        let totals = failing.1.as_ref().unwrap().read_totals.lock().unwrap();
+        assert_eq!(
+            (totals.calls, totals.requested_bytes, totals.errors),
+            (1, 16, 1)
+        );
     }
 
     #[test]

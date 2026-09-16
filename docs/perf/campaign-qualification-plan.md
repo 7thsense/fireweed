@@ -1,5 +1,37 @@
 # Campaign qualification and performance plan
 
+## Measure projection reads before changing pooled-cache budgets (2026-09-16)
+
+The previous turn produced progress by rejecting an unsupported decoder speedup
+and correlating later-cycle slowdowns with main-file materialization. Current
+runtime retains linear purge validation, with the decoder restored. No workload
+or build remained active when this investigation began.
+
+Extend the existing `FIREWEED_PROJECTION_IO_TRACE` diagnostic with per-file-class
+`projection_read` totals. Read/write requested bytes and counters remain separate;
+existing `projection_io` write output retains its format. Disabled tracing forwards
+`pread` directly without clocks or counter locks. Enabled tracing forwards the
+original completion and result, including short reads and callbacks. On Unix,
+PlatformIO performs synchronous calls including their completion callback. Elapsed
+time is VFS invocation time, **not** device service time; requested bytes may be
+served by the OS cache. Calls also include headers/other explicit reads, so they
+are not exact page-cache-miss counts. `errors` counts immediate Result errors,
+not later asynchronous callback failures on other I/O platforms.
+
+All three focused I/O tests pass, including a real short file read with one
+callback and unchanged data, separate requested-byte accounting, and propagated
+read errors. The native projection library suite passes **60 tests, zero failures,
+two intentional ignores**. Logs are archived as
+`fireweed-projection-read-trace-{tests,native-tests}.log.gz`. No cache setting,
+SQL, log durability barrier or public API changes. The existing diagnostic flag
+already disqualifies traced recordings from qualification.
+
+Next run an unchanged eight-cycle million-resident campaign to measure main/WAL
+read volumes through the post-checkpoint cycles. This is instrumentation-only
+progress; the repeated 12.5k target remains unproven and the last qualified baseline
+still has a 4.2% worst-cycle gap. A larger cache requires measured benefit and the
+same RSS/isolation/correctness gates, not merely the 30 MiB main-file size.
+
 ## Offline late-cycle review after the rejected decoder (2026-09-16)
 
 Read-only analysis of the existing guarded-counter qualification records shows
