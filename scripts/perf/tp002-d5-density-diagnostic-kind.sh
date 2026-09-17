@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export EVIDENCE_MODE=d5-diagnostic
-export PROJECTION_BACKEND=sqlite
+export PROJECTION_BACKEND=turso
 export QUEUE_COUNT=1001
 export ITEMS=10000
 export CONTROL_ITEMS=10000

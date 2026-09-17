@@ -521,14 +521,12 @@ async fn commit_request_id_replays_conflicts_and_expires() {
     );
 }
 
-/// The commit path is rejected on a backend without an atomic transition boundary (eventual-apply): the
-/// objectlog backend inherits the default `Unavailable`. (Capability descriptors are a follow-up; this just
-/// proves the port fails closed.)
+/// The filesystem log is the authoritative atomic transition boundary;
+/// completion must be visible through the public projection reads.
 #[tokio::test]
-#[ignore = "objectlog LogEngine product does not implement CommitTransitionPort (defaults Unavailable)"]
 async fn direct_objectlog_commit_is_available_and_observable() {
     let dir = std::env::temp_dir().join(format!(
-        "fireweed-commit-unavail-{}-{:?}",
+        "fireweed-commit-available-{}-{:?}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -562,15 +560,17 @@ async fn direct_objectlog_commit_is_available_and_observable() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        outcomes.as_slice(),
-        [EntryOutcome::Committed { .. }]
-    ));
+    assert!(
+        matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]),
+        "{outcomes:?}"
+    );
     let metrics = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (metrics.pending, metrics.leased, metrics.complete),
         (0, 0, 1)
     );
+    drop(fireweed);
+    std::fs::remove_dir_all(dir).expect("cleanup");
 }
 
 /// C6: an entry advancing a caller-supplied instance fence `expected -> next` succeeds and the stored fence

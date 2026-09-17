@@ -87,7 +87,6 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         == [
             "Cargo.toml",
             "crates/fireweed-bench/Cargo.toml",
-            "tools/fireweed-turso-compat-probe/Cargo.toml",
         ],
         "workspace routing drift",
     )
@@ -256,8 +255,8 @@ def validate_cargo_scope(text: str) -> None:
         "root Cargo comment omits independent benchmark workspace",
     )
     require(
-        "tools/fireweed-turso-compat-probe/Cargo.toml" in text,
-        "root Cargo comment omits independent Turso workspace",
+        "vendor/turso_core/Cargo.toml" in text,
+        "root Cargo comment omits vendored Turso tests",
     )
     require(
         "members below" in text,

@@ -78,6 +78,7 @@ fn item(i: u64, payload_tag: u8) -> NewItem {
         cohort_size: None,
         gate_keys: Vec::new(),
         entity: None,
+        index_fields: Default::default(),
     }
 }
 
@@ -125,7 +126,7 @@ pub async fn run_million_cycle_with(
     }
 
     // Insert. Retain item ids so modify uses O(1) primary-key refs rather than
-    // client-key scans (pathological on Turso/sqlite at 1M scale).
+    // client-key scans (pathological on Turso at 1M scale).
     let insert_start = Instant::now();
     let mut inserted = 0u64;
     let mut item_ids: Vec<ItemId> = Vec::with_capacity(sizes.insert_items as usize);

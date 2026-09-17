@@ -1,4 +1,4 @@
-//! Turso RelTx adapter — same apply/query surface as rusqlite, different engine.
+//! Native Turso implementation of the shared relational apply/query interface.
 
 use fireweed_engine::{EngineError, EngineResult};
 use fireweed_relational::{RelRow, RelTx, RelValue};
@@ -94,7 +94,7 @@ mod apply_statement_reuse_tests {
             Value::Integer(i64::MIN),
             Value::Real(1.25),
             Value::Text("metadata \0 λ".repeat(4096)),
-            Value::Blob(vec![0, 255, 31, 128].repeat(16384)),
+            Value::Blob([0, 255, 31, 128].repeat(16384)),
         ];
         let mut rows = statement.query(expected.clone()).await.unwrap();
         let held: Vec<_> = rows.next().await.unwrap().unwrap().into_values().collect();
@@ -326,8 +326,10 @@ fn block_on_turso<T: Send + 'static>(
     }
 }
 
+type TursoRelTxJob = Box<dyn FnOnce(&tokio::runtime::Handle) + Send>;
+
 struct TursoRelTxWorker {
-    jobs: std::sync::mpsc::Sender<Box<dyn FnOnce(&tokio::runtime::Handle) + Send>>,
+    jobs: std::sync::mpsc::Sender<TursoRelTxJob>,
 }
 
 impl TursoRelTxWorker {
@@ -348,8 +350,7 @@ impl TursoRelTxWorker {
 fn turso_reltx_worker() -> &'static TursoRelTxWorker {
     static WORKER: std::sync::OnceLock<TursoRelTxWorker> = std::sync::OnceLock::new();
     WORKER.get_or_init(|| {
-        let (jobs_tx, jobs_rx) =
-            std::sync::mpsc::channel::<Box<dyn FnOnce(&tokio::runtime::Handle) + Send>>();
+        let (jobs_tx, jobs_rx) = std::sync::mpsc::channel::<TursoRelTxJob>();
         std::thread::Builder::new()
             .name("turso-reltx".into())
             .spawn(move || {
@@ -466,10 +467,8 @@ mod packed_authority_first_tests {
             ),
             ids,
         );
-        if !authority_first {
-            if let QueueCommand::Claim(claim) = &mut command.command {
-                claim.authority_first = false;
-            }
+        if !authority_first && let QueueCommand::Claim(claim) = &mut command.command {
+            claim.authority_first = false;
         }
         command
     }
@@ -1364,12 +1363,10 @@ mod packed_authority_first_tests {
         apply(&packed, &shard, 1, packed_vector)
             .await
             .expect("claim run then complete run");
-        let mut seq = 1u64;
-        for command in claims.into_iter().chain(completes) {
+        for (seq, command) in (1u64..).zip(claims.into_iter().chain(completes)) {
             apply(&solo, &solo_shard, seq, vec![command])
                 .await
                 .expect("solo neighbor");
-            seq += 1;
         }
         for id in ids {
             assert_eq!(

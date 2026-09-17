@@ -1771,6 +1771,18 @@ impl ProjectionRead for AsyncObjectLogMemoryBackend {
         )
     }
 
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::RetainedItemView>>> + Send
+    {
+        std::future::ready(self.read_healthy_projection(shard, |projection| {
+            ProjectionStore::retained_items(projection, shard, after, limit)
+        }))
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,

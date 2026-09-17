@@ -510,7 +510,7 @@ pub fn validate_inert_mutation_generation_folding(
     let mut members = Vec::with_capacity(works.len());
     for work in works {
         members.push(MutationGenerationMember {
-            outcome: overlay.validate_one(snapshot, work),
+            outcome: overlay.validate_one(work),
         });
     }
     Ok((
@@ -546,7 +546,8 @@ where
     }
 }
 
-struct MutationGenerationOverlay {
+struct MutationGenerationOverlay<'a> {
+    snapshot: &'a MutationDriverSnapshot,
     client_keys: HashSet<String>,
     request_fingerprints: HashMap<RequestId, BodyHash>,
     unique_index_values: HashSet<String>,
@@ -556,9 +557,10 @@ struct MutationGenerationOverlay {
     terminal_ids: HashSet<ItemId>,
 }
 
-impl MutationGenerationOverlay {
-    fn from_snapshot(snapshot: &MutationDriverSnapshot) -> Self {
+impl<'a> MutationGenerationOverlay<'a> {
+    fn from_snapshot(snapshot: &'a MutationDriverSnapshot) -> Self {
         Self {
+            snapshot,
             client_keys: snapshot.client_keys.clone(),
             request_fingerprints: snapshot.request_fingerprints.clone(),
             unique_index_values: snapshot.unique_index_values.clone(),
@@ -569,16 +571,12 @@ impl MutationGenerationOverlay {
         }
     }
 
-    fn validate_one(
-        &mut self,
-        snapshot: &MutationDriverSnapshot,
-        work: &MutationGenerationWork,
-    ) -> MutationGenerationMemberOutcome {
+    fn validate_one(&mut self, work: &MutationGenerationWork) -> MutationGenerationMemberOutcome {
         match work {
             MutationGenerationWork::Push {
                 request,
                 fingerprint,
-            } => self.validate_push(snapshot, request, *fingerprint),
+            } => self.validate_push(request, *fingerprint),
             MutationGenerationWork::BatchUpdate {
                 shard,
                 request,
@@ -587,7 +585,6 @@ impl MutationGenerationOverlay {
                 fingerprint,
                 command_id,
             } => self.validate_batch_update(
-                snapshot,
                 shard,
                 request,
                 *now,
@@ -623,22 +620,20 @@ impl MutationGenerationOverlay {
 
     fn validate_push(
         &mut self,
-        snapshot: &MutationDriverSnapshot,
         request: &AsyncPushRequest,
         fingerprint: Option<PushFingerprint>,
     ) -> MutationGenerationMemberOutcome {
-        if snapshot.paused_drain_intake {
+        if self.snapshot.paused_drain_intake {
             return MutationGenerationMemberOutcome::Rejected(EngineError::Paused {
                 drain_intake: true,
             });
         }
-        if let (Some(request_id), Some(fingerprint)) = (request.request_id.as_ref(), fingerprint) {
-            if self.request_fingerprints.contains_key(request_id) {
-                let _ = fingerprint;
-                return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);
-            }
+        if let (Some(request_id), Some(_)) = (request.request_id.as_ref(), fingerprint)
+            && self.request_fingerprints.contains_key(request_id)
+        {
+            return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);
         }
-        if let Err(error) = validate_push_shape(&snapshot.definition, &request.items) {
+        if let Err(error) = validate_push_shape(&self.snapshot.definition, &request.items) {
             return MutationGenerationMemberOutcome::Rejected(error);
         }
         let mut keys = Vec::new();
@@ -667,7 +662,8 @@ impl MutationGenerationOverlay {
                     .copied()
                     .unwrap_or(0)
                     .saturating_add(1);
-                if snapshot
+                if self
+                    .snapshot
                     .definition
                     .max_eligible_group_size
                     .is_some_and(|max| next > max)
@@ -695,7 +691,6 @@ impl MutationGenerationOverlay {
 
     fn validate_batch_update(
         &mut self,
-        snapshot: &MutationDriverSnapshot,
         shard: &QueueKey,
         request: &BatchUpdateRequest,
         now: UtcTimestamp,
@@ -710,7 +705,7 @@ impl MutationGenerationOverlay {
             return MutationGenerationMemberOutcome::Rejected(EngineError::RequestIdConflict);
         }
         let plan = plan_batch_update(
-            &snapshot.definition,
+            &self.snapshot.definition,
             true,
             request.updates.clone(),
             self.batch_items.clone(),
@@ -726,14 +721,12 @@ impl MutationGenerationOverlay {
                     item_version,
                     ..
                 } = outcome
-                {
-                    if let Some(item) = self
+                    && let Some(item) = self
                         .batch_items
                         .iter_mut()
                         .find(|item| item.item_id == *item_id)
-                    {
-                        item.item_version = *item_version;
-                    }
+                {
+                    item.item_version = *item_version;
                 }
             }
             self.request_fingerprints
@@ -1662,10 +1655,9 @@ fn validate_push_definition(
     Ok(())
 }
 
-pub(crate) fn validate_push_shape(
-    definition: &QueueDefinition,
-    items: &[PushSpec],
-) -> EngineResult<()> {
+/// Validate priority, gate, cohort, and group shapes against one queue definition. Native adapters
+/// reuse this before upsert append so replacement admission follows the same rules as ordinary push.
+pub fn validate_push_shape(definition: &QueueDefinition, items: &[PushSpec]) -> EngineResult<()> {
     let mut request_gates = HashSet::new();
     let mut grouped_counts = std::collections::HashMap::new();
     for item in items {

@@ -13,40 +13,27 @@ use crate::performance_matrix_provenance::Provenance;
 
 pub const SCHEMA_VERSION: &str = "fireweed-performance-matrix-v1";
 
-/// TP-005 full register: exactly 20 `log--projection` cells. Barrier class is Strict.
+/// TP-005 full register: exactly 12 `log--projection` cells. Barrier class is Strict.
 const FULL_CELLS: &[(&str, &str)] = &[
     ("memory--memory", "Strict"),
-    ("memory--sqlite", "Strict"),
     ("memory--turso", "Strict"),
     ("memory--postgres", "Strict"),
-    ("sqlite--memory", "Strict"),
-    ("sqlite--sqlite", "Strict"),
-    ("sqlite--turso", "Strict"),
-    ("sqlite--postgres", "Strict"),
     ("postgres--memory", "Strict"),
-    ("postgres--sqlite", "Strict"),
     ("postgres--turso", "Strict"),
     ("postgres--postgres", "Strict"),
     ("filesystem--memory", "Strict"),
-    ("filesystem--sqlite", "Strict"),
     ("filesystem--turso", "Strict"),
     ("filesystem--postgres", "Strict"),
     ("s3--memory", "Strict"),
-    ("s3--sqlite", "Strict"),
     ("s3--turso", "Strict"),
     ("s3--postgres", "Strict"),
 ];
 
-/// Smoke: local logs × local projections (9 cells). No live PG/S3 required.
+/// Smoke: local logs × local projections (4 cells). No live PG/S3 required.
 const SMOKE_CELLS: &[(&str, &str)] = &[
     ("memory--memory", "Strict"),
-    ("memory--sqlite", "Strict"),
     ("memory--turso", "Strict"),
-    ("sqlite--memory", "Strict"),
-    ("sqlite--sqlite", "Strict"),
-    ("sqlite--turso", "Strict"),
     ("filesystem--memory", "Strict"),
-    ("filesystem--sqlite", "Strict"),
     ("filesystem--turso", "Strict"),
 ];
 
@@ -106,7 +93,7 @@ pub fn build_schedule(tier: &str) -> Result<Vec<ScheduleEntry>, String> {
                 }
             }
         }
-        // Maintenance: disposable projection rebuild for filesystem|s3 × sqlite|postgres.
+        // Maintenance: disposable projection rebuild for filesystem|s3 × postgres.
         // Turso has no rebuild control plane; memory projection is not durable to rebuild.
         for (cell, _) in FULL_CELLS
             .iter()

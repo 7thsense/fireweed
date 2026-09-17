@@ -289,7 +289,7 @@ pub fn register_suite_claims(
     Ok(RegisteredSuiteClaims { cell, claims })
 }
 
-/// One public 5×4 matrix cell.
+/// One public 4×3 matrix cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatrixCell {
     pub log: MatrixLog,

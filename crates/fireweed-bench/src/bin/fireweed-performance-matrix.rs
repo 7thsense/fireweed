@@ -247,8 +247,8 @@ fn barrier_class(cell: &str) -> &'static str {
 /// Drive public-facade futures on a reactor appropriate to the cell.
 ///
 /// Object-log and Turso products require the process-wide object-log Tokio runtime
-/// (`spawn_blocking` definition publish, LogEngine I/O). Postgres sync client paths
-/// must stay on `futures::executor::block_on` (they panic under a Tokio handle).
+/// (`spawn_blocking` definition publish, LogEngine I/O). PostgreSQL construction
+/// is isolated on an ordinary thread; its public operations own their async boundary.
 fn drive_cell<F, T>(cell: &str, fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send,
@@ -262,9 +262,7 @@ where
         Ok((log, _)) if matches!(log, "filesystem" | "s3") => {
             fireweed_objectlog::block_on_objectlog_future(fut)
         }
-        Ok((log, "turso")) if !matches!(log, "postgres") => {
-            fireweed_objectlog::block_on_objectlog_future(fut)
-        }
+        Ok((_, "turso")) => fireweed_objectlog::block_on_objectlog_future(fut),
         _ => futures::executor::block_on(fut),
     }
 }
@@ -295,16 +293,11 @@ fn build_storage_config(
     namespace: &str,
 ) -> Result<(StorageConfig, CleanupRecipe), String> {
     let (log_axis, proj_axis) = parse_cell(cell)?;
-    let log_path = root.join("log.sqlite");
-    let proj_sqlite = root.join("projection.sqlite");
     let proj_turso = root.join("projection.turso");
     let fs_root = root.join("log");
 
     let log = match log_axis {
         "memory" => LogConfig::Memory,
-        "sqlite" => LogConfig::Sqlite {
-            path: log_path.clone(),
-        },
         "postgres" => LogConfig::Postgres {
             url: ConfigSecret::new(postgres_url(cfg)?),
             schema: Some(derived_plain_schema(namespace)),
@@ -334,7 +327,6 @@ fn build_storage_config(
 
     let projection = match proj_axis {
         "memory" => ProjectionStoreConfig::Memory,
-        "sqlite" => ProjectionStoreConfig::Sqlite { path: proj_sqlite },
         "turso" => ProjectionStoreConfig::Turso { path: proj_turso },
         "postgres" => ProjectionStoreConfig::Postgres {
             url: ConfigSecret::new(postgres_url(cfg)?),
@@ -358,7 +350,7 @@ fn build_storage_config(
         recovery: matrix_recovery(),
     };
 
-    let recipe = cleanup_recipe(cell, namespace, &log_path)?;
+    let recipe = cleanup_recipe(cell, namespace)?;
     Ok((config, recipe))
 }
 
@@ -626,7 +618,7 @@ fn repetitions_for_tier(tier: &str) -> usize {
     if tier == "full" { 5 } else { 1 }
 }
 
-fn cleanup_recipe(cell: &str, namespace: &str, log_path: &Path) -> Result<CleanupRecipe, String> {
+fn cleanup_recipe(cell: &str, namespace: &str) -> Result<CleanupRecipe, String> {
     let (log, proj) = parse_cell(cell)?;
     let plain = || RunOwnership::resolve_schema(SchemaKind::Plain, namespace);
     let objectlog = || RunOwnership::resolve_schema(SchemaKind::ObjectLog, namespace);
@@ -638,12 +630,6 @@ fn cleanup_recipe(cell: &str, namespace: &str, log_path: &Path) -> Result<Cleanu
         ("memory", "postgres") => CleanupRecipe::LocalAndPostgres(facade_postgres_schema(
             &format!("memory_pg_{namespace}"),
         )),
-        ("sqlite", "postgres") => {
-            let path = log_path
-                .to_str()
-                .ok_or_else(|| "sqlite log path is not utf-8".to_owned())?;
-            CleanupRecipe::LocalAndPostgres(facade_postgres_schema(&format!("sqlite_pg_{path}")))
-        }
         _ => CleanupRecipe::Local,
     })
 }
@@ -839,15 +825,13 @@ fn wait_for_projection(
                 if value.compatible
                     && value.projection_sequence == value.authoritative_sequence =>
             {
-                return Ok(cell
-                    .ends_with("sqlite-async")
-                    .then(|| ProjectionCatchupEvidence {
-                        duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        poll_count,
-                        compatible: value.compatible,
-                        projection_sequence: value.projection_sequence,
-                        authoritative_sequence: value.authoritative_sequence,
-                    }));
+                return Ok(cell.ends_with("-async").then(|| ProjectionCatchupEvidence {
+                    duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    poll_count,
+                    compatible: value.compatible,
+                    projection_sequence: value.projection_sequence,
+                    authoritative_sequence: value.authoritative_sequence,
+                }));
             }
             Ok(_) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -889,7 +873,7 @@ fn execute_fragment(
         &ownership,
         &namespace,
         &root,
-        cleanup_recipe(cell, &namespace, &root.join("log.sqlite"))?,
+        cleanup_recipe(cell, &namespace)?,
     )?;
     match construct(cfg, cell, &root, &namespace) {
         Ok((fw, _)) => {
@@ -966,7 +950,7 @@ fn execute_lifecycle_fragment(
         &ownership,
         &namespace,
         &root,
-        cleanup_recipe(&args.cell, &namespace, &root.join("log.sqlite"))?,
+        cleanup_recipe(&args.cell, &namespace)?,
     )?;
     let (fireweed, _) = match construct(cfg, &args.cell, &root, &namespace) {
         Ok(value) => value,
@@ -1085,7 +1069,7 @@ fn clean_fragment_state(
         ownership,
         &namespace,
         &root,
-        cleanup_recipe(cell, &namespace, &root.join("log.sqlite"))?,
+        cleanup_recipe(cell, &namespace)?,
     )?;
     cleanup_owned(owned, cfg.postgres.as_ref(), cfg.s3.as_ref())
 }

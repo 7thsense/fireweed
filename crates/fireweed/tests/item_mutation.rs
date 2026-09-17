@@ -12,8 +12,8 @@ use fireweed::{
 };
 #[cfg(feature = "objectlog")]
 use fireweed::{
-    ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig, RecoveryAction,
-    RecoveryPolicy, ResponseBarrier, SegmentConfig,
+    LogConfig, ObjectLogAuthority, ProjectionStoreConfig, RecoveryAction, RecoveryPolicy,
+    ResponseBarrier, SegmentConfig, StorageConfig,
 };
 
 fn ts(seconds: i64) -> UtcTimestamp {
@@ -561,55 +561,58 @@ async fn objectlog_inmemory_reopen_replays_without_selector_evaluation() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[cfg(any())]
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
-async fn objectlog_sqlite_reopen_replays_without_selector_evaluation() {
+async fn objectlog_turso_reopen_replays_without_selector_evaluation() {
     let root = std::env::temp_dir().join(format!(
-        "fireweed-item-mutation-objectlog-sqlite-{}-{}",
+        "fireweed-item-mutation-objectlog-turso-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    let runtime = ObjectLogRuntimeConfig {
-        object_log: ObjectLogStorage::Local {
+    let runtime = StorageConfig {
+        log: LogConfig::Filesystem {
             root: root.join("object-log"),
         },
-        authority: ObjectLogAuthority::NativeConditionalWrite,
-        projection: ProjectionConfig::Sqlite {
-            path: root.join("projection.sqlite"),
+        authority: Some(ObjectLogAuthority::NativeConditionalWrite),
+        control_plane: None,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
+        projection: ProjectionStoreConfig::Turso {
+            path: root.join("projection.db"),
         },
         response_barrier: ResponseBarrier::Strict,
         segments: SegmentConfig::new(262_144, 20).unwrap(),
-        namespace: "mutation-objectlog-sqlite".into(),
+        namespace: "mutation-objectlog-turso".into(),
         recovery: RecoveryPolicy {
             incompatible_projection: RecoveryAction::RebuildProjection,
             verify_checksums: true,
             max_tail_commands: 1_000_000,
         },
     };
-    let fireweed = fireweed::open_objectlog_sqlite(runtime.clone(), Arc::new(SystemClock)).unwrap();
-    let queue = create(&fireweed, "objectlog-sqlite").await;
+    let fireweed = fireweed::open(runtime.clone(), Arc::new(SystemClock)).unwrap();
+    let queue = create(&fireweed, "objectlog-turso").await;
     let item_id = fireweed
         .push(
             &queue,
             NewItem {
-                client_item_key: Some(ClientItemKey::new("object-sqlite-item").unwrap()),
+                client_item_key: Some(ClientItemKey::new("object-turso-item").unwrap()),
                 entity: Some(serde_json::json!({"workflow": {"kind": "job"}})),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    let request = addressed_request("objectlog-sqlite-replay", item_id, Some(1));
+    let request = addressed_request("objectlog-turso-replay", item_id, Some(1));
     let committed = fireweed
         .mutate_items(&queue, request.clone())
         .await
         .unwrap();
     drop(fireweed);
 
-    let reopened = fireweed::open_objectlog_sqlite(runtime, Arc::new(SystemClock)).unwrap();
+    let reopened = fireweed::open(runtime, Arc::new(SystemClock)).unwrap();
     assert_eq!(
         reopened.mutate_items(&queue, request).await.unwrap(),
         committed

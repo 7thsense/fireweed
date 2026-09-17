@@ -275,10 +275,10 @@ def build_semantic_requirements(authority: dict) -> dict:
     for rid, text in e2e:
         add(rid, text, durability_class="A-or-B", capability="core")
 
-    # Canonical 20-cell default-public matrix selector (Turso default product claim).
+    # Canonical 12-cell default-public matrix selector (Turso default product claim).
     add(
-        "MATRIX-STRICT-20",
-        "default public matrix has exactly 20 strict cells with Turso default projection",
+        "MATRIX-STRICT-12",
+        "default public matrix has exactly 12 strict cells with Turso default projection",
         durability_class="A-or-B",
         capability="core",
     )
@@ -313,7 +313,7 @@ def build_overlay_assignments(
         for leaf in route_sources["leaves"]
         if leaf["kind"] == "strict"
     ]
-    require(len(strict_routes) == 20, f"strict leaves {len(strict_routes)} != 20")
+    require(len(strict_routes) == 12, f"strict leaves {len(strict_routes)} != 12")
 
     # Hybrid negatives (old selector rejections) — must equal new assertion set size intent.
     hybrid_negatives = [
@@ -334,7 +334,7 @@ def build_overlay_assignments(
         if leaf["kind"] == "object_log_async"
     ]
     require(ac_txn_dry, "missing ac_txn_dry_run leaves")
-    require(len(async_pos) == 8, "object_log_async cardinality")
+    require(len(async_pos) == 6, "object_log_async cardinality")
 
     e2e_routes = {
         "AC-E2E-1": [leaf_command_id("test_product_validation::scheduled_action_delivery_e2e")],
@@ -365,7 +365,7 @@ def build_overlay_assignments(
             find_route(routes_idx, "rejects_production_one_object_per_command")
         ],
         "AC-TURSO-1": [find_route(routes_idx, "turso_projection_is_accepted")],
-        "AC-TURSO-2": [find_route(routes_idx, "all_five_log_specs_accept_turso")],
+        "AC-TURSO-2": [find_route(routes_idx, "all_four_log_specs_accept_turso")],
         "AC-TURSO-3": [find_route(routes_idx, "class_b_memory_turso")],
         "AC-TURSO-4": [find_route(routes_idx, "turso_projection_is_the_public_env_default")],
         "AC-TURSO-5-ENABLED": [find_route(routes_idx, "turso_projection_is_accepted")],
@@ -381,12 +381,12 @@ def build_overlay_assignments(
         ],
         "SNORRI-REOPEN": [find_route(routes_idx, "snorri_reopen_s3_memory")],
         "SNORRI-PROJECTION-REBUILD": [
-            find_route(routes_idx, "snorri_projection_rebuild_s3_sqlite")
+            find_route(routes_idx, "snorri_projection_rebuild_s3_turso")
         ],
         "SNORRI-RETRY-ONCE": [
             find_route(routes_idx, "snorri_retry")
             if any("snorri_retry" in r for r in routes_idx)
-            else find_route(routes_idx, "snorri_reopen_s3_sqlite")
+            else find_route(routes_idx, "snorri_reopen_s3_turso")
         ],
         "PROVISIONED-QUALIFICATION-RUNNER": [
             find_route(routes_idx, "production_s3_object_log_config_uses_p1s_attested")
@@ -411,7 +411,7 @@ def build_overlay_assignments(
         "DYNAMIC-PRIVATE-SURFACE-DISCOVERY": [
             "audit::fireweed_test_placement::private_surface"
         ],
-        "MATRIX-STRICT-20": strict_routes,
+        "MATRIX-STRICT-12": strict_routes,
         "HYBRID-SELECTOR-RETIRED": hybrid_negatives,
         "PRODUCT-VALIDATION-AGGREGATE": [
             leaf_command_id(f) for f in PRODUCT_SUITE_LEAVES["product_validation_tests"]
@@ -757,7 +757,7 @@ def self_test(
         "required names namespace drift",
     )
     require(manifest["cargo_registration_audit"]["ok"], "cargo registration audit failed")
-    require(len(manifest["matrix"]["strict_leaf_ids"]) == 20, "strict cell count")
+    require(len(manifest["matrix"]["strict_leaf_ids"]) == 12, "strict cell count")
     require(manifest["matrix"]["default_projection"] == "turso", "default projection")
 
     # Hybrid old/new assertion sets equal (negatives vs bound hybrid-retired routes).
@@ -841,7 +841,7 @@ def generate_all() -> tuple[dict, dict, dict, dict, str, dict]:
         "functional-matrix-route-sources.json is not P10r",
     )
     require(
-        len([leaf for leaf in route_sources["leaves"] if leaf["kind"] == "strict"]) == 20,
+        len([leaf for leaf in route_sources["leaves"] if leaf["kind"] == "strict"]) == 12,
         "P10r strict leaf count",
     )
 

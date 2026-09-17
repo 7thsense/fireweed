@@ -11,8 +11,8 @@
       "b28dc5ef94c78fdbd10c",
       "a746763ca419993930bc",
       "1e1e35d82d1998ca303a",
-      "d08bc8a53f2ba5a88c04",
-      "3a3d00d2765fe4540d63"
+      "0a6c1cba86fe32a16ed7",
+      "f98d735d13bd236a3251"
     ],
     "workflow_inline_row_count": 5
   },
@@ -53,7 +53,7 @@
       "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#release_evidence_best_effort_readonly",
       "exclusive_owner": "P17r",
       "identity": "chmod -R a-w fireweed-evidence || true",
-      "line": 170,
+      "line": 234,
       "path": ".github/workflows/release.yml",
       "reason": "release_evidence_best_effort_readonly",
       "status": "discovery_negative"
@@ -63,13 +63,13 @@
       "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#release_runner_best_effort_disk_hygiene",
       "exclusive_owner": "P17r",
       "identity": "sudo docker image prune --all --force >/dev/null 2>&1 || true",
-      "line": 234,
+      "line": 298,
       "path": ".github/workflows/release.yml",
       "reason": "release_runner_best_effort_disk_hygiene",
       "status": "discovery_negative"
     }
   ],
-  "report_sha256": "9b3146f0b9fe55df67174711cd2b11fc0a2a334ec9f017f0a51c3e9a98f91f11",
+  "report_sha256": "a87cccea21859fe30438644948bd7c1f14e7b966e6a1c953844d7e4c02a0e041",
   "residuals": [],
   "scanner": {
     "hit_count": 5,

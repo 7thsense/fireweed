@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "spec_id": "storage-matrix-completion-brief",
-  "authority_revision": "P1-2026-08-04-turso-default+P4-method-contracts",
+  "authority_revision": "2026-09-17-sqlite-retired",
   "governed_documents": [
     {
       "path": "docs/helix/00-discover/product-vision.md",
@@ -107,14 +107,12 @@
   "canonical_axes": {
     "logs": [
       "memory",
-      "sqlite",
       "postgres",
       "filesystem",
       "s3"
     ],
     "projections": [
       "memory",
-      "sqlite",
       "turso",
       "postgres"
     ],
@@ -123,12 +121,11 @@
       "postgres"
     ],
     "cell_id_separator": "--",
-    "required_cell_count": 20,
+    "required_cell_count": 12,
     "profile_skus_are_public": false
   },
   "durability": {
     "class_a_logs": [
-      "sqlite",
       "postgres",
       "filesystem",
       "s3"
@@ -136,8 +133,8 @@
     "class_b_logs": [
       "memory"
     ],
-    "class_a_cell_count": 16,
-    "class_b_cell_count": 4,
+    "class_a_cell_count": 9,
+    "class_b_cell_count": 3,
     "history_requires_class_a": true,
     "silent_null_log_forbidden": true
   },
@@ -146,12 +143,11 @@
       "public_name": "Strict",
       "applicable_logs": [
         "memory",
-        "sqlite",
         "postgres",
         "filesystem",
         "s3"
       ],
-      "required_cell_count": 20
+      "required_cell_count": 12
     },
     "async_projection": {
       "public_name": "AsyncProjection",
@@ -160,8 +156,8 @@
         "filesystem",
         "s3"
       ],
-      "required_positive_cell_count": 8,
-      "required_pre_io_rejection_count": 12,
+      "required_positive_cell_count": 6,
+      "required_pre_io_rejection_count": 6,
       "bounds": [
         "apply_lag_max_commands",
         "apply_debt_max_bytes",
@@ -173,14 +169,8 @@
     },
     "sqlite_projection_deferred_flush": {
       "field": "sqlite_projection_deferred_flush_chunk",
-      "applicable_projections": [
-        "sqlite"
-      ],
-      "applicable_barriers": [
-        "Strict",
-        "AsyncProjection"
-      ],
-      "positive_when_present": true,
+      "retired": true,
+      "rejected_when_present": true,
       "part_of_async_projection_spec": false
     }
   },
@@ -220,7 +210,7 @@
   "configuration_surface": {
     "default_projection": "turso",
     "turso_supported_boundary": {
-      "version": "0.7.0",
+      "version": "0.7.2",
       "mode": "embedded_local_ordinary_wal",
       "unsupported_modes": [
         "remote",
@@ -245,32 +235,29 @@
     "log": {
       "help_values": [
         "memory",
-        "sqlite",
         "postgres",
         "filesystem",
         "s3"
       ],
       "parser_values": [
         "memory",
-        "sqlite",
         "postgres",
         "filesystem",
         "s3"
       ],
       "rejected_legacy_values": [
-        "objectlog"
+        "objectlog",
+        "sqlite"
       ]
     },
     "projection": {
       "help_values": [
         "memory",
-        "sqlite",
         "turso",
         "postgres"
       ],
       "parser_values": [
         "memory",
-        "sqlite",
         "turso",
         "postgres"
       ],
@@ -278,7 +265,8 @@
         "inmemory",
         "hybrid",
         "hybrid-strict",
-        "hybrid-async"
+        "hybrid-async",
+        "sqlite"
       ]
     },
     "response_barrier": {
@@ -306,12 +294,13 @@
       "Http"
     ],
     "positive_profile_formula": {
-      "sqlite_or_postgres_log_strict_enabled": 24,
-      "filesystem_or_s3_log_both_barriers_enabled": 48,
-      "total": 72
+      "postgres_log_strict_enabled": 9,
+      "filesystem_or_s3_log_both_barriers_enabled": 36,
+      "total": 45,
+      "scope": "composition-validation profiles; runtime qualification requires current evidence"
     },
-    "class_b_strict_enabled_durability_negatives": 12,
-    "class_b_strict_disabled_positives": 4,
+    "class_b_strict_enabled_durability_negatives": 9,
+    "class_b_strict_disabled_positives": 3,
     "disabled_with_endpoint": "tuple_coherence_rejection",
     "feature_unavailable_precedes_durability": true,
     "class_b_async_precedes_delivery_validation": true

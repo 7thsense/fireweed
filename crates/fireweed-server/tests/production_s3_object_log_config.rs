@@ -83,7 +83,7 @@ fn production_s3_env(
             bootstrap_queue.to_string(),
         );
     }
-    if projection == "sqlite" {
+    if projection == "turso" {
         let path = std::env::temp_dir().join(format!(
             "fireweed-p4s-proj-{}-{}.db",
             std::process::id(),
@@ -93,7 +93,7 @@ fn production_s3_env(
                 .unwrap_or(0)
         ));
         env.insert(
-            "FIREWEED_SQLITE_PROJECTION_PATH".into(),
+            "FIREWEED_TURSO_PROJECTION_PATH".into(),
             path.display().to_string(),
         );
     }
@@ -165,7 +165,7 @@ fn production_s3_config_rejects_incomplete_credentials_and_local_fallback() {
 }
 
 #[test]
-fn production_s3_config_parses_public_s3_memory_and_sqlite_cells() {
+fn production_s3_config_parses_public_s3_memory_and_turso_cells() {
     let env = production_s3_env(
         "https://s3.example.com",
         "fireweed-qual",
@@ -188,13 +188,13 @@ fn production_s3_config_parses_public_s3_memory_and_sqlite_cells() {
         "us-east-1",
         "ak",
         "sk",
-        "sqlite",
+        "turso",
         "t1:s3--sqlite",
     );
     let config = Config::from_env(&env).expect("s3×sqlite production env");
     assert!(matches!(
         config.backend.projection,
-        ProjectionSpec::Sqlite { .. }
+        ProjectionSpec::Turso { .. }
     ));
 }
 
@@ -260,15 +260,17 @@ fn p1s_attestation_is_minio_native_cas_not_garage() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        rejected.iter().any(|candidate| {
-            candidate
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .map(|p| p.eq_ignore_ascii_case("garage"))
-                .unwrap_or(false)
-                && candidate.get("selectable").and_then(|v| v.as_bool()) == Some(false)
-        }),
-        "attestation must retain Garage as a non-selectable rejected candidate"
+        rejected
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(|p| p.eq_ignore_ascii_case("garage"))
+                    .unwrap_or(false)
+            })
+            .all(|candidate| candidate.get("selectable").and_then(|v| v.as_bool()) == Some(false)),
+        "a listed Garage candidate must not be selectable"
     );
 }
 

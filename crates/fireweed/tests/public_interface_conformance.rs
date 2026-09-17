@@ -121,28 +121,15 @@ async fn memory_memory_public_interface() {
     .await;
 }
 
-#[cfg(any())]
+#[cfg(all(feature = "memory", feature = "turso"))]
 #[tokio::test]
-async fn sqlite_memory_public_interface() {
-    assert_cell("sqlite--memory", false, true, |root| {
-        fireweed::open_sqlite(
-            root.join("log.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .unwrap()
-    })
-    .await;
-}
-
-#[cfg(any())]
-#[tokio::test]
-async fn sqlite_sqlite_public_interface() {
-    assert_cell("sqlite--sqlite", false, true, |root| {
-        fireweed::open_sqlite_relational(
-            root.join("relational.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .unwrap()
+async fn memory_turso_public_interface() {
+    assert_cell("memory--turso", false, true, |root| {
+        let mut config = StorageConfig::memory();
+        config.projection = ProjectionStoreConfig::Turso {
+            path: root.join("projection.db"),
+        };
+        fireweed::open(config, Arc::new(SystemClock)).unwrap()
     })
     .await;
 }
@@ -155,24 +142,42 @@ async fn filesystem_memory_public_interface() {
     .await;
 }
 
-#[cfg(any())]
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
-async fn filesystem_sqlite_strict_public_interface() {
-    assert_cell("filesystem--sqlite--strict", true, true, |root| {
-        filesystem_sqlite(root, ResponseBarrier::Strict, "filesystem-sqlite-strict")
+async fn filesystem_turso_strict_public_interface() {
+    assert_cell("filesystem--turso--strict", false, true, |root| {
+        filesystem_turso(root, ResponseBarrier::Strict, "filesystem-turso-strict")
     })
     .await;
 }
 
-#[cfg(any())]
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
-async fn filesystem_sqlite_async_public_interface() {
-    assert_cell("filesystem--sqlite--async", true, false, |root| {
-        filesystem_sqlite(
+async fn filesystem_turso_async_public_interface() {
+    assert_cell("filesystem--turso--async", false, true, |root| {
+        filesystem_turso(
             root,
             ResponseBarrier::AsyncProjection,
-            "filesystem-sqlite-async",
+            "filesystem-turso-async",
         )
     })
     .await;
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+fn filesystem_turso(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
+    let mut storage = objectlog_storage(
+        LogConfig::Filesystem {
+            root: root.join("log"),
+        },
+        ProjectionStoreConfig::Turso {
+            path: root.join("projection.db"),
+        },
+        namespace,
+    );
+    storage.response_barrier = barrier;
+    if barrier == ResponseBarrier::AsyncProjection {
+        storage.async_projection = Some(fireweed::AsyncProjectionSpec::default());
+    }
+    fireweed::open(storage, Arc::new(SystemClock)).unwrap()
 }

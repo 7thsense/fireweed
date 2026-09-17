@@ -20,7 +20,7 @@
 //!    segmented writer, etc.) check `expected_epoch.is_some_and(|e| e != current_epoch)` inside the atomic
 //!    unit of work before applying anything. `None` is the degenerate sole-owner path (never self-fence).
 //!    Tests `claim_fences_superseded_owner_epoch`, `push_fences_superseded_owner_epoch`, and
-//!    `finalize_fences_superseded_owner_epoch` (fireweed-memory::tests, fireweed-sqlite::conformance) prove this.
+//!    `finalize_fences_superseded_owner_epoch` (fireweed-memory::tests) prove this.
 //!
 //!    TWO-COUNTER RECONCILIATION (bead pqueue-b29435b2): for backends whose control-plane acquire does
 //!    NOT bind the storage fence in the same transaction, `acquire_and_fence` may observe
@@ -39,9 +39,8 @@
 //!    - **Durable CP**: `current_epoch > lease.assignment_epoch` is a genuine inconsistency that still
 //!      fails closed `EpochFenced`. See [`QueueControlPlane::is_ephemeral`].
 //!
-//!    Tests `ephemeral_restart_reacquire_advances_storage_and_serves` (engine-level, crates/fireweed-engine)
-//!    and `ownership_restart_reacquire_serves_push_claim` (crates/fireweed-sqlite/tests/conformance.rs) prove
-//!    the restart-reconciliation invariant. Stale-epoch writes from the pre-restart epoch are still
+//!    Test `ephemeral_restart_reacquire_advances_storage_and_serves` (crates/fireweed-engine)
+//!    proves the restart-reconciliation invariant. Stale-epoch writes from the pre-restart epoch are still
 //!    `EpochFenced` (proven by the `*_fences_superseded_owner_epoch` suite against the post-restart fence).
 //!
 //! 2. [`owner_liveness_violation`] — the PREDICATE KERNEL of the TD-003 owner-liveness / stalled-queue guard

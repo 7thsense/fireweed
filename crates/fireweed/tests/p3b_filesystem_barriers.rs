@@ -101,26 +101,17 @@ fn all_six_filesystem_barrier_cells_open_with_caller_tuning() {
         drop(handle);
 
         ordinal += 1;
-        let mut config = filesystem_config(
-            fixture.path().join(format!("sqlite-log-{ordinal}")),
-            ProjectionStoreConfig::Sqlite {
-                path: fixture.path().join(format!("projection-{ordinal}.sqlite")),
+        let config = filesystem_config(
+            fixture.path().join(format!("turso-log-{ordinal}")),
+            ProjectionStoreConfig::Turso {
+                path: fixture.path().join(format!("projection-{ordinal}.db")),
             },
             barrier,
-            format!("p3b-sqlite-{ordinal}"),
+            format!("p3b-turso-{ordinal}"),
         );
-        config.sqlite_projection_deferred_flush_chunk = Some(7);
         let handle = fireweed::open(config, Arc::new(SystemClock))
-            .expect("filesystem×SQLite barrier must open");
-        let control = handle
-            .projection_control()
-            .expect("durable SQLite projection control");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build verification runtime")
-            .block_on(control.verify())
-            .expect("empty SQLite projection verifies");
+            .expect("filesystem×Turso barrier must open");
+        assert!(handle.projection_control().is_none());
         drop(handle);
     }
 
@@ -232,17 +223,7 @@ fn exact_invalid_neighbors_and_facade_routing_are_guarded() {
     assert_eq!(
         wrong_chunk.validate(),
         Err(EngineError::Invalid(
-            "sqlite-projection-deferred-flush-requires-sqlite-projection"
+            "sqlite storage is retired; use filesystem log and turso projection"
         ))
     );
-
-    // This source guard complements the public construction proof: it freezes the
-    // caller-owned values at every private conversion boundary where a future default
-    // could otherwise erase them without changing validation behavior.
-    let source = include_str!("../src/lib.rs");
-    assert!(source.contains("config.async_projection,"));
-    assert!(source.contains("config.sqlite_projection_deferred_flush_chunk,"));
-    assert!(source.contains("from_log_store_with_async_projection"));
-    assert!(source.contains("from_log_and_projection_with_async_projection"));
-    assert!(source.contains("sqlite_projection_deferred_flush_chunk\n        .unwrap_or"));
 }

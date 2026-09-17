@@ -6,17 +6,15 @@ use fireweed_core::{
     GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, LeaseToken, Metadata,
     MetadataValue, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
-    RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    RequestId, RetryPolicy, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncProjectionStore, ClaimCommand, ClaimCompatibility, ClaimUnit, CohortClaimCommand,
+    AsyncProjectionStore, ClaimCommand, ClaimCompatibility, CohortClaimCommand,
     CohortExpiredCommand, CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPosition, EngineError, FenceLeaseCommand, FinalizeCommand,
-    FinalizeKind, FinalizeOutcome, FinalizeTarget, GroupBatching, IdempotencyDecision,
-    LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand,
-    PushCommand, PushFingerprint, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand,
-    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand,
-    UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
+    CommandEnvelope, CommandId, CommandPosition, EngineError, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, IdempotencyDecision, LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate,
+    PurgeItemsCommand, PushCommand, PushFingerprint, PushItem, QueueCommand, QueueKey,
+    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
 };
 
 fn indexed_item(item_id: ItemId, key: &str, email: &str) -> PushItem {
@@ -495,7 +493,7 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
             QueueCommand::CohortClaim(CohortClaimCommand {
                 cohort_id: cohort_id.clone(),
                 item_ids: vec![first, second],
-                lease_token: lease,
+                lease_token: lease.clone(),
                 lease_expires_at: timestamp(30),
             }),
             vec![first, second],
@@ -504,6 +502,24 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     )
     .await
     .unwrap();
+    let rendered = AsyncProjectionStore::render_claimed(&turso, shard.clone(), vec![first, second])
+        .await
+        .unwrap();
+    assert_eq!(
+        rendered.len(),
+        2,
+        "both committed cohort members must render"
+    );
+    assert_eq!(
+        rendered.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    assert!(
+        rendered
+            .iter()
+            .all(|item| item.lease_token.as_ref() == Some(&lease)
+                && item.lease_expires_at == timestamp(30))
+    );
     AsyncProjectionStore::apply_recovery(
         &turso,
         vec![CommandPosition::new(shard.clone(), 2, 2)],
@@ -1097,7 +1113,7 @@ async fn grouped_replace_is_rejected_before_projection_mutation() {
         ),
     )
     .await;
-    result.expect("grouped ReplacePending uses the shared sqlite-family apply");
+    result.expect("grouped ReplacePending uses the shared relational apply");
     assert_eq!(
         turso
             .query(
@@ -1516,7 +1532,7 @@ fn envelope(id: &str, command: QueueCommand, item_ids: Vec<ItemId>, now: i64) ->
     }
 }
 
-async fn apply_both(
+async fn apply_command(
     turso: &TursoRelational,
     shard: &QueueKey,
     sequence: u64,
@@ -1528,46 +1544,8 @@ async fn apply_both(
         .expect("Turso apply");
 }
 
-async fn apply_async_pair(
-    turso: &TursoRelational,
-    shard: &QueueKey,
-    sequence: u64,
-    command: CommandEnvelope,
-) {
-    apply_both(turso, shard, sequence, command).await;
-}
-
-async fn assert_rich_selection_matches(
-    turso: &TursoRelational,
-    shard: &QueueKey,
-    unit: ClaimUnit,
-    compatibility: ClaimCompatibility,
-    now: UtcTimestamp,
-    max_items: usize,
-) -> fireweed_engine::RichClaimSelection {
-    AsyncProjectionStore::select_rich_claim(
-        turso,
-        shard.clone(),
-        unit,
-        compatibility,
-        now,
-        max_items,
-    )
-    .await
-    .unwrap()
-}
-
-async fn apply_both_rich(
-    turso: &TursoRelational,
-    shard: &QueueKey,
-    sequence: u64,
-    command: CommandEnvelope,
-) {
-    apply_both(turso, shard, sequence, command).await;
-}
-
 #[tokio::test]
-async fn filtered_item_selection_matches_sqlite_and_applies_limit_after_filters() {
+async fn filtered_item_selection_applies_limit_after_filters() {
     let definition = definition();
     let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
     let turso = TursoRelational::in_memory().await.unwrap();
@@ -1633,7 +1611,7 @@ async fn filtered_item_selection_matches_sqlite_and_applies_limit_after_filters(
             entity_document: None,
         },
     ];
-    apply_both_rich(
+    apply_command(
         &turso,
         &shard,
         0,
@@ -1727,7 +1705,7 @@ async fn filtered_item_selection_crosses_page_boundary_and_matches_nested_values
         index_fields: Default::default(),
         entity_document: None,
     });
-    apply_both_rich(
+    apply_command(
         &turso,
         &shard,
         0,
@@ -1785,7 +1763,8 @@ async fn configures_and_verifies_the_exact_shared_schema() {
         "fireweed_items_active_key",
         "fireweed_items_pending_eligible_order_idx",
         "fireweed_items_pending_group_nonnull_idx",
-        "fireweed_item_index_key_item_asc_idx",
+        "fireweed_item_index_key_numeric_asc_idx",
+        "fireweed_items_retained_numeric_idx",
     ] {
         assert!(report.indexes.iter().any(|actual| actual == index));
     }

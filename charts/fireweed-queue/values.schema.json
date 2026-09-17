@@ -375,11 +375,10 @@
         "log": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Command-log axis isomorphic to StorageConfig.log. Public product values: memory|sqlite|postgres|filesystem|s3.",
+          "description": "Command-log axis isomorphic to StorageConfig.log. Public product values: memory|postgres|filesystem|s3.",
           "required": [
             "backend",
             "objectLog",
-            "sqlite",
             "postgres"
           ],
           "properties": {
@@ -387,7 +386,6 @@
               "type": "string",
               "enum": [
                 "memory",
-                "sqlite",
                 "postgres",
                 "filesystem",
                 "s3"
@@ -456,20 +454,6 @@
                 }
               }
             },
-            "sqlite": {
-              "type": "object",
-              "additionalProperties": false,
-              "description": "SQLite command-log path when backend is sqlite.",
-              "required": [
-                "path"
-              ],
-              "properties": {
-                "path": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              }
-            },
             "postgres": {
               "$ref": "#/$defs/postgresSecret"
             }
@@ -478,10 +462,9 @@
         "projection": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Projection axis isomorphic to StorageConfig.projection. Public product values: memory|sqlite|turso|postgres.",
+          "description": "Projection axis isomorphic to StorageConfig.projection. Public product values: memory|turso|postgres.",
           "required": [
             "backend",
-            "sqlite",
             "turso",
             "postgres"
           ],
@@ -490,23 +473,9 @@
               "type": "string",
               "enum": [
                 "memory",
-                "sqlite",
                 "turso",
                 "postgres"
               ]
-            },
-            "sqlite": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "path"
-              ],
-              "properties": {
-                "path": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              }
             },
             "turso": {
               "type": "object",

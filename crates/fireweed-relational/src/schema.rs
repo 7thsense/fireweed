@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS fireweed_item_payloads (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
     ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
+-- The public retained-item cursor follows numeric u64 ItemId order. Decimal text
+-- primary keys cannot serve that order across digit widths. This tree changes on
+-- insertion, purge, or replacement; lifecycle transitions keep its keys stable.
+CREATE INDEX IF NOT EXISTS fireweed_items_retained_numeric_idx
+    ON fireweed_items (tenant_id, queue_id, length(item_id), item_id) WHERE superseded = 0;
 -- The campaign experiment found this index's write cost did not improve the
 -- complete workload. Remove it from projections opened by that candidate too.
 DROP INDEX IF EXISTS fireweed_items_lifecycle_counts_idx;
@@ -263,15 +268,20 @@ DROP INDEX IF EXISTS fireweed_item_index_key_idx;
 -- API-004 hot scans use `(index_key,item_id)` as their stable keyset.  Keep both
 -- physical directions because reversing an ASC index also reverses `item_id`, while
 -- the public cursor contract always uses item id ascending as its final tiebreaker.
-CREATE INDEX IF NOT EXISTS fireweed_item_index_key_item_asc_idx
-    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key ASC, item_id ASC);
-CREATE INDEX IF NOT EXISTS fireweed_item_index_key_item_desc_idx
-    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key DESC, item_id ASC);
+-- Item ids are canonical decimal u64 text. Length followed by text is their numeric order,
+-- including values beyond signed i64. Versioned names migrate existing stores exactly once;
+-- reopening an already-migrated projection does not rebuild either covering index.
+CREATE INDEX IF NOT EXISTS fireweed_item_index_key_numeric_asc_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key ASC, length(item_id) ASC, item_id ASC);
+CREATE INDEX IF NOT EXISTS fireweed_item_index_key_numeric_desc_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key DESC, length(item_id) ASC, item_id ASC);
+DROP INDEX IF EXISTS fireweed_item_index_key_item_asc_idx;
+DROP INDEX IF EXISTS fireweed_item_index_key_item_desc_idx;
 -- objectlog/async-projection logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
--- The async SQLite checkpoint worker records, per queue, the object-log lineage the durable SQLite
+-- The async relational checkpoint worker records, per queue, the object-log lineage the relational
 -- projection was last advanced from: the LOGICAL high-water it reached (relational_cursor.next_seq at
 -- checkpoint time), the object-log assignment epoch, and an opaque object-log segment/manifest reference
--- (stored verbatim — fireweed-sqlite does not depend on fireweed-objectlog types). This is LOGICAL high-water
+-- (stored verbatim — fireweed-relational does not depend on fireweed-objectlog types). This is LOGICAL high-water
 -- lineage, deliberately distinct from the PHYSICAL SQLite WAL checkpoint (PRAGMA wal_checkpoint), which is
 -- a storage-file concern that reclaims WAL frames and never advances the command cursor. The row is
 -- upserted in the SAME transaction that advances the logical high-water, so recorded lineage can never be

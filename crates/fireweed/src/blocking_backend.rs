@@ -62,26 +62,6 @@ struct WorkerSenders {
     data: Vec<mpsc::SyncSender<Job>>,
 }
 
-#[cfg(all(feature = "objectlog", feature = "postgres"))]
-#[derive(Clone)]
-pub(crate) struct OwnedBlockingExecutor {
-    pool: Arc<WorkerPool>,
-}
-
-#[cfg(all(feature = "objectlog", feature = "postgres"))]
-impl OwnedBlockingExecutor {
-    pub(crate) fn run<T, F>(
-        &self,
-        operation: F,
-    ) -> impl Future<Output = EngineResult<T>> + Send + use<T, F>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> EngineResult<T> + Send + 'static,
-    {
-        self.pool.submit_data(0, operation)
-    }
-}
-
 impl WorkerPool {
     fn new(worker_count: usize, pending_per_worker: usize) -> EngineResult<Self> {
         if worker_count == 0 || pending_per_worker == 0 {
@@ -194,13 +174,6 @@ fn shared_worker_pool() -> EngineResult<Arc<WorkerPool>> {
         Ok(pool) => Ok(Arc::clone(pool)),
         Err(error) => Err(EngineError::Storage(error.clone())),
     }
-}
-
-#[cfg(all(feature = "objectlog", feature = "postgres"))]
-pub(crate) fn shared_executor() -> EngineResult<OwnedBlockingExecutor> {
-    Ok(OwnedBlockingExecutor {
-        pool: shared_worker_pool()?,
-    })
 }
 
 /// Complete, bounded blocking boundary for the library's full backend surface.
@@ -728,10 +701,15 @@ impl<B: super::LibBackend + 'static> ProjectionRead for BlockingLibBackend<B> {
         )
     }
     fn retained_items(
-        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> impl Future<Output = EngineResult<Vec<RetainedItemView>>> + Send {
         let q = shard.clone();
-        self.dispatch(q.clone(), move |i| async move { i.retained_items(&q, after, limit).await })
+        self.dispatch(q.clone(), move |i| async move {
+            i.retained_items(&q, after, limit).await
+        })
     }
     fn live_items(
         &self,

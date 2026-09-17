@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live TP-002 E2 density proof: one durable filesystem object-log/SQLite service with 1001 generated queues.
+# Live TP-002 E2 density proof: one durable filesystem object-log/Turso service with 1001 generated queues.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -14,7 +14,7 @@ SERVER_WORKERS=${SERVER_WORKERS:-4}
 SEED=${SEED:-42}
 PROGRESS_BOUND_MS=${PROGRESS_BOUND_MS:-60000}
 EVIDENCE_MODE=${EVIDENCE_MODE:-release}
-PROJECTION_BACKEND=${PROJECTION_BACKEND:-sqlite}
+PROJECTION_BACKEND=${PROJECTION_BACKEND:-turso}
 THREAD_LIMIT=4
 CONNECTION_LIMIT=32
 TASK_LIMIT=64
@@ -35,12 +35,12 @@ rm -f "$PHASE_LOG"
 
 case "$EVIDENCE_MODE" in
   release)
-    [[ "$PROJECTION_BACKEND" == sqlite ]]
+    [[ "$PROJECTION_BACKEND" == turso ]]
     [[ "$QUEUE_COUNT" == 1001 && "$ITEMS" == 300000 && "$CONTROL_ITEMS" == 10000 ]]
     [[ "$HOT_CONNECTIONS" == 8 && "$NOISY_WORKERS" == 8 && "$SERVER_WORKERS" == 4 && "$SEED" == 42 ]]
     ;;
   d5-diagnostic)
-    [[ "$PROJECTION_BACKEND" == sqlite ]]
+    [[ "$PROJECTION_BACKEND" == turso ]]
     [[ "$QUEUE_COUNT" == 1001 && "$ITEMS" == 10000 && "$CONTROL_ITEMS" == 10000 ]]
     [[ "$HOT_CONNECTIONS" == 64 && "$NOISY_WORKERS" == 8 && "$SERVER_WORKERS" == 4 && "$SEED" == 42 ]]
     ;;
@@ -128,7 +128,7 @@ spec:
             # is intentionally absent; setting it would falsely imply that it selects behavior.
             - { name: FIREWEED_PROJECTION_BACKEND, value: "$PROJECTION_BACKEND" }
             - { name: FIREWEED_OBJECT_LOG_ROOT, value: /data/object-log }
-            - { name: FIREWEED_SQLITE_PROJECTION_PATH, value: /data/projection.db }
+            - { name: FIREWEED_TURSO_PROJECTION_PATH, value: /data/projection.db }
             - { name: FIREWEED_LISTEN_ADDR, value: "0.0.0.0:8080" }
             - { name: FIREWEED_WORKER_THREADS, value: "$SERVER_WORKERS" }
             - { name: FIREWEED_RUNTIME_RESOURCE_METRICS_PATH, value: /tmp/fireweed-runtime-resources.json }
@@ -143,7 +143,7 @@ spec:
             requests: { cpu: "1000m", memory: "512Mi" }
             limits: { cpu: "4000m", memory: "4Gi" }
           volumeMounts: [ { name: data, mountPath: /data } ]
-      # Keep storage bounded without charging object-log and SQLite files to the container's 4 GiB
+      # Keep storage bounded without charging object-log and Turso files to the container's 4 GiB
       # memory cgroup. The workload has no elapsed-time or throughput gate, so host-disk contention
       # changes capacity observations only and cannot become an implicit release condition.
       volumes: [ { name: data, emptyDir: { sizeLimit: 64Gi } } ]
@@ -171,7 +171,7 @@ SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.s
 NODE_IMAGE=$(docker inspect "${CLUSTER}-control-plane" --format '{{.Config.Image}}')
 NODE_CAPACITY=$(kubectl get node -o jsonpath='{.items[0].status.capacity.cpu} {.items[0].status.capacity.memory}')
 HARDWARE="$(nproc) host cores; $(awk '/MemTotal/ {printf "%.1f GiB RAM", $2/1024/1024}' /proc/meminfo); kind node $NODE_IMAGE capacity $NODE_CAPACITY; server limit 4 cores/4 GiB RAM"
-TOPOLOGY="live one-node kind deployment; direct filesystem objectlog/sqlite projection on bounded 64 GiB disk-backed emptyDir; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
+TOPOLOGY="live one-node kind deployment; direct filesystem objectlog/turso projection on bounded 64 GiB disk-backed emptyDir; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
 
 cat <<YAML | kubectl apply -f -
 apiVersion: batch/v1

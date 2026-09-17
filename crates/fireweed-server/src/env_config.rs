@@ -463,7 +463,7 @@ fn parse_backend(
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "objectlog is not a public product log value (public: memory|sqlite|postgres|filesystem|s3); \
+                "objectlog is not a public product log value (public: memory|postgres|filesystem|s3); \
                  use FIREWEED_LOG_BACKEND=filesystem (local/NAS) or FIREWEED_LOG_BACKEND=s3",
             ));
         }
@@ -533,7 +533,7 @@ fn parse_backend(
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "inmemory is not a public product projection (public: memory|sqlite|turso|postgres); \
+                "inmemory is not a public product projection (public: memory|turso|postgres); \
                  use FIREWEED_PROJECTION_BACKEND=memory",
             ));
         }
@@ -543,7 +543,7 @@ fn parse_backend(
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "this projection is not a public product value (public: memory|sqlite|turso|postgres). \
+                "this projection is not a public product value (public: memory|turso|postgres). \
                  hybrid|hybrid-strict|hybrid-async are demoted from the public env/Helm projection axis",
             ));
         }
@@ -576,31 +576,19 @@ fn parse_backend(
         }
     };
 
-    // Full public 5×4 matrix pairings plus transitional Hybrid* for direct Config tests.
+    // Current public 4×3 storage matrix.
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
         // Class B: memory log × durable projection (projection survives process death; no log rebuild).
-        (LogSpec::Memory, ProjectionSpec::Sqlite { .. }) => true,
         (LogSpec::Memory, ProjectionSpec::Turso { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Memory, ProjectionSpec::Postgres { .. }) => true,
-        (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
-        (LogSpec::Sqlite { .. }, ProjectionSpec::Sqlite { .. }) => true,
-        (LogSpec::Sqlite { .. }, ProjectionSpec::Turso { .. }) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::Sqlite { .. }, ProjectionSpec::Postgres { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
-        (LogSpec::ObjectLog(_), ProjectionSpec::Sqlite { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => true,
-        (LogSpec::ObjectLog(_), ProjectionSpec::Hybrid { .. }) => true,
-        (LogSpec::ObjectLog(_), ProjectionSpec::HybridStrict { .. }) => true,
-        (LogSpec::ObjectLog(_), ProjectionSpec::HybridAsync { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::ObjectLog(_), ProjectionSpec::Postgres { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::Postgres { .. }, ProjectionSpec::Sqlite { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::Turso { .. }) => true,
         #[cfg(feature = "postgres")]
@@ -924,18 +912,18 @@ mod tests {
             }
             other => panic!("expected Turso, got {}", other.label()),
         }
-        // Explicit memory/sqlite/postgres remain selectable.
+        // Explicit memory/Turso/PostgreSQL remain selectable.
         for (proj, check) in [
             ("memory", "memory"),
-            ("sqlite", "sqlite"),
+            ("turso", "turso"),
             ("postgres", "postgres"),
         ] {
             let mut pairs = vec![
                 ("FIREWEED_LOG_BACKEND", "memory"),
                 ("FIREWEED_PROJECTION_BACKEND", proj),
             ];
-            if proj == "sqlite" {
-                pairs.push(("FIREWEED_SQLITE_PROJECTION_PATH", "/tmp/x.db"));
+            if proj == "turso" {
+                pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/x.db"));
             }
             if proj == "postgres" {
                 pairs.push(("FIREWEED_PG_PROJECTION_URL", "postgres://u:p@localhost/db"));
@@ -950,15 +938,12 @@ mod tests {
     #[test]
     fn public_projection_help_and_parser_are_bijective() {
         // Public names accepted by the parser must match the help advertisement set.
-        const PUBLIC: &[&str] = &["memory", "sqlite", "turso", "postgres"];
+        const PUBLIC: &[&str] = &["memory", "turso", "postgres"];
         for name in PUBLIC {
             let mut pairs = vec![
                 ("FIREWEED_LOG_BACKEND", "memory"),
                 ("FIREWEED_PROJECTION_BACKEND", *name),
             ];
-            if *name == "sqlite" {
-                pairs.push(("FIREWEED_SQLITE_PROJECTION_PATH", "/tmp/p.db"));
-            }
             if *name == "turso" {
                 pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/p.turso"));
             }
@@ -991,18 +976,12 @@ mod tests {
     }
 
     #[test]
-    fn all_five_log_specs_accept_turso() {
+    fn all_four_log_specs_accept_turso() {
         let logs: Vec<Vec<(&str, &str)>> = vec![
             vec![
                 ("FIREWEED_LOG_BACKEND", "memory"),
                 ("FIREWEED_PROJECTION_BACKEND", "turso"),
                 ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/m.turso"),
-            ],
-            vec![
-                ("FIREWEED_LOG_BACKEND", "sqlite"),
-                ("FIREWEED_SQLITE_LOG_PATH", "/tmp/log.db"),
-                ("FIREWEED_PROJECTION_BACKEND", "turso"),
-                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/s.turso"),
             ],
             vec![
                 ("FIREWEED_LOG_BACKEND", "postgres"),
@@ -1125,24 +1104,24 @@ mod tests {
         // Class B: memory log × sqlite projection (durable projection; no log rebuild)
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/mem-class-b.db"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
+            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/mem-class-b.db"),
         ]))
         .expect("memory×sqlite Class B");
         assert!(matches!(config.backend.log, LogSpec::Memory));
         assert!(matches!(
             config.backend.projection,
-            ProjectionSpec::Sqlite { ref path } if path == &PathBuf::from("/data/mem-class-b.db")
+            ProjectionSpec::Turso { ref path } if path == &PathBuf::from("/data/mem-class-b.db")
         ));
         assert_eq!(config.backend.log.label(), "memory");
-        assert_eq!(config.backend.projection.label(), "sqlite");
+        assert_eq!(config.backend.projection.label(), "turso");
 
         // filesystem log (first-class) × sqlite projection
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "filesystem"),
             ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
-            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/fw-proj.db"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
+            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/fw-proj.db"),
         ]))
         .expect("filesystem×sqlite");
         match &config.backend.log {
@@ -1157,7 +1136,7 @@ mod tests {
         assert_eq!(config.backend.log.label(), "filesystem");
         assert!(matches!(
             config.backend.projection,
-            ProjectionSpec::Sqlite { .. }
+            ProjectionSpec::Turso { .. }
         ));
 
         // s3 log (first-class) × memory projection
@@ -1183,8 +1162,8 @@ mod tests {
         // s3 log (first-class) × sqlite projection
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "s3"),
-            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/s3-proj.db"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
+            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3-proj.db"),
             ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
             ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
             ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
@@ -1198,10 +1177,10 @@ mod tests {
             config.backend.log,
             LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
         ));
-        assert_eq!(config.backend.projection.label(), "sqlite");
+        assert_eq!(config.backend.projection.label(), "turso");
         assert!(matches!(
             config.backend.projection,
-            ProjectionSpec::Sqlite { ref path } if path == &PathBuf::from("/data/s3-proj.db")
+            ProjectionSpec::Turso { ref path } if path == &PathBuf::from("/data/s3-proj.db")
         ));
     }
 
@@ -1291,11 +1270,11 @@ mod tests {
             ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
             ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
         ];
-        for (projection, expect_label) in [("memory", "memory"), ("sqlite", "sqlite")] {
+        for (projection, expect_label) in [("memory", "memory"), ("turso", "turso")] {
             let mut pairs = s3_base.to_vec();
             pairs.push(("FIREWEED_PROJECTION_BACKEND", projection));
             if projection == "sqlite" {
-                pairs.push(("FIREWEED_SQLITE_PROJECTION_PATH", "/var/lib/fw/proj.db"));
+                pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/var/lib/fw/proj.db"));
             }
             let config = Config::from_env(&map(&pairs))
                 .unwrap_or_else(|e| panic!("s3×{projection} must parse: {e}"));
@@ -1457,27 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_log_path_is_threaded() {
-        // Explicit projection so this case stays about log-path threading; public default
-        // projection is Turso (see turso_projection_is_the_public_env_default).
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "sqlite"),
-            ("FIREWEED_SQLITE_LOG_PATH", "/data/log.db"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
-        ]))
-        .expect("valid env");
-        match config.backend.log {
-            LogSpec::Sqlite { path } => assert_eq!(path, PathBuf::from("/data/log.db")),
-            _ => panic!("expected LogSpec::Sqlite"),
-        }
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::InMemory
-        ));
-        assert_eq!(config.objectlog_byte_limits, ObjectLogByteLimits::default());
-    }
-
-    #[test]
     fn objectlog_byte_limits_are_typed_and_validated_against_segment_target() {
         let config = Config::from_env(&map(&[
             ("FIREWEED_SEGMENT_TARGET_BYTES", "1024"),
@@ -1525,15 +1483,15 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_sqlite_projection_carries_paths_and_segment_config() {
+    fn filesystem_turso_projection_carries_paths_and_segment_config() {
         // The filesystem object log's only production form is the segmented group-commit substrate;
         // the retired `FIREWEED_OBJECT_LOG_MODE` knob is ignored, and the projection axis is the
         // derived sqlite store.
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "filesystem"),
-            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
             ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/proj.db"),
+            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/proj.db"),
             ("FIREWEED_SEGMENT_TARGET_BYTES", "131072"),
             ("FIREWEED_SEGMENT_MAX_LATENCY_MS", "5"),
         ]))
@@ -1544,7 +1502,7 @@ mod tests {
                     root,
                     segment_config,
                 }),
-                ProjectionSpec::Sqlite { path },
+                ProjectionSpec::Turso { path },
             ) => {
                 assert_eq!(root, PathBuf::from("/data/olog"));
                 assert_eq!(path, PathBuf::from("/data/proj.db"));
@@ -1583,7 +1541,7 @@ mod tests {
                 ("FIREWEED_LOG_BACKEND", "filesystem"),
                 ("FIREWEED_PROJECTION_BACKEND", projection),
                 ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-                ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/hybrid.db"),
+                ("FIREWEED_TURSO_PROJECTION_PATH", "/data/hybrid.db"),
             ]));
             let Err(err) = result else {
                 panic!("{projection} must be rejected on the public env surface");
@@ -1670,9 +1628,9 @@ mod tests {
                 "FIREWEED_OBJECT_LOG_ROOT",
                 "/tmp/fireweed-p3v-deferred-flush-env",
             ),
-            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
             (
-                "FIREWEED_SQLITE_PROJECTION_PATH",
+                "FIREWEED_TURSO_PROJECTION_PATH",
                 "/tmp/fireweed-p3v-deferred-flush-env.sqlite",
             ),
             ("FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "5000"),
@@ -1688,10 +1646,7 @@ mod tests {
             config.backend.async_projection, None,
             "Strict env must not attach async_projection (P3v coherence)"
         );
-        assert_eq!(
-            config.backend.sqlite_projection_deferred_flush_chunk,
-            Some(17)
-        );
+        assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
         assert_eq!(config.validate_for_start(), Ok(()));
     }
 
@@ -1733,55 +1688,6 @@ mod tests {
             panic!("unknown log backend must fail");
         };
         assert!(err.0.contains("FIREWEED_LOG_BACKEND"), "{}", err.0);
-    }
-
-    #[test]
-    fn sqlite_log_sqlite_projection_carries_distinct_paths() {
-        // Class A: durable sqlite command log × derived sqlite projection (distinct store paths).
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "sqlite"),
-            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
-            ("FIREWEED_SQLITE_LOG_PATH", "/data/log.db"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/projection.db"),
-        ]))
-        .expect("sqlite × sqlite is a wired Class A pairing");
-        match (config.backend.log, config.backend.projection) {
-            (LogSpec::Sqlite { path: log_path }, ProjectionSpec::Sqlite { path: proj_path }) => {
-                assert_eq!(log_path, PathBuf::from("/data/log.db"));
-                assert_eq!(proj_path, PathBuf::from("/data/projection.db"));
-                assert_ne!(
-                    log_path, proj_path,
-                    "log and projection must use distinct paths"
-                );
-            }
-            _ => panic!("expected LogSpec::Sqlite × ProjectionSpec::Sqlite"),
-        }
-    }
-
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn sqlite_log_postgres_projection_carries_distinct_stores() {
-        // Class A: durable sqlite command log × derived postgres relational projection.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "sqlite"),
-            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
-            ("FIREWEED_SQLITE_LOG_PATH", "/data/sqlite-log.db"),
-            (
-                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
-                "postgres://app@127.0.0.1:5432/fireweed_projection",
-            ),
-        ]))
-        .expect("sqlite × postgres is a wired Class A pairing");
-        match (config.backend.log, config.backend.projection) {
-            (LogSpec::Sqlite { path }, ProjectionSpec::Postgres { url }) => {
-                assert_eq!(path, PathBuf::from("/data/sqlite-log.db"));
-                assert!(
-                    url.contains("fireweed_projection"),
-                    "projection URL should be the postgres projection DSN, got {url}"
-                );
-            }
-            _ => panic!("expected LogSpec::Sqlite × ProjectionSpec::Postgres"),
-        }
     }
 
     #[test]

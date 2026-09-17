@@ -40,8 +40,8 @@ fn filesystem(projection: ProjectionStoreConfig, root: &Path) -> StorageConfig {
     config
 }
 
-fn sqlite_projection(path: impl Into<PathBuf>) -> ProjectionStoreConfig {
-    ProjectionStoreConfig::Sqlite { path: path.into() }
+fn turso_projection(path: impl Into<PathBuf>) -> ProjectionStoreConfig {
+    ProjectionStoreConfig::Turso { path: path.into() }
 }
 
 fn postgres_log() -> LogConfig {
@@ -136,23 +136,17 @@ fn each_async_projection_bound_is_validated_before_tuple_coherence() {
 }
 
 #[test]
-fn all_nine_non_object_log_async_selections_fail_before_io() {
+fn all_six_non_object_log_async_selections_fail_before_io() {
     let root = std::env::temp_dir().join(format!(
         "fireweed-p3b-validation-never-created-{}",
         std::process::id()
     ));
     assert!(!root.exists());
 
-    for log in [
-        LogConfig::Memory,
-        LogConfig::Sqlite {
-            path: root.join("log.db"),
-        },
-        postgres_log(),
-    ] {
+    for log in [LogConfig::Memory, postgres_log()] {
         for projection in [
             ProjectionStoreConfig::Memory,
-            sqlite_projection(root.join("projection.db")),
+            turso_projection(root.join("projection.db")),
             postgres_projection(),
         ] {
             assert_eq!(
@@ -165,43 +159,30 @@ fn all_nine_non_object_log_async_selections_fail_before_io() {
 }
 
 #[test]
-fn sqlite_deferred_flush_tuning_is_independent_and_cell_scoped() {
-    let root = PathBuf::from("/p3b-sqlite-tuning-never-opened");
-    for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
-        let mut config = filesystem(sqlite_projection("projection.db"), &root);
-        config.response_barrier = barrier;
-        config.async_projection =
-            (barrier == ResponseBarrier::AsyncProjection).then(AsyncProjectionSpec::default);
-        config.sqlite_projection_deferred_flush_chunk = Some(17);
-        assert_eq!(config.validate(), Ok(()));
+fn retired_sqlite_deferred_flush_tuning_is_rejected_before_io() {
+    let root = PathBuf::from("/p3b-retired-tuning-never-opened");
+    for projection in [
+        ProjectionStoreConfig::Memory,
+        turso_projection("projection.db"),
+        postgres_projection(),
+    ] {
+        for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+            for chunk in [0, 17] {
+                let mut config = filesystem(projection.clone(), &root);
+                config.response_barrier = barrier;
+                config.async_projection = (barrier == ResponseBarrier::AsyncProjection)
+                    .then(AsyncProjectionSpec::default);
+                config.sqlite_projection_deferred_flush_chunk = Some(chunk);
+                assert_eq!(
+                    config.validate(),
+                    Err(EngineError::Invalid(
+                        "sqlite storage is retired; use filesystem log and turso projection"
+                    ))
+                );
+            }
+        }
     }
-
-    let mut zero = filesystem(sqlite_projection("projection.db"), &root);
-    zero.sqlite_projection_deferred_flush_chunk = Some(0);
-    assert_eq!(
-        zero.validate(),
-        Err(EngineError::Invalid(
-            "sqlite projection deferred flush chunk must be > 0"
-        ))
-    );
-
-    let mut wrong_projection = filesystem(ProjectionStoreConfig::Memory, &root);
-    wrong_projection.sqlite_projection_deferred_flush_chunk = Some(17);
-    assert_eq!(
-        wrong_projection.validate(),
-        Err(EngineError::Invalid(
-            "sqlite-projection-deferred-flush-requires-sqlite-projection"
-        ))
-    );
-
-    let mut wrong_log = base(LogConfig::Memory, sqlite_projection("projection.db"));
-    wrong_log.sqlite_projection_deferred_flush_chunk = Some(17);
-    assert_eq!(
-        wrong_log.validate(),
-        Err(EngineError::Invalid(
-            "sqlite-projection-deferred-flush-requires-object-log"
-        ))
-    );
+    assert!(!root.exists());
 }
 
 #[test]

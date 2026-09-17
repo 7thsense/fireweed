@@ -15,7 +15,7 @@ path = "src/bin/fireweed-postgres-migrate.rs"
 
 # Driven adapter: postgres (atomic durability class). Durable command LOG in postgres tables; the
 # priority-ordered projection is the shared `fireweed-projection` materialization, rebuilt from the log.
-# Mirrors `fireweed-sqlite` exactly — same template, same guarantees — over the SYNC `postgres` client.
+# Uses the synchronous PostgreSQL client behind the runtime-safe storage boundary.
 # Depends inward on the domain (engine/core) + the shared projection — the correct hexagonal direction.
 [dependencies]
 fireweed-core = { path = "../fireweed-core" }
@@ -30,7 +30,7 @@ serde = "1"
 serde_json = "1"
 bytes = "1"
 futures = "0.3"
-# Lease-token hashing for the relational projection (hash-only at rest; parity with fireweed-sqlite).
+# Lease-token hashing for the relational projection (hash-only at rest).
 sha2 = "0.11"
 
 [features]

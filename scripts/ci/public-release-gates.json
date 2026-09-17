@@ -8,6 +8,7 @@
     {"id": "dependency-license-policy", "command": ["cargo", "deny", "check"]},
     {"id": "secret-history", "command": ["bash", "scripts/ci/gitleaks-gate.sh"]},
     {"id": "source-package-sbom-provenance", "command": ["bash", "scripts/release/source-preview-artifacts-test.sh"]},
+    {"id": "release-channel", "command": ["python3", "scripts/release/test_release_channel.py"]},
     {"id": "whitespace", "command": ["git", "diff", "--check"]}
   ]
 }

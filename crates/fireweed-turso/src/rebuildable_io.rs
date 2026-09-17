@@ -120,7 +120,9 @@ impl RebuildableFile {
         let started = Instant::now();
         let result = operation();
         if let Err(error) = &result {
-            eprintln!("projection_io_error class={class} operation={operation_name} requested_bytes={bytes} error={error:?}");
+            eprintln!(
+                "projection_io_error class={class} operation={operation_name} requested_bytes={bytes} error={error:?}"
+            );
         }
         // On Unix PlatformIO completes reads/writes synchronously, including
         // the completion callback. This is VFS-call elapsed time, not device

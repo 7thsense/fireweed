@@ -729,8 +729,8 @@ where
 /// Assemble log-replay with optional adapter-local blocking offload per axis.
 ///
 /// When `offload_log` / `offload_projection` is true, that axis runs whole operations on a private
-/// [`crate::BoundedBlockingExecutor`] (not process-wide `BlockingLibBackend`). Use for rusqlite
-/// product cells so public Fireweed ports are non-blocking-under-poll.
+/// [`crate::BoundedBlockingExecutor`] (not process-wide `BlockingLibBackend`). Use for synchronous I/O
+/// adapters so public Fireweed ports are non-blocking-under-poll.
 pub fn assemble_async_log_replay_with_axis_offload<L, P>(
     log: L,
     projection: P,
@@ -2480,6 +2480,23 @@ where
         }
     }
 
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::RetainedItemView>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::retained_items(projection, &shard, after, limit)
+                })
+                .await
+        }
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,
@@ -3904,17 +3921,8 @@ where
                         .into_iter()
                         .map(crate::recovery_from_outcome_entry)
                         .collect::<Vec<_>>();
-                    self.commit_idempotency
-                        .lock()
-                        .expect("commit idempotency poisoned")
-                        .entry(shard.clone())
-                        .or_default()
-                        .record(
-                            rid.clone(),
-                            fingerprint,
-                            recovery.clone(),
-                            request_expires_at(now, retention),
-                        );
+                    // The durable replay port omits its original expiry. Keep
+                    // consulting it instead of extending retention on replay.
                     return Ok(outcomes_from_recovery(&recovery));
                 }
             }
@@ -3955,7 +3963,6 @@ where
 
             // --- off-permit pure prep (safe to overlap across workers) ---
             let mut prepared: Vec<Prepared> = Vec::with_capacity(entries.len());
-            let mut reserved_claims: HashSet<ItemId> = HashSet::new();
             for entry in entries {
                 let CommitTransitionEntry {
                     claim_ref,
@@ -3989,28 +3996,12 @@ where
                     });
                     continue;
                 }
-                if claim_refs
-                    .iter()
-                    .any(|c| reserved_claims.contains(&c.item_id))
-                {
-                    prepared.push(Prepared {
-                        consumed_input_id,
-                        additional_consumed_input_ids,
-                        claim_refs,
-                        finalize,
-                        side_records,
-                        instance_fence,
-                        push_items: None,
-                        early_reject: Some(EngineError::Terminal),
-                    });
-                    continue;
-                }
-                reserved_claims.extend(claim_refs.iter().map(|c| c.item_id));
-
                 let mut early_reject = None;
                 let mut push_items = None;
                 if !lifecycle_items.is_empty() {
-                    if let Some(e) = lifecycle_items.iter().find_map(|item| {
+                    if let Err(error) = crate::validate_push_shape(&definition, &lifecycle_items) {
+                        early_reject = Some(error);
+                    } else if let Some(e) = lifecycle_items.iter().find_map(|item| {
                         validate_entity(schema.as_ref(), item.entity.as_ref()).err()
                     }) {
                         early_reject = Some(e);
@@ -4074,10 +4065,20 @@ where
                                     let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
                                     let mut staged_unique_keys: HashMap<(String, Vec<u8>), ItemId> =
                                         HashMap::new();
+                                    let mut staged_client_keys = HashSet::new();
+                                    let mut reserved_claims = HashSet::new();
                                     let mut results = Vec::with_capacity(validate_in.len());
                                     for prep in &validate_in {
                                         if prep.skip {
                                             results.push(None);
+                                            continue;
+                                        }
+                                        if prep
+                                            .claim_refs
+                                            .iter()
+                                            .any(|claim| reserved_claims.contains(&claim.item_id))
+                                        {
+                                            results.push(Some(EngineError::Terminal));
                                             continue;
                                         }
                                         if let Err(e) = ProjectionStore::commit_validate(
@@ -4104,10 +4105,19 @@ where
                                                 results.push(Some(e));
                                                 continue;
                                             }
-                                            staged_fences
-                                                .insert(fence.instance_key.clone(), fence.next);
                                         }
                                         if let Some(push_items) = &prep.push_items {
+                                            let entry_client_keys =
+                                                match crate::commit_surface::candidate_client_keys(
+                                                    push_items.as_slice(),
+                                                    &staged_client_keys,
+                                                ) {
+                                                    Ok(keys) => keys,
+                                                    Err(error) => {
+                                                        results.push(Some(error));
+                                                        continue;
+                                                    }
+                                                };
                                             if let Err(e) = ProjectionStore::index_validate_push(
                                                 p,
                                                 &shard,
@@ -4126,7 +4136,15 @@ where
                                                 results.push(Some(e));
                                                 continue;
                                             }
+                                            staged_client_keys.extend(entry_client_keys);
                                         }
+                                        if let Some(fence) = &prep.fence {
+                                            staged_fences
+                                                .insert(fence.instance_key.clone(), fence.next);
+                                        }
+                                        reserved_claims.extend(
+                                            prep.claim_refs.iter().map(|claim| claim.item_id),
+                                        );
                                         results.push(None);
                                     }
                                     Ok(results)

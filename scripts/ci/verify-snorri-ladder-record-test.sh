@@ -6,7 +6,12 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 base="$repo_root/docs/perf/evidence/tp005/snorri-ladder-candidate.json"
-cp "$base" "$tmp/pending.json"
+python3 - "$base" "$tmp/pending.json" <<'PYFIXTURE'
+import json, sys
+x = json.load(open(sys.argv[1]))
+x["RESULT"] = {"status": "pending"}
+json.dump(x, open(sys.argv[2], "w"))
+PYFIXTURE
 # pending must fail
 if bash "$v" "$tmp/pending.json"; then echo "expected pending fail"; exit 1; fi
 code=0

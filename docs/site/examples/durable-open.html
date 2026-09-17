@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Public constructors for durable profiles and a role-named object-log runtime configuration that validates construction axes." />
-    <title>Open SQLite and object-log backends — Fireweed Queue</title>
+    <meta name="description" content="Public constructors for filesystem-log durability with native Turso or memory projections." />
+    <title>Open Turso and object-log backends — Fireweed Queue</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
   <body>
@@ -34,55 +34,25 @@
       <main>
 
         <div class="page-intro">
-          <h2>Open SQLite and object-log backends</h2>
-          <p>Public constructors for durable profiles and a role-named object-log runtime configuration that validates construction axes.</p>
+          <h2>Open Turso and object-log backends</h2>
+          <p>Public constructors for filesystem-log durability with native Turso or memory projections.</p>
         </div>
         <div class="example-meta">
           <span class="badge neutral">construction</span>
-          <span>Provenance: <code>crates/fireweed/tests/concrete_fireweed.rs::role_named_object_log_configuration_validates · crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_sqlite_log · crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_sqlite_relational · crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_objectlog</code></span>
+          <span>Provenance: <code>crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_turso · crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_objectlog</code></span>
         </div>
         <div class="tag-list" style="margin-bottom:16px"><span class="tag">durable</span><span class="tag">construction</span></div>
         <div class="code-block">
   <div class="label"><span>docs/site/examples/src/durable-open.rs</span><span>rust</span></div>
-  <pre><code>// Provenance: crates/fireweed/tests/concrete_fireweed.rs::role_named_object_log_configuration_validates
+  <pre><code>// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_turso
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn role_named_object_log_configuration_validates() {
-    let config = ObjectLogRuntimeConfig {
-        object_log: ObjectLogStorage::Local {
-            root: &quot;object-log&quot;.into(),
-        },
-        authority: ObjectLogAuthority::NativeConditionalWrite,
-        projection: ProjectionConfig::Sqlite {
-            path: &quot;projection.sqlite&quot;.into(),
-        },
-        response_barrier: ResponseBarrier::Strict,
-        segments: SegmentConfig::new(1024, 5).unwrap(),
-        namespace: &quot;downstream&quot;.to_string(),
-        recovery: RecoveryPolicy::default(),
-    };
-    config.validate().unwrap();
-}
-
-// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_sqlite_log
-// Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn lifecycle_over_shapes_sqlite_log() {
+fn lifecycle_over_shapes_turso() {
     for shape in all_shapes() {
-        let path = tmp(&amp;format!(&quot;sqlite-{}&quot;, shape.name));
-        let _ = std::fs::remove_file(&amp;path);
-        let fireweed =
-            open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect(&quot;open sqlite&quot;);
-        run_one(&quot;sqlite&quot;, &amp;fireweed, &amp;shape, true);
-        let _ = std::fs::remove_file(&amp;path);
-    }
-}
-
-// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_sqlite_relational
-// Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn lifecycle_over_shapes_sqlite_relational() {
-    for shape in all_shapes() {
-        let fireweed =
-            open_sqlite_relational(&quot;:memory:&quot;, Arc::new(SystemClock)).expect(&quot;sqlite relational&quot;);
-        run_one(&quot;sqlite_relational&quot;, &amp;fireweed, &amp;shape, true);
+        let root = tmp(&amp;format!(&quot;turso-{}&quot;, shape.name));
+        let fireweed = open_log_turso(&amp;root, Arc::new(SystemClock)).expect(&quot;open Turso&quot;);
+        run_one(&quot;turso&quot;, &amp;fireweed, &amp;shape, true);
+        drop(fireweed);
+        std::fs::remove_dir_all(root).expect(&quot;cleanup&quot;);
     }
 }
 
@@ -93,8 +63,8 @@ fn lifecycle_over_shapes_objectlog() {
         let dir = tmp(&amp;format!(&quot;objectlog-{}&quot;, shape.name));
         let _ = std::fs::remove_dir_all(&amp;dir);
         let fireweed = open_objectlog(&amp;dir, Arc::new(SystemClock)).expect(&quot;open objectlog&quot;);
-        // Eventual-apply class: update_fields is refused, so the lifecycle skips it.
-        run_one(&quot;objectlog&quot;, &amp;fireweed, &amp;shape, false);
+        // Exercise the current public batch-update contract on the original rows.
+        run_one(&quot;objectlog&quot;, &amp;fireweed, &amp;shape, true);
         let _ = std::fs::remove_dir_all(&amp;dir);
     }
 }</code></pre>

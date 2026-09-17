@@ -4,7 +4,7 @@
 //! S3-log cells satisfy the identical P5a Class A assertion set against native
 //! CAS, including failover/reopen with attested provenance; zero skips.
 //!
-//! Cells: `s3×memory`, `s3×sqlite`, `s3×postgres` (strict / NativeConditionalWrite).
+//! Cells: `s3×memory`, `s3×turso`, `s3×postgres` (strict / NativeConditionalWrite).
 //!
 //! Assertion set (identical across cells):
 //! 1. **T2 reopen** — pending work survives process-local drop + reopen from the
@@ -22,7 +22,7 @@
 //! ```text
 //! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
 //! export FIREWEED_PG_TEST_URL=postgres://fireweed:fireweed@127.0.0.1:55432/fireweed
-//! cargo test -p fireweed --features objectlog,sqlite,postgres --test p5as3_s3_reopen_parity -- --nocapture
+//! cargo test -p fireweed --features objectlog,turso,postgres --test p5as3_s3_reopen_parity -- --nocapture
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -457,17 +457,17 @@ async fn s3_memory_class_a_reopen_and_recovery_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_sqlite_class_a_reopen_and_recovery_replay() {
+async fn s3_turso_class_a_reopen_and_recovery_replay() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite-reopen");
     let ns = unique_ns("s3-sqlite-reopen");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_class_a_reopen_recovery_replay("s3--sqlite--strict", config).await;
+    run_class_a_reopen_recovery_replay("s3--turso--strict", config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -493,17 +493,17 @@ async fn s3_memory_native_cas_failover_reopen() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_sqlite_native_cas_failover_reopen() {
+async fn s3_turso_native_cas_failover_reopen() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite-failover");
     let ns = unique_ns("s3-sqlite-failover");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_native_cas_failover("s3--sqlite--strict", config).await;
+    run_native_cas_failover("s3--turso--strict", config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -523,18 +523,18 @@ async fn s3_postgres_native_cas_failover_reopen() {
 /// Disposable-projection rebuild: wipe local sqlite projection, reopen same S3
 /// namespace, Class A log rebuilds exact pending + request_id retention.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_sqlite_projection_loss_rebuilds_from_durable_log() {
+async fn s3_turso_projection_loss_rebuilds_from_durable_log() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite-rebuild");
     let ns = unique_ns("s3-sqlite-rebuild");
     let proj_path = fixture.path().join("projection.sqlite");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: proj_path.clone(),
         },
     );
-    let cell_id = "s3--sqlite--strict";
+    let cell_id = "s3--turso--strict";
     let definition = qdef("rebuild-queue");
     let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
     let rid = RequestId::new("p5as3-rebuild-rid").unwrap();

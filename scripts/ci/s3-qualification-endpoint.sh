@@ -38,10 +38,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PREFLIGHT_PY="${SCRIPT_DIR}/s3-native-cas-preflight.py"
 
-# Digest-pinned MinIO. Tag is documentation only; selection prefers the digest form.
-readonly MINIO_IMAGE_TAG="minio/minio:RELEASE.2024-12-18T13-15-44Z"
+# Digest-pinned MinIO from the official registry used in the release README:
+# https://github.com/minio/minio/blob/RELEASE.2024-12-18T13-15-44Z/README.md#container-installation
+# Verified 2026-09-17: Quay serves the same OCI index digest as the former Docker Hub pin;
+# the release-tag and digest-addressed manifest bytes hash to MINIO_IMAGE_DIGEST.
+# Tag is documentation only; selection prefers the digest form.
+readonly MINIO_IMAGE_TAG="quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z"
 readonly MINIO_IMAGE_DIGEST="sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
-readonly MINIO_IMAGE_PINNED="minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
+readonly MINIO_IMAGE_PINNED="quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
 readonly MINIO_VERSION_LABEL="RELEASE.2024-12-18T13-15-44Z"
 readonly CAPABILITY_ID="S3-NATIVE-CAS-CAPABILITY-ATTESTATION"
 readonly PLAN_KEY="P1s"

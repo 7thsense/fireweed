@@ -932,6 +932,18 @@ impl ProjectionRead for AsyncObjectLogPostgresBackend {
             }),
         )
     }
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::RetainedItemView>>> + Send
+    {
+        std::future::ready(self.read_healthy_projection(shard, |projection| {
+            ProjectionStore::retained_items(projection, shard, after, limit)
+        }))
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,
@@ -1089,6 +1101,30 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogPostgresBackend {
         async move {
             self.ensure_projection_healthy(&shard)?;
             objectlog_side_record(projection.as_ref(), &shard, &key).await
+        }
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        let prefix = prefix.to_vec();
+        async move {
+            self.ensure_projection_healthy(&shard)?;
+            fireweed_engine::commit_surface::side_records_by_prefix(
+                projection.as_ref(),
+                &shard,
+                &prefix,
+                page_size,
+                cursor,
+            )
+            .await
         }
     }
 }
@@ -1844,7 +1880,12 @@ mod async_projection {
     fn fixture(tag: &str) -> (String, std::path::PathBuf) {
         let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         (
-            format!("fireweed_async_pg_{tag}_{}_{}", std::process::id(), id),
+            format!(
+                "fireweed_async_pg_{}_{}_{}",
+                tag.replace('-', "_"),
+                std::process::id(),
+                id
+            ),
             std::env::temp_dir().join(format!(
                 "fireweed-async-projection-postgres-{tag}-{}-{id}",
                 std::process::id()

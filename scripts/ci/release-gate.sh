@@ -21,7 +21,7 @@
 #     Postgres storage pairs. Evidence generation is local/manual; GitHub only verifies governed inputs.
 #   - Live coverage bars: fireweed-core >=90% line / >=85% branch,
 #     fireweed-engine >=80% line (enforced below; this comment is not the
-#     authority — the check-lcov-coverage.py calls are).
+#     authority — the check-lcov-coverage.sh calls are).
 #
 # The exact-tag freshness attestation is intentionally enforced by the tag workflow, where the resolved tag
 # and checked-out commit are available. This local gate proves semantic completeness and source binding; it
@@ -99,13 +99,11 @@ fi
 echo "--- fireweed facade lib suite (must compile + pass; ignored tests need documented reasons) ---"
 ${CARGO} test -p fireweed --lib
 
-echo "--- fireweed facade integration targets (concrete + mutation + memory public interface) ---"
-# Full public_interface_conformance includes objectlog cells that still advertise incomplete
-# LogEngine ports (hot projection / bounded_mutation / catalog verify). Those stay tracked as
-# product completion work; the release gate requires the memory public interface plus lib suite.
+echo "--- fireweed facade integration targets (concrete + mutation + local public interfaces) ---"
+# Exercise every enabled local log/projection composition, including native Turso.
 ${CARGO} test -p fireweed --test concrete_fireweed
 ${CARGO} test -p fireweed --test item_mutation
-${CARGO} test -p fireweed --test public_interface_conformance memory_public_interface -- --exact
+${CARGO} test -p fireweed --test public_interface_conformance
 
 echo "--- fireweed-conformance suite ---"
 ${CARGO} test -p fireweed-conformance --lib
@@ -158,7 +156,7 @@ mkdir -p "${REPO_ROOT}/target/coverage"
 ${CARGO} llvm-cov clean --workspace
 ${CARGO} llvm-cov --package fireweed-core --lcov \
     --output-path "${REPO_ROOT}/target/coverage/fireweed-core.lcov"
-bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
+bash "${SCRIPT_DIR}/check-lcov-coverage.sh" \
     --lcov "${REPO_ROOT}/target/coverage/fireweed-core.lcov" --crate fireweed-core --min-lines 90
 # cargo-llvm-cov spawns Cargo/rustc subprocesses of its own. Pin the whole
 # subprocess tree to nightly and put the nightly binaries ahead of Homebrew's
@@ -168,7 +166,7 @@ NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly rustc)")"
 PATH="${NIGHTLY_BIN}:${PATH}" RUSTUP_TOOLCHAIN=nightly \
     rustup run nightly cargo llvm-cov --package fireweed-core --branch --lcov \
     --output-path "${REPO_ROOT}/target/coverage/fireweed-core-branch.lcov"
-bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
+bash "${SCRIPT_DIR}/check-lcov-coverage.sh" \
     --lcov "${REPO_ROOT}/target/coverage/fireweed-core-branch.lcov" \
     --crate fireweed-core --min-lines 90 --min-branches 85
 ${CARGO} llvm-cov clean --workspace
@@ -181,7 +179,7 @@ for package in fireweed-engine fireweed fireweed-memory fireweed-turso; do
 done
 ${CARGO} llvm-cov report --lcov \
     --output-path "${REPO_ROOT}/target/coverage/fireweed-engine.lcov"
-bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
+bash "${SCRIPT_DIR}/check-lcov-coverage.sh" \
     --lcov "${REPO_ROOT}/target/coverage/fireweed-engine.lcov" --crate fireweed-engine --min-lines 80
 
 echo "--- build-closure integrity (candidate mode; never reads .ddx/**) ---"

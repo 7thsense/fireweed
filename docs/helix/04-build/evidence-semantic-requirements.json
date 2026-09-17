@@ -261,8 +261,8 @@
         "required_result": "pass",
         "stale_input_fails": true
       },
-      "governing_assertion": "default public matrix has exactly 20 strict cells with Turso default projection",
-      "id": "MATRIX-STRICT-20"
+      "governing_assertion": "default public matrix has exactly 12 strict cells with Turso default projection",
+      "id": "MATRIX-STRICT-12"
     },
     {
       "capability": "durable_log_replay",

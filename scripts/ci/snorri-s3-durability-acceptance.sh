@@ -73,11 +73,11 @@ export SNORRI_S3_TEST=1
 
 # --- Fireweed-side contract harness (primary acceptance; zero skips) ---
 err "fireweed harness: p6s_s3_durability_acceptance"
-fw_cmd="rustup run ${TOOLCHAIN} cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance -- --nocapture"
+fw_cmd="rustup run ${TOOLCHAIN} cargo test -p fireweed --features objectlog,turso,postgres --test p6s_s3_durability_acceptance -- --nocapture"
 append_cmd "$fw_cmd"
 # shellcheck disable=SC2086
 rustup run "$TOOLCHAIN" cargo test -p fireweed \
-  --features objectlog,sqlite,postgres \
+  --features objectlog,turso,postgres \
   --test p6s_s3_durability_acceptance \
   -- --nocapture
 
@@ -227,31 +227,31 @@ doc = {
     },
     "semantic_ids": {
         "SNORRI-REOPEN": {
-            "cells": ["s3--memory", "s3--sqlite", "s3--postgres"],
+            "cells": ["s3--memory", "s3--turso", "s3--postgres"],
             "status": "passed",
             "command": (
                 f"rustup run {toolchain} cargo test -p fireweed "
-                "--features objectlog,sqlite,postgres "
+                "--features objectlog,turso,postgres "
                 "--test p6s_s3_durability_acceptance snorri_reopen_ -- --nocapture"
             ),
         },
         "SNORRI-PROJECTION-REBUILD": {
-            "cells": ["s3--sqlite", "s3--postgres"],
+            "cells": ["s3--turso", "s3--postgres"],
             "unsupported_negative": "s3--memory projection_control=None",
             "status": "passed",
             "command": (
                 f"rustup run {toolchain} cargo test -p fireweed "
-                "--features objectlog,sqlite,postgres "
+                "--features objectlog,turso,postgres "
                 "--test p6s_s3_durability_acceptance snorri_projection_rebuild_ "
                 "-- --nocapture"
             ),
         },
         "SNORRI-RETRY-ONCE": {
-            "cells": ["s3--memory", "s3--sqlite", "s3--postgres"],
+            "cells": ["s3--memory", "s3--turso", "s3--postgres"],
             "status": "passed",
             "command": (
                 f"rustup run {toolchain} cargo test -p fireweed "
-                "--features objectlog,sqlite,postgres "
+                "--features objectlog,turso,postgres "
                 "--test p6s_s3_durability_acceptance snorri_retry_once_ -- --nocapture"
             ),
         },

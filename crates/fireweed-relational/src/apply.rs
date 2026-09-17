@@ -1,4 +1,4 @@
-//! Shared SQLite-family projection apply. SQLite and Turso run this exact module.
+//! Relational projection apply used by the native Turso adapter.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -71,6 +71,10 @@ pub fn clearing_item_replacements_sql(row_count: usize) -> String {
 /// Apply independent lease-clearing replacements in bounded VALUES chunks.
 /// Every row keeps its version and fused-claim guard. A short update is an error;
 /// the owning apply transaction rolls back this chunk and all preceding chunks.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "SQL replacement binds retain explicit command position, time, and fused-claim guards"
+)]
 fn apply_clearing_item_replacements(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -128,7 +132,8 @@ fn apply_clearing_item_replacements(
             RelValue::Text(tenant.clone()),
             RelValue::Text(queue.clone()),
         ]);
-        let changed = crate::rel_exec_owned(tx, &clearing_item_replacements_sql(chunk.len()), params)?;
+        let changed =
+            crate::rel_exec_owned(tx, &clearing_item_replacements_sql(chunk.len()), params)?;
         if changed != chunk.len() {
             return Err(EngineError::Conflict);
         }
@@ -209,6 +214,10 @@ fn collect_expired_request_rows(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Parameters correspond to persisted request columns and the conflict policy"
+)]
 fn persist_request_row(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -372,10 +381,13 @@ pub fn persist_request_outcome_sql(
             position,
             envelope.created_at,
             ts_nanos(match envelope.command {
-                QueueCommand::Claim(ref claim) => claim.lease_expires_at,
-                QueueCommand::CohortClaim(ref claim) => claim.lease_expires_at,
+                QueueCommand::Claim(ref claim) if !item_ids.is_empty() => claim.lease_expires_at,
+                QueueCommand::CohortClaim(ref claim) if !item_ids.is_empty() => {
+                    claim.lease_expires_at
+                }
                 _ => envelope.created_at,
-            }),
+            })
+            .max(request_expires_at(queues, shard, envelope.created_at)?),
             true,
         )?;
         let ids =
@@ -395,6 +407,44 @@ pub fn persist_request_outcome_sql(
             ],
         )?;
         return Ok(());
+    }
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::ClaimByItemIds {
+            claimed_item_ids,
+            lease_token,
+            outcomes,
+            worker_id,
+        }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) {
+        let response = serde_json::to_string(&serde_json::json!({
+            "claimed_item_ids": claimed_item_ids, "lease_token": lease_token,
+            "outcomes": outcomes, "worker_id": worker_id,
+        }))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let lease_expiry = match &envelope.command {
+            QueueCommand::Claim(claim) if !claimed_item_ids.is_empty() => {
+                ts_nanos(claim.lease_expires_at)
+            }
+            _ => ts_nanos(envelope.created_at),
+        };
+        return persist_request_row(
+            tx,
+            shard,
+            "claim_by_item_ids",
+            request_id.as_str(),
+            fingerprint.to_be_bytes().to_vec(),
+            response,
+            position,
+            envelope.created_at,
+            lease_expiry.max(request_expires_at(queues, shard, envelope.created_at)?),
+            true,
+        );
     }
     let QueueCommand::Push(_) = &envelope.command else {
         return Ok(());
@@ -1179,6 +1229,10 @@ fn apply_complete_run_sql(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Apply runs explicitly borrow transaction state, scan hints, and durable command inputs"
+)]
 fn apply_push_run_sql(
     tx: &impl RelTx,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -1525,6 +1579,10 @@ fn fused_complete_moved_unnamed(
     Ok(false)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Completion SQL keeps command binds and lifecycle/version guards explicit"
+)]
 fn complete_named_ids_pk_sql(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -1609,15 +1667,70 @@ pub fn typed_index_keys_for_native(
     fireweed_engine::index_fields::typed_index_keys_for_item(typed_indexes, index_fields, entity)
 }
 
-pub fn typed_index_keys_for_push_item(
-    typed_indexes: &[QueueIndex],
-    item: &PushItem,
+/// Canonical keys for both opaque byte-field declarations and typed entity indexes.
+pub fn secondary_index_keys(
+    definition: &QueueDefinition,
+    fields: &BTreeMap<String, bytes::Bytes>,
+    index_fields: &BTreeMap<String, fireweed_core::TypedValue>,
+    entity: Option<&JsonValue>,
 ) -> EngineResult<Vec<(String, Vec<u8>)>> {
-    typed_index_keys_for_native(
-        typed_indexes,
-        &item.index_fields,
-        item.entity_document.as_ref(),
-    )
+    let mut keys =
+        Vec::with_capacity(definition.secondary_indexes.len() + definition.typed_indexes.len());
+    for spec in &definition.secondary_indexes {
+        let mut key = Vec::new();
+        let mut complete = true;
+        for field in &spec.fields {
+            let Some(value) = fields.get(field) else {
+                complete = false;
+                break;
+            };
+            let length = u32::try_from(value.len())
+                .map_err(|_| EngineError::Invalid("index field exceeds byte length limit"))?;
+            key.extend_from_slice(&length.to_be_bytes());
+            key.extend_from_slice(value);
+        }
+        if complete {
+            keys.push((spec.name.clone(), key));
+        }
+    }
+    keys.extend(typed_index_keys_for_native(
+        &definition.typed_indexes,
+        index_fields,
+        entity,
+    )?);
+    Ok(keys)
+}
+
+pub fn secondary_index_is_unique(definition: &QueueDefinition, name: &str) -> bool {
+    definition
+        .secondary_indexes
+        .iter()
+        .find(|index| index.name == name)
+        .map(|index| index.unique)
+        .or_else(|| {
+            definition
+                .typed_indexes
+                .iter()
+                .find(|index| index.name == name)
+                .map(index_is_unique)
+        })
+        .unwrap_or(false)
+}
+
+fn unique_index_names(definition: &QueueDefinition) -> HashSet<&str> {
+    definition
+        .secondary_indexes
+        .iter()
+        .filter(|index| index.unique)
+        .map(|index| index.name.as_str())
+        .chain(
+            definition
+                .typed_indexes
+                .iter()
+                .filter(|index| index_is_unique(index))
+                .map(|index| index.name.as_str()),
+        )
+        .collect()
 }
 
 pub fn index_is_unique(qi: &QueueIndex) -> bool {
@@ -1630,20 +1743,16 @@ pub fn index_is_unique(qi: &QueueIndex) -> bool {
 /// Check unique-index constraints for `keys` against existing DB rows. Returns `Conflict` if any
 /// unique index already maps the same key to a *different* item. Pass `exclude_item_id = Some(id)`
 /// when the item whose old rows were just deleted might still appear in DB (i.e. for UpdateFields).
-pub fn check_typed_unique_conflicts(
+pub fn check_secondary_unique_conflicts(
     tx: &impl RelTx,
     t: &str,
     q: &str,
-    typed_indexes: &[QueueIndex],
+    definition: &QueueDefinition,
     keys: &[(String, Vec<u8>)],
     exclude_item_id: Option<&str>,
 ) -> EngineResult<()> {
     for (name, key) in keys {
-        let unique = typed_indexes
-            .iter()
-            .find(|qi| &qi.name == name)
-            .map(index_is_unique)
-            .unwrap_or(false);
+        let unique = secondary_index_is_unique(definition, name);
         if !unique {
             continue;
         }
@@ -1694,18 +1803,26 @@ pub fn insert_typed_index_rows(
     insert_typed_index_rows_batch(tx, t, q, &[(item_id.to_string(), keys.to_vec())])
 }
 
-fn check_typed_unique_conflicts_batch(
+fn check_secondary_unique_conflicts_batch(
     tx: &impl RelTx,
     t: &str,
     q: &str,
-    typed_indexes: &[QueueIndex],
+    definition: &QueueDefinition,
     items: &[TypedIndexBatchItem],
 ) -> EngineResult<()> {
-    let unique_names: std::collections::HashSet<&str> = typed_indexes
-        .iter()
-        .filter(|index| index_is_unique(index))
-        .map(|index| index.name.as_str())
-        .collect();
+    let unique_names = unique_index_names(definition);
+    let mut staged_unique = HashMap::new();
+    for (item_id, keys) in items {
+        for (name, key) in keys {
+            if unique_names.contains(name.as_str())
+                && staged_unique
+                    .insert((name, key), item_id)
+                    .is_some_and(|previous| previous != item_id)
+            {
+                return Err(EngineError::Conflict);
+            }
+        }
+    }
     let rows: Vec<_> = items
         .iter()
         .flat_map(|(item_id, keys)| {
@@ -1806,33 +1923,75 @@ pub fn delete_typed_index_rows(
     Ok(())
 }
 
-/// Pack and check unique conflicts, then insert index rows for all `items` in a push batch.
-/// `typed_indexes` must already be resolved from the queue definition.
-pub fn maintain_typed_indexes_on_insert(
+/// Rebuild changed rows from their final SQL values inside the apply transaction.
+/// Remove all replaced keys before checking the batch, retaining outside holders.
+fn refresh_secondary_indexes(
+    tx: &impl RelTx,
+    definition: &QueueDefinition,
+    shard: &QueueKey,
+    ids: &[String],
+) -> EngineResult<()> {
+    type StoredIndexInputs = (String, Option<Vec<u8>>, Option<String>);
+    let (t, q) = parts(shard);
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let current: Option<StoredIndexInputs> = crate::query_optional(
+            tx,
+            "SELECT fields,index_fields,entity_document FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND superseded=0",
+            [
+                RelValue::Text(t.clone()),
+                RelValue::Text(q.clone()),
+                RelValue::Text(id.clone()),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if let Some((fields, native, entity)) = current {
+            let entity = entity
+                .map(|raw| serde_json::from_str::<JsonValue>(&raw))
+                .transpose()
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let keys = secondary_index_keys(
+                definition,
+                &fields_from_json(fields)?,
+                &fireweed_engine::index_fields::decode_index_fields_blob(native.as_deref())?,
+                entity.as_ref(),
+            )?;
+            rows.push((id.clone(), keys));
+        }
+    }
+    delete_typed_index_rows(tx, &t, &q, ids)?;
+    check_secondary_unique_conflicts_batch(tx, &t, &q, definition, &rows)?;
+    insert_typed_index_rows_batch(tx, &t, &q, &rows)
+}
+
+/// Pack and check unique conflicts, then insert all declared indexes for a push batch.
+pub fn maintain_secondary_indexes_on_insert(
     tx: &impl RelTx,
     t: &str,
     q: &str,
-    typed_indexes: &[QueueIndex],
+    definition: &QueueDefinition,
     items: &[&PushItem],
 ) -> EngineResult<()> {
-    if typed_indexes.is_empty() {
+    if definition.typed_indexes.is_empty() && definition.secondary_indexes.is_empty() {
         return Ok(());
     }
     // Every declared typed index is a query handle (ADR-011): `fireweed_item_index` is the
     // only durable row hot queries (bounded_mutation, range scans, aggregates) seek against,
     // so non-unique indexes need rows here too, not just the ones with a uniqueness
     // constraint to enforce.
-    let unique_names: std::collections::HashSet<&str> = typed_indexes
-        .iter()
-        .filter(|index| index_is_unique(index))
-        .map(|index| index.name.as_str())
-        .collect();
+    let unique_names = unique_index_names(definition);
     // Collect (item_id, keys) and enforce within-batch uniqueness in a single pass.
     let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
         std::collections::HashMap::new();
     let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
-        let keys = typed_index_keys_for_push_item(typed_indexes, item)?;
+        let keys = secondary_index_keys(
+            definition,
+            &item.fields,
+            &item.index_fields,
+            item.entity_document.as_ref(),
+        )?;
         let id_str = item.item_id.to_string();
         for (name, key) in &keys {
             if unique_names.contains(name.as_str()) {
@@ -1850,7 +2009,7 @@ pub fn maintain_typed_indexes_on_insert(
             item_keys.push((id_str, keys));
         }
     }
-    check_typed_unique_conflicts_batch(tx, t, q, typed_indexes, &item_keys)?;
+    check_secondary_unique_conflicts_batch(tx, t, q, definition, &item_keys)?;
     insert_typed_index_rows_batch(tx, t, q, &item_keys)?;
     Ok(())
 }
@@ -1887,6 +2046,23 @@ pub fn extend_claim_by_query_idempotency_for_renewal(
             RelValue::Text(t.to_string()),
             RelValue::Text(q.to_string()),
             IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY.into(),
+            renewed_expires_at.into(),
+            renewed.clone().into(),
+        ],
+    )?;
+    // Addressed query claims have an independent request namespace. Keep their
+    // receipts through a whole-claim renewal without mixing equal request IDs
+    // from the index-query namespace in the historical replay-edge table.
+    crate::rel_exec(
+        tx,
+        "UPDATE fireweed_request_idempotency SET expires_at=max(expires_at,?3) \
+         WHERE tenant_id=?1 AND queue_id=?2 AND operation='claim_by_item_ids' \
+           AND json_array_length(response_payload,'$.claimed_item_ids')>0 \
+           AND NOT EXISTS (SELECT 1 FROM json_each(response_payload,'$.claimed_item_ids') member \
+             WHERE member.value NOT IN (SELECT value FROM json_each(?4)))",
+        [
+            t.into(),
+            q.into(),
             renewed_expires_at.into(),
             renewed.into(),
         ],
@@ -2075,15 +2251,13 @@ pub fn insert_item_specs(
             (base_seq + specs.len() as i64).into(),
         ],
     )?;
-    let typed_indexes = queues
-        .get(shard)
-        .map(|d| d.typed_indexes.as_slice())
-        .unwrap_or(&[]);
+    let definition = queues.get(shard).ok_or(EngineError::NotFound)?;
     let items_only: Vec<&PushItem> = specs.iter().map(|s| s.item).collect();
     // Fast path: homogeneous default-empty rows with a single wall clock (common internal benches).
     let first_now = specs[0].now;
     let homogeneous_now = specs.iter().all(|s| s.now == first_now);
-    if typed_indexes.is_empty()
+    if definition.typed_indexes.is_empty()
+        && definition.secondary_indexes.is_empty()
         && homogeneous_now
         && items_only
             .iter()
@@ -2109,7 +2283,7 @@ pub fn insert_item_specs(
                 )
             }),
         )?;
-        maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
+        maintain_secondary_indexes_on_insert(tx, &t, &q, definition, &items_only)?;
         return Ok(base_seq);
     }
     const ROW_PH: &str =
@@ -2176,7 +2350,7 @@ pub fn insert_item_specs(
         .unwrap_or_else(|| ts_nanos(first_now));
     upsert_cohorts(tx, queues, shard, &t, &q, &items_only, cohort_now_n)?;
     // ADR-011: typed secondary index maintenance.
-    maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
+    maintain_secondary_indexes_on_insert(tx, &t, &q, definition, &items_only)?;
     Ok(base_seq)
 }
 
@@ -2497,41 +2671,40 @@ pub fn exec_items_in(
     // IN on a composite key can scan an entire queue in Turso. For this
     // exact helper shape, resolve rowids by indexed points first, then mutate
     // those integer primary keys. Keep one statement per bounded batch.
-    if tx.prefer_point_updates() {
-        if let Some(statement) =
+    if tx.prefer_point_updates()
+        && let Some(statement) =
             prefix.strip_suffix(" WHERE tenant_id=? AND queue_id=? AND item_id IN")
+    {
+        let table = statement.strip_prefix("DELETE FROM ").or_else(|| {
+            statement
+                .strip_prefix("UPDATE ")
+                .and_then(|s| s.split_once(" SET ").map(|(table, _)| table))
+        });
+        if let Some(
+            table @ ("fireweed_items"
+            | "fireweed_item_payloads"
+            | "fireweed_item_gates"
+            | "fireweed_lease_bearers"),
+        ) = table
         {
-            let table = statement.strip_prefix("DELETE FROM ").or_else(|| {
-                statement
-                    .strip_prefix("UPDATE ")
-                    .and_then(|s| s.split_once(" SET ").map(|(table, _)| table))
-            });
-            if let Some(
-                table @ ("fireweed_items"
-                | "fireweed_item_payloads"
-                | "fireweed_item_gates"
-                | "fireweed_lease_bearers"),
-            ) = table
-            {
-                for chunk in ids.chunks(bind_chunk_size(1, lead.len() + 2)) {
-                    let values = vec!["(?)"; chunk.len()].join(",");
-                    let sql = format!(
-                        "WITH incoming(item_id) AS (VALUES {values}) \
+            for chunk in ids.chunks(bind_chunk_size(1, lead.len() + 2)) {
+                let values = vec!["(?)"; chunk.len()].join(",");
+                let sql = format!(
+                    "WITH incoming(item_id) AS (VALUES {values}) \
                         {statement} WHERE rowid IN (SELECT i.rowid FROM incoming \
                         CROSS JOIN {table} i INDEXED BY sqlite_autoindex_{table}_1 \
                         ON i.tenant_id=? AND i.queue_id=? AND i.item_id=incoming.item_id)"
-                    );
-                    let mut params = chunk
-                        .iter()
-                        .cloned()
-                        .map(RelValue::Text)
-                        .collect::<Vec<_>>();
-                    params.extend_from_slice(lead);
-                    params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
-                    crate::rel_exec(tx, &sql, params)?;
-                }
-                return Ok(());
+                );
+                let mut params = chunk
+                    .iter()
+                    .cloned()
+                    .map(RelValue::Text)
+                    .collect::<Vec<_>>();
+                params.extend_from_slice(lead);
+                params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
+                crate::rel_exec(tx, &sql, params)?;
             }
+            return Ok(());
         }
     }
     let chunk_size = bind_chunk_size(1, lead.len() + 2);
@@ -3627,6 +3800,10 @@ fn class_s_live_claim(
     Ok(item_ids_in_state(tx, shard, &[first.to_string()], "Pending")?.is_empty())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Claim apply explicitly borrows scan hints and token operations alongside command binds"
+)]
 fn apply_one_claim_sql(
     tx: &impl RelTx,
     grouped_shards: &HashSet<QueueKey>,
@@ -3859,6 +4036,10 @@ fn apply_packed_claims_sql(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Parameters mirror the bounded lease UPDATE's queue, identity, and command binds"
+)]
 fn lease_pending_ids_sql(
     tx: &impl RelTx,
     tenant: &str,
@@ -3929,6 +4110,10 @@ fn lease_pending_ids_sql(
     Ok(pending_moved)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Apply runs explicitly borrow scan/token state and paired durable command inputs"
+)]
 fn apply_claim_run_sql(
     tx: &impl RelTx,
     grouped_shards: &HashSet<QueueKey>,
@@ -4099,6 +4284,10 @@ pub fn apply_fused_claim_complete_sql(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Fused apply keeps scan/token state and the two durable command runs explicit"
+)]
 fn apply_fused_claim_complete_run_sql(
     tx: &impl RelTx,
     grouped_shards: &HashSet<QueueKey>,
@@ -4239,10 +4428,8 @@ fn api001_update_shape(update: &UpdateFieldsCommand) -> Option<Api001UpdateShape
     }
     let address = if update.client_item_key.is_some() {
         Api001UpdateAddress::ClientItemKey
-    } else if update.item_id.as_u64() != 0 {
-        Api001UpdateAddress::ItemId
     } else {
-        return None;
+        Api001UpdateAddress::ItemId
     };
     Some(Api001UpdateShape {
         address,
@@ -4690,7 +4877,7 @@ fn write_shaped_payloads(
         let PayloadUpdate::Set(payload) = &update.payload else {
             continue;
         };
-        if update.item_id.as_u64() != 0 {
+        if update.item_id.as_u64() != 0 || update.client_item_key.is_none() {
             by_id.push((
                 update.item_id.to_string(),
                 payload.as_ref().map(|bytes| bytes.to_vec()),
@@ -4718,6 +4905,10 @@ fn write_shaped_payloads(
     upsert_item_payloads(tx, &tenant, &queue, by_id)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Batch apply explicitly borrows queue/scan state alongside update command inputs"
+)]
 fn apply_update_fields_batch_sql(
     tx: &impl RelTx,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -4756,17 +4947,22 @@ fn apply_update_fields_batch_sql(
         .get(shard)
         .map(|definition| definition.priority_model)
         .ok_or(EngineError::NotFound)?;
-    if try_apply_operation_shaped_api001_batch(
-        tx,
-        grouped_shards,
-        claim_scan_hints,
-        claim_scan_default_fifo,
-        shard,
-        seq,
-        now,
-        &model,
-        updates,
-    )? {
+    let definition = queues.get(shard).ok_or(EngineError::NotFound)?;
+    let legacy_fields_changed = !definition.secondary_indexes.is_empty()
+        && updates.iter().any(|update| update.set_fields.is_some());
+    if !legacy_fields_changed
+        && try_apply_operation_shaped_api001_batch(
+            tx,
+            grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            seq,
+            now,
+            &model,
+            updates,
+        )?
+    {
         return Ok(());
     }
     if updates.iter().any(|update| {
@@ -4798,7 +4994,7 @@ fn apply_update_fields_batch_sql(
     let mut key_resolved: HashMap<String, String> = HashMap::new();
     let unresolved_keys: Vec<String> = updates
         .iter()
-        .filter(|update| update.item_id.as_u64() == 0)
+        .filter(|update| update.item_id.as_u64() == 0 && update.client_item_key.is_some())
         .filter_map(|update| {
             update
                 .client_item_key
@@ -4826,7 +5022,7 @@ fn apply_update_fields_batch_sql(
     let ids: Vec<String> = updates
         .iter()
         .filter_map(|update| {
-            if update.item_id.as_u64() == 0 {
+            if update.item_id.as_u64() == 0 && update.client_item_key.is_some() {
                 update
                     .client_item_key
                     .as_ref()
@@ -4877,8 +5073,10 @@ fn apply_update_fields_batch_sql(
     let mut staged: Vec<Vec<RelValue>> = Vec::with_capacity(updates.len());
     let mut ranked: Vec<GroupItemRef> = Vec::new();
     let mut left_eligible: Vec<GroupItemRef> = Vec::new();
+    let mut gate_deletes = Vec::new();
+    let mut gate_inserts = Vec::new();
     for update in updates {
-        let id = if update.item_id.as_u64() == 0 {
+        let id = if update.item_id.as_u64() == 0 && update.client_item_key.is_some() {
             update
                 .client_item_key
                 .as_ref()
@@ -4898,6 +5096,10 @@ fn apply_update_fields_batch_sql(
             .is_some_and(|expected| expected != row.item_version as u64)
         {
             continue;
+        }
+        if let Some(gates) = &update.set_gate_keys {
+            gate_deletes.push(id.clone());
+            gate_inserts.extend(gates.iter().map(|gate| (id.clone(), gate.clone())));
         }
         let CurrentUpdateRow {
             fields: raw_fields,
@@ -5035,15 +5237,15 @@ fn apply_update_fields_batch_sql(
             )?;
         }
     }
-    let mut gate_deletes = Vec::new();
-    let mut gate_inserts = Vec::new();
-    for update in updates {
-        if let Some(gates) = &update.set_gate_keys {
-            gate_deletes.push(update.item_id.to_string());
-            for gate in gates {
-                gate_inserts.push((update.item_id.to_string(), gate.clone()));
-            }
-        }
+    if legacy_fields_changed {
+        let ids = staged
+            .iter()
+            .filter_map(|row| match &row[0] {
+                RelValue::Text(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        refresh_secondary_indexes(tx, definition, shard, &ids)?;
     }
     for chunk in gate_deletes.chunks(UPDATE_FIELDS_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(",");
@@ -5243,6 +5445,9 @@ fn apply_command_sql_with_claims(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
+            // Committed claim rendering reads these rows rather than process-local tokens.
+            // Cohort members need the same persisted bearer as ordinary claimed items.
+            persist_lease_bearers(tx, shard, &c.item_ids, &c.lease_token)?;
             if grouped_shards.contains(shard) {
                 let groups = groups_of(tx, shard, &c.item_ids)?;
                 relect_group_summaries(tx, shard, &groups, now)?;
@@ -5481,16 +5686,14 @@ fn apply_command_sql_with_claims(
                                 .into(),
                         ],
                     )?;
-                    if !typed_indexes.is_empty() {
-                        let item_id_str = c.item_id.to_string();
-                        delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id_str))?;
-                        let new_keys = fireweed_engine::index_fields::typed_index_keys(
-                            typed_indexes,
-                            &extracted,
-                        )?;
-                        check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
-                        insert_typed_index_rows(tx, &t, &q, &item_id_str, &new_keys)?;
-                    }
+                }
+                let definition = queues.get(shard).ok_or(EngineError::NotFound)?;
+                let typed_changed =
+                    !definition.typed_indexes.is_empty() && c.set_entity_document.is_some();
+                let legacy_changed = !definition.secondary_indexes.is_empty()
+                    && (c.set_fields.is_some() || !c.field_ops.is_empty());
+                if typed_changed || legacy_changed {
+                    refresh_secondary_indexes(tx, definition, shard, &[c.item_id.to_string()])?;
                 }
             }
             Ok(())
@@ -6232,10 +6435,9 @@ fn apply_command_sql_with_claims(
                 &q,
                 &invalidated,
             )?;
-            let typed_indexes = queues
-                .get(shard)
-                .map(|definition| definition.typed_indexes.as_slice())
-                .unwrap_or(&[]);
+            let definition = queues.get(shard).ok_or(EngineError::NotFound)?;
+            let has_indexes =
+                !definition.typed_indexes.is_empty() || !definition.secondary_indexes.is_empty();
 
             let mut distinct = HashSet::new();
             let batch_auxiliary = c.items.iter().all(|item| {
@@ -6245,7 +6447,7 @@ fn apply_command_sql_with_claims(
             // Typed indexes/group summaries and ordered repeated IDs retain the
             // sequential lowering below.
             let batch_replacements = batch_auxiliary
-                && typed_indexes.is_empty()
+                && !has_indexes
                 && !grouped_shards.contains(shard)
                 && c.items.iter().all(|item| {
                     item.action
@@ -6264,7 +6466,9 @@ fn apply_command_sql_with_claims(
                     fused_claims,
                 )?;
                 token_ops.extend(
-                    c.items.iter().map(|item| TokenOp::Clear(shard.clone(), item.item_id)),
+                    c.items
+                        .iter()
+                        .map(|item| TokenOp::Clear(shard.clone(), item.item_id)),
                 );
             }
             let sequential_items = if batch_replacements {
@@ -6381,10 +6585,10 @@ fn apply_command_sql_with_claims(
                                     &values.index_fields,
                                 )?
                                 .into(),
-                                lease_hash_sql.into(),
-                                lease_expiry_sql.into(),
-                                worker_sql.into(),
-                                fenced_sql.into(),
+                                lease_hash_sql,
+                                lease_expiry_sql,
+                                worker_sql,
+                                fenced_sql,
                                 (values.item_version as i64).into(),
                                 terminal.then_some(now_n).into(),
                                 terminal.then_some(position.backend_epoch as i64).into(),
@@ -6434,14 +6638,15 @@ fn apply_command_sql_with_claims(
                                 )?;
                             }
                         }
-                        if !typed_indexes.is_empty() {
+                        if has_indexes {
                             delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
-                            let keys = typed_index_keys_for_native(
-                                typed_indexes,
+                            let keys = secondary_index_keys(
+                                definition,
+                                &values.fields,
                                 &values.index_fields,
                                 values.entity_document.as_ref(),
                             )?;
-                            check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &keys, None)?;
+                            check_secondary_unique_conflicts(tx, &t, &q, definition, &keys, None)?;
                             insert_typed_index_rows(tx, &t, &q, &item_id, &keys)?;
                         }
                         if values.invalidate_lease {

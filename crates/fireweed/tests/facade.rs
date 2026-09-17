@@ -1,5 +1,8 @@
 #![allow(dead_code, unused_imports)]
 
+#[path = "support/storage.rs"]
+mod storage;
+
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -111,9 +114,9 @@ async fn claim_with_metadata_equals_filters_over_memory() {
     );
 }
 
-/// Same fence over sqlite (log × memory projection via open_sqlite, and relational projection).
+/// Same fence over filesystem log with memory and Turso projections.
 #[tokio::test]
-async fn claim_with_metadata_equals_filters_over_sqlite() {
+async fn claim_with_metadata_equals_filters_over_local_durable_profiles() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -162,19 +165,18 @@ async fn claim_with_metadata_equals_filters_over_sqlite() {
     }
 
     exercise(
-        "open_sqlite",
-        fireweed::open_sqlite(log_path.to_str().unwrap(), Arc::new(ManualClock::at(0))).unwrap(),
+        "filesystem_memory",
+        storage::open_log_memory(log_path.to_str().unwrap(), Arc::new(ManualClock::at(0))).unwrap(),
     )
     .await;
     exercise(
-        "open_sqlite_relational",
-        fireweed::open_sqlite_relational(rel_path.to_str().unwrap(), Arc::new(ManualClock::at(0)))
-            .unwrap(),
+        "filesystem_turso",
+        storage::open_log_turso(rel_path.to_str().unwrap(), Arc::new(ManualClock::at(0))).unwrap(),
     )
     .await;
 
-    let _ = std::fs::remove_file(log_path);
-    let _ = std::fs::remove_file(rel_path);
+    let _ = storage::cleanup(log_path);
+    let _ = storage::cleanup(rel_path);
 }
 
 #[tokio::test]
@@ -188,7 +190,7 @@ async fn stamped_discovery_preserves_ungrouped_order_through_relational_construc
         "fireweed-facade-stamped-discovery-{}-{nonce}.db",
         std::process::id()
     ));
-    let fireweed = fireweed::open_sqlite_relational(path.to_str().unwrap(), clock).unwrap();
+    let fireweed = storage::open_log_memory(path.to_str().unwrap(), clock).unwrap();
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
     let ungrouped = at(10);
@@ -220,18 +222,18 @@ async fn stamped_discovery_preserves_ungrouped_order_through_relational_construc
     );
 
     drop(fireweed);
-    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir_all(format!("{}.store", path.display())).unwrap();
 }
 
 /// fireweed-6486ed63 / fireweed-01802c42: facade-level request-id retention across reopen on
-/// the public `open_sqlite` async log-replay product (Fresh / Replayed / RequestIdConflict).
+/// the public filesystem log-replay product (Fresh / Replayed / RequestIdConflict).
 ///
 /// Specifically asserts **changed-body-across-reopen** returns `RequestIdConflict` and same body
 /// returns `Replayed` after a cold open (recovery rebuilds the push ledger fingerprints).
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "turso")]
 #[tokio::test]
-async fn request_id_push_retention_survives_open_sqlite_reopen() {
-    use fireweed::open_sqlite;
+async fn request_id_push_retention_survives_filesystem_reopen() {
+    use storage::open_log_memory;
     let path = std::env::temp_dir()
         .join(format!(
             "fireweed-facade-request-id-reopen-{}-{}.db",
@@ -244,11 +246,11 @@ async fn request_id_push_retention_survives_open_sqlite_reopen() {
         .to_str()
         .unwrap()
         .to_string();
-    let _ = std::fs::remove_file(&path);
+    let _ = storage::cleanup(&path);
     let q = qkey();
     let rid = RequestId::new("facade-reopen-req").unwrap();
     let first_ids = {
-        let fireweed = open_sqlite(&path, Arc::new(ManualClock::at(0))).unwrap();
+        let fireweed = open_log_memory(&path, Arc::new(ManualClock::at(0))).unwrap();
         fireweed.create_queue(qdef()).await.unwrap();
         assert!(
             fireweed
@@ -276,7 +278,7 @@ async fn request_id_push_retention_survives_open_sqlite_reopen() {
         );
         first.item_ids.clone()
     };
-    let reopened = open_sqlite(&path, Arc::new(ManualClock::at(0))).unwrap();
+    let reopened = open_log_memory(&path, Arc::new(ManualClock::at(0))).unwrap();
     reopened.create_queue(qdef()).await.unwrap();
     let replay = reopened
         .push_batch_with_request_id(&q, rid.clone(), vec![at(10), at(20)])
@@ -296,13 +298,13 @@ async fn request_id_push_retention_survives_open_sqlite_reopen() {
         "facade reopen must RequestIdConflict on changed body"
     );
     drop(reopened);
-    let _ = std::fs::remove_file(&path);
+    let _ = storage::cleanup(&path);
 }
 
 /// AC fireweed-dd6cbcde: upsert → claim → commit_transition on objectlog × sqlite under Strict.
 #[tokio::test]
-#[cfg(all(feature = "objectlog", feature = "sqlite"))]
-async fn objectlog_sqlite_strict_upsert_claim_commit_transition() {
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+async fn objectlog_turso_strict_upsert_claim_commit_transition() {
     use fireweed::{
         EntryOutcome, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
         ProjectionConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig,
@@ -337,8 +339,19 @@ async fn objectlog_sqlite_strict_upsert_claim_commit_transition() {
             max_tail_commands: 1_000_000,
         },
     };
-    let fireweed =
-        fireweed::open_objectlog_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let fireweed = fireweed::open(
+        {
+            let path = match &config.projection {
+                ProjectionConfig::Sqlite { path } => path.clone(),
+                _ => unreachable!(),
+            };
+            let mut config = config.into_matrix_config();
+            config.projection = fireweed::ProjectionStoreConfig::Turso { path };
+            config
+        },
+        Arc::new(ManualClock::at(1_000)),
+    )
+    .unwrap();
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
 
@@ -409,13 +422,13 @@ async fn objectlog_sqlite_strict_upsert_claim_commit_transition() {
 
 /// Bead fireweed-e47e9287: `Fireweed::side_records_by_prefix` is reachable through the public
 /// trait-object facade (not just a concrete sqlite backend type), over the `sqlite`-log ×
-/// `in-memory`-projection composition (`open_sqlite`). Proves ordered, prefix-isolated hydration of an
+/// `in-memory`-projection composition (filesystem log). Proves ordered, prefix-isolated hydration of an
 /// instance's audit chain — the read snorri needs to key audit records as
 /// `audit:{workflow_instance_id}:{transition_request_id}` and enumerate one instance's chain from a single
 /// prefix instead of tracking key lists in the checkpoint head.
 #[tokio::test]
-async fn side_records_by_prefix_reads_through_facade_over_sqlite_log() {
-    use fireweed::open_sqlite;
+async fn side_records_by_prefix_reads_through_facade_over_filesystem_log() {
+    use storage::open_log_memory;
     let path = std::env::temp_dir()
         .join(format!(
             "fireweed-facade-prefix-scan-{}-{}.db",
@@ -428,10 +441,10 @@ async fn side_records_by_prefix_reads_through_facade_over_sqlite_log() {
         .to_str()
         .unwrap()
         .to_string();
-    let _ = std::fs::remove_file(&path);
+    let _ = storage::cleanup(&path);
     let q = qkey();
 
-    let fireweed = open_sqlite(&path, Arc::new(ManualClock::at(0))).unwrap();
+    let fireweed = open_log_memory(&path, Arc::new(ManualClock::at(0))).unwrap();
     fireweed.create_queue(qdef()).await.unwrap();
 
     let key = ClientItemKey::new("work-1").unwrap();
@@ -504,5 +517,5 @@ async fn side_records_by_prefix_reads_through_facade_over_sqlite_log() {
     );
     assert_eq!(page2.next_cursor, None);
 
-    let _ = std::fs::remove_file(&path);
+    let _ = storage::cleanup(&path);
 }

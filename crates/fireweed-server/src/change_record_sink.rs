@@ -197,9 +197,7 @@ impl ChangeRecordEmissionBackend for fireweed::turso_compose::DerivedObjectLogTu
     }
 }
 
-/// Atomic log × Turso products: Class A emission is deferred to durable-log follow-ons;
 /// Class B (memory log) is rejected at validate_for_start when delivery is enabled.
-/// These stubs satisfy the composition trait bound for the shared finalizer.
 #[cfg(feature = "turso-projection")]
 impl ChangeRecordEmissionBackend
     for fireweed::turso_compose::AtomicTursoBackend<
@@ -226,15 +224,40 @@ impl ChangeRecordEmissionBackend
 {
     fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
         &self,
-        _shard: &QueueKey,
-        _sink: &S,
-        _limit: usize,
-        _emitted_at: UtcTimestamp,
-        _source_owner_id: Option<fireweed_core::OwnerId>,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
     ) -> EngineResult<usize> {
-        Err(EngineError::Invalid(
-            "change-record-emission-pending-for-postgres-turso",
-        ))
+        let log = self.log_store();
+        let cursor = log.with_store(|log| LogStore::emission_cursor(log, shard))?;
+        let page = log.with_store(|log| LogStore::read_from(log, shard, cursor, limit))?;
+        if page.entries.is_empty() {
+            return Ok(0);
+        }
+        let mut records = Vec::new();
+        for (position, envelope) in &page.entries {
+            records.extend(fireweed_engine::command_envelope_change_records(
+                shard,
+                position,
+                envelope,
+                emitted_at,
+                source_owner_id.clone(),
+            ));
+        }
+        // The cursor advances only after the sink accepts the log-derived records.
+        // A retry may redeliver a page; projection persistence is not a delivery barrier.
+        sink.emit(shard, &records)?;
+        if let Some((position, _)) = page.entries.last() {
+            log.with_store_mut(|log| LogStore::set_emission_cursor(log, shard, position.clone()))?;
+        }
+        Ok(records.len())
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        self.log_store()
+            .with_store(LogStore::supports_emission_cursor)
     }
 }
 

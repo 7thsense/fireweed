@@ -5,9 +5,9 @@
 //! (>=10,000,000 accepted items/hr per queue == 2,777.78 items/s) plus per-batch latency percentiles.
 //!
 //! Projection families:
-//!   * `log-replay` (in-memory projection rebuilt from a durable log): `memory`, `sqlite`, `objectlog`,
+//!   * `log-replay` (in-memory projection rebuilt from a durable log): `memory`, `turso`, `objectlog`,
 //!     `postgres`.
-//!   * `relational` (DB-resident / DB-authoritative projection): `sqlite_relational`, `postgres_relational`.
+//!   * `relational` (DB-resident projection): `postgres_relational`.
 //!
 //! Driven by `futures::executor::block_on` (NOT tokio) so the sync `postgres` client works uniformly.
 //!
@@ -18,14 +18,14 @@
 //!   # postgres / postgres_relational require a live DB (fail-closed; no LOUD skip):
 //!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@HOST:5432/postgres cargo run --release -p fireweed-bench
 //!   # omit those backends when no DB is available:
-//!   cargo run --release -p fireweed-bench -- --backends memory,sqlite,sqlite_relational,objectlog
+//!   cargo run --release -p fireweed-bench -- --backends memory,turso,objectlog
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fireweed::{
     ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_memory, open_objectlog,
-    open_postgres_runtime, open_sqlite, open_sqlite_relational,
+    open_postgres_runtime,
 };
 use fireweed_bench::{
     FLOOR_ITEMS_PER_HR, FLOOR_ITEMS_PER_SEC, OpStats, Shape, SystemClock, all_shapes, bench_qdef,
@@ -58,8 +58,7 @@ impl Config {
         let mut batch = 10_000usize;
         let mut backends = vec![
             "memory".into(),
-            "sqlite".into(),
-            "sqlite_relational".into(),
+            "turso".into(),
             "objectlog".into(),
             "postgres".into(),
             "postgres_relational".into(),
@@ -186,9 +185,8 @@ async fn run(cfg: &Config) {
     for backend in &cfg.backends {
         match backend.as_str() {
             "memory" => run_memory(cfg).await,
-            "sqlite" => run_sqlite(cfg).await,
-            "sqlite_relational" => run_sqlite_relational(cfg).await,
-            "objectlog" => run_objectlog(cfg).await,
+            "turso" => fireweed_objectlog::block_on_objectlog_future(run_turso(cfg)),
+            "objectlog" => fireweed_objectlog::block_on_objectlog_future(run_objectlog(cfg)),
             "postgres" => run_postgres(cfg).await,
             "postgres_relational" => run_postgres_relational(cfg).await,
             other => println!("(skipping unknown backend '{other}')"),
@@ -200,7 +198,7 @@ async fn run(cfg: &Config) {
 }
 
 /// Run the per-shape throughput + lifecycle workloads for one prepared backend. `supports_update` is the
-/// atomic-class flag for `update_fields` (false for the eventual-apply object-log backend).
+/// flag selecting public `batch_update` coverage.
 async fn run_shapes<F>(cfg: &Config, name: &str, family: &str, supports_update: bool, mut make: F)
 where
     F: FnMut() -> Fireweed,
@@ -267,42 +265,31 @@ async fn run_memory(cfg: &Config) {
     }
 }
 
-async fn run_sqlite(cfg: &Config) {
-    // throughput / lifecycle each build a fresh in-process file via a unique path.
-    let mut counter = 0usize;
-    run_shapes(cfg, "sqlite", LOG_FAMILY, true, || {
-        counter += 1;
-        let path = tmp("sqlite", &format!("{counter}"))
-            .to_string_lossy()
-            .into_owned();
-        let _ = std::fs::remove_file(&path);
-        open_sqlite(&path, Arc::new(SystemClock)).expect("open sqlite")
+async fn run_turso(cfg: &Config) {
+    let mut roots = Vec::new();
+    run_shapes(cfg, "turso", LOG_FAMILY, true, || {
+        let root = tmp("turso", &roots.len().to_string());
+        let handle =
+            fireweed_bench::open_log_turso(&root, Arc::new(SystemClock)).expect("open Turso");
+        roots.push(root);
+        handle
     })
     .await;
     if cfg.has("recovery") {
-        recovery_durable(cfg, "sqlite", LOG_FAMILY, |path| {
-            open_sqlite(path, Arc::new(SystemClock)).expect("sqlite")
+        recovery_durable(cfg, "turso", LOG_FAMILY, |path| {
+            fireweed_bench::open_log_turso(std::path::Path::new(path), Arc::new(SystemClock))
+                .expect("open Turso")
         })
         .await;
     }
-}
-
-async fn run_sqlite_relational(cfg: &Config) {
-    run_shapes(cfg, "sqlite_relational", REL_FAMILY, true, || {
-        open_sqlite_relational(":memory:", Arc::new(SystemClock)).expect("sqlite relational")
-    })
-    .await;
-    if cfg.has("recovery") {
-        println!(
-            "{:<20} {:<11} {:<16} {:<9} (in-memory DB-resident — replay N/A)",
-            "sqlite_relational", REL_FAMILY, "-", "recovery"
-        );
+    for root in roots {
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
 
 async fn run_objectlog(cfg: &Config) {
     let mut counter = 0usize;
-    run_shapes(cfg, "objectlog", LOG_FAMILY, false, || {
+    run_shapes(cfg, "objectlog", LOG_FAMILY, true, || {
         counter += 1;
         let dir = tmp("objectlog", &format!("{counter}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -433,7 +420,7 @@ where
     F: Fn(&str) -> Fireweed,
 {
     let path = tmp(name, "recov").to_string_lossy().into_owned();
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&path);
     let shape = &cfg.shapes[0];
     {
         let fireweed = reopen(&path);
@@ -447,7 +434,8 @@ where
     let t = Instant::now();
     let fireweed = reopen(&path);
     report_recovery(name, family, t.elapsed(), &fireweed, cfg).await;
-    let _ = std::fs::remove_file(&path);
+    drop(fireweed);
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 async fn report_recovery(

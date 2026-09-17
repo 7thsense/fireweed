@@ -61,7 +61,10 @@ pass "manifest capability schema consumed without edit"
 # Image pin constants present and digest-shaped.
 grep -q 'MINIO_IMAGE_DIGEST="sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"' "$QUAL" \
   || fail "MinIO image digest pin missing or drifted"
-grep -q 'minio/minio@sha256:' "$QUAL" || fail "pinned image form missing"
+grep -q 'MINIO_IMAGE_TAG="quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z"' "$QUAL" \
+  || fail "official MinIO registry or release tag drifted"
+grep -q 'MINIO_IMAGE_PINNED="quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"' "$QUAL" \
+  || fail "official digest-pinned image form missing"
 grep -q 'S3-NATIVE-CAS-CAPABILITY-ATTESTATION' "$QUAL" || fail "capability id missing from script"
 pass "image digest pin + capability id constants"
 

@@ -5,9 +5,9 @@ cluster.
 
 The chart storage contract is expressed as axes isomorphic to `StorageConfig`:
 
-- `storage.log.backend`: public `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
+- `storage.log.backend`: public `memory` | `postgres` | `filesystem` | `s3`
 - `storage.log.objectLog.root` / `objectLog.s3.*`: filesystem root and S3 credential blocks (structured fields)
-- `storage.projection.backend`: public `memory` | `sqlite` | `turso` (default) | `postgres`
+- `storage.projection.backend`: public `memory` | `turso` (default) | `postgres`
 - `storage.controlPlane.backend`: `inprocess` or `postgres`
 
 Only those public product values are chart-selectable. The gate contains named
@@ -32,7 +32,7 @@ variants on top of that matrix.
 renders `FIREWEED_OBJECT_LOG_S3_*`,
 `FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL`, and `FIREWEED_ADVERTISE_ADDR` from the pod
 IP, uses `replicaCount=3`, and keeps pod-local rebuildable projections
-(`sqlite` or `turso`) private via `emptyDir` rather than a shared RWO PVC.
+(`turso`) private via `emptyDir` rather than a shared RWO PVC.
 Multi-replica validation uses durability/control-plane rules (shared S3 log +
 postgres ownership + pod-local projection), not a hard-coded SQLite projection.
 The PostgreSQL DSN is both the shared queue control plane and the atomic
@@ -54,6 +54,6 @@ Runtime smoke testing is separate:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
-bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend sqlite
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso
 ```

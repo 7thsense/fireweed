@@ -5,8 +5,7 @@
 //!
 //! The harness expresses each cut point as owned request data and simulates a process kill by dropping the handle and
 //! reopening the SAME durable state. These tests exercise the capability against a non-durable profile
-//! (memory — in-process invariants only) and two durable profiles (composed sqlite-log, composed
-//! object-log) so the cut-point mechanics are validated on the recovery path they exist to model.
+//! (memory — in-process invariants only) and a durable filesystem object-log profile so the cut-point mechanics are validated on the recovery path they exist to model.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -219,11 +218,6 @@ async fn before_append_is_inert_memory() {
 }
 
 #[tokio::test]
-async fn before_append_is_inert_sqlite_log() {
-    assert_before_append_is_inert(&objectlog_factory()).await;
-}
-
-#[tokio::test]
 async fn before_append_is_inert_objectlog() {
     assert_before_append_is_inert(&objectlog_factory()).await;
 }
@@ -281,17 +275,7 @@ where
 }
 
 #[tokio::test]
-async fn after_append_before_apply_replays_once_sqlite_log() {
-    assert_after_append_replays_once(&objectlog_factory()).await;
-}
-
-#[tokio::test]
 async fn after_append_before_apply_replays_once_objectlog() {
-    assert_after_append_replays_once(&objectlog_factory()).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn after_append_before_apply_replays_once_objectlog_sqlite() {
     assert_after_append_replays_once(&objectlog_factory()).await;
 }
 
@@ -352,11 +336,8 @@ async fn typed_commit_reports_resolved_apply_boundary() {
 
 /// The lost-response `request_id` replay: a committed-then-lost response must replay the ONE committed
 /// result on reopen. `ComposedBackend` recovery rebuilds the push-idempotency map from the durable log
-/// for BOTH durability classes — the ATOMIC composed-log profile (`sqlite_log`, exercised here) as well
-/// as the EVENTUAL-APPLY profile (`objectlog_sqlite`). Before B3.1, atomic composed-log recovery dropped
-/// the idempotency map (the rebuild was gated on `DurabilityClass::EventualApply` in
-/// `crates/fireweed-engine/src/compose.rs`), so the `sqlite_log` arm below re-executed and returned a fresh
-/// id — an INV-14 violation this bead's engine fix closed.
+/// and retains the original item IDs. This runs against filesystem object-log recovery
+/// on current-thread and multithreaded runtimes.
 async fn assert_lost_response_replays_once<B>(make: &impl Fn() -> B)
 where
     B: fireweed_conformance::ConformanceCore,
@@ -389,13 +370,13 @@ where
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lost_response_replays_once_objectlog_sqlite() {
+async fn lost_response_replays_once_objectlog_multithread() {
     assert_lost_response_replays_once(&objectlog_factory()).await;
 }
 
 /// Regression guard for the B3.1 engine fix: atomic composed-log recovery must rebuild push-idempotency.
 #[tokio::test]
-async fn lost_response_replays_once_sqlite_log() {
+async fn lost_response_replays_once_objectlog() {
     assert_lost_response_replays_once(&objectlog_factory()).await;
 }
 

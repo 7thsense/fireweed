@@ -2,7 +2,7 @@
 
 use fireweed_engine::{EngineError, EngineResult};
 
-/// One bound parameter or result cell. Matches the SQLite type affinity both rusqlite and Turso use.
+/// One bound parameter or result cell. Matches the SQL type affinities used by Turso.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelValue {
     Null,

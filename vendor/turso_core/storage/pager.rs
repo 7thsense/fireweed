@@ -4411,10 +4411,13 @@ impl Pager {
                         // diagnostic by the workload recorder. No clock reads when disabled.
                         commit_info.checkpoint_trace =
                             std::env::var_os("FIREWEED_PROJECTION_IO_TRACE").map(|_| {
-                                (std::time::Instant::now(),
-                                 std::time::SystemTime::now()
-                                     .duration_since(std::time::UNIX_EPOCH)
-                                     .unwrap_or_default().as_micros())
+                                (
+                                    std::time::Instant::now(),
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_micros(),
+                                )
                             });
                         commit_info.state = CommitState::AutoCheckpoint;
                     }

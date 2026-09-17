@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(barrier_class("memory--memory"), "Strict");
         assert_eq!(barrier_class("s3--turso"), "Strict");
         assert_eq!(
-            barrier_class("sqlite--sqlite"),
+            barrier_class("filesystem--turso"),
             barrier_class("filesystem--postgres")
         );
     }

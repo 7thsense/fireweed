@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$LCOV" || -z "$CRATE" || -z "$MIN_LINES" ]]; then
-    echo "usage: check-lcov-coverage.py --fixture FILE --crate CRATE --min-lines N [--min-branches N]" >&2
+    echo "usage: check-lcov-coverage.sh --fixture FILE --crate CRATE --min-lines N [--min-branches N]" >&2
     exit 2
 fi
 

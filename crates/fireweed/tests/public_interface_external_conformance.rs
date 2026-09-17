@@ -290,8 +290,7 @@ struct ReopenProbe {
     item_id: fireweed::ItemId,
     batch: BatchUpdateRequest,
     batch_response: fireweed::BatchUpdateResponse,
-    mutation: ItemMutationRequest,
-    mutation_response: ItemMutationResponse,
+    mutation: (ItemMutationRequest, ItemMutationResponse),
 }
 
 fn reopen_definition(cell: &str) -> QueueDefinition {
@@ -380,7 +379,10 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
     let batch_response = fireweed.batch_update(&queue, batch.clone()).await.unwrap();
     let mutation = ItemMutationRequest {
         request_id: RequestId::new("reopen-mutation-v1").unwrap(),
-        evaluated_at: UtcTimestamp::new(1_800_000_000, 0).unwrap(),
+        // The mutation timestamp also anchors receipt retention. Use the same
+        // clock as this fixture's push/batch calls so cleanup cannot see a
+        // fictitious future and expire their receipts before reopen.
+        evaluated_at: fireweed::Clock::now(&SystemClock),
         dry_run: false,
         returning: ItemMutationReturning::BeforeSnapshot,
         gate_changes: vec![],
@@ -459,6 +461,28 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
         mutation_response.results[0].selector_id.as_deref(),
         Some("pre-mutation-state")
     );
+    let after_mutation = fireweed.current_position(&queue).await.unwrap();
+    assert_eq!(
+        fireweed
+            .push_with_request_id(
+                &queue,
+                RequestId::new("reopen-push-v1").unwrap(),
+                reopen_item(b"before"),
+            )
+            .await
+            .unwrap(),
+        (item_id, fireweed::PushDisposition::Replayed),
+        "mutation must retain the preceding push receipt"
+    );
+    assert_eq!(
+        fireweed.batch_update(&queue, batch.clone()).await.unwrap(),
+        batch_response,
+        "mutation must retain the preceding batch receipt"
+    );
+    assert_eq!(
+        fireweed.current_position(&queue).await.unwrap(),
+        after_mutation
+    );
     fireweed
         .push(
             &queue,
@@ -480,12 +504,12 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
         item_id,
         batch,
         batch_response,
-        mutation,
-        mutation_response,
+        mutation: (mutation, mutation_response),
     }
 }
 
 async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
+    let before_replays = fireweed.current_position(&probe.queue).await.unwrap();
     assert_eq!(
         fireweed.queue_definition(&probe.queue).await.unwrap(),
         probe.definition
@@ -507,15 +531,26 @@ async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
             .unwrap(),
         probe.batch_response
     );
+    let mut conflicting_batch = probe.batch;
+    conflicting_batch.updates[0].priority = BatchUpdateValue::Replace(PriorityValue::Int64(99));
     assert_eq!(
         fireweed
-            .mutate_items(&probe.queue, probe.mutation.clone())
+            .batch_update(&probe.queue, conflicting_batch)
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict,
+        "changed batch-update body must conflict after close/reopen"
+    );
+    let (mutation, mutation_response) = probe.mutation;
+    assert_eq!(
+        fireweed
+            .mutate_items(&probe.queue, mutation.clone())
             .await
             .unwrap(),
-        probe.mutation_response,
+        mutation_response,
         "item mutation response must replay exactly after close/reopen"
     );
-    let mut conflicting_mutation = probe.mutation;
+    let mut conflicting_mutation = mutation;
     let ItemMutationOperation::SelectFirst { clauses } = &mut conflicting_mutation.operation else {
         unreachable!("reopen mutation uses selectors")
     };
@@ -528,11 +563,17 @@ async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
         EngineError::RequestIdConflict,
         "changed mutation body must conflict after close/reopen"
     );
+    assert_eq!(
+        fireweed.current_position(&probe.queue).await.unwrap(),
+        before_replays,
+        "receipt replay and body conflicts must not append after reopen"
+    );
     let item = fireweed
         .live_item(&probe.queue, ClientItemKey::new("reopen-primary").unwrap())
         .await
         .unwrap()
         .expect("primary item survives close/reopen");
+    assert_eq!(item.item_id, probe.item_id);
     assert_eq!(item.priority, Some(PriorityValue::Int64(2)));
     assert_eq!(item.payload.as_deref(), Some(b"after".as_slice()));
     assert_eq!(
@@ -810,84 +851,38 @@ async fn postgres_coordinated_public_interface() {
 async fn memory_postgres_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let schema_name = unique_name("memory_postgres");
-    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
-    let isolated_url = schema_url(&postgres_url, &schema_name);
+    let mut schema = PostgresSchema::new(
+        postgres_url.clone(),
+        derived_postgres_schema(&format!("memory_pg_{schema_name}")),
+    );
     let mut cfg = fireweed::StorageConfig::memory();
     cfg.projection = fireweed::ProjectionStoreConfig::Postgres {
-        url: ConfigSecret::new(isolated_url.clone()),
+        url: ConfigSecret::new(postgres_url.clone()),
     };
     cfg.namespace = schema_name.clone();
-    let fireweed = fireweed::open(cfg.clone(), Arc::new(SystemClock)).unwrap_or_else(|error| {
-        panic!(
-            "failed to open memory--postgres: {}",
-            redacted_error(error, &[&postgres_url])
-        )
-    });
+    let fireweed = fireweed::open_async(cfg.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open memory--postgres: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
     public_interface::run("memory--postgres", &fireweed, false).await;
-    let probe = seed_reopen_probe("memory--postgres", &fireweed).await;
+    // An in-memory authoritative log has no process-restart durability contract.
     drop(fireweed);
-    let reopened = fireweed::open(cfg, Arc::new(SystemClock)).unwrap_or_else(|error| {
-        panic!(
-            "failed to reopen memory--postgres: {}",
-            redacted_error(error, &[&postgres_url])
-        )
-    });
-    verify_reopen_probe(&reopened, probe).await;
-    drop(reopened);
     schema
         .cleanup()
         .unwrap_or_else(|_| panic!("failed to clean memory--postgres schema"));
 }
 
-/// P7N non-S3 cell: sqlite log × postgres projection.
+/// P7N non-S3 cell: postgres log × Turso projection.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
-async fn sqlite_postgres_public_interface() {
+async fn postgres_turso_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
-    let root = FixtureRoot::new("sqlite_postgres");
-    let schema_name = unique_name("sqlite_postgres");
-    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
-    let isolated_url = schema_url(&postgres_url, &schema_name);
-    let log_path = root.path().join("log.sqlite");
-    let fireweed = fireweed::open_sqlite_postgres_projection(
-        log_path.to_str().unwrap(),
-        &isolated_url,
-        Arc::new(SystemClock),
-    )
-    .unwrap_or_else(|error| {
-        panic!(
-            "failed to open sqlite--postgres: {}",
-            redacted_error(error, &[&postgres_url])
-        )
-    });
-    public_interface::run("sqlite--postgres", &fireweed, false).await;
-    let probe = seed_reopen_probe("sqlite--postgres", &fireweed).await;
-    drop(fireweed);
-    let reopened = fireweed::open_sqlite_postgres_projection(
-        log_path.to_str().unwrap(),
-        &isolated_url,
-        Arc::new(SystemClock),
-    )
-    .unwrap_or_else(|error| {
-        panic!(
-            "failed to reopen sqlite--postgres: {}",
-            redacted_error(error, &[&postgres_url])
-        )
-    });
-    verify_reopen_probe(&reopened, probe).await;
-    drop(reopened);
-    schema
-        .cleanup()
-        .unwrap_or_else(|_| panic!("failed to clean sqlite--postgres schema"));
-}
-
-/// P7N non-S3 cell: postgres log × sqlite projection.
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
-async fn postgres_sqlite_public_interface() {
-    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
-    let root = FixtureRoot::new("postgres_sqlite");
-    let schema_name = unique_name("postgres_sqlite");
+    let root = FixtureRoot::new("postgres_turso");
+    let schema_name = unique_name("postgres_turso");
     let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
     let isolated_url = schema_url(&postgres_url, &schema_name);
     let mut cfg = fireweed::StorageConfig::memory();
@@ -898,30 +893,34 @@ async fn postgres_sqlite_public_interface() {
         node_id: None,
         coordination: None,
     };
-    cfg.projection = fireweed::ProjectionStoreConfig::Sqlite {
-        path: root.path().join("projection.sqlite"),
+    cfg.projection = fireweed::ProjectionStoreConfig::Turso {
+        path: root.path().join("projection.db"),
     };
     cfg.namespace = schema_name.clone();
-    let fireweed = fireweed::open(cfg.clone(), Arc::new(SystemClock)).unwrap_or_else(|error| {
-        panic!(
-            "failed to open postgres--sqlite: {}",
-            redacted_error(error, &[&postgres_url])
-        )
-    });
-    public_interface::run("postgres--sqlite", &fireweed, false).await;
-    let probe = seed_reopen_probe("postgres--sqlite", &fireweed).await;
+    let fireweed = fireweed::open_async(cfg.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open postgres--turso: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    public_interface::run("postgres--turso", &fireweed, false).await;
+    let probe = seed_reopen_probe("postgres--turso", &fireweed).await;
     drop(fireweed);
-    let reopened = fireweed::open(cfg, Arc::new(SystemClock)).unwrap_or_else(|error| {
-        panic!(
-            "failed to reopen postgres--sqlite: {}",
-            redacted_error(error, &[&postgres_url])
-        )
-    });
+    let reopened = fireweed::open_async(cfg, Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to reopen postgres--turso: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
     verify_reopen_probe(&reopened, probe).await;
     drop(reopened);
     schema
         .cleanup()
-        .unwrap_or_else(|_| panic!("failed to clean postgres--sqlite schema"));
+        .unwrap_or_else(|_| panic!("failed to clean postgres--turso schema"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1060,26 +1059,42 @@ async fn s3_postgres_strict_public_interface() {
         .unwrap_or_else(|_| panic!("failed to clean s3--postgres--strict namespace"));
 }
 
-async fn run_s3_sqlite(cell: &str, barrier: ResponseBarrier) {
+async fn run_s3_turso(cell: &str, barrier: ResponseBarrier) {
     let config = S3Config::load();
     let root = FixtureRoot::new(cell);
     let namespace = unique_name(cell);
     let mut objects = S3Namespace::new(&config, &namespace);
-    let runtime = objectlog_config(
-        s3_storage(&config),
-        ObjectLogAuthority::NativeConditionalWrite,
-        ProjectionConfig::Sqlite {
-            path: root.path().join("projection.sqlite"),
+    let runtime = fireweed::StorageConfig {
+        log: fireweed::LogConfig::S3 {
+            endpoint: config.s3_endpoint.clone(),
+            bucket: config.s3_bucket.clone(),
+            region: config.s3_region.clone(),
+            access_key_id: ConfigSecret::new(config.s3_access_key.clone()),
+            secret_access_key: ConfigSecret::new(config.s3_secret_key.clone()),
+            allow_insecure_http: config.s3_endpoint.starts_with("http://"),
         },
-        barrier,
+        projection: fireweed::ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
+        },
+        authority: Some(ObjectLogAuthority::NativeConditionalWrite),
+        response_barrier: barrier,
+        async_projection: (barrier == ResponseBarrier::AsyncProjection)
+            .then(fireweed::AsyncProjectionSpec::default),
+        segments: SegmentConfig::new(262_144, 20).unwrap(),
         namespace,
-    );
-    let fireweed = fireweed::open_objectlog_sqlite(runtime.clone(), Arc::new(SystemClock))
+        recovery: RecoveryPolicy {
+            incompatible_projection: RecoveryAction::RebuildProjection,
+            verify_checksums: true,
+            max_tail_commands: 1_000_000,
+        },
+        ..fireweed::StorageConfig::memory()
+    };
+    let fireweed = fireweed::open(runtime.clone(), Arc::new(SystemClock))
         .unwrap_or_else(|_| panic!("failed to open {cell} without exposing connection details"));
-    public_interface::run(cell, &fireweed, true).await;
+    public_interface::run(cell, &fireweed, false).await;
     let probe = seed_reopen_probe(cell, &fireweed).await;
     drop(fireweed);
-    let reopened = fireweed::open_objectlog_sqlite(runtime, Arc::new(SystemClock))
+    let reopened = fireweed::open(runtime, Arc::new(SystemClock))
         .unwrap_or_else(|_| panic!("failed to reopen {cell} without exposing connection details"));
     verify_reopen_probe(&reopened, probe).await;
     drop(reopened);
@@ -1090,12 +1105,12 @@ async fn run_s3_sqlite(cell: &str, barrier: ResponseBarrier) {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires live S3; P10 executes the full external matrix"]
-async fn s3_sqlite_strict_public_interface() {
-    run_s3_sqlite("s3--sqlite--strict", ResponseBarrier::Strict).await;
+async fn s3_turso_strict_public_interface() {
+    run_s3_turso("s3--turso--strict", ResponseBarrier::Strict).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires live S3; P10 executes the full external matrix"]
-async fn s3_sqlite_async_public_interface() {
-    run_s3_sqlite("s3--sqlite--async", ResponseBarrier::AsyncProjection).await;
+async fn s3_turso_async_public_interface() {
+    run_s3_turso("s3--turso--async", ResponseBarrier::AsyncProjection).await;
 }

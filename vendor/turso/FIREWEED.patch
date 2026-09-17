@@ -1,6 +1,26 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -127,12 +127,15 @@
+@@ -35,10 +35,11 @@
+ mimalloc = ["dep:mimalloc"]
+ pure-rust-crypto = [
+     "turso_sdk_kit/pure-rust-crypto",
+-    "turso_sync_sdk_kit/pure-rust-crypto",
++    "turso_sync_sdk_kit?/pure-rust-crypto",
+ ]
+ stacker = ["turso_core/stacker"]
+ sync = [
++    "dep:turso_sync_sdk_kit",
+     "dep:hyper",
+     "dep:tokio",
+     "dep:hyper-rustls",
+@@ -120,19 +121,20 @@
+ optional = true
+ default-features = false
+ 
+-[dependencies.tracing]
+-version = "0.1.41"
+-
+ [dependencies.tracing-subscriber]
  version = "0.3.20"
  
  [dependencies.turso_core]
@@ -12,7 +32,106 @@
  version = "0.7.2"
  
  [dependencies.turso_sync_sdk_kit]
++optional = true
 +path = "../turso_sync_sdk_kit"
  version = "0.7.2"
  
  [dev-dependencies.anyhow]
+@@ -140,9 +142,6 @@
+ 
+ [dev-dependencies.rand]
+ version = "0.9.2"
+-
+-[dev-dependencies.rand_chacha]
+-version = "0.9.0"
+ 
+ [dev-dependencies.reqwest]
+ version = "0.13.2"
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -85,8 +85,13 @@
+     pub(crate) async fn maybe_handle_dangling_tx(&self) -> Result<()> {
+         match self.dangling_tx.load(Ordering::SeqCst) {
+             DropBehavior::Rollback => {
+-                let mut stmt = self.prepare("ROLLBACK").await?;
+-                stmt.execute(()).await?;
++                // A statement or I/O error can already have aborted the transaction.
++                // Retrying ROLLBACK then fails forever and hides the original error
++                // from every subsequent operation on this connection.
++                if !self.is_autocommit()? {
++                    let mut stmt = self.prepare("ROLLBACK").await?;
++                    stmt.execute(()).await?;
++                }
+                 self.dangling_tx
+                     .store(DropBehavior::Ignore, Ordering::SeqCst);
+             }
+--- a/src/rows.rs
++++ b/src/rows.rs
+@@ -73,6 +73,12 @@
+ }
+ 
+ impl Row {
++    /// Consume this row, transferring its text and blob buffers to the caller.
++    /// Values remain owned independently of the statement and subsequent rows.
++    pub fn into_values(self) -> impl ExactSizeIterator<Item = Value> {
++        self.values.into_iter().map(Value::from)
++    }
++
+     pub fn get_value(&self, idx: usize) -> Result<Value> {
+         let val = self.values.get(idx).ok_or_else(|| {
+             Error::Misuse(format!(
+@@ -112,3 +118,54 @@
+         self.values.len()
+     }
+ }
++
++#[cfg(test)]
++mod owned_row_tests {
++    use super::*;
++
++    #[test]
++    fn consuming_row_preserves_types_and_transfers_variable_buffers() {
++        let text = "owned metadata".repeat(100);
++        let blob = vec![0, 255, 31, 128].repeat(1024);
++        let text_pointer = text.as_ptr();
++        let blob_pointer = blob.as_ptr();
++        let row = Row {
++            values: vec![
++                Value::Null.into(),
++                Value::Integer(i64::MIN).into(),
++                Value::Real(1.25).into(),
++                Value::Text(text).into(),
++                Value::Blob(blob).into(),
++                Value::Text(String::new()).into(),
++                Value::Blob(Vec::new()).into(),
++            ],
++        };
++        let mut values = row.into_values();
++        assert_eq!(values.len(), 7);
++        assert_eq!(values.next(), Some(Value::Null));
++        assert_eq!(values.next(), Some(Value::Integer(i64::MIN)));
++        assert_eq!(values.next(), Some(Value::Real(1.25)));
++        let Some(Value::Text(text)) = values.next() else {
++            panic!("missing text")
++        };
++        assert_eq!(text, "owned metadata".repeat(100));
++        assert_eq!(
++            text.as_ptr(),
++            text_pointer,
++            "text buffer must transfer without cloning"
++        );
++        let Some(Value::Blob(blob)) = values.next() else {
++            panic!("missing blob")
++        };
++        assert_eq!(blob, vec![0, 255, 31, 128].repeat(1024));
++        assert_eq!(
++            blob.as_ptr(),
++            blob_pointer,
++            "blob buffer must transfer without cloning"
++        );
++        assert_eq!(values.next(), Some(Value::Text(String::new())));
++        assert_eq!(values.next(), Some(Value::Blob(Vec::new())));
++        assert_eq!(values.len(), 0);
++        assert_eq!(values.next(), None);
++    }
++}

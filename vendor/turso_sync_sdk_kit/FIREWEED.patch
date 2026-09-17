@@ -1,8 +1,27 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -67,15 +67,18 @@
- features = ["env-filter"]
+@@ -41,10 +41,6 @@
+ path = "src/lib.rs"
+ doc = false
  
+-[dependencies.env_logger]
+-version = "0.11.6"
+-default-features = false
+-
+ [dependencies.genawaiter]
+ version = "0.99.1"
+ default-features = false
+@@ -59,24 +55,18 @@
+ [dependencies.tracing]
+ version = "0.1.41"
+ 
+-[dependencies.tracing-appender]
+-version = "0.2.3"
+-
+-[dependencies.tracing-subscriber]
+-version = "0.3.20"
+-features = ["env-filter"]
+-
  [dependencies.turso_core]
 +path = "../turso_core"
  version = "0.7.2"
@@ -18,4 +37,5 @@
 +path = "../turso_sync_engine"
  version = "0.7.2"
  
- [build-dependencies.bindgen]
+-[build-dependencies.bindgen]
+-version = "0.69.5"

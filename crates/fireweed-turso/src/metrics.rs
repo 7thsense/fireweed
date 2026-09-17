@@ -333,14 +333,13 @@ pub(crate) async fn migrate(connection: &turso::Connection) -> crate::Result<()>
         let sql = format!(
             "ALTER TABLE queues ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0 CHECK(typeof({column})='integer' AND {column}>=0)"
         );
-        if let Err(error) = connection.execute(&sql, ()).await {
-            if !error
+        if let Err(error) = connection.execute(&sql, ()).await
+            && !error
                 .to_string()
                 .to_ascii_lowercase()
                 .contains("duplicate column")
-            {
-                return Err(error.into());
-            }
+        {
+            return Err(error.into());
         }
     }
     if let Err(error) = connection
@@ -349,14 +348,12 @@ pub(crate) async fn migrate(connection: &turso::Connection) -> crate::Result<()>
             (),
         )
         .await
-    {
-        if !error
+        && !error
             .to_string()
             .to_ascii_lowercase()
             .contains("duplicate column")
-        {
-            return Err(error.into());
-        }
+    {
+        return Err(error.into());
     }
     // One atomic backfill; a failed/interrupted migration is retried on open.
     connection.execute("UPDATE queues SET (resident_pending,resident_leased,resident_complete,resident_failed)=(SELECT COALESCE(SUM(lifecycle_state='Pending'),0),COALESCE(SUM(lifecycle_state='Leased'),0),COALESCE(SUM(lifecycle_state='Complete'),0),COALESCE(SUM(lifecycle_state='Failed'),0) FROM fireweed_items i WHERE i.tenant_id=queues.tenant AND i.queue_id=queues.queue AND i.superseded=0),resident_counts_version=1 WHERE resident_counts_version=0", ()).await?;
@@ -503,8 +500,13 @@ mod tests {
         let position = CommandPosition::new(q.clone(), 0, 0);
         let claim = claim_command(vec![id], true);
         let rel = Reads(std::cell::Cell::new(0));
-        let delta =
-            MetricsDelta::capture(&rel, &[position.clone()], &[claim.clone()], &seeds).unwrap();
+        let delta = MetricsDelta::capture(
+            &rel,
+            std::slice::from_ref(&position),
+            std::slice::from_ref(&claim),
+            &seeds,
+        )
+        .unwrap();
         assert_eq!(
             rel.0.get(),
             0,

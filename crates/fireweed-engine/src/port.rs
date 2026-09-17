@@ -356,7 +356,7 @@ pub trait Backend: Send + Sync {
     /// The authoritative-commit capability descriptors (Snorri StateStore boundary, epic pqueue-2201fd37).
     /// Default = [`CommitCapabilities::default`] (all-false): a backend that has not wired the atomic commit
     /// boundary advertises NO commit guarantees, so a consumer rejects it before activation. Memory +
-    /// sqlite-relational override this to advertise what they actually implement.
+    /// native Turso and PostgreSQL projections override this to advertise what they actually implement.
     fn commit_capabilities(&self) -> CommitCapabilities {
         CommitCapabilities::default()
     }
@@ -586,7 +586,10 @@ pub trait ProjectionRead: Send + Sync {
     /// Bounded item-ID keyset page of non-superseded retained rows, including terminal rows.
     /// Each page is a committed read, not a snapshot spanning later calls.
     fn retained_items(
-        &self, _shard: &QueueKey, _after: Option<ItemId>, _limit: usize,
+        &self,
+        _shard: &QueueKey,
+        _after: Option<ItemId>,
+        _limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<RetainedItemView>>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
@@ -2169,7 +2172,7 @@ pub trait AsOfProjectionStore: ProjectionStore {
     ///
     /// Log-replayable projection families (the object-log / in-memory default) reconstruct an
     /// ephemeral view from a snapshot plus the replayed command tail, so they return `true`.
-    /// Relational projection stores (`SqliteRelational`, `PostgresRelational`) keep no replayable
+    /// Relational projection stores (`TursoRelational`, `PostgresRelational`) keep no replayable
     /// command log and cannot reconstruct historical state, so they override this to `false`. The
     /// composed backend consults this up-front and declines as-of reads with `EngineError::Unavailable`
     /// (matching the monolithic relational backends) before performing a queue-existence lookup.

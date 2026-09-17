@@ -67,33 +67,20 @@ fn fixture_starts_preflights_and_cleans_up() {
         .expect("repeat rskafka preflight");
 
     let name = fixture.container_name().to_string();
+    let process_id = fixture.process_id();
+    let address = fixture.bootstrap().parse().unwrap();
     fixture.cleanup();
-    // Container must be gone after explicit cleanup.
-    let status = std::process::Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", &name])
-        .output()
-        .expect("docker inspect after cleanup");
-    let running = String::from_utf8_lossy(&status.stdout);
-    assert!(
-        !status.status.success() || running.trim() != "true",
-        "container {name} must not remain running after cleanup"
-    );
+    assert_broker_stopped(&name, process_id, address);
 }
 
 #[test]
-fn fixture_drop_tears_down_container() {
+fn fixture_drop_tears_down_broker() {
     let fixture = ExternalKafkaFixture::start().expect("fixture start for drop teardown");
     let name = fixture.container_name().to_string();
+    let process_id = fixture.process_id();
+    let address = fixture.bootstrap().parse().unwrap();
     drop(fixture);
-    let status = std::process::Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}}", &name])
-        .output()
-        .expect("docker inspect after drop");
-    let running = String::from_utf8_lossy(&status.stdout);
-    assert!(
-        !status.status.success() || running.trim() != "true",
-        "Drop must remove container {name}"
-    );
+    assert_broker_stopped(&name, process_id, address);
 }
 
 #[test]
@@ -122,4 +109,28 @@ fn kafka_endpoint_classifies_as_external_kafka_mode() {
         ..Default::default()
     };
     assert_eq!(config.mode(), ChangeRecordSinkMode::ExternalKafka);
+}
+
+fn assert_broker_stopped(name: &str, process_id: Option<u32>, address: std::net::SocketAddr) {
+    assert!(
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200))
+            .is_err(),
+        "broker still accepts connections after cleanup"
+    );
+    if let Some(pid) = process_id {
+        #[cfg(target_os = "linux")]
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "Kafka child was not reaped"
+        );
+    } else {
+        let status = std::process::Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", name])
+            .output()
+            .expect("docker inspect after cleanup");
+        assert!(
+            !status.status.success() || String::from_utf8_lossy(&status.stdout).trim() != "true",
+            "container {name} still runs after cleanup"
+        );
+    }
 }

@@ -2,13 +2,13 @@
   "schema_version": 1,
   "plan_key": "P5",
   "bead_id": "fireweed-2d8b7989",
-  "description": "Class B (memory log) reopen semantics for all four memory-log cells: volatility/persistence, reopen claim/finalize, rejection, counters, stale, and duplicate invariants. Zero skips under live Postgres.",
+  "description": "Structural example for all three Class B (memory log) cells: volatile log semantics, projection reuse where configured, claim/finalize and request-id invariants. This fixture is not execution evidence; PostgreSQL commands require a live fixture.",
   "entries": [
     {
       "semantic_id": "SNORRI-REOPEN",
       "cell_id": "memory--memory",
       "status": "passed",
-      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_memory_volatility_reopen -- --nocapture",
+      "command": "cargo test -p fireweed --features memory,turso --test p5_class_b_reopen p5_memory_memory_volatility_reopen -- --exact --nocapture",
       "methods": [
         "reopen",
         "push",
@@ -21,26 +21,9 @@
     },
     {
       "semantic_id": "SNORRI-REOPEN",
-      "cell_id": "memory--sqlite",
-      "status": "passed",
-      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_sqlite_projection_reopen -- --nocapture",
-      "methods": [
-        "reopen",
-        "push",
-        "claim",
-        "complete",
-        "fail",
-        "commit",
-        "push_with_request_id",
-        "metrics"
-      ],
-      "notes": "Projection-only reopen: counters, claim/finalize, stale, request_id duplicate invariants"
-    },
-    {
-      "semantic_id": "SNORRI-REOPEN",
       "cell_id": "memory--turso",
       "status": "passed",
-      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_turso_projection_reopen -- --nocapture",
+      "command": "cargo test -p fireweed --features memory,turso --test p5_class_b_reopen p5_memory_turso_projection_reopen -- --exact --nocapture",
       "methods": [
         "reopen",
         "push",
@@ -51,13 +34,13 @@
         "push_with_request_id",
         "metrics"
       ],
-      "notes": "Projection-only reopen via public default Turso projection"
+      "notes": "Projection reuse does not upgrade the volatile memory log to durable Class A; checks exact replay, counters and claim/finalize behavior."
     },
     {
       "semantic_id": "SNORRI-REOPEN",
       "cell_id": "memory--postgres",
       "status": "passed",
-      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_postgres_projection_reopen -- --nocapture",
+      "command": "cargo test -p fireweed --features memory,turso,postgres --test p5_class_b_reopen postgres_cell::p5_memory_postgres_projection_reopen -- --exact --nocapture",
       "methods": [
         "reopen",
         "push",
@@ -68,7 +51,7 @@
         "push_with_request_id",
         "metrics"
       ],
-      "notes": "Live Postgres required (FIREWEED_PG_TEST_URL); zero skips"
+      "notes": "Projection reuse does not upgrade the volatile memory log to durable Class A; checks exact replay, counters and claim/finalize behavior."
     }
   ]
 }

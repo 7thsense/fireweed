@@ -6,12 +6,12 @@
 //! the E2 headline. THIS suite is the headline evidence.
 //!
 //! TOPOLOGY (a real ADR-008 multi-node cluster of independent owners, as DOCKER CONTAINERS on the bridge).
-//! Each owner node is an independent `fireweed-service` process running in its own `ubuntu:25.04` container on
-//! the docker bridge network, on the FAST `object_log_sqlite_projection` backend in **segmented group-commit
-//! mode** (`FIREWEED_LOG_BACKEND=objectlog` + `FIREWEED_PROJECTION_BACKEND=sqlite` +
-//! `FIREWEED_OBJECT_LOG_MODE=segmented` → the local-object-log authority with a group-committing segmented
-//! substrate plus a SQLite materialized projection, TD-004). Shared-nothing: a distinct `FIREWEED_NODE_ID`, its
-//! OWN object-log root + sqlite projection on a per-container `tmpfs /data`, its own `0.0.0.0:8080` listener,
+//! Each owner is an independent `fireweed-service` process in a container on the Docker bridge, using
+//! `FIREWEED_LOG_BACKEND=filesystem` and `FIREWEED_PROJECTION_BACKEND=turso`: the filesystem log authority
+//! with segmented group commit plus a Turso materialized projection. The executable is bind-mounted from
+//! the host, so `FIREWEED_E2_IMAGE` must provide its loader and shared-library ABI; the historical default
+//! `ubuntu:25.04` is not an ABI guarantee for newly built host binaries. Shared-nothing: a distinct `FIREWEED_NODE_ID`, its
+//! OWN object-log root + Turso projection on a per-container `tmpfs /data`, its own `0.0.0.0:8080` listener,
 //! and a DISJOINT `FIREWEED_BOOTSTRAP_QUEUES` set (each node owns its own M queues; no queue lives on two
 //! nodes). The driver (this cargo-test host process) reaches each node directly at its **container IP:8080**
 //! over real bridge TCP — host-process → container, the ADR-008 ownership model with no shared store, no
@@ -41,13 +41,13 @@
 //! Every number is MEASURED, never hard-coded.
 //!
 //! EVIDENCE. On a passing run this emits `evidence_tier=release` ledger rows
-//! (`backend_profile="object_log_sqlite_projection"`, `measurements.tp002_evidence_ids=["E2"]`,
-//! `scale="release"`) and self-validates them strict (mirroring the postgres single-deployment baseline). If
-//! the bars are NOT met on this box (a core / I-O ceiling), the row is emitted SMOKE-tier (honest, never a
-//! faked release row) AND the test still hard-fails so the bead stays open with the measured ceiling visible.
+//! (`backend_profile="object_log_turso_projection"`, `measurements.tp002_evidence_ids=["E2"]`,
+//! `scale="release"`) and self-validates them strictly. If topology/progress/isolation checks fail, the row
+//! remains SMOKE-tier and the test fails. Rates below capacity targets stay visible in the evidence but
+//! do not change that tier. This workload covers push and claim/finalize, not enrichment or retention.
 //!
-//! ENV-GATED. Self-skips (LOUD) without `FIREWEED_E2_MULTINODE=1`, so a routine `cargo test` is short and never
-//! spins up an 8-node container cluster. To run the headline:
+//! ENV-GATED and fail-closed: without `FIREWEED_E2_MULTINODE` the test fails before creating containers.
+//! Set it to `1` to run the full 2/4/8 owner sweep:
 //!   cargo build -p fireweed-server --release --bin fireweed-service
 //!   FIREWEED_E2_MULTINODE=1 cargo test --manifest-path crates/fireweed-bench/Cargo.toml \
 //!     --test performance_multi_node_object_log_e2_tests -- --nocapture
@@ -276,7 +276,11 @@ fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
         }
         conn.send(&args).expect("send XACK");
         match conn.recv().expect("read XACK reply") {
-            Val::Int(_) => {}
+            Val::Int(acked) => assert_eq!(
+                acked,
+                ids.len() as i64,
+                "XACK must finalize every claimed id on {key}"
+            ),
             other => panic!("XACK on {key} failed: {other:?}"),
         }
         total += ids.len() as u64;
@@ -364,9 +368,8 @@ fn spawn_cluster(
             .args([
                 "run", "-d", "--name", &name, "--tmpfs", "/data", "-v", &mount,
             ])
-            .args(["-e", "FIREWEED_LOG_BACKEND=objectlog"])
-            .args(["-e", "FIREWEED_PROJECTION_BACKEND=sqlite"])
-            .args(["-e", "FIREWEED_OBJECT_LOG_MODE=segmented"])
+            .args(["-e", "FIREWEED_LOG_BACKEND=filesystem"])
+            .args(["-e", "FIREWEED_PROJECTION_BACKEND=turso"])
             .args([
                 "-e",
                 &format!(
@@ -387,7 +390,7 @@ fn spawn_cluster(
             ])
             .args(["-e", &format!("FIREWEED_NODE_ID={}", idx + 1)])
             .args(["-e", "FIREWEED_OBJECT_LOG_ROOT=/data/olog"])
-            .args(["-e", "FIREWEED_SQLITE_PROJECTION_PATH=/data/proj.db"])
+            .args(["-e", "FIREWEED_TURSO_PROJECTION_PATH=/data/proj.db"])
             .args(["-e", &format!("FIREWEED_LISTEN_ADDR=0.0.0.0:{NODE_PORT}")])
             .args(["-e", &format!("FIREWEED_BOOTSTRAP_QUEUES={bootstrap}")])
             .args(["-e", "FIREWEED_RECLAIM_INTERVAL_MS=60000"])
@@ -627,7 +630,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 fn performance_multi_node_object_log_e2_tests() {
     if env::var("FIREWEED_E2_MULTINODE").is_err() {
         panic!(
-            "TP-002 E2 LIVE MULTI-NODE object_log_sqlite_projection SKIPPED — set FIREWEED_E2_MULTINODE=1 (and \
+            "TP-002 E2 LIVE MULTI-NODE object_log_turso_projection SKIPPED — set FIREWEED_E2_MULTINODE=1 (and \
              build the service: `cargo build -p fireweed-server --release --bin fireweed-service`) to run the \
              headline cross-queue scale-out at owner counts 2/4/8 as bridge containers. The >=3.5x-at-8 \
              multiple + worst-per-queue floor evidence is DEFERRED (not measured), never a hidden pass."
@@ -652,11 +655,9 @@ fn performance_multi_node_object_log_e2_tests() {
         "docker is required for the containerized E2 cluster but `docker version` failed"
     );
 
-    // Defaults are the operating point tuned for THIS 12-core box (see the evidence doc): one queue per
-    // owner; each queue driven by a few large-pipeline connections (keeps the driver thread count low so the
-    // 8 co-located node containers are not starved); 4 worker threads per node (enough that the force-sealed
-    // claim+finalize path keeps its per-queue floor at 8 owners, few enough that the box scales near-linearly
-    // 2->8). Override any via env to re-tune on different hardware.
+    // Historical defaults use one queue per owner, eight pipelined connections per queue, and four
+    // worker threads per node. The complete 2/4/8 sweep measures their behavior on the current host;
+    // these settings imply neither a throughput floor nor linear scaling. Overrides are recorded.
     let queues_per_owner = env_usize("FIREWEED_E2_QUEUES_PER_OWNER", 1);
     let items_per_queue = env_u64("FIREWEED_E2_ITEMS_PER_QUEUE", 12_000);
     let conns_per_queue = env_usize("FIREWEED_E2_CONNS_PER_QUEUE", 8);
@@ -676,7 +677,7 @@ fn performance_multi_node_object_log_e2_tests() {
     let counts = [2usize, 4, 8];
 
     println!(
-        "\nTP-002 E2 LIVE multi-node object_log_sqlite_projection (segmented) scale-out — bridge containers; \
+        "\nTP-002 E2 LIVE multi-node object_log_turso_projection (segmented) scale-out — bridge containers; \
          {cores} cores; queues/owner={queues_per_owner}, items/queue={items_per_queue}, \
          conns/queue={conns_per_queue}, seg_target_bytes={}, seg_max_latency_ms={}, worker_threads/node={}",
         tuning.segment_target_bytes, tuning.segment_max_latency_ms, tuning.worker_threads
@@ -862,13 +863,13 @@ fn performance_multi_node_object_log_e2_tests() {
     let row = fireweed_release::LedgerRow {
         suite: "performance_multi_node_object_log_e2_tests".into(),
         command: "FIREWEED_E2_MULTINODE=1 cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test performance_multi_node_object_log_e2_tests".into(),
-        backend_profile: "object_log_sqlite_projection".into(),
+        backend_profile: "object_log_turso_projection".into(),
         scale: scale.into(),
         seed: 0,
         environment: format!(
             "live multi-node cluster of independent ADR-008 owners as docker bridge containers on \
-             object_log_sqlite_projection in SEGMENTED group-commit mode (TD-004); {cores} cores; owner counts \
-             2/4/8; each owner an independent fireweed-service container with its own object-log root + sqlite \
+             object_log_turso_projection in SEGMENTED group-commit mode (TD-004); {cores} cores; owner counts \
+             2/4/8; each owner an independent fireweed-service container with its own object-log root + Turso \
              projection on tmpfs + disjoint bootstrap queues + {worker} worker threads; each queue driven by \
              {conns} concurrent RESP connections; driver speaks raw RESP over bridge TCP to each container IP",
             worker = tuning.worker_threads,

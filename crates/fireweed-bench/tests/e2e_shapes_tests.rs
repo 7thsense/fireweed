@@ -13,10 +13,11 @@ use std::sync::Arc;
 
 use fireweed::{
     ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_memory, open_objectlog,
-    open_postgres_runtime, open_sqlite, open_sqlite_relational,
+    open_postgres_runtime,
 };
+use fireweed_bench::open_log_turso;
 use fireweed_bench::{Shape, SystemClock, all_shapes, bench_qdef, lifecycle, qkey};
-use futures::executor::block_on;
+use fireweed_objectlog::block_on_objectlog_future as block_on;
 
 /// Small but non-trivial: exercises batching + the 10%/10%/80% lifecycle partition with whole groups.
 const ITEMS: u64 = 2_000;
@@ -69,23 +70,13 @@ fn lifecycle_over_shapes_memory() {
 }
 
 #[test]
-fn lifecycle_over_shapes_sqlite_log() {
+fn lifecycle_over_shapes_turso() {
     for shape in all_shapes() {
-        let path = tmp(&format!("sqlite-{}", shape.name));
-        let _ = std::fs::remove_file(&path);
-        let fireweed =
-            open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect("open sqlite");
-        run_one("sqlite", &fireweed, &shape, true);
-        let _ = std::fs::remove_file(&path);
-    }
-}
-
-#[test]
-fn lifecycle_over_shapes_sqlite_relational() {
-    for shape in all_shapes() {
-        let fireweed =
-            open_sqlite_relational(":memory:", Arc::new(SystemClock)).expect("sqlite relational");
-        run_one("sqlite_relational", &fireweed, &shape, true);
+        let root = tmp(&format!("turso-{}", shape.name));
+        let fireweed = open_log_turso(&root, Arc::new(SystemClock)).expect("open Turso");
+        run_one("turso", &fireweed, &shape, true);
+        drop(fireweed);
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
 
@@ -95,8 +86,8 @@ fn lifecycle_over_shapes_objectlog() {
         let dir = tmp(&format!("objectlog-{}", shape.name));
         let _ = std::fs::remove_dir_all(&dir);
         let fireweed = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
-        // Eventual-apply class: update_fields is refused, so the lifecycle skips it.
-        run_one("objectlog", &fireweed, &shape, false);
+        // Exercise the current public batch-update contract on the original rows.
+        run_one("objectlog", &fireweed, &shape, true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

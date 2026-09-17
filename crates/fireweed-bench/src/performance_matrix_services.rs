@@ -62,8 +62,7 @@ impl SecretRedactor {
                 // `garage` is the sole provider-neutral weak-password denylist
                 // member retained for historical local S3-compat fixtures.
                 .filter(|password| {
-                    !WEAK_PASSWORD_DENYLIST
-                        .contains(&password.to_ascii_lowercase().as_str())
+                    !WEAK_PASSWORD_DENYLIST.contains(&password.to_ascii_lowercase().as_str())
                 })
             {
                 values.push(password);
@@ -478,7 +477,10 @@ mod tests {
             "denylisted weak password must not be substring-redacted from evidence"
         );
         assert!(
-            !redactor.values.iter().any(|v| v.eq_ignore_ascii_case("garage")),
+            !redactor
+                .values
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case("garage")),
             "denylisted weak password must not enter redaction values"
         );
     }

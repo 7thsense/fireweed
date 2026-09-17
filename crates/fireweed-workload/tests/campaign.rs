@@ -275,7 +275,7 @@ async fn terminal_campaign_reports_rebuild_from_log_only() {
                 }
                 assert_eq!(
                     row.lifecycle_state,
-                    if id % 31 == 0 {
+                    if id.is_multiple_of(31) {
                         ItemState::Failed
                     } else {
                         ItemState::Complete
@@ -284,14 +284,19 @@ async fn terminal_campaign_reports_rebuild_from_log_only() {
                 assert_eq!(
                     row.metadata.get("outcome"),
                     Some(&MetadataValue::String(
-                        if id % 31 == 0 { "failed" } else { "accepted" }.into()
+                        if id.is_multiple_of(31) {
+                            "failed"
+                        } else {
+                            "accepted"
+                        }
+                        .into()
                     ))
                 );
                 assert_eq!(
                     row.metadata.get("provider_id"),
                     Some(&MetadataValue::String(format!("provider-{id}")))
                 );
-                assert_eq!(row.attempt_count, 3 + u32::from(id % 19 == 0));
+                assert_eq!(row.attempt_count, 3 + u32::from(id.is_multiple_of(19)));
                 assert_eq!(
                     row.priority,
                     Some(if campaign_timestamp_priority {

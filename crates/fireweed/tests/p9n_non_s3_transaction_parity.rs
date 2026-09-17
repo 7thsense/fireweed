@@ -1,10 +1,10 @@
 //! P9N — transaction parity (commit, multi-claim, explain, side records, atomic
-//! rejection) on the 12 non-S3 cells.
+//! rejection) on the 9 non-S3 cells.
 //!
-//! Public matrix without S3 (turso projection is exercised elsewhere / default axis):
-//!   log ∈ {memory, sqlite, postgres, filesystem}
-//!   × projection ∈ {memory, sqlite, postgres}
-//! = 12 cells.
+//! Public matrix without S3 (native Turso is the default projection):
+//!   log ∈ {memory, postgres, filesystem}
+//!   × projection ∈ {memory, turso, postgres}
+//! = 9 cells.
 //!
 //! Method coverage is the P9 contract set, exercised via
 //! `support/public_interface::run_p9_surface`. Live Postgres cells
@@ -93,40 +93,14 @@ async fn p9n_memory_memory_query_parity() {
 }
 
 #[tokio::test]
-async fn p9n_memory_sqlite_query_parity() {
-    let root = FixtureRoot::new("memory_sqlite");
-    run_cell("memory--sqlite", true, || {
+async fn p9n_memory_turso_query_parity() {
+    let root = FixtureRoot::new("memory_turso");
+    run_cell("memory--turso", true, || {
         let mut cfg = StorageConfig::memory();
-        cfg.projection = ProjectionStoreConfig::Sqlite {
-            path: root.path().join("projection.sqlite"),
+        cfg.projection = ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
         };
-        open(cfg, Arc::new(SystemClock)).expect("open memory×sqlite")
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn p9n_sqlite_memory_query_parity() {
-    let root = FixtureRoot::new("sqlite_memory");
-    run_cell("sqlite--memory", true, || {
-        fireweed::open_sqlite(
-            root.path().join("log.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .expect("open sqlite×memory")
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn p9n_sqlite_sqlite_query_parity() {
-    let root = FixtureRoot::new("sqlite_sqlite");
-    run_cell("sqlite--sqlite", true, || {
-        fireweed::open_sqlite_relational(
-            root.path().join("relational.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .expect("open sqlite×sqlite")
+        open(cfg, Arc::new(SystemClock)).expect("open memory×turso")
     })
     .await;
 }
@@ -142,23 +116,21 @@ async fn p9n_filesystem_memory_query_parity() {
 }
 
 #[tokio::test]
-async fn p9n_filesystem_sqlite_query_parity() {
-    let root = FixtureRoot::new("filesystem_sqlite");
-    run_cell("filesystem--sqlite", true, || {
-        let cfg = fireweed::ObjectLogRuntimeConfig {
-            object_log: fireweed::ObjectLogStorage::Local {
-                root: root.path().join("object-log"),
-            },
-            authority: fireweed::ObjectLogAuthority::NativeConditionalWrite,
-            projection: fireweed::ProjectionConfig::Sqlite {
-                path: root.path().join("projection.sqlite"),
-            },
-            response_barrier: ResponseBarrier::Strict,
-            segments: segments(),
-            namespace: format!("p9n-filesystem-sqlite-{}", std::process::id()),
-            recovery: fireweed::RecoveryPolicy::default(),
+async fn p9n_filesystem_turso_query_parity() {
+    let root = FixtureRoot::new("filesystem_turso");
+    run_cell("filesystem--turso", true, || {
+        let mut cfg = StorageConfig::memory();
+        cfg.log = fireweed::LogConfig::Filesystem {
+            root: root.path().join("object-log"),
         };
-        fireweed::open_objectlog_sqlite(cfg, Arc::new(SystemClock)).expect("open filesystem×sqlite")
+        cfg.authority = Some(fireweed::ObjectLogAuthority::NativeConditionalWrite);
+        cfg.projection = ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
+        };
+        cfg.response_barrier = ResponseBarrier::Strict;
+        cfg.segments = segments();
+        cfg.namespace = format!("p9n-filesystem-turso-{}", std::process::id());
+        fireweed::open(cfg, Arc::new(SystemClock)).expect("open filesystem×turso")
     })
     .await;
 }
@@ -188,26 +160,6 @@ mod postgres_cells {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn p9n_sqlite_postgres_query_parity() {
-        let url = pg_url();
-        let root = FixtureRoot::new("sqlite_postgres");
-        let mut cfg = StorageConfig::memory();
-        cfg.log = LogConfig::Sqlite {
-            path: root.path().join("log.sqlite"),
-        };
-        cfg.projection = ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(url),
-        };
-        cfg.namespace = format!("p9n_sqlite_pg_{}", std::process::id());
-        run_cell_async("sqlite--postgres", true, async {
-            fireweed::open_async(cfg, Arc::new(SystemClock))
-                .await
-                .expect("open sqlite×postgres")
-        })
-        .await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn p9n_postgres_memory_query_parity() {
         let url = pg_url();
         // Isolate log schema so concurrent matrix runs do not collide on create_queue/push.
@@ -231,10 +183,10 @@ mod postgres_cells {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn p9n_postgres_sqlite_query_parity() {
+    async fn p9n_postgres_turso_query_parity() {
         let url = pg_url();
-        let root = FixtureRoot::new("postgres_sqlite");
-        let schema = format!("p9n_pg_sqlite_{}", std::process::id());
+        let root = FixtureRoot::new("postgres_turso");
+        let schema = format!("p9n_pg_turso_{}", std::process::id());
         let mut cfg = StorageConfig::memory();
         cfg.log = LogConfig::Postgres {
             url: ConfigSecret::new(url),
@@ -243,14 +195,14 @@ mod postgres_cells {
             node_id: None,
             coordination: None,
         };
-        cfg.projection = ProjectionStoreConfig::Sqlite {
-            path: root.path().join("projection.sqlite"),
+        cfg.projection = ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
         };
         cfg.namespace = schema;
-        run_cell_async("postgres--sqlite", true, async {
+        run_cell_async("postgres--turso", true, async {
             fireweed::open_async(cfg, Arc::new(SystemClock))
                 .await
-                .expect("open postgres×sqlite")
+                .expect("open postgres×turso")
         })
         .await;
     }

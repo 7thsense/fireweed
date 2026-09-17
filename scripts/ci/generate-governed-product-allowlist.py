@@ -142,7 +142,7 @@ def build_commands(route_doc: dict) -> list[dict]:
         )
     )
 
-    features = "memory,sqlite,objectlog,postgres,turso"
+    features = "memory,objectlog,postgres,turso"
     commands.append(
         entry(
             entry_id="functional-matrix-dry-run-leaves",
@@ -160,7 +160,7 @@ def build_commands(route_doc: dict) -> list[dict]:
                 "--",
                 "--nocapture",
             ],
-            notes="Exact dry-run leaves: 20 strict + 8 async + 12 invalid + AC-TXN + guards",
+            notes="Exact dry-run leaves: 12 strict + 6 async + 6 invalid + AC-TXN + guards",
         )
     )
 
@@ -180,13 +180,13 @@ def build_commands(route_doc: dict) -> list[dict]:
                 features,
                 "--test",
                 "storage_matrix_t0_t2",
-                "storage_matrix_t0_t2_all_twenty_cells",
+                "storage_matrix_t0_t2_all_twelve_cells",
                 "--",
                 "--exact",
                 "--nocapture",
             ],
             notes=(
-                "Live 20-cell T0–T2 reduced-count functional matrix; "
+                "Live 12-cell T0–T2 reduced-count functional matrix; "
                 "require ran=20 skipped=0 with PG+S3 fixtures (fail-closed)"
             ),
             requires_fixtures=["FIREWEED_PG_TEST_URL", "FIREWEED_S3_TEST_ENDPOINT"],
@@ -196,7 +196,7 @@ def build_commands(route_doc: dict) -> list[dict]:
     # Registration leaf (always offline-safe).
     commands.append(
         entry(
-            entry_id="functional-matrix-registers-20-cells",
+            entry_id="functional-matrix-registers-12-cells",
             category="functional",
             source="P10r",
             command=CARGO
@@ -235,7 +235,7 @@ def build_commands(route_doc: dict) -> list[dict]:
             category="T4",
             source="P12",
             command=["bash", "scripts/ci/helm-gate.sh"],
-            notes="20-cell Helm lint/render/kubeconform + Turso default",
+            notes="12-cell Helm lint/render/kubeconform + Turso default",
         )
     )
 

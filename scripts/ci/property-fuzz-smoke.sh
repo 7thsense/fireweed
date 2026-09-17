@@ -1,47 +1,40 @@
 #!/usr/bin/env bash
-# Property test and fuzz smoke runner (PR tier; bootstrap scaffold).
-#
-# Runs proptest suites and cargo-fuzz targets that exist; passes
-# immediately when none are registered. Feature beads populate these:
-#   B-011: priority-decode fuzz + AC-CORE-1 proptest
-#   B-020: command-envelope-decode fuzz
-#   B-100: operator-selector fuzz
+# Property test and fuzz smoke runner (PR tier).
 #
 # PR tier: >=10,000 proptest cases per property, >=10 s fuzz per target.
+# Keep the property target list explicit: property names do not necessarily
+# contain "proptest", and a discovery failure must never mean a passing skip.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
+export PROPTEST_CASES=10000
+export RUST_TEST_THREADS=1
+
 echo "=== property + fuzz smoke ==="
+echo "--- core priority ordering properties (10,000 cases per property) ---"
+rustup run 1.97.1 cargo test --locked -p fireweed-core \
+    --test core_priority_model_tests -- --test-threads=1
 
-FOUND_PROPERTY=0
-FOUND_FUZZ=0
-
-if rustup run 1.97.1 cargo test --workspace --list 2>/dev/null \
-        | grep -qE 'proptest|_property_tests'; then
-    FOUND_PROPERTY=1
-fi
-
-if command -v cargo-fuzz >/dev/null 2>&1 \
-        && cargo fuzz list 2>/dev/null | grep -q .; then
-    FOUND_FUZZ=1
-fi
-
-if [[ $FOUND_PROPERTY -eq 0 && $FOUND_FUZZ -eq 0 ]]; then
-    echo "No property tests or fuzz targets registered yet (scaffold passes)."
-    echo "=== property + fuzz smoke PASSED (no targets) ==="
-    exit 0
-fi
-
-if [[ $FOUND_PROPERTY -eq 1 ]]; then
-    echo "--- property tests ---"
-    rustup run 1.97.1 cargo test --workspace -- --include-ignored
-fi
-
-if [[ $FOUND_FUZZ -eq 1 ]]; then
+if [[ -f fuzz/Cargo.toml ]]; then
+    if ! command -v cargo-fuzz >/dev/null 2>&1; then
+        echo "property-fuzz-smoke: fuzz/Cargo.toml exists but cargo-fuzz is unavailable" >&2
+        exit 1
+    fi
+    # Capture discovery before iteration so command failures propagate. LibFuzzer
+    # requires nightly; an unavailable toolchain or broken target fails this gate.
+    targets="$(rustup run nightly cargo fuzz list)"
     echo "--- fuzz smoke (10 s per target) ---"
     while IFS= read -r target; do
+        [[ -n "${target}" ]] || continue
         echo "  fuzz: ${target}"
-        cargo fuzz run "${target}" -- -max_total_time=10 -timeout=5
-    done < <(cargo fuzz list)
+        rustup run nightly cargo fuzz run "${target}" -- \
+            -max_total_time=10 -timeout=5 -jobs=1 -workers=1
+    done <<< "${targets}"
+else
+    echo "No cargo-fuzz project registered; fuzz smoke not applicable."
 fi
 
 echo "=== property + fuzz smoke PASSED ==="

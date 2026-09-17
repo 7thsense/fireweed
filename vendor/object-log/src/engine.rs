@@ -2469,7 +2469,11 @@ mod idle_batch_wait_tests {
                 let worker_shared = shared.clone();
                 let worker = std::thread::spawn(move || {
                     started_tx.send(()).unwrap();
-                    assert!(result_tx.send(take_batch(&worker_shared, config, true)).is_ok());
+                    assert!(
+                        result_tx
+                            .send(take_batch(&worker_shared, config, true))
+                            .is_ok()
+                    );
                 });
                 started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
                 let early = result_rx.recv_timeout(Duration::from_millis(100));

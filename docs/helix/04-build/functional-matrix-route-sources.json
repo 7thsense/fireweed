@@ -1,47 +1,39 @@
 {
-  "authority_manifest_sha256": "2ce5d2d755f036a6111212859c91c4555088f1b7b715ea4db54c9fb2debe7569",
-  "authority_revision": "P1-2026-08-04-turso-default+P4-method-contracts",
+  "authority_manifest_sha256": "2a7c9df1ba7d37025c248b84ee7cddc346b724214381efa46f995e616042a6fb",
+  "authority_revision": "2026-09-17-sqlite-retired",
   "broad_substring_filters_forbidden": true,
   "cell_id_separator": "--",
   "cells": [
     "memory--memory",
-    "memory--sqlite",
     "memory--turso",
     "memory--postgres",
-    "sqlite--memory",
-    "sqlite--sqlite",
-    "sqlite--turso",
-    "sqlite--postgres",
     "postgres--memory",
-    "postgres--sqlite",
     "postgres--turso",
     "postgres--postgres",
     "filesystem--memory",
-    "filesystem--sqlite",
     "filesystem--turso",
     "filesystem--postgres",
     "s3--memory",
-    "s3--sqlite",
     "s3--turso",
     "s3--postgres"
   ],
   "counts": {
-    "async_invalid": 12,
+    "async_invalid": 6,
     "by_kind": {
       "ac_txn_dry_run": 3,
-      "async_invalid": 12,
-      "class_b_server": 7,
+      "async_invalid": 6,
+      "class_b_server": 4,
       "external_kafka": 4,
       "guard": 1,
-      "inline_lib": 13,
-      "object_log_async": 8,
-      "p4_method_suite": 22,
-      "strict": 20,
-      "t0_t2": 10
+      "inline_lib": 4,
+      "object_log_async": 6,
+      "p4_method_suite": 20,
+      "strict": 12,
+      "t0_t2": 8
     },
-    "leaves": 100,
-    "object_log_async": 8,
-    "strict": 20
+    "leaves": 68,
+    "object_log_async": 6,
+    "strict": 12
   },
   "external_kafka_feature_tuples": [
     "feature-on",
@@ -56,7 +48,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -65,13 +57,12 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "ac_txn_dry_run",
-      "leaf_id": "ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
+      "leaf_id": "ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
       "list_invocation": [
         "rustup",
         "run",
@@ -81,18 +72,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
         "--list",
-        "ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
+        "ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
         "--exact"
       ],
       "notes": "AC-TXN dry-run aggregate over manifest axes",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells"
+      "test_filter": "ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells"
     },
     {
       "cargo_args": [
@@ -100,7 +91,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -109,13 +100,12 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "ac_txn_dry_run",
-      "leaf_id": "ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
+      "leaf_id": "ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_6_cells",
       "list_invocation": [
         "rustup",
         "run",
@@ -125,18 +115,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
         "--list",
-        "ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
+        "ac_txn_dry_run_object_log_async_enumerates_all_6_cells",
         "--exact"
       ],
       "notes": "AC-TXN dry-run aggregate over manifest axes",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "ac_txn_dry_run_object_log_async_enumerates_all_8_cells"
+      "test_filter": "ac_txn_dry_run_object_log_async_enumerates_all_6_cells"
     },
     {
       "cargo_args": [
@@ -144,7 +134,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -153,13 +143,12 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "ac_txn_dry_run",
-      "leaf_id": "ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
+      "leaf_id": "ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_12_manifest_cells",
       "list_invocation": [
         "rustup",
         "run",
@@ -169,18 +158,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
         "--list",
-        "ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
+        "ac_txn_dry_run_strict_enumerates_all_12_manifest_cells",
         "--exact"
       ],
       "notes": "AC-TXN dry-run aggregate over manifest axes",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "ac_txn_dry_run_strict_enumerates_all_20_manifest_cells"
+      "test_filter": "ac_txn_dry_run_strict_enumerates_all_12_manifest_cells"
     },
     {
       "cargo_args": [
@@ -188,7 +177,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -197,7 +186,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -213,7 +201,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -232,7 +220,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -241,7 +229,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -257,7 +244,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -276,51 +263,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "memory--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "async_invalid",
-      "leaf_id": "async_invalid:memory--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "async_invalid_memory_sqlite",
-        "--exact"
-      ],
-      "notes": "Non-object-log AsyncProjection pre-I/O rejection dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "async_invalid_memory_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -329,7 +272,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -345,7 +287,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -364,7 +306,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -373,7 +315,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -389,7 +330,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -408,7 +349,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -417,7 +358,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -433,7 +373,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -452,51 +392,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "postgres--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "async_invalid",
-      "leaf_id": "async_invalid:postgres--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "async_invalid_postgres_sqlite",
-        "--exact"
-      ],
-      "notes": "Non-object-log AsyncProjection pre-I/O rejection dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "async_invalid_postgres_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -505,7 +401,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -521,7 +416,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -538,182 +433,6 @@
       "cargo_args": [
         "test",
         "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--memory",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "async_invalid",
-      "leaf_id": "async_invalid:sqlite--memory",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "async_invalid_sqlite_memory",
-        "--exact"
-      ],
-      "notes": "Non-object-log AsyncProjection pre-I/O rejection dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "async_invalid_sqlite_memory"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--postgres",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "async_invalid",
-      "leaf_id": "async_invalid:sqlite--postgres",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "async_invalid_sqlite_postgres",
-        "--exact"
-      ],
-      "notes": "Non-object-log AsyncProjection pre-I/O rejection dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "async_invalid_sqlite_postgres"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "async_invalid",
-      "leaf_id": "async_invalid:sqlite--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "async_invalid_sqlite_sqlite",
-        "--exact"
-      ],
-      "notes": "Non-object-log AsyncProjection pre-I/O rejection dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "async_invalid_sqlite_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--turso",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "async_invalid",
-      "leaf_id": "async_invalid:sqlite--turso",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "async_invalid_sqlite_turso",
-        "--exact"
-      ],
-      "notes": "Non-object-log AsyncProjection pre-I/O rejection dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "async_invalid_sqlite_turso"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
         "fireweed-server",
         "--features",
         "postgres",
@@ -726,7 +445,7 @@
         "postgres"
       ],
       "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_all_four_cells_t0_t3",
+      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_all_cells_t0_t3",
       "list_invocation": [
         "rustup",
         "run",
@@ -740,51 +459,13 @@
         "--lib",
         "--",
         "--list",
-        "class_b_memory_log_tests::class_b_all_four_cells_t0_t3",
+        "class_b_memory_log_tests::class_b_all_cells_t0_t3",
         "--exact"
       ],
       "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
       "package": "fireweed-server",
       "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_all_four_cells_t0_t3"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_four_cells_never_claim_durable_log_replay",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_four_cells_never_claim_durable_log_replay",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_four_cells_never_claim_durable_log_replay"
+      "test_filter": "class_b_memory_log_tests::class_b_all_cells_t0_t3"
     },
     {
       "cargo_args": [
@@ -861,82 +542,6 @@
       "package": "fireweed-server",
       "provider_neutral": true,
       "test_filter": "class_b_memory_log_tests::class_b_memory_postgres_t0_t3"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_memory_projection_arms_exist_in_composition_root",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_memory_projection_arms_exist_in_composition_root",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_memory_projection_arms_exist_in_composition_root"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_memory_sqlite_t0_t3",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_memory_sqlite_t0_t3",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_memory_sqlite_t0_t3"
     },
     {
       "cargo_args": [
@@ -1140,7 +745,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1149,7 +754,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -1165,7 +769,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -1270,44 +874,6 @@
         "postgres"
       ],
       "kind": "inline_lib",
-      "leaf_id": "inline_lib:postgres_log_matrix_tests::postgres_log_composition_root_wires_three_projection_cells",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "postgres_log_matrix_tests::postgres_log_composition_root_wires_three_projection_cells",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "postgres_log_matrix_tests::postgres_log_composition_root_wires_three_projection_cells"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
       "leaf_id": "inline_lib:postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract",
       "list_invocation": [
         "rustup",
@@ -1329,44 +895,6 @@
       "package": "fireweed-server",
       "provider_neutral": true,
       "test_filter": "postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs"
     },
     {
       "cargo_args": [
@@ -1410,275 +938,9 @@
       "cargo_args": [
         "test",
         "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_composition_root_wires_three_projection_cells",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_composition_root_wires_three_projection_cells",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_composition_root_wires_three_projection_cells"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_memory_lifecycle_and_reopen",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_memory_lifecycle_and_reopen",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_memory_lifecycle_and_reopen"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_postgres_lifecycle_and_reopen",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_postgres_lifecycle_and_reopen",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_postgres_lifecycle_and_reopen"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_sqlite_lifecycle_and_reopen",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_sqlite_lifecycle_and_reopen",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_sqlite_lifecycle_and_reopen"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_t3_evidence_axis_names_file_contract",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_t3_evidence_axis_names_file_contract",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_t3_evidence_axis_names_file_contract"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_t3_tp003_ac_txn_exact_pairs",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_t3_tp003_ac_txn_exact_pairs",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_t3_tp003_ac_txn_exact_pairs"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:sqlite_log_matrix_tests::sqlite_log_t4_helm_ci_values_and_gate",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "sqlite_log_matrix_tests::sqlite_log_t4_helm_ci_values_and_gate",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "sqlite_log_matrix_tests::sqlite_log_t4_helm_ci_values_and_gate"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1687,7 +949,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -1703,7 +964,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -1722,7 +983,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1731,7 +992,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -1747,7 +1007,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -1766,51 +1026,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "filesystem--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "object_log_async",
-      "leaf_id": "object_log_async:filesystem--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "object_log_async_filesystem_sqlite",
-        "--exact"
-      ],
-      "notes": "Object-log AsyncProjection validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "object_log_async_filesystem_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1819,7 +1035,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -1835,7 +1050,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -1854,7 +1069,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1863,7 +1078,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -1879,7 +1093,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -1898,7 +1112,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1907,7 +1121,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -1923,7 +1136,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -1942,51 +1155,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "s3--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "object_log_async",
-      "leaf_id": "object_log_async:s3--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "object_log_async_s3_sqlite",
-        "--exact"
-      ],
-      "notes": "Object-log AsyncProjection validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "object_log_async_s3_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -1995,7 +1164,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2011,7 +1179,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -2030,7 +1198,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance"
       ],
@@ -2039,7 +1207,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2055,7 +1222,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance",
         "--",
@@ -2074,22 +1241,21 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance"
       ],
-      "cell_id": "filesystem--sqlite--async",
+      "cell_id": "filesystem--turso--async",
       "exact": true,
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_conformance::filesystem_sqlite_async_public_interface",
+      "leaf_id": "p4:public_interface_conformance::filesystem_turso_async_public_interface",
       "list_invocation": [
         "rustup",
         "run",
@@ -2099,18 +1265,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance",
         "--",
         "--list",
-        "filesystem_sqlite_async_public_interface",
+        "filesystem_turso_async_public_interface",
         "--exact"
       ],
       "notes": "P4 API-005 suite ownership exact cell module leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "filesystem_sqlite_async_public_interface"
+      "test_filter": "filesystem_turso_async_public_interface"
     },
     {
       "cargo_args": [
@@ -2118,22 +1284,21 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance"
       ],
-      "cell_id": "filesystem--sqlite--strict",
+      "cell_id": "filesystem--turso--strict",
       "exact": true,
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_conformance::filesystem_sqlite_strict_public_interface",
+      "leaf_id": "p4:public_interface_conformance::filesystem_turso_strict_public_interface",
       "list_invocation": [
         "rustup",
         "run",
@@ -2143,18 +1308,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance",
         "--",
         "--list",
-        "filesystem_sqlite_strict_public_interface",
+        "filesystem_turso_strict_public_interface",
         "--exact"
       ],
       "notes": "P4 API-005 suite ownership exact cell module leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "filesystem_sqlite_strict_public_interface"
+      "test_filter": "filesystem_turso_strict_public_interface"
     },
     {
       "cargo_args": [
@@ -2162,7 +1327,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance"
       ],
@@ -2171,7 +1336,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2187,7 +1351,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance",
         "--",
@@ -2206,22 +1370,21 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance"
       ],
-      "cell_id": "sqlite--memory",
+      "cell_id": "memory--turso",
       "exact": true,
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_conformance::sqlite_memory_public_interface",
+      "leaf_id": "p4:public_interface_conformance::memory_turso_public_interface",
       "list_invocation": [
         "rustup",
         "run",
@@ -2231,18 +1394,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_conformance",
         "--",
         "--list",
-        "sqlite_memory_public_interface",
+        "memory_turso_public_interface",
         "--exact"
       ],
       "notes": "P4 API-005 suite ownership exact cell module leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "sqlite_memory_public_interface"
+      "test_filter": "memory_turso_public_interface"
     },
     {
       "cargo_args": [
@@ -2250,51 +1413,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "public_interface_conformance"
-      ],
-      "cell_id": "sqlite--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_conformance::sqlite_sqlite_public_interface",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "public_interface_conformance",
-        "--",
-        "--list",
-        "sqlite_sqlite_public_interface",
-        "--exact"
-      ],
-      "notes": "P4 API-005 suite ownership exact cell module leaf",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "sqlite_sqlite_public_interface"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2303,7 +1422,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2319,7 +1437,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2338,7 +1456,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2347,7 +1465,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2363,7 +1480,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2382,7 +1499,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2391,7 +1508,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2407,7 +1523,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2426,7 +1542,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2435,7 +1551,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2451,7 +1566,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2470,7 +1585,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2479,7 +1594,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2495,7 +1609,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2514,7 +1628,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2523,7 +1637,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2539,7 +1652,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2558,7 +1671,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2567,7 +1680,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2583,7 +1695,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2602,7 +1714,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2611,7 +1723,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2627,7 +1738,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2646,7 +1757,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2655,7 +1766,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2671,7 +1781,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2690,7 +1800,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2699,7 +1809,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2715,7 +1824,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2734,7 +1843,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2743,7 +1852,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2759,7 +1867,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2778,22 +1886,21 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
-      "cell_id": "postgres--sqlite",
+      "cell_id": "postgres--turso",
       "exact": true,
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_external_conformance::postgres_sqlite_public_interface",
+      "leaf_id": "p4:public_interface_external_conformance::postgres_turso_public_interface",
       "list_invocation": [
         "rustup",
         "run",
@@ -2803,18 +1910,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
         "--list",
-        "postgres_sqlite_public_interface",
+        "postgres_turso_public_interface",
         "--exact"
       ],
       "notes": "P4 API-005 suite ownership exact cell module leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "postgres_sqlite_public_interface"
+      "test_filter": "postgres_turso_public_interface"
     },
     {
       "cargo_args": [
@@ -2822,7 +1929,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
@@ -2831,7 +1938,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -2847,7 +1953,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
@@ -2866,22 +1972,21 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
-      "cell_id": "s3--sqlite--async",
+      "cell_id": "s3--turso--async",
       "exact": true,
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_external_conformance::s3_sqlite_async_public_interface",
+      "leaf_id": "p4:public_interface_external_conformance::s3_turso_async_public_interface",
       "list_invocation": [
         "rustup",
         "run",
@@ -2891,18 +1996,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
         "--list",
-        "s3_sqlite_async_public_interface",
+        "s3_turso_async_public_interface",
         "--exact"
       ],
       "notes": "P4 API-005 suite ownership exact cell module leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "s3_sqlite_async_public_interface"
+      "test_filter": "s3_turso_async_public_interface"
     },
     {
       "cargo_args": [
@@ -2910,22 +2015,21 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance"
       ],
-      "cell_id": "s3--sqlite--strict",
+      "cell_id": "s3--turso--strict",
       "exact": true,
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_external_conformance::s3_sqlite_strict_public_interface",
+      "leaf_id": "p4:public_interface_external_conformance::s3_turso_strict_public_interface",
       "list_invocation": [
         "rustup",
         "run",
@@ -2935,18 +2039,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "public_interface_external_conformance",
         "--",
         "--list",
-        "s3_sqlite_strict_public_interface",
+        "s3_turso_strict_public_interface",
         "--exact"
       ],
       "notes": "P4 API-005 suite ownership exact cell module leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "s3_sqlite_strict_public_interface"
+      "test_filter": "s3_turso_strict_public_interface"
     },
     {
       "cargo_args": [
@@ -2954,51 +2058,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "public_interface_external_conformance"
-      ],
-      "cell_id": "sqlite--postgres",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "p4_method_suite",
-      "leaf_id": "p4:public_interface_external_conformance::sqlite_postgres_public_interface",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "public_interface_external_conformance",
-        "--",
-        "--list",
-        "sqlite_postgres_public_interface",
-        "--exact"
-      ],
-      "notes": "P4 API-005 suite ownership exact cell module leaf",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "sqlite_postgres_public_interface"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3007,7 +2067,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3023,7 +2082,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3042,7 +2101,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3051,7 +2110,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3067,7 +2125,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3086,51 +2144,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "filesystem--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:filesystem--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_filesystem_sqlite",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_filesystem_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3139,7 +2153,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3155,7 +2168,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3174,7 +2187,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3183,7 +2196,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3199,7 +2211,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3218,7 +2230,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3227,7 +2239,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3243,7 +2254,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3262,51 +2273,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "memory--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:memory--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_memory_sqlite",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_memory_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3315,7 +2282,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3331,7 +2297,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3350,7 +2316,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3359,7 +2325,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3375,7 +2340,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3394,7 +2359,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3403,7 +2368,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3419,7 +2383,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3438,51 +2402,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "postgres--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:postgres--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_postgres_sqlite",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_postgres_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3491,7 +2411,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3507,7 +2426,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3526,7 +2445,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3535,7 +2454,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3551,7 +2469,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3570,7 +2488,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3579,7 +2497,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3595,7 +2512,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3614,51 +2531,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "s3--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:s3--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_s3_sqlite",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_s3_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -3667,7 +2540,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3683,7 +2555,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -3702,183 +2574,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--memory",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:sqlite--memory",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_sqlite_memory",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_sqlite_memory"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--postgres",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:sqlite--postgres",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_sqlite_postgres",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_sqlite_postgres"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--sqlite",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:sqlite--sqlite",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_sqlite_sqlite",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_sqlite_sqlite"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources"
-      ],
-      "cell_id": "sqlite--turso",
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "strict",
-      "leaf_id": "strict:sqlite--turso",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--list",
-        "strict_sqlite_turso",
-        "--exact"
-      ],
-      "notes": "Strict barrier validate dry-run",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "strict_sqlite_turso"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -3887,7 +2583,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3903,7 +2598,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
@@ -3922,7 +2617,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -3931,7 +2626,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3947,7 +2641,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
@@ -3966,7 +2660,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -3975,7 +2669,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -3991,7 +2684,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
@@ -4010,7 +2703,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources"
       ],
@@ -4019,7 +2712,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -4035,7 +2727,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
@@ -4054,7 +2746,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -4063,7 +2755,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -4079,7 +2770,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
@@ -4098,7 +2789,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -4107,7 +2798,6 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
@@ -4123,7 +2813,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
@@ -4142,7 +2832,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -4151,13 +2841,12 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "t0_t2",
-      "leaf_id": "t0_t2:sqlite_log_t3_t4_evidence_and_helm_values_present",
+      "leaf_id": "t0_t2:storage_matrix_registers_exactly_12_distinct_cells",
       "list_invocation": [
         "rustup",
         "run",
@@ -4167,18 +2856,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
         "--list",
-        "sqlite_log_t3_t4_evidence_and_helm_values_present",
+        "storage_matrix_registers_exactly_12_distinct_cells",
         "--exact"
       ],
       "notes": "Library T0\u2013T2 / evidence harness exact leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "sqlite_log_t3_t4_evidence_and_helm_values_present"
+      "test_filter": "storage_matrix_registers_exactly_12_distinct_cells"
     },
     {
       "cargo_args": [
@@ -4186,7 +2875,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2"
       ],
@@ -4195,13 +2884,12 @@
       "feature_tuple": null,
       "features": [
         "memory",
-        "sqlite",
         "objectlog",
         "postgres",
         "turso"
       ],
       "kind": "t0_t2",
-      "leaf_id": "t0_t2:sqlite_log_three_cells_t0_t2",
+      "leaf_id": "t0_t2:storage_matrix_t0_t2_all_twelve_cells",
       "list_invocation": [
         "rustup",
         "run",
@@ -4211,106 +2899,18 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "--",
         "--list",
-        "sqlite_log_three_cells_t0_t2",
+        "storage_matrix_t0_t2_all_twelve_cells",
         "--exact"
       ],
       "notes": "Library T0\u2013T2 / evidence harness exact leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "sqlite_log_three_cells_t0_t2"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "storage_matrix_t0_t2"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "t0_t2",
-      "leaf_id": "t0_t2:storage_matrix_registers_exactly_20_distinct_cells",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "storage_matrix_t0_t2",
-        "--",
-        "--list",
-        "storage_matrix_registers_exactly_20_distinct_cells",
-        "--exact"
-      ],
-      "notes": "Library T0\u2013T2 / evidence harness exact leaf",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "storage_matrix_registers_exactly_20_distinct_cells"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "storage_matrix_t0_t2"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "memory",
-        "sqlite",
-        "objectlog",
-        "postgres",
-        "turso"
-      ],
-      "kind": "t0_t2",
-      "leaf_id": "t0_t2:storage_matrix_t0_t2_all_twenty_cells",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.97.1",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,sqlite,objectlog,postgres,turso",
-        "--test",
-        "storage_matrix_t0_t2",
-        "--",
-        "--list",
-        "storage_matrix_t0_t2_all_twenty_cells",
-        "--exact"
-      ],
-      "notes": "Library T0\u2013T2 / evidence harness exact leaf",
-      "package": "fireweed",
-      "provider_neutral": true,
-      "test_filter": "storage_matrix_t0_t2_all_twenty_cells"
+      "test_filter": "storage_matrix_t0_t2_all_twelve_cells"
     }
   ],
   "p2r_mappings_authored": false,
@@ -4318,7 +2918,6 @@
   "schema_version": 1,
   "server_objectlog_dev_tuple": [
     "memory",
-    "sqlite",
     "postgres",
     "objectlog"
   ],

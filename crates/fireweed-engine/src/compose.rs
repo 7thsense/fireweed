@@ -1291,6 +1291,15 @@ pub trait ProjectionStore: Send {
         Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
     }
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics>;
+    /// Bounded numeric item-ID page, including terminal rows until purge and excluding superseded rows.
+    fn retained_items(
+        &self,
+        _shard: &QueueKey,
+        _after: Option<ItemId>,
+        _limit: usize,
+    ) -> EngineResult<Vec<crate::RetainedItemView>> {
+        Err(EngineError::Unavailable)
+    }
     fn terminal_emission_metrics(
         &self,
         shard: &QueueKey,

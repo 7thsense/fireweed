@@ -24,6 +24,7 @@ mod command;
 /// Native binary durable command-envelope codec (FWC1 frame only).
 pub mod command_codec;
 mod commit;
+pub mod commit_surface;
 mod compose;
 mod control_plane;
 mod density;
@@ -77,6 +78,7 @@ pub use async_composed::{
     abort_unplanned_generation_on_deadline, admit_inert_mutation_generation,
     finish_retained_grouped_cohort_claim, retain_sequencer_after_slot_release,
     validate_inert_mutation_generation, validate_inert_mutation_generation_folding,
+    validate_push_shape,
 };
 pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
 pub use async_log_replay_product::{
@@ -212,12 +214,12 @@ pub use port::{
     ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse, ItemMutationResult,
     ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
     ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
-    LeaseGuard, LeaseView, LifecyclePatch, LiveItemView, RetainedItemView, LogRead,
+    LeaseGuard, LeaseView, LifecyclePatch, LiveItemView, LogRead,
     MAX_ORDERED_INDEPENDENT_PUSH_ITEMS, MaintenanceStopReason, MaintenanceSummary, PendingPage,
     PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushBatchOutcome,
     PushDisposition, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe, ReschedulePort,
-    SelectedMutation, SetGatesPort, SideRecordPage, SnapshotRef, SnapshotStore,
+    RetainedItemView, SelectedMutation, SetGatesPort, SideRecordPage, SnapshotRef, SnapshotStore,
     TerminalEmissionMetrics, TickReport, TimestampComparison, UpdateFieldsPort, UpsertOutcome,
     UpsertPort, generate_query_lease_token, is_api001_reserved_write_field,
     validate_api001_reserved_write_fields, validate_distinct_commit_claims,

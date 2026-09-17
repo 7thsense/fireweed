@@ -1644,9 +1644,13 @@ pub fn commit(
 // ProjectionData: items + eligibility index + pause flag
 // ---------------------------------------------------------------------------
 
+type FramedIndexKeys = Arc<[(String, Vec<u8>)]>;
+
 #[derive(Clone)]
 pub struct ProjectionData {
     items: FastHashMap<ItemId, ItemRecord>,
+    /// Non-superseded resident identities for bounded progress/disposition pages.
+    retained_ids: BTreeSet<ItemId>,
     /// Ordered PEL indexes. These keep cursor/range reads proportional to the
     /// requested page instead of scanning every resident item or lease.
     leased_ids: BTreeSet<ItemId>,
@@ -1695,7 +1699,7 @@ pub struct ProjectionData {
     typed_index_specs: Vec<QueueIndex>,
     /// Framed index keys for live items. Derived cache only — unique occupancy stays on `indexes`.
     /// Rebuilt on snapshot import; not stored in [`ProjectionImage`].
-    framed_index_keys: FastHashMap<ItemId, Arc<[(String, Vec<u8>)]>>,
+    framed_index_keys: FastHashMap<ItemId, FramedIndexKeys>,
     /// Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37). Wholly
     /// SEPARATE from `items`/`eligible`/`by_key`: these are NOT claimable work — they never enter the
     /// eligibility index, do not appear in claim/peek/metrics-as-work, and survive input finalization. Both
@@ -1723,6 +1727,7 @@ impl ProjectionData {
         }
         Self {
             items: FastHashMap::default(),
+            retained_ids: BTreeSet::new(),
             leased_ids: BTreeSet::new(),
             leased_by_consumer: FastHashMap::default(),
             ordinary_leases_by_expiry: BTreeMap::new(),
@@ -1822,6 +1827,7 @@ impl ProjectionData {
                     .insert(rec.item_id);
             }
             if !rec.superseded {
+                projection.retained_ids.insert(rec.item_id);
                 if let Some(key) = rec.explicit_client_item_key.clone() {
                     projection.by_key.insert(key, rec.item_id);
                 }
@@ -1977,16 +1983,13 @@ impl ProjectionData {
         &mut self,
         item_id: ItemId,
         keys: Vec<(String, Vec<u8>)>,
-    ) -> Arc<[(String, Vec<u8>)]> {
-        let keys = Arc::<[(String, Vec<u8>)]>::from(keys);
+    ) -> FramedIndexKeys {
+        let keys = FramedIndexKeys::from(keys);
         self.framed_index_keys.insert(item_id, Arc::clone(&keys));
         keys
     }
 
-    fn framed_keys_or_compute(
-        &mut self,
-        item_id: ItemId,
-    ) -> EngineResult<Arc<[(String, Vec<u8>)]>> {
+    fn framed_keys_or_compute(&mut self, item_id: ItemId) -> EngineResult<FramedIndexKeys> {
         if let Some(keys) = self.framed_index_keys.get(&item_id) {
             return Ok(Arc::clone(keys));
         }
@@ -2090,6 +2093,7 @@ impl ProjectionData {
             self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
         self.insert_keys_into_both(rec.item_id, &keys);
         self.remember_framed_keys(rec.item_id, keys);
+        self.retained_ids.insert(rec.item_id);
         self.items.insert(rec.item_id, rec);
         self.metrics.pending += 1;
         Ok(())
@@ -2643,7 +2647,7 @@ impl ProjectionData {
                                 && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
                             {
                                 self.eligible
-                                    .remove(EligibilityIndex::token(&old, &self.priority_model));
+                                    .remove(EligibilityIndex::token(old, &self.priority_model));
                             }
                             // Only retain the old lifecycle/index bookkeeping across
                             // mutation. Copying the payload, metadata, and entity here
@@ -2892,6 +2896,7 @@ impl ProjectionData {
                     self.index_remove_keys(c.superseded_item_id, &keys);
                     self.claim_index_remove_keys(c.superseded_item_id, &keys);
                 }
+                self.retained_ids.remove(&c.superseded_item_id);
                 self.framed_index_keys.remove(&c.superseded_item_id);
                 self.replace_gate_memberships(c.superseded_item_id, &superseded_gate_keys, &[]);
                 self.by_key.remove(&c.client_item_key);
@@ -3048,7 +3053,7 @@ fn mutation_snapshot(record: &ItemRecord) -> ItemMutationSnapshot {
         fields: record.fields.clone(),
         metadata: record.metadata.clone(),
         gate_keys: record.gate_keys.clone(),
-        entity: record.entity_document.clone(),
+        entity: rehydrate_entity_document(record.entity_document.clone(), &record.index_fields),
         lease_token: record.lease_token.clone(),
         lease_expires_at: record.lease_expires_at,
         lease_is_cohort: record.lease_is_cohort,
@@ -3101,9 +3106,17 @@ fn mutation_predicate_matches(
             if pointer_tokens(pointer).is_err() {
                 return false;
             }
+            // Compact pushes retain native index fields instead of duplicate JSON.
+            // Match the public entity view without materializing JSON on the insert path.
+            let materialized = record
+                .entity_document
+                .is_none()
+                .then(|| rehydrate_entity_document(None, &record.index_fields))
+                .flatten();
             let actual = record
                 .entity_document
                 .as_ref()
+                .or(materialized.as_ref())
                 .and_then(|document| document.pointer(pointer));
             match value {
                 EntityPredicateValue::Missing => actual.is_none(),
@@ -3649,7 +3662,12 @@ impl ProjectionData {
                 }
             }
         }
-        let mut entity = record.entity_document.clone();
+        let original_entity = if patch.entity_edits.is_empty() {
+            record.entity_document.clone()
+        } else {
+            rehydrate_entity_document(record.entity_document.clone(), &record.index_fields)
+        };
+        let mut entity = original_entity.clone();
         for edit in &patch.entity_edits {
             if apply_entity_edit(&mut entity, &edit.pointer, &edit.operation).is_err() {
                 return Ok((ItemMutationOutcome::Invalid, None));
@@ -3670,7 +3688,7 @@ impl ProjectionData {
             || metadata != record.metadata
             || gate_keys != record.gate_keys
             || fields != record.fields
-            || entity != record.entity_document
+            || entity != original_entity
             || invalidate_lease;
         if !changed {
             return Ok((ItemMutationOutcome::NoChange, None));
@@ -3694,15 +3712,19 @@ impl ProjectionData {
                 state,
             }
         };
-        // Keep native index fields in step with entity edits when present.
+        // An explicit root removal clears native fields as well, so serving-time
+        // entity echo cannot reconstruct the deleted document. Unrelated edits
+        // preserve the compact representation.
         let index_fields = if let Some(doc) = entity.as_ref() {
             fireweed_engine::index_fields::extract_index_fields_from_entity(
                 &self.typed_index_specs,
                 doc,
             )
             .unwrap_or_else(|_| record.index_fields.clone())
-        } else {
+        } else if patch.entity_edits.is_empty() {
             record.index_fields.clone()
+        } else {
+            BTreeMap::new()
         };
         Ok((
             outcome,
@@ -4025,6 +4047,7 @@ impl ProjectionData {
     }
 
     fn remove_record(&mut self, rec: ItemRecord) -> EngineResult<()> {
+        self.retained_ids.remove(&rec.item_id);
         if !rec.superseded {
             self.metrics_dec(rec.state);
         }
@@ -4176,6 +4199,37 @@ impl ProjectionData {
         ids.iter()
             .filter_map(|id| self.items.get(id))
             .filter_map(ItemRecord::to_claimed)
+            .collect()
+    }
+
+    /// Read a bounded numeric item-ID page without scanning other retained history.
+    pub fn retained_items(
+        &self,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+        if !(1..=1000).contains(&limit) {
+            return Err(EngineError::Invalid("retained page size must be 1..1000"));
+        }
+        self.retained_ids
+            .range((after.map(Excluded).unwrap_or(Unbounded), Unbounded))
+            .take(limit)
+            .map(|id| {
+                let record = self.items.get(id).ok_or_else(|| {
+                    EngineError::Storage("retained item index references a missing row".into())
+                })?;
+                Ok(fireweed_engine::RetainedItemView {
+                    item_id: record.item_id,
+                    client_item_key: record.client_item_key(),
+                    item_version: record.item_version,
+                    lifecycle_state: record.state,
+                    priority: record.priority.clone(),
+                    not_before: record.not_before,
+                    attempt_count: record.attempt_count,
+                    payload: record.payload.clone(),
+                    metadata: record.metadata.clone(),
+                })
+            })
             .collect()
     }
 
@@ -4391,8 +4445,7 @@ impl ProjectionData {
         page_size: usize,
         cursor: Option<Vec<u8>>,
     ) -> SideRecordPage {
-        // Mirrors the sqlite-backed composition's page cap (fireweed-sqlite's
-        // `SIDE_RECORD_MAX_PAGE_SIZE`) so a caller sees the same page-size ceiling regardless of backend.
+        // Bound page allocation and iteration to the public 1,000-record ceiling.
         let page_size = page_size.min(1_000);
         let start = cursor.unwrap_or_else(|| prefix.to_vec());
         let mut entries = Vec::new();
@@ -5694,6 +5747,162 @@ mod tests {
         }
     }
     #[test]
+    fn compact_index_entity_supports_selector_edits_snapshots_and_noops() {
+        use fireweed_core::RequestId;
+        use fireweed_engine::{AddressedMutation, EntityEdit, ItemSelector, SelectedMutation};
+        let mut definition = qdef_with_emit_change_records(false);
+        definition.typed_indexes = vec![QueueIndex {
+            name: "by_kind".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "kind".into(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }];
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        let mut item = push_item("1", "one", 1);
+        item.index_fields
+            .insert("kind".into(), TypedValue::String("red".into()));
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand { items: vec![item] }))
+            .unwrap();
+        assert!(
+            projection.items[&iid("1")].entity_document.is_none(),
+            "insert stays compact"
+        );
+        let compact_projection = projection.clone();
+        for value in ["red", "blue"] {
+            let request = ItemMutationRequest {
+                request_id: RequestId::new(format!("compact-{value}")).unwrap(),
+                evaluated_at: ts(10),
+                dry_run: false,
+                returning: ItemMutationReturning::BeforeSnapshot,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::SelectFirst {
+                    clauses: vec![SelectedMutation {
+                        selector_id: "kind".into(),
+                        selector: ItemSelector {
+                            scope: ItemSelectorScope::Live,
+                            predicates: vec![ItemPredicate::EntityEq {
+                                pointer: "/kind".into(),
+                                value: EntityPredicateValue::Value(serde_json::json!("red")),
+                            }],
+                        },
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::RejectActive,
+                        patch: ItemPatch {
+                            entity_edits: vec![EntityEdit {
+                                pointer: "/kind".into(),
+                                operation: EntityEditOperation::Set(serde_json::json!(value)),
+                            }],
+                            ..Default::default()
+                        },
+                    }],
+                },
+            };
+            let plan = projection.plan_item_mutation(&request).unwrap();
+            assert_eq!(plan.response.summary.matched, 1);
+            assert_eq!(plan.response.summary.changed, u64::from(value == "blue"));
+            assert_eq!(
+                plan.response.results[0].before.as_ref().unwrap().entity,
+                Some(serde_json::json!({"kind": "red"}))
+            );
+            projection
+                .apply_command(&QueueCommand::MutateItems(plan.command))
+                .unwrap();
+        }
+        let record = &projection.items[&iid("1")];
+        assert_eq!(
+            record.item_version, 2,
+            "identical edit must not increment the version"
+        );
+        assert_eq!(
+            record.index_fields["kind"],
+            TypedValue::String("blue".into())
+        );
+        assert_eq!(
+            record.entity_document,
+            Some(serde_json::json!({"kind": "blue"}))
+        );
+
+        // Removing either a compact entity or a materialized one must also
+        // remove its typed index membership and must remain absent on reads.
+        for (mut projection, kind) in [(compact_projection, "red"), (projection, "blue")] {
+            let version = projection.items[&iid("1")].item_version;
+            assert_eq!(
+                projection
+                    .index_lookup("by_kind", &[kind.as_bytes().to_vec()])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let request = ItemMutationRequest {
+                request_id: RequestId::new(format!("remove-root-{kind}")).unwrap(),
+                evaluated_at: ts(10),
+                dry_run: false,
+                returning: ItemMutationReturning::BeforeSnapshot,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed {
+                    entries: vec![AddressedMutation {
+                        item_id: iid("1"),
+                        expected_item_version: None,
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::RejectActive,
+                        patch: ItemPatch {
+                            entity_edits: vec![EntityEdit {
+                                pointer: String::new(),
+                                operation: EntityEditOperation::Remove,
+                            }],
+                            ..Default::default()
+                        },
+                    }],
+                },
+            };
+            let plan = projection.plan_item_mutation(&request).unwrap();
+            assert_eq!(plan.response.summary.changed, 1);
+            assert_eq!(
+                plan.response.results[0].before.as_ref().unwrap().entity,
+                Some(serde_json::json!({"kind": kind}))
+            );
+            projection
+                .apply_command(&QueueCommand::MutateItems(plan.command))
+                .unwrap();
+            let record = &projection.items[&iid("1")];
+            assert_eq!(record.item_version, version + 1);
+            assert!(record.entity_document.is_none());
+            assert!(record.index_fields.is_empty());
+            assert!(mutation_snapshot(record).entity.is_none());
+            assert!(mutation_predicate_matches(
+                record,
+                &ItemPredicate::EntityEq {
+                    pointer: String::new(),
+                    value: EntityPredicateValue::Missing,
+                },
+                ts(10)
+            ));
+            assert!(
+                projection
+                    .index_lookup("by_kind", &[kind.as_bytes().to_vec()])
+                    .unwrap()
+                    .is_empty()
+            );
+            let repeat = projection.plan_item_mutation(&request).unwrap();
+            assert_eq!(repeat.response.summary.changed, 0);
+            assert!(matches!(
+                repeat.response.results[0].outcome,
+                ItemMutationOutcome::NoChange
+            ));
+        }
+    }
+
+    #[test]
     fn disposable_mutation_planner_matches_borrowed_validation() {
         use fireweed_core::RequestId;
         use fireweed_engine::{AddressedMutation, BatchUpdateValue};
@@ -6466,6 +6675,104 @@ mod tests {
         assert!(
             priced_key < unpriced_key,
             "priced work must continue to sort ahead of unpriced FIFO work"
+        );
+    }
+
+    #[test]
+    fn retained_pages_follow_numeric_ids_and_lifecycle_after_reopen() {
+        let definition = qdef_with_emit_change_records(false);
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let mut enriched = push_item("2", "two", 20);
+        enriched.payload = Some(Bytes::from_static(b"recipient"));
+        enriched
+            .metadata
+            .insert("top_time", MetadataValue::String("09:00".into()));
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![
+                    push_item("10", "ten", 10),
+                    enriched,
+                    push_item("0", "zero", 0),
+                    push_item("18446744073709551615", "max", 30),
+                ],
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("2")],
+                lease_token: LeaseToken::new("retained").unwrap(),
+                lease_expires_at: ts(60),
+                worker_id: None,
+                authority_first: false,
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(iid("2"), FinalizeKind::Complete)],
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::ReplacePending(
+                fireweed_engine::ReplacePendingCommand {
+                    client_item_key: ClientItemKey::new("ten").unwrap(),
+                    superseded_item_id: iid("10"),
+                    replacement: push_item("11", "ten", 11),
+                },
+            ))
+            .unwrap();
+        for view in [
+            &projection,
+            &ProjectionData::from_image(&definition, projection.to_image(None)).unwrap(),
+        ] {
+            let first = view.retained_items(None, 2).unwrap();
+            assert_eq!(
+                first.iter().map(|row| row.item_id).collect::<Vec<_>>(),
+                vec![iid("0"), iid("2")]
+            );
+            assert_eq!(first[1].lifecycle_state, ItemState::Complete);
+            assert_eq!(first[1].attempt_count, 1);
+            assert_eq!(first[1].payload.as_deref(), Some(b"recipient".as_slice()));
+            assert_eq!(
+                first[1].metadata.get("top_time"),
+                Some(&MetadataValue::String("09:00".into()))
+            );
+            assert_eq!(
+                view.retained_items(Some(iid("2")), 2)
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.item_id)
+                    .collect::<Vec<_>>(),
+                vec![iid("11"), iid("18446744073709551615")]
+            );
+            assert!(
+                view.retained_items(Some(iid("18446744073709551615")), 1)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                view.retained_items(None, 0),
+                Err(EngineError::Invalid(_))
+            ));
+            assert!(matches!(
+                view.retained_items(None, 1001),
+                Err(EngineError::Invalid(_))
+            ));
+        }
+        projection
+            .apply_command(&QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![iid("2")],
+                force: true,
+            }))
+            .unwrap();
+        assert_eq!(
+            projection.retained_items(Some(iid("0")), 1).unwrap()[0].item_id,
+            iid("11")
         );
     }
 

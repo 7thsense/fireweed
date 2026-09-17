@@ -6,30 +6,29 @@ use fireweed::{
     DiscoveryGranularity, EngineError, GroupKey, LogConfig, MultiQueueClaimLimits,
     MultiQueueClaimTarget, NewItem, ObjectLogAuthority, OldestFirstScopePrefix, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    ProjectionStoreConfig, QueueCreationPolicy, QueueId, QueueKey, QueueTemplate, RecurrencePolicy,
-    RetryPolicy, StorageConfig, SystemClock, TenantId, select_active_scope_from_prefix,
+    QueueCreationPolicy, QueueId, QueueKey, QueueTemplate, RecurrencePolicy, RetryPolicy,
+    StorageConfig, SystemClock, TenantId, select_active_scope_from_prefix,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = temporary_database_path("run");
-    remove_sqlite_files(&path);
+    let path = temporary_root("run");
+    remove_fixture(&path);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(run_workflow(&path));
-    remove_sqlite_files(&path);
+    remove_fixture(&path);
     result
 }
 
 async fn run_workflow(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let log_root = path.with_extension("object-log");
+    let log_root = path.to_path_buf();
     std::fs::create_dir_all(&log_root)?;
     let mut cfg = StorageConfig::memory();
     cfg.log = LogConfig::Filesystem { root: log_root };
-    cfg.projection = ProjectionStoreConfig::Turso {
-        path: path.with_extension("turso"),
-    };
+    // Discovery is available on the log-backed memory projection. Native Turso
+    // supports the addressed workflow in fireweed-workload, but not discovery.
     cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
     let fireweed = fireweed::open(cfg, clock)?;
     let deliveries = queue("deliveries");
@@ -220,7 +219,7 @@ fn queue_template() -> QueueTemplate {
     .with_revision("v1")
 }
 
-fn temporary_database_path(label: &str) -> PathBuf {
+fn temporary_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "fireweed-scheduler-boundary-{label}-{}-{}.db",
         std::process::id(),
@@ -231,14 +230,11 @@ fn temporary_database_path(label: &str) -> PathBuf {
     ))
 }
 
-fn remove_sqlite_files(path: &Path) {
-    for suffix in ["", "-shm", "-wal"] {
-        let candidate = PathBuf::from(format!("{}{}", path.display(), suffix));
-        if let Err(error) = std::fs::remove_file(&candidate)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("could not remove {}: {error}", candidate.display());
-        }
+fn remove_fixture(path: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("could not remove {}: {error}", path.display());
     }
 }
 
@@ -248,13 +244,13 @@ mod tests {
 
     #[test]
     fn public_workflow_runs_end_to_end() {
-        let path = temporary_database_path("test");
-        remove_sqlite_files(&path);
+        let path = temporary_root("test");
+        remove_fixture(&path);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime.block_on(run_workflow(&path)).unwrap();
-        remove_sqlite_files(&path);
+        remove_fixture(&path);
     }
 }

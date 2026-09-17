@@ -40,8 +40,8 @@ fn service_help_advertises_only_fireweed_runtime_names() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(stdout.starts_with("fireweed-service\n"));
     assert!(stdout.contains("FIREWEED_LISTEN_ADDR"));
-    assert!(stdout.contains("FIREWEED_LOG_BACKEND=memory|sqlite|postgres|filesystem|s3"));
-    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|sqlite|turso|postgres"));
+    assert!(stdout.contains("FIREWEED_LOG_BACKEND=memory|postgres|filesystem|s3"));
+    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|turso|postgres"));
     assert!(
         stdout
             .contains("FIREWEED_TURSO_PROJECTION_PATH=/var/lib/fireweed/fireweed-projection.turso")
@@ -204,7 +204,7 @@ fn s3_env_builds_typed_shared_profile() {
 
 #[test]
 fn every_s3_projection_accepts_postgres_publication_authority() {
-    for projection in ["memory", "sqlite"] {
+    for projection in ["memory", "turso"] {
         let config = Config::from_env(&env(&[
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -239,12 +239,12 @@ fn every_s3_projection_accepts_postgres_publication_authority() {
 /// `FIREWEED_LOG_BACKEND=s3` pairs with public projections memory and sqlite;
 /// postgres when the `postgres` feature is on.
 #[test]
-fn first_class_s3_log_backend_pairs_with_memory_and_sqlite() {
+fn first_class_s3_log_backend_pairs_with_memory_and_turso() {
     for (projection, extra) in [
         ("memory", None),
         (
-            "sqlite",
-            Some(("FIREWEED_SQLITE_PROJECTION_PATH", "/data/s3.db")),
+            "turso",
+            Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
         ),
     ] {
         let mut pairs = vec![

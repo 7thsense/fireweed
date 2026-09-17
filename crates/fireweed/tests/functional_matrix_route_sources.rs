@@ -1,19 +1,19 @@
 //! P10r exact functional-matrix route source leaves (provider-neutral IDs).
 //!
-//! These leaves are compile/list-addressable dry-run sources for the public 5×4
+//! These leaves are compile/list-addressable dry-run sources for the public 4×3
 //! matrix. P2r binds semantic requirements to the listed harness IDs; P10 executes
 //! them. Broad substring cargo filters are forbidden — each leaf uses a full
 //! exact test name under this target.
 //!
 //! Governing axes: `docs/helix/04-build/storage-authority-manifest.json`
-//! (`memory|sqlite|postgres|filesystem|s3` × `memory|sqlite|turso|postgres`).
+//! (`memory|postgres|filesystem|s3` × `memory|turso|postgres`).
 //!
 //! Leaf families:
-//! - **strict** — 20 cells, `ResponseBarrier::Strict` validate dry-run
-//! - **object_log_async** — 8 filesystem/s3 cells, `AsyncProjection` validate dry-run
-//! - **async_invalid** — 12 non-object-log cells, pre-I/O rejection dry-run
+//! - **strict** — 12 cells, `ResponseBarrier::Strict` validate dry-run
+//! - **object_log_async** — 6 filesystem/s3 cells, `AsyncProjection` validate dry-run
+//! - **async_invalid** — 6 non-object-log cells, pre-I/O rejection dry-run
 //! - **ac_txn_dry_run** — aggregate AC-TXN-5/5A cardinality dry-runs over the same axes
-//! - **t0_t2_register** — proves the T0–T2 matrix harness is registered (20 cells)
+//! - **t0_t2_register** — proves the T0–T2 matrix harness is registered (12 cells)
 //!
 //! Cell IDs use the manifest separator (`--`). Test function names map
 //! `log--projection` to rustc-safe `prefix_log_projection`.
@@ -30,10 +30,10 @@ use fireweed::{
 const ASYNC_REQUIRES_OBJECT_LOG: EngineError =
     EngineError::Invalid("async-projection-requires-object-log");
 
-const LOGS: [&str; 5] = ["memory", "sqlite", "postgres", "filesystem", "s3"];
-const PROJECTIONS: [&str; 4] = ["memory", "sqlite", "turso", "postgres"];
+const LOGS: [&str; 4] = ["memory", "postgres", "filesystem", "s3"];
+const PROJECTIONS: [&str; 3] = ["memory", "turso", "postgres"];
 const OBJECT_LOGS: [&str; 2] = ["filesystem", "s3"];
-const NON_OBJECT_LOGS: [&str; 3] = ["memory", "sqlite", "postgres"];
+const NON_OBJECT_LOGS: [&str; 2] = ["memory", "postgres"];
 
 fn cell_id(log: &str, projection: &str) -> String {
     format!("{log}--{projection}")
@@ -70,9 +70,6 @@ fn dummy_pg_url() -> &'static str {
 fn projection_cfg(projection: &str, root: &Path, tag: &str) -> ProjectionStoreConfig {
     match projection {
         "memory" => ProjectionStoreConfig::Memory,
-        "sqlite" => ProjectionStoreConfig::Sqlite {
-            path: root.join(format!("{tag}-projection.db")),
-        },
         "turso" => ProjectionStoreConfig::Turso {
             path: root.join(format!("{tag}-projection.turso")),
         },
@@ -86,9 +83,6 @@ fn projection_cfg(projection: &str, root: &Path, tag: &str) -> ProjectionStoreCo
 fn log_cfg(log: &str, root: &Path, tag: &str) -> LogConfig {
     match log {
         "memory" => LogConfig::Memory,
-        "sqlite" => LogConfig::Sqlite {
-            path: root.join(format!("{tag}-log.db")),
-        },
         "postgres" => LogConfig::Postgres {
             url: ConfigSecret::new(dummy_pg_url()),
             schema: Some(format!("p10r_{tag}")),
@@ -204,7 +198,7 @@ fn dry_run_async_invalid(log: &str, projection: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Exact strict leaves (20)
+// Exact strict leaves (12)
 // ---------------------------------------------------------------------------
 
 macro_rules! strict_leaf {
@@ -217,28 +211,20 @@ macro_rules! strict_leaf {
 }
 
 strict_leaf!(strict_memory_memory, "memory", "memory");
-strict_leaf!(strict_memory_sqlite, "memory", "sqlite");
 strict_leaf!(strict_memory_turso, "memory", "turso");
 strict_leaf!(strict_memory_postgres, "memory", "postgres");
-strict_leaf!(strict_sqlite_memory, "sqlite", "memory");
-strict_leaf!(strict_sqlite_sqlite, "sqlite", "sqlite");
-strict_leaf!(strict_sqlite_turso, "sqlite", "turso");
-strict_leaf!(strict_sqlite_postgres, "sqlite", "postgres");
 strict_leaf!(strict_postgres_memory, "postgres", "memory");
-strict_leaf!(strict_postgres_sqlite, "postgres", "sqlite");
 strict_leaf!(strict_postgres_turso, "postgres", "turso");
 strict_leaf!(strict_postgres_postgres, "postgres", "postgres");
 strict_leaf!(strict_filesystem_memory, "filesystem", "memory");
-strict_leaf!(strict_filesystem_sqlite, "filesystem", "sqlite");
 strict_leaf!(strict_filesystem_turso, "filesystem", "turso");
 strict_leaf!(strict_filesystem_postgres, "filesystem", "postgres");
 strict_leaf!(strict_s3_memory, "s3", "memory");
-strict_leaf!(strict_s3_sqlite, "s3", "sqlite");
 strict_leaf!(strict_s3_turso, "s3", "turso");
 strict_leaf!(strict_s3_postgres, "s3", "postgres");
 
 // ---------------------------------------------------------------------------
-// Exact object-log async leaves (8)
+// Exact object-log async leaves (6)
 // ---------------------------------------------------------------------------
 
 macro_rules! async_valid_leaf {
@@ -251,7 +237,6 @@ macro_rules! async_valid_leaf {
 }
 
 async_valid_leaf!(object_log_async_filesystem_memory, "filesystem", "memory");
-async_valid_leaf!(object_log_async_filesystem_sqlite, "filesystem", "sqlite");
 async_valid_leaf!(object_log_async_filesystem_turso, "filesystem", "turso");
 async_valid_leaf!(
     object_log_async_filesystem_postgres,
@@ -259,12 +244,11 @@ async_valid_leaf!(
     "postgres"
 );
 async_valid_leaf!(object_log_async_s3_memory, "s3", "memory");
-async_valid_leaf!(object_log_async_s3_sqlite, "s3", "sqlite");
 async_valid_leaf!(object_log_async_s3_turso, "s3", "turso");
 async_valid_leaf!(object_log_async_s3_postgres, "s3", "postgres");
 
 // ---------------------------------------------------------------------------
-// Exact async-invalid leaves (12)
+// Exact async-invalid leaves (6)
 // ---------------------------------------------------------------------------
 
 macro_rules! async_invalid_leaf {
@@ -277,15 +261,9 @@ macro_rules! async_invalid_leaf {
 }
 
 async_invalid_leaf!(async_invalid_memory_memory, "memory", "memory");
-async_invalid_leaf!(async_invalid_memory_sqlite, "memory", "sqlite");
 async_invalid_leaf!(async_invalid_memory_turso, "memory", "turso");
 async_invalid_leaf!(async_invalid_memory_postgres, "memory", "postgres");
-async_invalid_leaf!(async_invalid_sqlite_memory, "sqlite", "memory");
-async_invalid_leaf!(async_invalid_sqlite_sqlite, "sqlite", "sqlite");
-async_invalid_leaf!(async_invalid_sqlite_turso, "sqlite", "turso");
-async_invalid_leaf!(async_invalid_sqlite_postgres, "sqlite", "postgres");
 async_invalid_leaf!(async_invalid_postgres_memory, "postgres", "memory");
-async_invalid_leaf!(async_invalid_postgres_sqlite, "postgres", "sqlite");
 async_invalid_leaf!(async_invalid_postgres_turso, "postgres", "turso");
 async_invalid_leaf!(async_invalid_postgres_postgres, "postgres", "postgres");
 
@@ -294,7 +272,7 @@ async_invalid_leaf!(async_invalid_postgres_postgres, "postgres", "postgres");
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ac_txn_dry_run_strict_enumerates_all_20_manifest_cells() {
+fn ac_txn_dry_run_strict_enumerates_all_12_manifest_cells() {
     let mut seen = std::collections::BTreeSet::new();
     for log in LOGS {
         for projection in PROJECTIONS {
@@ -302,11 +280,11 @@ fn ac_txn_dry_run_strict_enumerates_all_20_manifest_cells() {
             seen.insert(cell_id(log, projection));
         }
     }
-    assert_eq!(seen.len(), 20, "AC-TXN dry-run strict must cover 20 cells");
+    assert_eq!(seen.len(), 12, "AC-TXN dry-run strict must cover 12 cells");
 }
 
 #[test]
-fn ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells() {
+fn ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells() {
     let mut seen = std::collections::BTreeSet::new();
     for log in NON_OBJECT_LOGS {
         for projection in PROJECTIONS {
@@ -316,13 +294,13 @@ fn ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells() {
     }
     assert_eq!(
         seen.len(),
-        12,
-        "AC-TXN dry-run async-invalid must cover 12 cells"
+        6,
+        "AC-TXN dry-run async-invalid must cover 6 cells"
     );
 }
 
 #[test]
-fn ac_txn_dry_run_object_log_async_enumerates_all_8_cells() {
+fn ac_txn_dry_run_object_log_async_enumerates_all_6_cells() {
     let mut seen = std::collections::BTreeSet::new();
     for log in OBJECT_LOGS {
         for projection in PROJECTIONS {
@@ -332,8 +310,8 @@ fn ac_txn_dry_run_object_log_async_enumerates_all_8_cells() {
     }
     assert_eq!(
         seen.len(),
-        8,
-        "AC-TXN dry-run object-log async must cover 8 cells"
+        6,
+        "AC-TXN dry-run object-log async must cover 6 cells"
     );
 }
 
@@ -344,9 +322,9 @@ fn ac_txn_dry_run_object_log_async_enumerates_all_8_cells() {
 #[test]
 fn t0_t2_register_manifest_axes_match_authority() {
     // Pure axis arithmetic from the authority axes — no cargo execution claim.
-    assert_eq!(LOGS.len() * PROJECTIONS.len(), 20);
-    assert_eq!(OBJECT_LOGS.len() * PROJECTIONS.len(), 8);
-    assert_eq!(NON_OBJECT_LOGS.len() * PROJECTIONS.len(), 12);
+    assert_eq!(LOGS.len() * PROJECTIONS.len(), 12);
+    assert_eq!(OBJECT_LOGS.len() * PROJECTIONS.len(), 6);
+    assert_eq!(NON_OBJECT_LOGS.len() * PROJECTIONS.len(), 6);
     for log in LOGS {
         for projection in PROJECTIONS {
             let id = cell_id(log, projection);
@@ -383,6 +361,6 @@ fn route_source_leaf_ids_are_provider_neutral() {
         }
     }
     // Axis tables themselves are the only allowed selector vocabulary.
-    assert_eq!(LOGS, ["memory", "sqlite", "postgres", "filesystem", "s3"]);
-    assert_eq!(PROJECTIONS, ["memory", "sqlite", "turso", "postgres"]);
+    assert_eq!(LOGS, ["memory", "postgres", "filesystem", "s3"]);
+    assert_eq!(PROJECTIONS, ["memory", "turso", "postgres"]);
 }

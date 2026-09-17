@@ -71,8 +71,8 @@ if [[ "$MODE" == "enforcing" ]]; then
     rustup run 1.97.1 cargo test -p fireweed-release -- --nocapture
 
     echo "--- coverage threshold parser fixtures ---"
-    bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate fireweed-core --min-lines 90 --min-branches 85
-    bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/engine-pass.info" --crate fireweed-engine --min-lines 80
+    bash "${SCRIPT_DIR}/check-lcov-coverage.sh" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate fireweed-core --min-lines 90 --min-branches 85
+    bash "${SCRIPT_DIR}/check-lcov-coverage.sh" --fixture "${SCRIPT_DIR}/fixtures/lcov/engine-pass.info" --crate fireweed-engine --min-lines 80
 
     echo "--- product workflow suite names (P2r exact set) ---"
     bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" --self-test

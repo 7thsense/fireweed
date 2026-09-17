@@ -2,13 +2,12 @@
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn run_workflow(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let log_root = path.with_extension("object-log");
+    let log_root = path.to_path_buf();
     std::fs::create_dir_all(&log_root)?;
     let mut cfg = StorageConfig::memory();
     cfg.log = LogConfig::Filesystem { root: log_root };
-    cfg.projection = ProjectionStoreConfig::Turso {
-        path: path.with_extension("turso"),
-    };
+    // Discovery is available on the log-backed memory projection. Native Turso
+    // supports the addressed workflow in fireweed-workload, but not discovery.
     cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
     let fireweed = fireweed::open(cfg, clock)?;
     let deliveries = queue("deliveries");

@@ -527,18 +527,6 @@ fn memory_cfg() -> StorageConfig {
     StorageConfig::memory()
 }
 
-fn memory_sqlite_cfg(root: &Path) -> StorageConfig {
-    let mut cfg = StorageConfig::memory();
-    cfg.projection = ProjectionStoreConfig::Sqlite {
-        path: root.join("projection.sqlite"),
-    };
-    cfg.namespace = format!("p5-mem-sqlite-{}", std::process::id());
-    cfg.segments = segments();
-    cfg.response_barrier = ResponseBarrier::Strict;
-    cfg.recovery = RecoveryPolicy::default();
-    cfg
-}
-
 fn memory_turso_cfg(root: &Path) -> StorageConfig {
     let mut cfg = StorageConfig::memory();
     cfg.projection = ProjectionStoreConfig::Turso {
@@ -577,12 +565,6 @@ async fn p5_memory_memory_volatility_reopen() {
 }
 
 #[tokio::test]
-async fn p5_memory_sqlite_projection_reopen() {
-    let root = FixtureRoot::new("memory_sqlite");
-    exercise_class_b_reopen("memory--sqlite", true, memory_sqlite_cfg(root.path())).await;
-}
-
-#[tokio::test]
 async fn p5_memory_turso_projection_reopen() {
     let root = FixtureRoot::new("memory_turso");
     exercise_class_b_reopen("memory--turso", true, memory_turso_cfg(root.path())).await;
@@ -613,28 +595,6 @@ mod postgres_cell {
     }
 }
 
-/// Offline claim ban: Class B memory log never claims durable_log_replay.
-#[test]
-fn p5_class_b_four_cells_never_claim_durable_log_replay() {
-    // Mirrors fireweed-conformance::matrix_classes hard rule without a dep cycle.
-    for proj in ["memory", "sqlite", "turso", "postgres"] {
-        let cell = format!("memory--{proj}");
-        let durable_log_replay_claimed = false;
-        assert!(
-            !durable_log_replay_claimed,
-            "{cell}: Class B must not claim durable_log_replay"
-        );
-        let process_local = proj == "memory";
-        if process_local {
-            // Volatility only — no projection_reopen product claim.
-            assert_eq!(proj, "memory");
-        } else {
-            // Durable projection may claim projection-only reopen, never log-rebuild.
-            assert_ne!(proj, "memory");
-        }
-    }
-}
-
 /// Composition smoke: every Class B cell opens via `StorageConfig` (sync path for local cells).
 #[test]
 fn p5_class_b_local_cells_open_via_storage_config() {
@@ -642,6 +602,5 @@ fn p5_class_b_local_cells_open_via_storage_config() {
     let clock = Arc::new(SystemClock);
 
     open(memory_cfg(), Arc::clone(&clock) as _).expect("open memory×memory");
-    open(memory_sqlite_cfg(root.path()), Arc::clone(&clock) as _).expect("open memory×sqlite");
     open(memory_turso_cfg(root.path()), clock as _).expect("open memory×turso");
 }

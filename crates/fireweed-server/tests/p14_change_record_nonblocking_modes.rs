@@ -225,7 +225,10 @@ async fn p14_external_kafka_feature_on_composition_accepts_class_a() {
     let root = tmp_root("kafka-on");
     let mut c = base_config(fs_backend(root.clone()));
     c.change_record_sink = kafka_sink();
-    match start(c).await {
+    match tokio::time::timeout(Duration::from_secs(20), start(c))
+        .await
+        .expect("local Kafka fixture must be reachable within 20 seconds")
+    {
         Ok(s) => {
             with_heartbeat(|| async {
                 redis_xadd(s.addr()).await;

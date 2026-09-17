@@ -172,7 +172,10 @@ trait FireweedDataPlane: Send + Sync {
         granularity: DiscoveryGranularity,
     ) -> FacadeFuture<'a, Vec<ActiveScope>>;
     fn retained_items<'a>(
-        &'a self, queue: &'a QueueKey, after: Option<ItemId>, limit: usize,
+        &'a self,
+        queue: &'a QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> FacadeFuture<'a, Vec<RetainedItemView>>;
     fn live_item<'a>(
         &'a self,
@@ -822,7 +825,10 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
         Box::pin(RuntimeCore::discover(self, queue, granularity))
     }
     fn retained_items<'a>(
-        &'a self, queue: &'a QueueKey, after: Option<ItemId>, limit: usize,
+        &'a self,
+        queue: &'a QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> FacadeFuture<'a, Vec<RetainedItemView>> {
         Box::pin(RuntimeCore::retained_items(self, queue, after, limit))
     }
@@ -1086,13 +1092,6 @@ impl Fireweed {
                 || capabilities.rebuild_projection)
                 .then_some(ProjectionControl { inner })
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_buffered_group_commit_commands(&self) -> Option<usize> {
-        self.projection
-            .as_ref()
-            .and_then(ProjectionLifecycleHandle::buffered_group_commit_commands)
     }
 
     pub async fn ownership(&self, queue: &QueueKey) -> EngineResult<Ownership> {
@@ -1464,7 +1463,10 @@ impl Fireweed {
     }
     /// Bounded retained-row page; see the runtime method for consistency semantics.
     pub async fn retained_items(
-        &self, queue: &QueueKey, after: Option<ItemId>, limit: usize,
+        &self,
+        queue: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> EngineResult<Vec<RetainedItemView>> {
         self.inner.retained_items(queue, after, limit).await
     }

@@ -110,7 +110,7 @@ Fireweed separates queue semantics from storage and transport:
 | Projection | Rebuildable item, eligibility, lease, and query state |
 
 Log and projection storage are independent axes. Local development can use
-memory or SQLite. Durable deployments can compose an object log or Postgres log
+memory or a filesystem log with a Turso projection. Durable deployments can compose an object log or Postgres log
 with the projections documented in the operator guide. Unsupported pairings
 fail at startup instead of silently selecting another backend.
 
@@ -126,7 +126,7 @@ fail at startup instead of silently selecting another backend.
   covers embedded construction and worker lifecycle verbs.
 - [Embedded workflow example](crates/fireweed/examples/scheduler_boundary.rs)
   composes queue templates, grouped discovery, stateless dispersion, bounded
-  multi-queue claims, and worker finalization over durable relational SQLite.
+  multi-queue claims, and worker finalization over a filesystem log with a memory projection.
 - [Container runtime contract](docs/deployment/container-runtime-contract.md)
   lists runtime settings and storage profiles.
 - [Operator deployment guide](docs/deployment/operator-guide.md) covers Helm,
@@ -135,12 +135,14 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
+- [v0.31.28 release notes](docs/releases/v0.31.28.md) cover storage cleanup,
+  correctness fixes, verification and performance evidence.
 - [v0.30.0 identity note](docs/releases/v0.30.0.md) reserves package identity
   `0.30.0` ahead of candidate-source freeze (not a cut tag by itself).
 - [v0.29.2 release notes](docs/releases/v0.29.2.md) (historical) describe Snorri
   validate-before-apply fixes and E3 TP-003 emitter scaffold.
 - [v0.23.2 release notes](docs/releases/v0.23.2.md) (historical) describe an earlier
-  public 5×3 storage matrix; current product law is the 5×4 matrix with Turso default.
+  public 5×3 storage matrix; current storage support is the 4×3 matrix with Turso default.
 - [v0.23.0 release notes](docs/releases/v0.23.0.md) (historical) describe the native-S3
   authority cutover and provider-neutral E3 runner. Current S3 publication authority is
   NativeConditionalWrite only; provider brands are not product SKUs.

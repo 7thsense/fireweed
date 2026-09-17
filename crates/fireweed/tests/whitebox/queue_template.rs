@@ -4,6 +4,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(all(feature = "postgres", feature = "objectlog"))]
+use crate::{
+    CommitResponseBarrier, ComposedProjectionConfig, ComposedStorageConfig, ObjectLogConfig,
+    ProjectionRecoveryPolicy, SegmentSettings,
+};
 use fireweed::{
     CohortOnIncomplete, CohortPolicy, CreateQueue, EligibilityPolicy, EnsureQueueError,
     EntitySchemaDocument, Fireweed, GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec,

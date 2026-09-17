@@ -566,7 +566,7 @@ mod tests {
         assert!(futures::executor::block_on(fireweed.queue_definition(&queue)).is_err());
     }
 
-    fn filesystem_sqlite_config(label: &str) -> (PathBuf, StorageConfig) {
+    fn filesystem_turso_config(label: &str) -> (PathBuf, StorageConfig) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -579,8 +579,8 @@ mod tests {
             log: LogConfig::Filesystem {
                 root: base.join("log"),
             },
-            projection: ProjectionStoreConfig::Sqlite {
-                path: base.join("projection.sqlite"),
+            projection: ProjectionStoreConfig::Turso {
+                path: base.join("projection.db"),
             },
             control_plane: None,
             authority: Some(ObjectLogAuthority::NativeConditionalWrite),
@@ -599,12 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_sqlite_recovery_reopens_exact_population() {
-        let (base, config) = filesystem_sqlite_config("recovery");
+    fn filesystem_turso_recovery_reopens_exact_population() {
+        let (base, config) = filesystem_turso_config("recovery");
         let shape = all_shapes()[0];
         let queue = qkey("recovery");
         let fireweed = open(config.clone(), Arc::new(SystemClock)).expect("open");
-        let population = futures::executor::block_on(seed_recovery_population(
+        let population = fireweed_objectlog::block_on_objectlog_future(seed_recovery_population(
             &fireweed,
             bench_qdef("bench", "recovery", &shape),
             &queue,
@@ -616,8 +616,8 @@ mod tests {
         .expect("seed");
         drop(fireweed);
 
-        let result = futures::executor::block_on(reopen_verify_and_drain(
-            "filesystem--sqlite",
+        let result = fireweed_objectlog::block_on_objectlog_future(reopen_verify_and_drain(
+            "filesystem--turso",
             0,
             &queue,
             population,
@@ -626,32 +626,6 @@ mod tests {
         .expect("recover");
         assert_eq!(result.reopened_metrics.pending, 128);
         assert_eq!(result.drained_metrics.pending, 0);
-        std::fs::remove_dir_all(base).expect("cleanup");
-    }
-
-    #[test]
-    fn filesystem_sqlite_projection_maintenance_preserves_population() {
-        let (base, config) = filesystem_sqlite_config("maintenance");
-        let shape = all_shapes()[1];
-        let queue = qkey("maintenance");
-        let fireweed = open(config, Arc::new(SystemClock)).expect("open");
-        let result = futures::executor::block_on(run_projection_maintenance(
-            &fireweed,
-            bench_qdef("bench", "maintenance", &shape),
-            &queue,
-            &shape,
-            "filesystem--sqlite",
-            0,
-            128,
-            64,
-        ))
-        .expect("maintenance");
-        assert_eq!(
-            result.population.identity_sha256,
-            result.post_rebuild_identity_sha256
-        );
-        assert_eq!(result.drained_metrics.pending, 0);
-        drop(fireweed);
         std::fs::remove_dir_all(base).expect("cleanup");
     }
 }

@@ -43,84 +43,22 @@ SEMANTIC_IDS = (
     "SNORRI-RETRY-ONCE",
 )
 
-# 12 non-S3 product cells of the public log × projection matrix excluding s3
-# (memory|sqlite|postgres|filesystem × memory|sqlite|postgres).
-NON_S3_CELLS = (
-    "memory--memory",
-    "memory--sqlite",
-    "memory--postgres",
-    "sqlite--memory",
-    "sqlite--sqlite",
-    "sqlite--postgres",
-    "postgres--memory",
-    "postgres--sqlite",
-    "postgres--postgres",
-    "filesystem--memory",
-    "filesystem--sqlite",
-    "filesystem--postgres",
-)
-
-# Local-deterministic subset (no live Postgres required).
-NON_S3_LOCAL_CELLS = (
-    "memory--memory",
-    "memory--sqlite",
-    "sqlite--memory",
-    "sqlite--sqlite",
-    "filesystem--memory",
-    "filesystem--sqlite",
-)
-
-# Class B memory-log cells (P5): log=memory × {memory,sqlite,turso,postgres}.
-CLASS_B_CELLS = (
-    "memory--memory",
-    "memory--sqlite",
-    "memory--turso",
-    "memory--postgres",
-)
-
-# Live S3 product cells (P6s): s3 log × {memory,sqlite,postgres} (+ turso when exercised).
-S3_CELLS = (
-    "s3--memory",
-    "s3--sqlite",
-    "s3--postgres",
-)
+# Current public matrix: four log backends × three projection backends.
+NON_S3_CELLS = tuple(f"{log}--{projection}" for log in ("memory", "postgres", "filesystem")
+                     for projection in ("memory", "turso", "postgres"))
+NON_S3_LOCAL_CELLS = tuple(f"{log}--{projection}" for log in ("memory", "filesystem")
+                           for projection in ("memory", "turso"))
+CLASS_B_CELLS = tuple(f"memory--{projection}" for projection in ("memory", "turso", "postgres"))
+S3_CELLS = tuple(f"s3--{projection}" for projection in ("memory", "turso", "postgres"))
 
 # Forbidden provider-brand tokens in fixtures / cell IDs (P1s / P4 neutrality).
 FORBIDDEN_BRANDS = re.compile(
     r"(?i)\b(garage|minio|eldir|aws|gcs|azure|r2|cloudflare|digitalocean)\b"
 )
 
-# Map semantic ID → Fireweed-owned proof commands. Commands are provider-neutral
-# cargo filters; live PG/S3 fixtures are gated by the environment, not brand names.
+# Common semantic proofs. Lifecycle commands are generated per exact current cell by
+# commands_for; live PG/S3 fixtures are required by the selected harnesses.
 LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
-    "SNORRI-MATRIX-LIFECYCLE": [
-        [
-            "rustup",
-            "run",
-            "1.97.1",
-            "cargo",
-            "test",
-            "-p",
-            "fireweed",
-            "--test",
-            "public_interface_conformance",
-            "--",
-            "--nocapture",
-        ],
-        [
-            "rustup",
-            "run",
-            "1.97.1",
-            "cargo",
-            "test",
-            "-p",
-            "fireweed",
-            "--lib",
-            "epoch::",
-            "--",
-            "--nocapture",
-        ],
-    ],
     "SNORRI-REOPEN": [
         [
             "rustup",
@@ -132,7 +70,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
             "fireweed",
             "--test",
             "storage_matrix_t0_t2",
-            "storage_matrix_t0_t2_all_twenty_cells",
+            "storage_matrix_t0_t2_all_twelve_cells",
             "--",
             "--nocapture",
         ],
@@ -162,8 +100,8 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
             "-p",
             "fireweed",
             "--test",
-            "public_interface_conformance",
-            "filesystem_sqlite",
+            "public_durability_matrix",
+            "objectlog_turso_strict_reopen_and_log_only_rebuild",
             "--",
             "--nocapture",
         ],
@@ -197,7 +135,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
             "-p",
             "fireweed",
             "--features",
-            "objectlog,sqlite,postgres",
+            "objectlog,turso,postgres",
             "--test",
             "p6s_s3_durability_acceptance",
             "snorri_reopen_",
@@ -215,7 +153,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
             "-p",
             "fireweed",
             "--features",
-            "objectlog,sqlite,postgres",
+            "objectlog,turso,postgres",
             "--test",
             "p6s_s3_durability_acceptance",
             "snorri_projection_rebuild_",
@@ -233,7 +171,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
             "-p",
             "fireweed",
             "--features",
-            "objectlog,sqlite,postgres",
+            "objectlog,turso,postgres",
             "--test",
             "p6s_s3_durability_acceptance",
             "snorri_retry_once_",
@@ -301,7 +239,7 @@ def validate_ledger(path: Path, required_ids: tuple[str, ...], cells: tuple[str,
         # Aggregate rows (reopen / retry / rebuild) may use cell_id "matrix".
         if cell and cell != "matrix":
             if cell not in cells and not any(cell.startswith(c) for c in cells):
-                # Allow variant suffixes (e.g. filesystem--sqlite--strict).
+                # Allow variant suffixes (e.g. filesystem--turso--strict).
                 base = "--".join(cell.split("--")[:2])
                 if base not in cells:
                     die(f"cell_id {cell!r} not in required cell set for {sid}")
@@ -334,10 +272,29 @@ def validate_ledger(path: Path, required_ids: tuple[str, ...], cells: tuple[str,
     )
 
 
-def print_matrix(cells: tuple[str, ...], ids: tuple[str, ...]) -> None:
+def commands_for(sid: str, cells_name: str) -> list[list[str]]:
+    if cells_name == "s3":
+        return S3_DURABILITY_COMMANDS.get(sid, [])
+    if sid == "SNORRI-MATRIX-LIFECYCLE":
+        commands = []
+        for cell in resolve_cells(cells_name):
+            log, projection = cell.split("--")
+            external = log == "postgres" or projection == "postgres"
+            features = "memory,objectlog,turso" + (",postgres" if external else "")
+            test = ("postgres_cells::" if external else "") + f"p7n_{log}_{projection}_lifecycle"
+            commands.append([
+                "rustup", "run", "1.97.1", "cargo", "test", "-p", "fireweed",
+                "--features", features, "--test", "p7n_non_s3_lifecycle_parity",
+                test, "--", "--exact", "--nocapture",
+            ])
+        return commands
+    return LIFECYCLE_COMMANDS.get(sid, [])
+
+
+def print_matrix(cells: tuple[str, ...], ids: tuple[str, ...], *, cells_name: str) -> None:
     print("semantic_id\tcell_count\tcommand_count")
     for sid in ids:
-        cmds = LIFECYCLE_COMMANDS.get(sid, [])
+        cmds = commands_for(sid, cells_name)
         print(f"{sid}\t{len(cells)}\t{len(cmds)}")
     print("cells:")
     for c in cells:
@@ -345,9 +302,8 @@ def print_matrix(cells: tuple[str, ...], ids: tuple[str, ...]) -> None:
 
 
 def execute_commands(ids: tuple[str, ...], *, cells_name: str = "non-s3") -> None:
-    command_map = S3_DURABILITY_COMMANDS if cells_name == "s3" else LIFECYCLE_COMMANDS
     for sid in ids:
-        cmds = command_map.get(sid)
+        cmds = commands_for(sid, cells_name)
         if not cmds:
             die(f"no commands registered for {sid} (cells={cells_name})")
         for cmd in cmds:
@@ -369,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cells",
         default="non-s3",
         choices=("non-s3", "non-s3-local", "class-b", "s3", "all-listed"),
-        help="Cell set to require for lifecycle/reopen ledgers (default non-s3 = 12 cells)",
+        help="Cell set to require for lifecycle/reopen ledgers (default non-s3 = 9 cells)",
     )
     parser.add_argument(
         "--ids",
@@ -396,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     cells = resolve_cells(args.cells)
 
     if args.print_matrix:
-        print_matrix(cells, ids)
+        print_matrix(cells, ids, cells_name=args.cells)
         return 0
 
     if args.ledger is None and not args.execute:

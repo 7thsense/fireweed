@@ -129,7 +129,7 @@ async fn push_claim_finalize_over_resp(addr: std::net::SocketAddr) {
 /// the `spawn_blocking` + whole-operation boundary covers this combo the same way it covers postgres/inmemory
 /// (no reactor-thread panic on the sync postgres `connect`/`recover`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_sqlite_combo_runs_under_tokio() {
+async fn postgres_turso_combo_runs_under_tokio() {
     let url = std::env::var("FIREWEED_PG_TEST_URL")
         .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = format!("fireweed_pgsqlite_{}", std::process::id());
@@ -147,7 +147,7 @@ async fn postgres_sqlite_combo_runs_under_tokio() {
             url: scoped_url,
             credentials: None,
         },
-        projection: ProjectionSpec::Sqlite {
+        projection: ProjectionSpec::Turso {
             path: sqlite_path.clone(),
         },
         control_plane: ControlPlaneSpec::InProcess,

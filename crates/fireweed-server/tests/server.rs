@@ -7,13 +7,13 @@ use std::time::Duration;
 use fireweed_core::{
     EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
-    RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
-    AsyncProjectionSpec, ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest,
-    Clock, ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
-    FinalizePort, InMemoryControlPlane, LogStore, ProjectionRead, PushPort, PushSpec,
-    QueueControlPlane, QueueKey, ReclaimDriver,
+    AsyncProjectionSpec, ChangeRecord, ChangeRecordKind, ClaimPort, ClaimRequest, Clock,
+    ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
+    FinalizePort, InMemoryControlPlane, ProjectionRead, PushPort, PushSpec, QueueControlPlane,
+    QueueKey,
 };
 use fireweed_memory::{ManualClock, composed_memory_backend};
 use fireweed_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
@@ -22,21 +22,6 @@ use fireweed_server::{
     NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, ResponseBarrierSpec,
     SegmentConfig, emit_change_record_tick, start, start_with,
 };
-/// Filesystem object-log × Turso projection (sqlite log/projection selectors are retired).
-fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
-    BackendSpec {
-        log: LogSpec::ObjectLog(ObjectLogSpec::local(
-            root,
-            SegmentConfig::new(262_144, 20).unwrap(),
-        )),
-        projection: ProjectionSpec::Turso { path: projection },
-        control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
-    }
-}
-
 /// Object-log (LogEngine) × Turso projection — public default composition cell.
 fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
     BackendSpec {
@@ -140,35 +125,6 @@ fn tmp_runtime_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let _ = std::fs::remove_file(format!("{}-wal", projection.display()));
     let _ = std::fs::remove_file(format!("{}-shm", projection.display()));
     (root, projection)
-}
-
-#[cfg(any())]
-fn open_direct_objectlog_hybrid(
-    root: &std::path::Path,
-    projection: &std::path::Path,
-) -> fireweed_objectlog::AsyncObjectLogHybridBackend {
-    use fireweed_objectlog::{
-        AsyncObjectLogHybridBackend, HybridProductConfig, flush_config_from_segment,
-    };
-    let hybrid = HybridProductConfig {
-        deferred_flush_chunk: fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
-        strict: false,
-        async_monitor: None,
-    };
-    let flush = flush_config_from_segment(1024 * 1024, 5);
-    let path = projection.to_str().expect("utf8 projection path");
-    let open = AsyncObjectLogHybridBackend::open(root, path, flush, 0, hybrid);
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            rt.block_on(open)
-        }
-    }
-    .expect("recover objectlog/hybrid")
 }
 
 async fn raw_resp(addr: std::net::SocketAddr, parts: &[&str]) -> String {
@@ -857,12 +813,12 @@ async fn terminal_emission_metrics_reach_server_surface() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
+async fn objectlog_turso_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
     let first_id = {
         let server = start(Config::new(
-            objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -909,7 +865,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     let _ = std::fs::remove_file(format!("{}-wal", rebuilt_projection_path.display()));
     let _ = std::fs::remove_file(format!("{}-shm", rebuilt_projection_path.display()));
     let server = start(Config::new(
-        objectlog_sqlite_spec(object_root.clone(), rebuilt_projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), rebuilt_projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1150,14 +1106,14 @@ async fn memory_turso_server_push_claim_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen() {
+async fn segmented_objectlog_turso_push_claim_finalize_and_recovers_on_reopen() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed
     // `ObjectLog` axis); a push acks only after its segment seals (durable) AND applies to the projection.
     let (object_root, projection_path) = tmp_runtime_paths("segolsqlite");
     let first_id = {
         let server = start(Config::new(
-            objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -1202,7 +1158,7 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
     // committed segments (via `read_all`) so the acked item is NOT redelivered and ids keep advancing.
     let _ = std::fs::remove_file(&projection_path);
     let server = start(Config::new(
-        objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -1334,9 +1290,9 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
+async fn objectlog_turso_async_push_claim_finalize_and_recovers_on_reopen() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    // The `objectlog/hybrid-async` runtime profile end to end: it selects the object-log + hybrid substrate
+    // The `objectlog/turso async` runtime profile end to end: it selects the object-log + hybrid substrate
     // (manifest commit + synchronous in-memory apply/render is the success barrier; the SQLite image is an
     // asynchronous checkpoint), carries the async-apply thresholds, and recovers acked state on reopen.
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async");
@@ -1353,6 +1309,8 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
             SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
         );
         // A non-default threshold config the async profile carries into `start`.
+        config.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
+        config.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
         config.backend.async_projection = Some(
             AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
                 .expect("valid hybrid-async thresholds"),
@@ -1413,7 +1371,7 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
         .unwrap();
     assert!(
         empty.is_none(),
-        "acked item was redelivered after objectlog/hybrid-async recovery"
+        "acked item was redelivered after objectlog/turso async recovery"
     );
     let next_id: String = redis::cmd("XADD")
         .arg("t1:q1")
@@ -1432,9 +1390,9 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
     let _ = std::fs::remove_file(&projection_path);
 }
 
-/// The `objectlog/hybrid-async` config used by the crash/chaos tests below: the async spec plus a non-default
+/// The `objectlog/turso async` config used by the crash/chaos tests below: the async spec plus a non-default
 /// threshold set so the profile is exercised end to end (bead pqueue-fed791af).
-fn objectlog_hybrid_async_config(
+fn objectlog_turso_async_config(
     object_root: std::path::PathBuf,
     projection_path: std::path::PathBuf,
 ) -> Config {
@@ -1449,6 +1407,7 @@ fn objectlog_hybrid_async_config(
         &mut config,
         SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
     );
+    config.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
     config.backend.async_projection = Some(
         AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
             .expect("valid hybrid-async thresholds"),
@@ -1456,17 +1415,17 @@ fn objectlog_hybrid_async_config(
     config
 }
 
-/// CHAOS — crash MID-LEASE on the `objectlog/hybrid-async` profile: an item is claimed (XREADGROUP) but never
+/// CHAOS — crash MID-LEASE on the `objectlog/turso async` profile: an item is claimed (XREADGROUP) but never
 /// acked, then the server is dropped. On restart the recovered lease is neither DUPLICATED (a fresh
 /// XREADGROUP does not redeliver it) nor LOST (a subsequently-pushed item is the only thing delivered — the
 /// leased item stays in-flight, not re-queued to pending).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_loses() {
+async fn objectlog_turso_async_chaos_crash_mid_lease_neither_redelivers_nor_loses() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) =
         tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
     let leased_id = {
-        let server = start(objectlog_hybrid_async_config(
+        let server = start(objectlog_turso_async_config(
             object_root.clone(),
             projection_path.clone(),
         ))
@@ -1497,7 +1456,7 @@ async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_los
         id
     };
 
-    let server = start(objectlog_hybrid_async_config(
+    let server = start(objectlog_turso_async_config(
         object_root.clone(),
         projection_path.clone(),
     ))
@@ -1553,17 +1512,17 @@ async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_los
     let _ = std::fs::remove_file(&projection_path);
 }
 
-/// CHAOS — disk-loss of the SQLite projection image on the `objectlog/hybrid-async` profile: after two pushes
+/// CHAOS — disk-loss of the SQLite projection image on the `objectlog/turso async` profile: after two pushes
 /// the server is dropped and the projection db is DELETED. Because the object log is the source of truth, a
 /// restart replays the retained log from genesis and both items are delivered exactly once (nothing lost,
 /// nothing duplicated).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
+async fn objectlog_turso_async_chaos_disk_loss_replays_retained_object_log() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) =
         tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
     {
-        let server = start(objectlog_hybrid_async_config(
+        let server = start(objectlog_turso_async_config(
             object_root.clone(),
             projection_path.clone(),
         ))
@@ -1593,7 +1552,7 @@ async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
     // DISK LOSS: the async SQLite projection image is gone; only the durable object log remains.
     std::fs::remove_file(&projection_path).unwrap();
 
-    let server = start(objectlog_hybrid_async_config(
+    let server = start(objectlog_turso_async_config(
         object_root.clone(),
         projection_path.clone(),
     ))
@@ -1810,6 +1769,9 @@ async fn change_record_sink_rejected_on_legacy_hybrid_projection() {
         Duration::from_secs(60),
         vec![qdef()],
     );
+    config.backend.projection = ProjectionSpec::Hybrid {
+        path: projection_path.clone(),
+    };
     set_segment_config(
         &mut config,
         SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
@@ -1828,53 +1790,6 @@ async fn change_record_sink_rejected_on_legacy_hybrid_projection() {
             .expect("objectlog/hybrid must refuse enabled change-record delivery"),
         EngineError::Invalid("legacy-projection-change-record-delivery-retired")
     );
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
-}
-
-#[cfg(any())]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn objectlog_hybrid_request_id_replays_after_reopen() {
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-request-id");
-    let request_id = RequestId::new("hybrid-request-1").unwrap();
-    let body = vec![PushSpec {
-        priority: Some(PriorityValue::Int64(5)),
-        ..Default::default()
-    }];
-    let first = {
-        let backend = open_direct_objectlog_hybrid(&object_root, &projection_path);
-        backend.create_queue(qdef()).await.unwrap();
-        backend
-            .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
-            .await
-            .unwrap()
-    };
-
-    let reopened = open_direct_objectlog_hybrid(&object_root, &projection_path);
-    let replayed = reopened
-        .push_with_request_id(&shard(), request_id.clone(), body, ts(1), None)
-        .await
-        .unwrap();
-    assert!(first.is_fresh());
-    assert!(replayed.is_replayed());
-    assert_eq!(replayed.item_ids, first.item_ids);
-    assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
-    let err = reopened
-        .push_with_request_id(
-            &shard(),
-            request_id,
-            vec![PushSpec {
-                priority: Some(PriorityValue::Int64(6)),
-                ..Default::default()
-            }],
-            ts(2),
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::RequestIdConflict);
-
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
 }
@@ -2190,106 +2105,6 @@ async fn change_record_sink_failure_isolation() {
     assert_eq!(stable(&received[0]), stable(&received[1]));
 }
 
-#[derive(Default)]
-struct RecordingChangeRecordSink {
-    batches: std::sync::Mutex<Vec<Vec<ChangeRecordKind>>>,
-}
-
-impl RecordingChangeRecordSink {
-    fn batches(&self) -> Vec<Vec<ChangeRecordKind>> {
-        self.batches.lock().expect("sink poisoned").clone()
-    }
-}
-
-impl ChangeRecordSink for RecordingChangeRecordSink {
-    fn emit(
-        &self,
-        _shard: &QueueKey,
-        records: &[ChangeRecord],
-    ) -> fireweed_engine::EngineResult<()> {
-        self.batches
-            .lock()
-            .expect("sink poisoned")
-            .push(records.iter().map(|record| record.command_kind).collect());
-        Ok(())
-    }
-}
-
-#[cfg(any())]
-#[tokio::test]
-async fn reclaim_driver_reaps_only_after_emitter_advances_terminal_cursor() {
-    let backend = Arc::new(composed_sqlite_backend_in_memory().unwrap());
-    let shard = qkey();
-    backend.create_queue(qdef()).await.unwrap();
-
-    let ids = backend
-        .push(&shard, vec![PushSpec::default()], ts(0), None)
-        .await
-        .unwrap();
-    let claim = backend
-        .claim(ClaimRequest {
-            eligibility_time: None,
-            shard: shard.clone(),
-            worker_id: WorkerId::new("worker-1").unwrap(),
-            max_items: 1,
-            lease_token: LeaseToken::new("lease-1").unwrap(),
-            lease_expires_at: ts(60),
-            now: ts(1),
-            compatibility: Default::default(),
-            expected_epoch: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(claim.items[0].item_id, ids[0]);
-    backend
-        .finalize(
-            &shard,
-            vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
-            ts(2),
-            None,
-        )
-        .await
-        .unwrap();
-
-    let sink = RecordingChangeRecordSink::default();
-    let queues = vec![qdef()];
-
-    emit_change_record_tick(backend.as_ref(), &sink, &queues, 1).unwrap();
-    assert_eq!(
-        backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
-        Some(fireweed_engine::CommandPosition::new(shard.clone(), 0, 0))
-    );
-    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 1);
-
-    emit_change_record_tick(backend.as_ref(), &sink, &queues, 1).unwrap();
-    assert_eq!(
-        backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
-        Some(fireweed_engine::CommandPosition::new(shard.clone(), 0, 1))
-    );
-    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 1);
-
-    emit_change_record_tick(backend.as_ref(), &sink, &queues, 1).unwrap();
-    assert_eq!(
-        backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
-        Some(fireweed_engine::CommandPosition::new(shard.clone(), 0, 2))
-    );
-    assert_eq!(
-        backend.metrics(&shard).await.unwrap().complete,
-        1,
-        "the emitter owns only emission; it does not run a duplicate maintenance loop"
-    );
-    backend.tick(ts(100_000)).await.unwrap();
-    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 0);
-    assert_eq!(
-        sink.batches(),
-        vec![
-            vec![ChangeRecordKind::Push],
-            vec![ChangeRecordKind::Claim],
-            vec![ChangeRecordKind::Finalize],
-        ]
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_delivery() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
@@ -2334,73 +2149,4 @@ async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_de
     tokio::time::sleep(Duration::from_millis(150)).await;
     server.shutdown_and_drain(Duration::from_secs(5)).await;
     let _ = std::fs::remove_dir_all(&object_root);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn class_a_sqlite_memory_starts_with_opt_out_and_disabled_endpoint_tuple_rejected() {
-    let dir = std::env::temp_dir().join(format!(
-        "p8c-sqlite-memory-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let log_path = dir.join("log.sqlite");
-
-    // Disabled + endpoint is tuple-coherence rejection at start.
-    let mut disabled = Config::new(
-        BackendSpec {
-            log: LogSpec::Sqlite {
-                path: log_path.clone(),
-            },
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-        },
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    );
-    disabled.change_record_sink.endpoint = Some("http://127.0.0.1:9".into());
-    assert_eq!(
-        start(disabled).await.err(),
-        Some(EngineError::Invalid(
-            "change-record-endpoint-requires-enabled"
-        ))
-    );
-
-    // Enabled embedded + all queues opted out still starts (no emitter task needed).
-    let mut opted_out = qdef();
-    opted_out.emit_change_records = false;
-    let mut enabled = Config::new(
-        BackendSpec {
-            log: LogSpec::Sqlite {
-                path: log_path.clone(),
-            },
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-        },
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![opted_out],
-    );
-    enabled.change_record_sink = ChangeRecordSinkConfig {
-        enabled: true,
-        endpoint: None,
-        ..ChangeRecordSinkConfig::default()
-    };
-    let server = start(enabled)
-        .await
-        .expect("opt-out queues allow enabled sink without emitter work");
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&dir);
 }

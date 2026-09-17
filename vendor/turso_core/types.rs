@@ -3926,9 +3926,7 @@ mod tests {
             let reference = Record::new(values.into_iter().try_collect().unwrap());
             let mut expected = std::vec::Vec::new();
             reference.serialize(&mut expected);
-            let record =
-                ImmutableRecord::from_registers(&registers, registers.len())
-                    .unwrap();
+            let record = ImmutableRecord::from_registers(&registers, registers.len()).unwrap();
             assert_eq!(record.get_payload(), expected.as_slice());
         }
     }

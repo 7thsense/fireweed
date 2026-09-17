@@ -1,10 +1,18 @@
 # Pinned Turso performance backports
 
-The five crates here are the published Turso 0.7.2 sources. Only `turso_core`
-contains behavior changes; see [its patch and provenance](turso_core/FIREWEED.md).
-The four binding/support crates change only their dependency paths, so the same
-core reaches Fireweed when consumed from another workspace. A root-only Cargo
-patch would silently disappear for downstream users, which is not acceptable.
+The five Turso crates here derive from the published 0.7.2 sources. The core
+performance backports are described in [their provenance](turso_core/FIREWEED.md).
+The `turso` binding also retains the transaction rollback correction exercised
+by Fireweed's failed-apply recovery tests. Its sync SDK is optional: ordinary
+local projections do not need the remote synchronization dependency tree.
+
+Manifests route dependencies through this bundle and remove dependencies unused
+by the retained code. The SDK deliberately keeps `parking_lot` with `send_guard`:
+that feature makes core guards usable in the SDK's Send futures even without a
+direct SDK import. Core retains `antithesis_sdk` for generated assertion macros.
+Each `FIREWEED.patch` is regenerated against its published crate archive;
+independent Cargo lockfile refreshes and this documentation are tracked separately.
+A root-only Cargo patch would disappear for downstream consumers.
 Each crate retains its upstream metadata and includes the upstream MIT license.
 
 `fireweed-turso` directly depends on these paths. No consumer-side Cargo override

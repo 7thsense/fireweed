@@ -370,6 +370,20 @@ impl<B: ProductBackend + 'static> RecoveryReadPort for RuntimeSafeBackend<B> {
             move |i| async move { i.side_record(&q, &key).await },
         )
     }
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<SideRecordPage>> + Send {
+        let q = shard.clone();
+        let prefix = prefix.to_vec();
+        self.offload(q.clone(), move |i| async move {
+            i.side_records_by_prefix(&q, &prefix, page_size, cursor)
+                .await
+        })
+    }
 }
 impl<B: ProductBackend + 'static> RenewLeasePort for RuntimeSafeBackend<B> {
     fn renew(
@@ -596,6 +610,18 @@ impl<B: ProductBackend + 'static> ProjectionRead for RuntimeSafeBackend<B> {
             move |i| async move { i.claimed_view(&q, &ids).await },
         )
     }
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> impl Future<Output = EngineResult<Vec<fireweed_engine::RetainedItemView>>> + Send {
+        let q = shard.clone();
+        self.offload(q.clone(), move |i| async move {
+            i.retained_items(&q, after, limit).await
+        })
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,

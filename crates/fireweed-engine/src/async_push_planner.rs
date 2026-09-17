@@ -73,8 +73,7 @@ where
         let node_id = self.node_id;
         Box::pin(async move {
             if let (Some(request_id), Some(fingerprint)) = (request.request_id.clone(), fingerprint)
-            {
-                match resolve_push_idempotency_snapshot(
+                && let Some(item_ids) = resolve_push_idempotency_snapshot(
                     log.as_ref(),
                     projection.as_ref(),
                     request.shard.clone(),
@@ -83,10 +82,8 @@ where
                     request.now,
                 )
                 .await?
-                {
-                    Some(item_ids) => return Ok(AsyncPushPlan::replay(item_ids)),
-                    None => {}
-                }
+            {
+                return Ok(AsyncPushPlan::replay(item_ids));
             }
 
             projection.admit_mutation(request.shard.clone()).await?;

@@ -1,4 +1,4 @@
-# Current TP-003 T3 evidence (P11)
+# Historical TP-003 T3 generation (P11)
 
 Historical files under `docs/perf/evidence/tp003-*.jsonl` are **immutable** and
 must not be rewritten. They do not qualify current product evidence
@@ -8,15 +8,15 @@ must not be rewritten. They do not qualify current product evidence
 
 `CURRENT-TP003-TRANSACTION-MATRIX`
 
-## How to generate run-owned artifacts
+## Current status
 
-```sh
-export FIREWEED_PG_TEST_URL=postgres://fireweed:fireweed@127.0.0.1:55432/fireweed
-export FIREWEED_P11_EVIDENCE_DIR=$(mktemp -d /tmp/fireweed-p11-XXXXXX)
-bash scripts/ci/record-current-tp003-td008-evidence.sh
-```
+The SQLite-era producer was retired in v0.31.28 because its exact Cargo filters
+no longer named executable tests. See the
+[maintenance migration audit](../../maintenance-test-migration.md) for current
+runtime transaction coverage. This directory preserves the original generation;
+its recorded passes do not qualify the current 12-cell matrix.
 
-Artifacts land **outside** the repository (RunOwned). Digests of a successful
+Artifacts were generated **outside** the repository (RunOwned). Digests of that
 local generation are recorded in `run-owned-digests.sha256` and
 `p11-current-tp003-note.json`. P18 alone promotes allowlisted paths.
 

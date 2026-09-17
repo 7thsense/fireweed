@@ -1,5 +1,8 @@
 #![allow(dead_code, unused_imports)]
 
+#[path = "support/storage.rs"]
+mod storage;
+
 use std::sync::Arc;
 
 use fireweed::*;
@@ -39,7 +42,7 @@ fn qdef() -> QueueDefinition {
     }
 }
 
-fn sqlite_test_path(test_name: &str) -> String {
+fn storage_test_path(test_name: &str) -> String {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -119,10 +122,11 @@ async fn open_memory_builds_a_usable_fireweed() {
     assert_eq!(claimed.len(), 1, "open_memory handle claims normally");
 }
 
-/// The blessed sqlite path builds and round-trips too.
+/// The filesystem log path builds and round-trips too.
 #[tokio::test]
-async fn open_sqlite_builds_a_usable_fireweed() {
-    let fireweed = fireweed::open_sqlite(":memory:", Arc::new(ManualClock::at(0))).unwrap();
+async fn filesystem_log_builds_a_usable_fireweed() {
+    let fixture = storage::Fixture::new();
+    let fireweed = storage::open_log_memory(fixture.path(), Arc::new(ManualClock::at(0))).unwrap();
     fireweed.create_queue(qdef()).await.unwrap();
     fireweed
         .push(&qkey(), fireweed::NewItem::default())
@@ -134,11 +138,12 @@ async fn open_sqlite_builds_a_usable_fireweed() {
 /// Rust 2024 return-position `impl Trait` must not capture the borrowed path: the backend owns all
 /// state needed by the returned handle.
 #[tokio::test]
-async fn open_sqlite_retained_handle_owns_path() {
-    let path = sqlite_test_path("retained-handle-owns-path");
+async fn filesystem_log_retained_handle_owns_path() {
+    let path = storage_test_path("retained-handle-owns-path");
     let cleanup_path = std::path::PathBuf::from(&path);
-    let fireweed =
-        retain_static(fireweed::open_sqlite(path.as_str(), Arc::new(ManualClock::at(0))).unwrap());
+    let fireweed = retain_static(
+        storage::open_log_memory(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
+    );
     drop(path);
 
     fireweed.create_queue(qdef()).await.unwrap();
@@ -148,17 +153,17 @@ async fn open_sqlite_retained_handle_owns_path() {
         .unwrap();
     assert_eq!(fireweed.metrics(&qkey()).await.unwrap().pending, 1);
     drop(fireweed);
-    std::fs::remove_file(cleanup_path).unwrap();
+    std::fs::remove_dir_all(format!("{}.store", cleanup_path.display())).unwrap();
 }
 
-/// Dropping every handle closes SQLite cleanly; the same caller-owned path can then reopen the durable
+/// Dropping every handle closes the log cleanly; the same caller-owned path can then reopen the durable
 /// queue without leaking the path to manufacture a `'static` borrow.
 #[tokio::test]
-async fn open_sqlite_owned_path_reopens_after_all_handles_drop() {
-    let path = sqlite_test_path("owned-path-reopens");
+async fn filesystem_log_owned_path_reopens_after_all_handles_drop() {
+    let path = storage_test_path("owned-path-reopens");
     {
         let fireweed = retain_static(
-            fireweed::open_sqlite(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
+            storage::open_log_memory(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
         );
         fireweed.create_queue(qdef()).await.unwrap();
         fireweed
@@ -170,11 +175,12 @@ async fn open_sqlite_owned_path_reopens_after_all_handles_drop() {
         assert_eq!(second_handle.metrics(&qkey()).await.unwrap().pending, 1);
     }
 
-    let reopened =
-        retain_static(fireweed::open_sqlite(path.as_str(), Arc::new(ManualClock::at(1))).unwrap());
+    let reopened = retain_static(
+        storage::open_log_memory(path.as_str(), Arc::new(ManualClock::at(1))).unwrap(),
+    );
     assert_eq!(reopened.metrics(&qkey()).await.unwrap().pending, 1);
     drop(reopened);
-    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir_all(format!("{path}.store")).unwrap();
 }
 
 /// FAST LOCAL GUARD (ADR-009 L6): `fireweed` must not re-export a port trait on its public surface, or expose

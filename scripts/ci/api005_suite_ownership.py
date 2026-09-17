@@ -62,14 +62,14 @@ FAMILY_RULES: list[tuple[str, re.Pattern[str]]] = [
         "commit",
         re.compile(
             r"^(commit|commit_multi_claim|commit_capabilities|explain_commit|"
-            r"side_record|side_records)$"
+            r"side_record|side_records|side_records_by_prefix)$"
         ),
     ),
     (
         "mutation_and_maintenance",
         re.compile(
             r"^(renew|reassign|update_fields|batch_update|mutate_items|update|set_gates|"
-            r"reclaim_expired|reclaim_expired_at|purge|bounded_mutation|upsert)$"
+            r"reschedule|reclaim_expired|reclaim_expired_at|purge|bounded_mutation|upsert)$"
         ),
     ),
     (
@@ -105,7 +105,7 @@ FAMILY_RULES: list[tuple[str, re.Pattern[str]]] = [
         "read_and_discovery",
         re.compile(
             r"^(peek|current_position|discover_active_scopes|discover_active_scopes_stamped|"
-            r"discover|live_item|live_items|query_index_unique|query_index|"
+            r"discover|live_item|live_items|retained_items|query_index_unique|query_index|"
             r"query_index_unique_typed|query_index_typed|claimed)$"
         ),
     ),
@@ -137,7 +137,7 @@ TEST_FN_RE = re.compile(
     re.MULTILINE,
 )
 CELL_LITERAL_RE = re.compile(
-    r'(?:assert_cell|public_interface::run(?:_with_commit_boundary)?|run_s3_sqlite|run_postgres_runtime|'
+    r'(?:assert_cell|public_interface::run(?:_with_commit_boundary)?|run_s3_turso|run_postgres_runtime|'
     r'run_sync_constructor|seed_reopen_probe)\(\s*"([^"]+)"'
 )
 CELL_ID_RE = re.compile(r"^[a-z0-9]+(?:--[a-z0-9]+)+(?:--[a-z0-9-]+)?$")
@@ -364,7 +364,7 @@ def parse_suite_registrations() -> tuple[list[dict[str, str]], list[dict[str, st
         body = external_text[start : start + nxt.start()] if nxt else external_text[start:]
         # Cell id may appear as string literal to run/assert helpers.
         candidates = re.findall(
-            r'(?:public_interface::run(?:_with_commit_boundary)?|run_s3_sqlite|run_postgres_runtime|'
+            r'(?:public_interface::run(?:_with_commit_boundary)?|run_s3_turso|run_postgres_runtime|'
             r'run_sync_constructor|seed_reopen_probe)\(\s*"([^"]+)"',
             body,
         )

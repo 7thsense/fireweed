@@ -20,8 +20,8 @@ SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
 KIND_IMAGE_CONTEXT="${PROOF_DIR}/kind-image"
 KIND_IMAGE_DOCKERFILE="${KIND_IMAGE_CONTEXT}/Dockerfile"
 
-# Public projection axis (memory|sqlite|turso|postgres); live-kind sample of deployable cells.
-STORAGE_COMBINATIONS=("filesystem:memory" "filesystem:sqlite" "filesystem:turso")
+# Public projection axis (memory|turso|postgres); live-kind sample of deployable cells.
+STORAGE_COMBINATIONS=("filesystem:memory" "filesystem:turso")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 export KIND_NODE_IMAGE
 
@@ -381,9 +381,9 @@ validate_docs_microsite() {
     local kind_cmd
     for kind_cmd in \
         'bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory' \
-        'bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend sqlite' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso' \
         'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend memory' \
-        'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend turso' \
         'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres'
     do
         if ! grep -Fq "$kind_cmd" docs/deployment/kind-helm-integration.md; then

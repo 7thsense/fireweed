@@ -3,7 +3,7 @@
 //! Two subcommands:
 //!
 //! * `run` — connect to a set of independent owner Services over the cluster network (pod->pod), drive the
-//!   segmented `object_log_sqlite_projection` RESP workload (pipelined `XADD` ingest, `XREADGROUP >` claim,
+//!   segmented `object_log_turso_projection` RESP workload (pipelined `XADD` ingest, `XREADGROUP >` claim,
 //!   `XACK` finalize) at ONE owner count, live-prove one-owner-per-queue (`XLEN` answers an integer on the
 //!   owner and `-ERR no such queue` on every other node), and print a single measured `RESULT {json}` line:
 //!   per-queue + aggregate ingest and claim+finalize throughput. Designed to run as an in-cluster `Job` with

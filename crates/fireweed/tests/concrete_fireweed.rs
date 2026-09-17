@@ -101,7 +101,7 @@ async fn exercise_operation_families(fireweed: &Fireweed, queue_name: &str) {
 }
 
 #[test]
-fn role_named_object_log_configuration_validates() {
+fn role_named_object_log_configuration_rejects_retired_sqlite() {
     let config = ObjectLogRuntimeConfig {
         object_log: ObjectLogStorage::Local {
             root: "object-log".into(),

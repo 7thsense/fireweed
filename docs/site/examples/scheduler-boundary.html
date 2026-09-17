@@ -48,8 +48,14 @@
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn run_workflow(path: &amp;Path) -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     let clock: Arc&lt;dyn Clock&gt; = Arc::new(SystemClock);
-    let fireweed =
-        fireweed::open_sqlite_relational(path.to_str().expect(&quot;UTF-8 temp path&quot;), clock)?;
+    let log_root = path.to_path_buf();
+    std::fs::create_dir_all(&amp;log_root)?;
+    let mut cfg = StorageConfig::memory();
+    cfg.log = LogConfig::Filesystem { root: log_root };
+    // Discovery is available on the log-backed memory projection. Native Turso
+    // supports the addressed workflow in fireweed-workload, but not discovery.
+    cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+    let fireweed = fireweed::open(cfg, clock)?;
     let deliveries = queue(&quot;deliveries&quot;);
     let maintenance = queue(&quot;maintenance&quot;);
     let template = queue_template();

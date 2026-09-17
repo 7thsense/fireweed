@@ -185,6 +185,10 @@ struct Counts {
     due_to_claim_max_us: AtomicU64,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Campaign workers explicitly receive shared observations, stage bounds, and timing inputs"
+)]
 async fn workers(
     fw: &Fireweed,
     q: &QueueKey,
@@ -225,7 +229,9 @@ async fn workers(
                     (Some(PriorityValue::Int64(p)), false) => (*p, 0),
                     _ => return Err("missing or wrong campaign priority type".into()),
                 };
-                if order < previous { return Err("priority inversion within claim".into()); }
+                if order < previous {
+                    return Err("priority inversion within claim".into());
+                }
                 previous = order;
                 if row.not_before.is_some_and(|t| t > ts(now)) {
                     return Err("early claim".into());
@@ -275,8 +281,11 @@ async fn workers(
                                     BatchUpdateValue::Replace(meta(stage + 1, id, campaign));
                                 priority
                             };
-                            patch.priority =
-                                BatchUpdateValue::Replace(Some(if stage == 0 { fifo_priority(id, cfg) } else { scheduled_priority(priority, cfg) }));
+                            patch.priority = BatchUpdateValue::Replace(Some(if stage == 0 {
+                                fifo_priority(id, cfg)
+                            } else {
+                                scheduled_priority(priority, cfg)
+                            }));
                             patch.not_before = BatchUpdateValue::Replace(Some(ts(if stage == 0 {
                                 1
                             } else {
@@ -299,12 +308,15 @@ async fn workers(
                                 return Err("early provider delivery".into());
                             }
                             let mut tracking = row.metadata.clone();
-                            if cfg.faults && id % 19 == 0 && tracking.get("retry").is_none() {
+                            if cfg.faults
+                                && id.is_multiple_of(19)
+                                && tracking.get("retry").is_none()
+                            {
                                 tracking.insert("retry", MetadataValue::String("1".into()));
                                 patch.lifecycle = LifecyclePatch::SetPending;
                                 retried += 1;
                             } else {
-                                let failed = cfg.faults && id % 31 == 0;
+                                let failed = cfg.faults && id.is_multiple_of(31);
                                 tracking.insert(
                                     "outcome",
                                     MetadataValue::String(
@@ -376,6 +388,10 @@ async fn workers(
 }
 
 // Separate read oracle: checks persisted fields, identities and dispositions, not worker counters.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The independent persisted-row oracle keeps population, campaign, phase, and deadline explicit"
+)]
 async fn verify_rows(
     fw: &Fireweed,
     q: &QueueKey,
@@ -425,8 +441,8 @@ async fn verify_rows(
             {
                 return Err("original attributes lost".into());
             }
-            let failed = cfg.faults && id % 31 == 0;
-            let retries = usize::from(cfg.faults && id % 19 == 0);
+            let failed = cfg.faults && id.is_multiple_of(31);
+            let retries = usize::from(cfg.faults && id.is_multiple_of(19));
             if terminal {
                 let state = if failed {
                     ItemState::Failed
@@ -546,10 +562,10 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                                 async move {
                                 let chunk = &ids[batch_index*cfg.batch..((batch_index+1)*cfg.batch).min(ids.len())];
                                 let rows: Vec<_> = chunk.iter().map(|id| NewItem { client_item_key: Some(key(*id)),
-                                    priority: Some(fifo_priority(*id, &cfg)), not_before: Some(ts(1)),
+                                    priority: Some(fifo_priority(*id, cfg)), not_before: Some(ts(1)),
                                     metadata: meta(0, *id, campaign), payload: Some(initial_body(*id, campaign, cfg.payload_bytes)), ..Default::default() }).collect();
                                 counts.initial_payload_bytes.fetch_add(rows.iter().map(|row| row.payload.as_ref().map_or(0, |body| body.len() as u64)).sum::<u64>(), Ordering::Relaxed);
-                                let accepted = retry(deadline, || fw.push_batch(&q, rows.clone())).await?;
+                                let accepted = retry(deadline, || fw.push_batch(q, rows.clone())).await?;
                                 if accepted.len() != chunk.len() { return Err("missing push identities".into()); }
                                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
                             }}).buffer_unordered(cfg.load_workers).try_collect::<Vec<_>>().await?;
@@ -596,7 +612,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                             let purge_batch = cfg.purge_batch.unwrap_or(8000);
                             let mut purge_ids = Vec::with_capacity(purge_batch);
                             let mut purge_batches = 0; let mut max_purge_batch = 0;
-                            while cfg.recycle {
+                            if cfg.recycle { loop {
                                 let page_size = (purge_batch - purge_ids.len()).min(1000);
                                 let rows = retry(deadline, || fw.retained_items(&q,cursor,page_size)).await?;
                                 let ended = rows.is_empty();
@@ -608,7 +624,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
                                     purge_ids.clear();
                                 }
                                 if ended { break; }
-                            }
+                            }}
                             if cfg.recycle && !retry(deadline, || fw.retained_items(&q,None,1)).await?.is_empty() {
                                 return Err("purge left projected rows".into());
                             }

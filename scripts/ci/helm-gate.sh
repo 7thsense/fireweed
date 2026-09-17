@@ -145,25 +145,16 @@ values_file_for() {
     local combination="$1"
     case "$combination" in
         memory-memory) echo "${CHART_DIR}/ci/memory-memory-values.yaml" ;;
-        memory-sqlite) echo "${CHART_DIR}/ci/memory-sqlite-values.yaml" ;;
         memory-turso) echo "${CHART_DIR}/ci/memory-turso-values.yaml" ;;
         memory-postgres) echo "${CHART_DIR}/ci/memory-postgres-values.yaml" ;;
         filesystem-memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
-        filesystem-sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
         filesystem-turso) echo "${CHART_DIR}/ci/filesystem-turso-values.yaml" ;;
         filesystem-postgres) echo "${CHART_DIR}/ci/filesystem-postgres-values.yaml" ;;
-        sqlite-memory) echo "${CHART_DIR}/ci/sqlite-memory-values.yaml" ;;
-        sqlite-sqlite) echo "${CHART_DIR}/ci/sqlite-sqlite-values.yaml" ;;
-        sqlite-turso) echo "${CHART_DIR}/ci/sqlite-turso-values.yaml" ;;
-        sqlite-postgres) echo "${CHART_DIR}/ci/sqlite-postgres-values.yaml" ;;
         s3-memory) echo "${CHART_DIR}/ci/s3-memory-values.yaml" ;;
-        s3-sqlite) echo "${CHART_DIR}/ci/s3-sqlite-values.yaml" ;;
         s3-turso) echo "${CHART_DIR}/ci/s3-turso-values.yaml" ;;
         s3-postgres) echo "${CHART_DIR}/ci/s3-postgres-values.yaml" ;;
         shared-s3-postgres-control-plane) echo "${CHART_DIR}/ci/shared-s3-postgres-control-plane-values.yaml" ;;
-        s3-sqlite-postgres-control-plane) echo "${CHART_DIR}/ci/s3-sqlite-postgres-control-plane-values.yaml" ;;
         postgres-memory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
-        postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres-turso) echo "${CHART_DIR}/ci/postgres-turso-values.yaml" ;;
         postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
         lakebase-postgres) echo "${CHART_DIR}/ci/lakebase-postgres-values.yaml" ;;
@@ -177,23 +168,15 @@ canonical_cell_id_for() {
     local log proj
     case "$combination" in
         memory-memory) log=memory; proj=memory ;;
-        memory-sqlite) log=memory; proj=sqlite ;;
         memory-turso) log=memory; proj=turso ;;
         memory-postgres) log=memory; proj=postgres ;;
-        sqlite-memory) log=sqlite; proj=memory ;;
-        sqlite-sqlite) log=sqlite; proj=sqlite ;;
-        sqlite-turso) log=sqlite; proj=turso ;;
-        sqlite-postgres) log=sqlite; proj=postgres ;;
         postgres-memory) log=postgres; proj=memory ;;
-        postgres-sqlite) log=postgres; proj=sqlite ;;
         postgres-turso) log=postgres; proj=turso ;;
         postgres-postgres) log=postgres; proj=postgres ;;
         filesystem-memory) log=filesystem; proj=memory ;;
-        filesystem-sqlite) log=filesystem; proj=sqlite ;;
         filesystem-turso) log=filesystem; proj=turso ;;
         filesystem-postgres) log=filesystem; proj=postgres ;;
         s3-memory) log=s3; proj=memory ;;
-        s3-sqlite) log=s3; proj=sqlite ;;
         s3-turso) log=s3; proj=turso ;;
         s3-postgres) log=s3; proj=postgres ;;
         *) err "not a canonical matrix combination: ${combination}"; exit 1 ;;
@@ -205,10 +188,6 @@ assert_projection_path_contract() {
     local rendered="$1"
     local projection="$2"
 
-    if [[ "$projection" == "sqlite" ]]; then
-        assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "sqlite projection path"
-        assert_not_contains "$rendered" 'FIREWEED_TURSO_PROJECTION_PATH' "turso path on sqlite projection"
-    fi
     if [[ "$projection" == "turso" ]]; then
         assert_contains "$rendered" 'FIREWEED_TURSO_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.turso"' "turso projection path"
         assert_not_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH' "sqlite path on turso projection"
@@ -256,7 +235,7 @@ assert_no_fixture_credentials() {
     done
 }
 
-# Class B memory log cells (memory × {memory,sqlite,turso,postgres}).
+# Class B memory log cells (memory × {memory,turso,postgres}).
 assert_memory_log_contract() {
     local rendered="$1"
     local projection="$2"
@@ -268,7 +247,7 @@ assert_memory_log_contract() {
     assert_not_contains "$rendered" 'FIREWEED_SQLITE_LOG_PATH' "sqlite log path on memory log"
     assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
     assert_projection_path_contract "$rendered" "$projection"
-    if [[ "$projection" == "sqlite" || "$projection" == "turso" ]]; then
+    if [[ "$projection" == "turso" ]]; then
         assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC for durable local projection"
         assert_contains "$rendered" 'name: storage' "storage volume for durable local projection"
     fi
@@ -291,21 +270,8 @@ assert_filesystem_cell_contract() {
     assert_no_fixture_credentials "$rendered" "filesystem/${projection} rendered manifest"
 }
 
-assert_sqlite_log_contract() {
-    local rendered="$1"
-    local projection="$2"
 
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "sqlite"' "sqlite log axis"
-    assert_contains "$rendered" "FIREWEED_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
-    assert_contains "$rendered" 'FIREWEED_SQLITE_LOG_PATH: "/var/lib/fireweed/projection/fireweed-log.db"' "sqlite log path"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
-    assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_projection_path_contract "$rendered" "$projection"
-    assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
-    assert_no_fixture_credentials "$rendered" "sqlite/${projection} rendered manifest"
-}
-
-# Single-replica chart-installable s3 log cells (s3 × {memory,sqlite,turso,postgres}).
+# Single-replica chart-installable s3 log cells (s3 × {memory,turso,postgres}).
 assert_s3_cell_contract() {
     local rendered="$1"
     local projection="$2"
@@ -331,7 +297,7 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_contains "$rendered" 'FIREWEED_REPLICA_COUNT: "3"' "replica count env"
     assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "s3"' "s3 log axis"
     assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
-    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "turso"' "turso projection axis"
     assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy store env"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
@@ -340,7 +306,7 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: "false"' "S3 TLS setting"
     assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE_HEARTBEAT_TTL_MS: "5000"' "control-plane heartbeat ttl"
     assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE_LEASE_TTL_MS: "15000"' "control-plane lease ttl"
-    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "pod-local SQLite path"
+    assert_contains "$rendered" 'FIREWEED_TURSO_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.turso"' "pod-local Turso path"
     assert_contains "$rendered" 'name: FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID' "S3 access key secret env"
     assert_contains "$rendered" 'name: FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY' "S3 secret key secret env"
     assert_contains "$rendered" 'name: FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL' "postgres control-plane secret env"
@@ -356,22 +322,6 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_no_fixture_credentials "$rendered" "shared S3/postgres rendered manifest"
 }
 
-assert_s3_sqlite_postgres_control_plane_contract() {
-    local rendered="$1"
-
-    assert_contains "$rendered" 'replicas: 3' "shared profile replica count"
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "s3"' "first-class s3 log axis"
-    assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
-    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
-    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy objectlog store on first-class s3"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
-    assert_contains "$rendered" 'name: FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID' "S3 access key secret env"
-    assert_contains "$rendered" 'name: FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL' "postgres control-plane secret env"
-    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "shared PVC"
-    assert_contains "$rendered" 'emptyDir: {}' "pod-local projection volume"
-    assert_no_fixture_credentials "$rendered" "first-class s3 rendered manifest"
-}
 
 assert_postgres_contract() {
     local rendered="$1"
@@ -382,7 +332,7 @@ assert_postgres_contract() {
     assert_contains "$rendered" 'name: FIREWEED_POSTGRES_LOG_DATABASE_URL' "postgres log env"
     assert_contains "$rendered" 'secretKeyRef:' "postgres Secret reference"
     assert_projection_path_contract "$rendered" "$projection"
-    if [[ "$projection" == "sqlite" || "$projection" == "turso" ]]; then
+    if [[ "$projection" == "turso" ]]; then
         assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC for durable local projection"
         assert_contains "$rendered" 'name: storage' "storage volume for durable local projection"
     fi
@@ -426,7 +376,7 @@ assert_generated_bootstrap_contract() {
 }
 
 assert_demoted_projection_schema_exclusion() {
-    # Public projection enum is memory|sqlite|turso|postgres.
+    # Public projection enum is memory|turso|postgres.
     # Demoted aliases (hybrid, hybrid-async, hybrid-strict, inmemory) must fail schema validation.
     # turso is public and must NOT be re-added to this rejected-name guard.
     local demoted
@@ -447,8 +397,8 @@ assert_demoted_projection_schema_exclusion() {
         # path and allowed public enum from either formatter so a schema expansion, a
         # template-time rejection, or an unrelated render failure cannot satisfy
         # this public-support boundary.
-        local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'sqlite', 'turso', 'postgres'"
-        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "sqlite", "turso", "postgres"'
+        local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'turso', 'postgres'"
+        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "turso", "postgres"'
         if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
             err "filesystem/${demoted} did not fail with the exact public projection enum-exclusion error"
             cat "$output" >&2
@@ -531,9 +481,9 @@ helm_defaults_to_turso_projection() {
 }
 
 assert_canonical_matrix_mapping() {
-    echo "--- canonical 20-cell T4 fixture mapping ---"
+    echo "--- canonical 12-cell T4 fixture mapping ---"
     local -A seen_cells=()
-    local combo cell_id expected_count=20
+    local combo cell_id expected_count=12
     if ((${#MATRIX_COMBINATIONS[@]} != expected_count)); then
         err "MATRIX_COMBINATIONS must have exactly ${expected_count} entries (got ${#MATRIX_COMBINATIONS[@]})"
         exit 1
@@ -554,7 +504,7 @@ assert_canonical_matrix_mapping() {
         err "expected ${expected_count} distinct canonical cell IDs, got ${#seen_cells[@]}"
         exit 1
     fi
-    echo "canonical 20-cell T4 mapping: OK"
+    echo "canonical 12-cell T4 mapping: OK"
 }
 
 assert_combination_contract() {
@@ -564,25 +514,16 @@ assert_combination_contract() {
     echo "--- rendered contract assertions [${combination}] ---"
     case "$combination" in
         memory-memory) assert_memory_log_contract "$rendered" "memory" ;;
-        memory-sqlite) assert_memory_log_contract "$rendered" "sqlite" ;;
         memory-turso) assert_memory_log_contract "$rendered" "turso" ;;
         memory-postgres) assert_memory_log_contract "$rendered" "postgres" ;;
         filesystem-memory) assert_filesystem_cell_contract "$rendered" "memory" ;;
-        filesystem-sqlite) assert_filesystem_cell_contract "$rendered" "sqlite" ;;
         filesystem-turso) assert_filesystem_cell_contract "$rendered" "turso" ;;
         filesystem-postgres) assert_filesystem_cell_contract "$rendered" "postgres" ;;
-        sqlite-memory) assert_sqlite_log_contract "$rendered" "memory" ;;
-        sqlite-sqlite) assert_sqlite_log_contract "$rendered" "sqlite" ;;
-        sqlite-turso) assert_sqlite_log_contract "$rendered" "turso" ;;
-        sqlite-postgres) assert_sqlite_log_contract "$rendered" "postgres" ;;
         s3-memory) assert_s3_cell_contract "$rendered" "memory" ;;
-        s3-sqlite) assert_s3_cell_contract "$rendered" "sqlite" ;;
         s3-turso) assert_s3_cell_contract "$rendered" "turso" ;;
         s3-postgres) assert_s3_cell_contract "$rendered" "postgres" ;;
         shared-s3-postgres-control-plane) assert_shared_s3_postgres_control_plane_contract "$rendered" ;;
-        s3-sqlite-postgres-control-plane) assert_s3_sqlite_postgres_control_plane_contract "$rendered" ;;
         postgres-memory) assert_postgres_contract "$rendered" "memory" ;;
-        postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
         postgres-turso) assert_postgres_contract "$rendered" "turso" ;;
         postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
         lakebase-postgres) assert_lakebase_postgres_contract "$rendered" ;;
@@ -614,8 +555,8 @@ main() {
     echo "--- local profile fail-closed contract ---"
     local scaled_local
     scaled_local="$(mktemp)"
-    if helm template fireweed-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
-        err "scaled local filesystem/sqlite profile unexpectedly rendered"
+    if helm template fireweed-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/filesystem-turso-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
+        err "scaled local filesystem/turso profile unexpectedly rendered"
         cat "$scaled_local" >&2
         rm -f "$scaled_local"
         exit 1
@@ -623,7 +564,7 @@ main() {
     assert_contains "$scaled_local" 'replicaCount > 1 requires storage.log.backend=s3' "scaled local fail-closed message"
     rm -f "$scaled_local"
 
-    # Multi-replica accepts pod-local rebuildable projections (sqlite|turso), not only sqlite.
+    # Multi-replica accepts pod-local rebuildable Turso projections.
     echo "--- multi-replica turso durability rule contract ---"
     local scaled_turso
     scaled_turso="$(mktemp)"

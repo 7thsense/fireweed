@@ -24,14 +24,14 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "functional_matrix_route_sources",
         "--",
         "--nocapture"
       ],
       "id": "functional-matrix-dry-run-leaves",
-      "notes": "Exact dry-run leaves: 20 strict + 8 async + 12 invalid + AC-TXN + guards",
+      "notes": "Exact dry-run leaves: 12 strict + 6 async + 6 invalid + AC-TXN + guards",
       "source": "P10r"
     },
     {
@@ -45,16 +45,16 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
-        "storage_matrix_t0_t2_all_twenty_cells",
+        "storage_matrix_t0_t2_all_twelve_cells",
         "--",
         "--exact",
         "--nocapture"
       ],
       "id": "functional-matrix-t0-t2-live-reduced-count",
-      "notes": "Live 20-cell T0\u2013T2 reduced-count functional matrix; require ran=20 skipped=0 with PG+S3 fixtures (fail-closed)",
+      "notes": "Live 12-cell T0\u2013T2 reduced-count functional matrix; require ran=20 skipped=0 with PG+S3 fixtures (fail-closed)",
       "requires_fixtures": [
         "FIREWEED_PG_TEST_URL",
         "FIREWEED_S3_TEST_ENDPOINT"
@@ -72,7 +72,7 @@
         "-p",
         "fireweed",
         "--features",
-        "memory,sqlite,objectlog,postgres,turso",
+        "memory,objectlog,postgres,turso",
         "--test",
         "storage_matrix_t0_t2",
         "storage_matrix_registers_exactly_20_distinct_cells",
@@ -80,7 +80,7 @@
         "--exact",
         "--nocapture"
       ],
-      "id": "functional-matrix-registers-20-cells",
+      "id": "functional-matrix-registers-12-cells",
       "notes": "Offline registration: exactly 20 distinct cell IDs",
       "source": "P10r"
     },
@@ -101,7 +101,7 @@
         "scripts/ci/helm-gate.sh"
       ],
       "id": "t4-helm-gate",
-      "notes": "20-cell Helm lint/render/kubeconform + Turso default",
+      "notes": "12-cell Helm lint/render/kubeconform + Turso default",
       "source": "P12"
     },
     {
@@ -246,7 +246,7 @@
   ],
   "plan_key": "P13",
   "product_release_readiness_claimed": false,
-  "route_sources_authority_manifest_sha256": "2ce5d2d755f036a6111212859c91c4555088f1b7b715ea4db54c9fb2debe7569",
+  "route_sources_authority_manifest_sha256": "2a7c9df1ba7d37025c248b84ee7cddc346b724214381efa46f995e616042a6fb",
   "route_sources_sha256_field": "authority_manifest_sha256",
   "schema_version": 1,
   "workflow": ".github/workflows/governed-product.yml"

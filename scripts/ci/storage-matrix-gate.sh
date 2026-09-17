@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# storage-matrix-gate.sh — Release/CI gate for the public 20-cell storage matrix.
+# storage-matrix-gate.sh — Release/CI gate for the public 12-cell storage matrix.
 #
-# The public product storage surface is exactly the 5×4 matrix
-# (log ∈ {memory,sqlite,postgres,filesystem,s3} ×
-#  projection ∈ {memory,sqlite,turso,postgres}).
+# The public product storage surface is exactly the 4×3 matrix
+# (log ∈ {memory,postgres,filesystem,s3} ×
+#  projection ∈ {memory,turso,postgres}).
 # This gate binds exact P10r functional-matrix source leaves (compile/list +
 # focused cargo invocations), legacy product-name hygiene, and Helm matrix
 # fixtures so a release cannot ship with a failed required cell.
@@ -30,7 +30,7 @@
 # Local/dev runs may execute without live S3 or Postgres: cargo tests document
 # skip for cells that need FIREWEED_S3_TEST_ENDPOINT / FIREWEED_PG_TEST_URL.
 #
-# Required product / release CI that claims the full 20-cell surface MUST:
+# Required product / release CI that claims the full 12-cell surface MUST:
 #   1. export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
 #   2. provision S3-compatible + Postgres fixtures (see Fixture requirements)
 #   3. treat a missing fixture as gate failure (this script enforces that)
@@ -68,7 +68,7 @@ done
 
 err() { echo "storage-matrix-gate: $*" >&2; }
 
-echo "=== storage-matrix-gate: public 20-cell StorageConfig matrix ==="
+echo "=== storage-matrix-gate: public 12-cell StorageConfig matrix ==="
 echo "repo: ${REPO_ROOT}"
 echo "REQUIRE_FULL=${REQUIRE_FULL}"
 
@@ -93,7 +93,7 @@ if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL
         echo "  FIREWEED_PG_TEST_URL is set"
     fi
     if ((missing != 0)); then
-        err "refusing to claim full 20-cell matrix with missing fixtures (skip ≠ pass)"
+        err "refusing to claim full 12-cell matrix with missing fixtures (skip ≠ pass)"
         exit 1
     fi
 fi
@@ -119,7 +119,7 @@ bash "${SCRIPT_DIR}/assert-no-legacy-storage-product-names.sh"
 # 2. Exact cargo source leaves (no substring filters)
 # ---------------------------------------------------------------------------
 if ((SKIP_CARGO == 0)); then
-    FIREWEED_FEATURES="memory,sqlite,objectlog,postgres,turso"
+    FIREWEED_FEATURES="memory,objectlog,postgres,turso"
 
     echo "--- compile/list functional-matrix route source leaves ---"
     python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --list-leaves
@@ -132,7 +132,7 @@ if ((SKIP_CARGO == 0)); then
     echo "--- exact T0–T2 registration leaf (no live fixture execution claim) ---"
     ${CARGO} test -p fireweed --features "${FIREWEED_FEATURES}" \
         --test storage_matrix_t0_t2 -- \
-        storage_matrix_registers_exactly_20_distinct_cells --exact --nocapture
+        storage_matrix_registers_exactly_12_distinct_cells --exact --nocapture
 
     # Exact server --lib + external-kafka leaves: compile/list only (P10r boundary).
     # Full execution of fixture-bound cells is owned by P10 after P2r bindings.
@@ -196,7 +196,7 @@ fi
 #    Deployment/T4 portion: 20 canonical cells, Turso default, topology variants.
 # ---------------------------------------------------------------------------
 if ((SKIP_HELM == 0)); then
-    echo "--- helm-gate (20-cell matrix fixtures + shared variants + turso default) ---"
+    echo "--- helm-gate (12-cell matrix fixtures + shared variants + turso default) ---"
     bash "${SCRIPT_DIR}/helm-gate.sh"
 else
     if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then

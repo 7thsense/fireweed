@@ -11,8 +11,8 @@ control plane), not a table of environment variable names.
 
 | Axis | Public values | Notes |
 |------|---------------|-------|
-| **Log backend** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, authority, replay when durable |
-| **Projection** | `memory`, `sqlite`, `turso` (default), `postgres` | Serving, claim selection, validation, apply |
+| **Log backend** | `memory`, `postgres`, `filesystem`, `s3` | Command append, authority, replay when durable |
+| **Projection** | `memory`, `turso` (default), `postgres` | Serving, claim selection, validation, apply |
 
 Typed **`StorageConfig`** (API-005, `orthogonal-storage-matrix-brief`) is the
 normative composition root. The service process must assemble one
@@ -25,13 +25,12 @@ manifest, conditional write / authority, retention). They are not profile SKUs
 and are not “fake S3” vs “real S3.” Historical evidence IDs may still name older
 pair strings; public product selection uses only the axes above.
 
-| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
-|------------------|----------|----------|-------------------|------------|
-| `memory` | Class B | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `turso` (default) | `postgres` |
+|------------------|----------|-------------------|------------|
+| `memory` | Class B | Class B | Class B |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
 
 **Durability (summary):** Class A success ⇒ durable on the log and visible in
 the serving projection; recovery via high-water + tail when the log remains.
@@ -51,13 +50,11 @@ be framed as matrix rows or container injection values.
 StorageConfig
   log:
     Memory
-    | Sqlite { path }
     | Postgres { url, … }
     | Filesystem { root }
     | S3 { endpoint, bucket, region, credentials, … }
   projection:
     Memory
-    | Sqlite { path }
     | Turso { path }          # public default
     | Postgres { url, … }
   control_plane: …
@@ -91,8 +88,8 @@ cell.
 
 The container injection map accepts **only** public product axis names:
 
-- log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
-- projection: `memory` | `sqlite` | `turso` | `postgres`
+- log: `memory` | `postgres` | `filesystem` | `s3`
+- projection: `memory` | `turso` | `postgres`
 
 Defaults are `filesystem` × `turso` (TD-010). The documented Turso path env is
 `FIREWEED_TURSO_PROJECTION_PATH` (default
@@ -181,8 +178,8 @@ into the stock container image.
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
 | `FIREWEED_LISTEN_ADDR` | no | `0.0.0.0:8080` | RESP listen address. |
-| `FIREWEED_LOG_BACKEND` | no | `filesystem` | **Injection** for log axis. Public values only: `memory`, `sqlite`, `postgres`, `filesystem`, `s3`. |
-| `FIREWEED_PROJECTION_BACKEND` | no | `turso` | **Injection** for projection axis. Public values only: `memory`, `sqlite`, `turso`, `postgres`. |
+| `FIREWEED_LOG_BACKEND` | no | `filesystem` | **Injection** for log axis. Public values only: `memory`, `postgres`, `filesystem`, `s3`. |
+| `FIREWEED_PROJECTION_BACKEND` | no | `turso` | **Injection** for projection axis. Public values only: `memory`, `turso`, `postgres`. |
 | `FIREWEED_OBJECT_LOG_ROOT` | when log is `filesystem` | `/var/lib/fireweed/object-log` | Local/filesystem object-log root. |
 | `FIREWEED_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/fireweed/fireweed-log.db` | Local SQLite log path. |
 | `FIREWEED_TURSO_PROJECTION_PATH` | when projection is `turso` | `/var/lib/fireweed/fireweed-projection.turso` | Local Turso materialized projection path (chart default under the storage volume: `/var/lib/fireweed/projection/projection.turso`). |
@@ -205,3 +202,13 @@ containing any retired pre-release frame or metadata namespace is rejected durin
 | `FIREWEED_BOOTSTRAP_GENERATED_TENANT` | no | `t1` | Tenant for generated bootstrap queues. |
 | `FIREWEED_BOOTSTRAP_GENERATED_PREFIX` | no | `q` | Queue prefix for generated bootstrap queues (`q0`, `q1`, … with the default). |
 | `FIREWEED_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
+
+## Maintenance release boundary
+
+SQLite log/projection selection and deferred-flush settings are retired. Native
+Turso is the default projection. Strict responses include projection apply;
+AsyncProjection acknowledges the authoritative log and permits serving lag.
+Supported construction does not imply every optional query/transition API is
+implemented: see [the maintenance baseline](../perf/maintenance-release-baseline.md)
+for explicit native Turso limitations and tests. Source-preview releases do not
+claim governed Kubernetes deployment qualification.

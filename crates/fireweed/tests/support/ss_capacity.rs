@@ -126,9 +126,6 @@ pub enum Cell {
         log_root: PathBuf,
         projection_path: PathBuf,
     },
-    /// SQLite command log × memory projection. Not production.
-    #[cfg(feature = "sqlite")]
-    SqliteCommandLogMemory { path: PathBuf, sync: SqliteLogSync },
 }
 
 impl Cell {
@@ -174,41 +171,17 @@ impl Cell {
                         parent_dir().join(format!("fireweed-ss-{kind}-olt-{}", unique_suffix()));
                     let _ = std::fs::remove_dir_all(&root);
                     std::fs::create_dir_all(&root).expect("object-log+turso root");
-                    return Self::ObjectLogFilesystemTurso {
+                    Self::ObjectLogFilesystemTurso {
                         log_root: root.join("log"),
                         projection_path: root.join("projection.db"),
-                    };
+                    }
                 }
                 #[cfg(not(feature = "turso"))]
                 panic!("SS_CELL=objectlog-turso requires the turso cargo feature (default-on)");
             }
-            "sqlite" | "sqlite--memory" | "sqlite-log" => {
-                #[cfg(feature = "sqlite")]
-                {
-                    let sync = match sync_set
-                        .unwrap_or_else(|| "full".into())
-                        .to_ascii_lowercase()
-                        .as_str()
-                    {
-                        "normal" => SqliteLogSync::Normal,
-                        "off" => SqliteLogSync::Off,
-                        _ => SqliteLogSync::Full,
-                    };
-                    let path =
-                        parent_dir().join(format!("fireweed-ss-{kind}-sl-{}.db", unique_suffix()));
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-                    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-                    return Self::SqliteCommandLogMemory { path, sync };
-                }
-                #[cfg(not(feature = "sqlite"))]
-                panic!(
-                    "SS_CELL=sqlite requires the sqlite cargo feature; it is not the production log"
-                );
-            }
             other => panic!(
                 "SS_CELL must be objectlog (filesystem--memory), objectlog-turso \
-                 (filesystem--turso, production pair), or sqlite (command-log calibration), \
+                 (filesystem--turso, production pair), \
                  got {other:?}"
             ),
         }
@@ -219,8 +192,6 @@ impl Cell {
             Self::ObjectLogFilesystemMemory { .. } => "filesystem--memory",
             #[cfg(feature = "turso")]
             Self::ObjectLogFilesystemTurso { .. } => "filesystem--turso",
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { .. } => "sqlite--memory",
         }
     }
 
@@ -229,8 +200,6 @@ impl Cell {
             Self::ObjectLogFilesystemMemory { .. } => "filesystem",
             #[cfg(feature = "turso")]
             Self::ObjectLogFilesystemTurso { .. } => "filesystem",
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { .. } => "sqlite",
         }
     }
 
@@ -239,8 +208,6 @@ impl Cell {
             Self::ObjectLogFilesystemMemory { .. } => "memory",
             #[cfg(feature = "turso")]
             Self::ObjectLogFilesystemTurso { .. } => "turso",
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { .. } => "memory",
         }
     }
 
@@ -251,8 +218,6 @@ impl Cell {
             // Gather concurrent produces into one packed PUT. Apply is one transaction
             // per object; ack is log-durable (AsyncProjection).
             Self::ObjectLogFilesystemTurso { .. } => env_usize("SS_INFLIGHT", 8).max(1),
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
         }
     }
 
@@ -291,10 +256,6 @@ impl Cell {
                 )
                 .expect("open filesystem--turso")
             }
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { path, sync } => {
-                open_sqlite_with_sync(path.to_str().unwrap(), clock, *sync).expect("open_sqlite")
-            }
         }
     }
 
@@ -319,14 +280,6 @@ impl Cell {
                     projection_path.display()
                 )
             }
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { path, sync } => {
-                format!(
-                    "cell=sqlite--memory log_axis=sqlite (command-log calibration, NOT production) \
-                     projection=memory sqlite_sync={sync:?} path={}",
-                    path.display()
-                )
-            }
         }
     }
 
@@ -345,12 +298,6 @@ impl Cell {
                 let _ = std::fs::remove_file(format!("{}-wal", projection_path.display()));
                 let _ = std::fs::remove_file(format!("{}-shm", projection_path.display()));
             }
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { path, .. } => {
-                let _ = std::fs::remove_file(path);
-                let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-                let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-            }
         }
     }
 
@@ -359,8 +306,6 @@ impl Cell {
             Self::ObjectLogFilesystemMemory { root } => Some(root),
             #[cfg(feature = "turso")]
             Self::ObjectLogFilesystemTurso { log_root, .. } => Some(log_root),
-            #[cfg(feature = "sqlite")]
-            Self::SqliteCommandLogMemory { .. } => None,
         }
     }
 

@@ -44,17 +44,12 @@ REQUIRED TOOLS FOR REAL RUNS:
 
 STORAGE BACKENDS (runnable live smokes; public product names only):
   filesystem + memory    ephemeral projection over a durable filesystem object log
-  filesystem + sqlite    durable SQLite relational projection over the filesystem
-                         object log, persisted on the chart's storage volume
   filesystem + turso     durable Turso relational projection over the filesystem
                          object log (product default projection), on the chart volume
   postgres   + memory    durable postgres command log + in-memory projection
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
                          the fireweed-postgres-log Secret before installing the chart.
-  postgres   + sqlite    durable postgres command log + a derived SQLite relational
-                         projection on the chart's storage volume. Same in-cluster
-                         postgres as above for the log axis; no projection Secret.
   postgres   + turso     durable postgres command log + Turso relational projection
                          on the chart's storage volume.
   postgres   + postgres  durable postgres command log + a SEPARATE postgres-backed
@@ -126,18 +121,16 @@ kubectl_cmd() {
 values_file_for() {
     case "$1:$2" in
         filesystem:memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
-        filesystem:sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
         filesystem:turso) echo "${CHART_DIR}/ci/filesystem-turso-values.yaml" ;;
         postgres:memory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
-        postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres:turso) echo "${CHART_DIR}/ci/postgres-turso-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
-        *) die "no runtime CI values file for log=$1 projection=$2 (public: filesystem × memory|sqlite|turso; postgres × memory|sqlite|turso|postgres)" ;;
+        *) die "no runtime CI values file for log=$1 projection=$2 (live smoke: filesystem × memory|turso; postgres × memory|turso|postgres)" ;;
     esac
 }
 
-# The Kubernetes Secret name + key the postgres-memory/postgres-sqlite values files expect the log DSN
-# under (must match charts/fireweed-queue/ci/postgres-memory-values.yaml and postgres-sqlite-values.yaml:
+# The Kubernetes Secret name + key the postgres-memory/postgres-turso values files expect the log DSN
+# under (must match charts/fireweed-queue/ci/postgres-memory-values.yaml and postgres-turso-values.yaml:
 # storage.log.postgres.existingSecret/databaseUrlKey).
 PG_SECRET_NAME="fireweed-postgres-log"
 PG_SECRET_KEY="database-url"
@@ -271,13 +264,11 @@ validate_config() {
     [[ -n "${PROJECTION_BACKEND}" ]] || die "--projection-backend is required"
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
         filesystem:memory) ;;
-        filesystem:sqlite) ;;
         filesystem:turso) ;;
         postgres:memory) ;;
-        postgres:sqlite) ;;
         postgres:turso) ;;
         postgres:postgres) ;;
-        *) die "runtime smoke supports public axes only: log=filesystem projection={memory,sqlite,turso}, and log=postgres projection={memory,sqlite,turso,postgres} (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
+        *) die "runtime smoke supports log=filesystem projection={memory,turso}, and log=postgres projection={memory,turso,postgres} (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example fireweed-service:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"

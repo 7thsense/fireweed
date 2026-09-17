@@ -155,7 +155,7 @@ fn structural_s3_config(
 fn s3_validate_time_pins_are_retired_for_all_three_projections() {
     for projection in [
         ProjectionStoreConfig::Memory,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: PathBuf::from("/tmp/p3s-never-opened.sqlite"),
         },
         ProjectionStoreConfig::Postgres {
@@ -179,53 +179,28 @@ fn s3_validate_time_pins_are_retired_for_all_three_projections() {
 }
 
 #[test]
-fn s3_deferred_flush_accepts_sqlite_and_rejects_memory_and_postgres() {
-    let mut sqlite = StorageConfig {
-        log: LogConfig::S3 {
-            endpoint: "http://127.0.0.1:1".to_owned(),
-            bucket: "fireweed".to_owned(),
-            region: "us-east-1".to_owned(),
-            access_key_id: ConfigSecret::new("access"),
-            secret_access_key: ConfigSecret::new("secret"),
-            allow_insecure_http: true,
+fn s3_retired_deferred_flush_rejected_before_io() {
+    for projection in [
+        ProjectionStoreConfig::Memory,
+        ProjectionStoreConfig::Turso {
+            path: PathBuf::from("/p3s-must-not-exist/projection.db"),
         },
-        projection: ProjectionStoreConfig::Sqlite {
-            path: PathBuf::from("/tmp/p3s-deferred.sqlite"),
+        ProjectionStoreConfig::Postgres {
+            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
-        control_plane: None,
-        authority: Some(ObjectLogAuthority::NativeConditionalWrite),
-        response_barrier: ResponseBarrier::Strict,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: Some(7),
-        segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
-        namespace: "p3s-deferred-sqlite".to_owned(),
-        recovery: RecoveryPolicy::default(),
-    };
-    assert_eq!(sqlite.validate(), Ok(()));
-
-    sqlite.response_barrier = ResponseBarrier::AsyncProjection;
-    sqlite.async_projection = Some(non_default_spec());
-    assert_eq!(sqlite.validate(), Ok(()));
-
-    let mut memory = sqlite.clone();
-    memory.projection = ProjectionStoreConfig::Memory;
-    assert_eq!(
-        memory.validate(),
-        Err(EngineError::Invalid(
-            "sqlite-projection-deferred-flush-requires-sqlite-projection"
-        ))
-    );
-
-    let mut postgres = sqlite;
-    postgres.projection = ProjectionStoreConfig::Postgres {
-        url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
-    };
-    assert_eq!(
-        postgres.validate(),
-        Err(EngineError::Invalid(
-            "sqlite-projection-deferred-flush-requires-sqlite-projection"
-        ))
-    );
+    ] {
+        for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+            let mut config =
+                structural_s3_config(projection.clone(), barrier, "retired-tuning".into());
+            config.sqlite_projection_deferred_flush_chunk = Some(7);
+            assert_eq!(
+                config.validate(),
+                Err(EngineError::Invalid(
+                    "sqlite storage is retired; use filesystem log and turso projection"
+                ))
+            );
+        }
+    }
 }
 
 #[test]
@@ -292,13 +267,13 @@ fn unsupported_s3_field_and_endpoint_negatives_are_retained() {
 }
 
 #[test]
-fn s3_facade_routes_caller_async_spec_and_deferred_flush_fields() {
+fn s3_facade_routes_caller_async_spec() {
     // Source guard: freeze the private conversion boundary so a future default
     // cannot erase caller-owned values without changing validation behavior.
     let source = include_str!("../src/lib.rs");
     assert!(source.contains("fn open_s3_log_cell("));
     assert!(source.contains("fn open_s3_objectlog_memory_projection("));
-    assert!(source.contains("fn open_s3_composed_sqlite("));
+    assert!(source.contains("fn finish_objectlog_turso("));
     assert!(source.contains("fn open_s3_objectlog_postgres_blocking("));
     assert!(
         source.contains("from_log_store_with_async_projection"),
@@ -318,10 +293,6 @@ fn s3_facade_routes_caller_async_spec_and_deferred_flush_fields() {
     assert!(
         s3_cell.contains("async_projection,"),
         "open_s3_log_cell must forward async_projection"
-    );
-    assert!(
-        s3_cell.contains("sqlite_projection_deferred_flush_chunk,"),
-        "open_s3_log_cell must forward deferred-flush tuning"
     );
     assert!(
         !s3_cell.contains("AsyncProjectionSpec::default"),
@@ -366,27 +337,18 @@ fn all_six_s3_barrier_cells_open_with_caller_tuning() {
         eprintln!("P3s PASS s3×memory barrier={barrier:?}");
 
         ordinal += 1;
-        let mut config = s3_config(
-            ProjectionStoreConfig::Sqlite {
-                path: fixture.path().join(format!("projection-{ordinal}.sqlite")),
+        let config = s3_config(
+            ProjectionStoreConfig::Turso {
+                path: fixture.path().join(format!("projection-{ordinal}.db")),
             },
             barrier,
-            format!("p3s-sqlite-{}-{}", std::process::id(), ordinal),
+            format!("p3s-turso-{}-{}", std::process::id(), ordinal),
         );
-        config.sqlite_projection_deferred_flush_chunk = Some(7);
         let handle =
-            fireweed::open(config, Arc::new(SystemClock)).expect("s3×SQLite barrier must open");
-        let control = handle
-            .projection_control()
-            .expect("durable SQLite projection control");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build verification runtime")
-            .block_on(control.verify())
-            .expect("empty SQLite projection verifies");
+            fireweed::open(config, Arc::new(SystemClock)).expect("s3×Turso barrier must open");
+        assert!(handle.projection_control().is_none());
         drop(handle);
-        eprintln!("P3s PASS s3×sqlite barrier={barrier:?} deferred_flush_chunk=7");
+        eprintln!("P3s PASS s3×turso barrier={barrier:?}");
     }
 
     let url = require_pg_url();
@@ -489,7 +451,7 @@ fn s3_cells_reopen_with_namespace_segments_and_recovery_fields() {
     let namespace = format!("p3s-reopen-{}", std::process::id());
 
     let mut config = s3_config(
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("reopen-projection.sqlite"),
         },
         ResponseBarrier::AsyncProjection,
@@ -501,23 +463,14 @@ fn s3_cells_reopen_with_namespace_segments_and_recovery_fields() {
         verify_checksums: true,
         max_tail_commands: 4_096,
     };
-    config.sqlite_projection_deferred_flush_chunk = Some(3);
 
     let first = fireweed::open(config.clone(), Arc::new(SystemClock))
-        .expect("first s3×sqlite open with nested fields");
+        .expect("first s3×turso open with nested fields");
     drop(first);
 
     let reopened = fireweed::open(config, Arc::new(SystemClock))
         .expect("reopen must preserve namespace/segments/recovery wiring");
-    let control = reopened
-        .projection_control()
-        .expect("reopened SQLite control");
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build verification runtime")
-        .block_on(control.verify())
-        .expect("reopened projection verifies");
+    assert!(reopened.projection_control().is_none());
     drop(reopened);
-    eprintln!("P3s PASS s3×sqlite reopen namespace={namespace} segments+recovery+deferred-flush");
+    eprintln!("P3s PASS s3×turso reopen namespace={namespace} segments+recovery");
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P2r: invoke exact generated suite leaves and require ran=1 each.
+# P2r: require exactly one executed test per run leaf or listed test per list leaf.
 # Usage:
 #   run-exact-suite-leaves.sh <suite-name>
 #   run-exact-suite-leaves.sh --manifest-leaf <p10r-leaf-id>
@@ -26,25 +26,43 @@ run_exact() {
         echo "exact leaf failed: ${cmd[*]}" >&2
         exit 1
     fi
-    # Cargo prints "running 1 test" for --exact single filters.
-    if ! grep -qE 'running 1 test|test result: ok\. 1 passed' <<<"${output}"; then
-        # list-only paths may print "1 test, 0 benchmarks" without running.
-        if ! grep -qE '^[0-9]+ test(s)?, 0 benchmarks?$' <<<"${output}" \
-            && ! grep -qE ': test$' <<<"${output}"; then
-            printf '%s\n' "${output}" >&2
-            echo "exact leaf did not report ran=1: ${cmd[*]}" >&2
-            exit 1
-        fi
+    local mode=run arg
+    for arg in "${cmd[@]}"; do
+        [[ "$arg" == --list ]] && mode=list
+    done
+    # Sum across Cargo's harnesses: several zero-match targets plus one selected
+    # test are valid, while two one-test harnesses are still ambiguous.
+    if ! printf '%s\n' "$output" | python3 -c '
+import re, sys
+mode = sys.argv[1]
+text = sys.stdin.read()
+if mode == "list":
+    entries = re.findall(r"^.+: test$", text, re.MULTILINE)
+    summaries = re.findall(r"^(\d+) tests?(?:, (\d+) benchmarks?)?$", text, re.MULTILINE)
+    valid = len(entries) == 1 and bool(summaries)
+    valid = valid and sum(int(n) for n, _ in summaries) == 1
+    valid = valid and all(not benches or int(benches) == 0 for _, benches in summaries)
+else:
+    summaries = re.findall(
+        r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;",
+        text, re.MULTILINE,
+    )
+    valid = bool(summaries) and all(status == "ok" for status, *_ in summaries)
+    valid = valid and sum(int(passed) for _, passed, *_ in summaries) == 1
+    valid = valid and all(int(failed) == int(ignored) == int(measured) == 0
+                          for _, _, failed, ignored, measured in summaries)
+if not valid:
+    raise SystemExit(f"exact leaf must report exactly one {mode} test and no ignored/benchmark results")
+' "$mode"; then
+        printf '%s\n' "${output}" >&2
+        echo "zero-match, ambiguous, or unverified leaf: ${cmd[*]}" >&2
+        exit 1
     fi
-    # Reject zero-match / multi-match cargo filters.
-    if grep -qE '0 passed|running 0 tests|0 tests,' <<<"${output}"; then
-        if ! grep -qE 'running 1 test|1 passed|1 test,' <<<"${output}"; then
-            printf '%s\n' "${output}" >&2
-            echo "zero-match or ambiguous leaf: ${cmd[*]}" >&2
-            exit 1
-        fi
+    if [[ "$mode" == list ]]; then
+        echo "listed=1 ok: ${cmd[*]}"
+    else
+        echo "ran=1 ok: ${cmd[*]}"
     fi
-    echo "ran=1 ok: ${cmd[*]}"
 }
 
 if [[ "$1" == "--manifest-leaf" ]]; then
@@ -113,4 +131,4 @@ for part in inv:
     run_exact "${cmd[@]}"
 done
 
-echo "suite ${suite_name}: ${#seen[@]} exact leaves, each ran=1"
+echo "suite ${suite_name}: ${#seen[@]} exact leaves validated; run/list results reported above"

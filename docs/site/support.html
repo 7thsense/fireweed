@@ -53,7 +53,6 @@
           <thead><tr><th>Log × projection</th><th>Status</th><th>Notes</th></tr></thead>
           <tbody>
             <tr><td><code>memory</code> × <code>memory</code> | <code>turso</code> | <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class B: durability limited to the projection after process death; no Class A log replay.</td></tr>
-            <tr><td><code>sqlite</code> log or projection</td><td><span class="badge blocked">retired</span></td><td>Use filesystem log and turso projection.</td></tr>
             <tr><td><code>postgres</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A; optional postgres cargo feature / image packaging must fail closed when omitted.</td></tr>
             <tr><td><code>filesystem</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A local/NAS object log; default deploy log axis with Turso projection.</td></tr>
             <tr><td><code>s3</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A object log; NativeConditionalWrite S3 only—provider brands are not product SKUs.</td></tr>

@@ -1,5 +1,8 @@
 #![allow(dead_code, unused_imports)]
 
+#[path = "support/storage.rs"]
+mod storage;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -200,7 +203,7 @@ async fn time_only_crossed_group_triggers_progress_guard_without_reordering() {
             .unwrap()
             .as_nanos()
     ));
-    let durable = fireweed::open_sqlite_relational(path.to_str().unwrap(), clock.clone()).unwrap();
+    let durable = storage::open_log_memory(path.to_str().unwrap(), clock.clone()).unwrap();
     durable.create_queue(definition(&q, 60_000)).await.unwrap();
     durable
         .push(
@@ -246,5 +249,5 @@ async fn time_only_crossed_group_triggers_progress_guard_without_reordering() {
     assert_eq!(prefix.scopes(), source.as_slice());
 
     drop(durable);
-    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir_all(format!("{}.store", path.display())).unwrap();
 }

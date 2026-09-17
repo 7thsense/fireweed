@@ -118,9 +118,6 @@ fn build_config(
     let (log_axis, proj_axis) = parse_cell(cell)?;
     let log = match log_axis {
         "memory" => LogConfig::Memory,
-        "sqlite" => LogConfig::Sqlite {
-            path: root.join("log.sqlite"),
-        },
         "postgres" => {
             let url = postgres
                 .map(|p| p.url.as_str())
@@ -155,9 +152,6 @@ fn build_config(
     };
     let projection = match proj_axis {
         "memory" => ProjectionStoreConfig::Memory,
-        "sqlite" => ProjectionStoreConfig::Sqlite {
-            path: root.join("projection.sqlite"),
-        },
         "turso" => ProjectionStoreConfig::Turso {
             path: root.join("projection.turso"),
         },
@@ -227,9 +221,7 @@ where
         Ok((log, _)) if matches!(log, "filesystem" | "s3") => {
             fireweed_objectlog::block_on_objectlog_future(fut)
         }
-        Ok((log, "turso")) if !matches!(log, "postgres") => {
-            fireweed_objectlog::block_on_objectlog_future(fut)
-        }
+        Ok((_, "turso")) => fireweed_objectlog::block_on_objectlog_future(fut),
         _ => futures::executor::block_on(fut),
     }
 }

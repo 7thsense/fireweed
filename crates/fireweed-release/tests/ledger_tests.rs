@@ -384,12 +384,12 @@ fn release_manifest_rejects_wrong_profile_and_unlisted_id_substitution() {
     assert!(errors.iter().any(|error| {
         error
             .0
-            .contains("backend_profile \"object_log_inmemory_projection\" is not governed for E2; required E2 profile set is [\"object_log_sqlite_projection\"]")
+            .contains("backend_profile \"object_log_inmemory_projection\" is not governed for E2; required E2 profile set is [\"object_log_turso_projection\", \"object_log_sqlite_projection\"]")
     }));
     assert!(errors.iter().any(|error| {
         error
             .0
-            .contains("required E2 profile set is [\"object_log_sqlite_projection\"]")
+            .contains("required E2 profile set is [\"object_log_turso_projection\", \"object_log_sqlite_projection\"]")
     }));
     assert!(errors.iter().any(|error| {
         error

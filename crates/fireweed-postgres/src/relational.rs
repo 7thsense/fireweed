@@ -217,6 +217,8 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
     ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = false;
+CREATE INDEX IF NOT EXISTS fireweed_items_retained_id_idx
+    ON fireweed_items (tenant_id, queue_id, (item_id::numeric)) WHERE superseded = false;
 CREATE INDEX IF NOT EXISTS fireweed_items_claim_idx
     ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq) WHERE lifecycle_state = 'Pending';
 CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx
@@ -349,7 +351,7 @@ CREATE TABLE IF NOT EXISTS fireweed_metrics_counted_item (
 -- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `fireweed_items`: a side
 -- record carries no lifecycle/lease/priority/eligibility, so it is never claimable, eligible, peekable, or
 -- counted as work. `key`/`payload` are opaque bytes fireweed stores verbatim; the apply arm upserts by key.
--- Mirrors `fireweed-sqlite`'s `fireweed_side_records` (`crates/fireweed-sqlite/src/relational.rs:234-237`).
+-- PostgreSQL storage for opaque non-work records committed with transitions.
 CREATE TABLE IF NOT EXISTS fireweed_side_records (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BYTEA NOT NULL, payload BYTEA NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, key)
@@ -358,7 +360,7 @@ CREATE TABLE IF NOT EXISTS fireweed_side_records (
 -- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `fireweed_items`: a fence carries
 -- no lifecycle/lease and is never claimable/eligible/peekable. `instance_key` is opaque bytes; an absent key
 -- reads as fence 0 (the unset convention). The commit upserts the row to `next` only after validation.
--- Mirrors `fireweed-sqlite`'s `fireweed_instance_fences` (`crates/fireweed-sqlite/src/relational.rs:242-245`).
+-- Instance fencing tokens committed with workflow transitions.
 CREATE TABLE IF NOT EXISTS fireweed_instance_fences (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BYTEA NOT NULL, fence BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, instance_key)
@@ -636,6 +638,11 @@ END $$;
 "#;
 
 const GROUP_SUMMARY_INDEX_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "fireweed_items_retained_id_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_retained_id_idx \
+         ON fireweed_items (tenant_id,queue_id,(item_id::numeric)) WHERE superseded=false",
+    ),
     (
         "fireweed_item_index_component_lookup_idx",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_item_index_component_lookup_idx \
@@ -1631,7 +1638,7 @@ fn plan_item_mutation_sql<C: GenericClient>(
         "SELECT item_id,client_item_key,priority,not_before,eligible_since,group_key,cohort_size, \
                 payload,fields,metadata,entity_document,lifecycle_state,item_version,retry_count, \
                 max_attempts,created_seq,lease_expires_at,worker_id,fenced,superseded,terminal_at, \
-                last_command_sequence \
+                last_command_sequence,index_fields \
          FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 ORDER BY created_seq,item_id{}",
         if lock_rows { " FOR UPDATE" } else { "" }
     );
@@ -1653,6 +1660,9 @@ fn plan_item_mutation_sql<C: GenericClient>(
             .map(GroupKey::new)
             .transpose()
             .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let index_fields = fireweed_engine::index_fields::decode_index_fields_blob(
+            row.get::<_, Option<Vec<u8>>>(22).as_deref(),
+        )?;
         let entity_document = row
             .get::<_, Option<String>>(10)
             .map(|raw| {
@@ -1693,8 +1703,8 @@ fn plan_item_mutation_sql<C: GenericClient>(
                 .get(&item_id.to_string())
                 .cloned()
                 .unwrap_or_default(),
-            index_fields: Default::default(),
             entity_document,
+            index_fields,
             state,
             item_version: u64::try_from(row.get::<_, i64>(12))
                 .map_err(|error| EngineError::Storage(error.to_string()))?,
@@ -3905,7 +3915,7 @@ fn apply_command_sql(
         // C9 (epic pqueue-2201fd37): opaque NON-WORK side records (Snorri authoritative-commit boundary).
         // Upsert each (key,payload) into `fireweed_side_records` — a table disjoint from `fireweed_items`, so a
         // side record is never claimable/eligible/peekable nor counted as work. Apply is infallible
-        // (insert-or-overwrite by key), mirroring `fireweed-sqlite`'s arm. `CommitTransitionPort` itself is not
+        // (insert-or-overwrite by key). `CommitTransitionPort` itself is not
         // yet wired on this backend (a separate bead) — this arm only makes the storage ready for it.
         QueueCommand::WriteSideRecords(c) => {
             if !c.records.is_empty() {
@@ -4716,6 +4726,108 @@ fn render_claimed(
         )?);
     }
     Ok(out)
+}
+
+fn side_records_by_prefix_sql(
+    client: &mut Client,
+    shard: &QueueKey,
+    prefix: &[u8],
+    page_size: usize,
+    cursor: Option<Vec<u8>>,
+) -> EngineResult<fireweed_engine::SideRecordPage> {
+    let page_size = page_size.min(1_000);
+    let (tenant, queue) = parts(shard);
+    let start = cursor
+        .unwrap_or_else(|| prefix.to_vec())
+        .max(prefix.to_vec());
+    let mut upper = prefix.to_vec();
+    while upper.last() == Some(&u8::MAX) {
+        upper.pop();
+    }
+    let limit = (page_size + 1) as i64;
+    // BYTEA comparison is bytewise, matching the projection's ordered byte keys.
+    // The primary key serves both bounds and ordering; fetch only one lookahead row.
+    let rows = if let Some(last) = upper.last_mut() {
+        *last += 1;
+        st(client.query(
+            "SELECT key,payload FROM fireweed_side_records \
+             WHERE tenant_id=$1 AND queue_id=$2 AND key >= $3 AND key < $4 \
+             ORDER BY key LIMIT $5",
+            &[&tenant, &queue, &start, &upper, &limit],
+        ))?
+    } else {
+        st(client.query(
+            "SELECT key,payload FROM fireweed_side_records \
+             WHERE tenant_id=$1 AND queue_id=$2 AND key >= $3 ORDER BY key LIMIT $4",
+            &[&tenant, &queue, &start, &limit],
+        ))?
+    };
+    let mut entries = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, Vec<u8>>(0),
+                Bytes::from(row.get::<_, Vec<u8>>(1)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let next_cursor = if entries.len() > page_size {
+        entries.pop().map(|(key, _)| key)
+    } else {
+        None
+    };
+    Ok(fireweed_engine::SideRecordPage {
+        entries,
+        next_cursor,
+    })
+}
+
+fn retained_items_sql(
+    client: &mut Client,
+    shard: &QueueKey,
+    after: Option<ItemId>,
+    limit: usize,
+) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+    if !(1..=1000).contains(&limit) {
+        return Err(EngineError::Invalid("retained page size must be 1..1000"));
+    }
+    let (tenant, queue) = parts(shard);
+    let rows = if let Some(after) = after {
+        st(client.query(
+            "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,not_before,\
+             retry_count,payload,metadata FROM fireweed_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND superseded=false \
+             AND item_id::numeric>$3::text::numeric ORDER BY item_id::numeric LIMIT $4",
+            &[&tenant, &queue, &after.to_string(), &(limit as i64)],
+        ))?
+    } else {
+        st(client.query(
+            "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,not_before,\
+             retry_count,payload,metadata FROM fireweed_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND superseded=false \
+             ORDER BY item_id::numeric LIMIT $3",
+            &[&tenant, &queue, &(limit as i64)],
+        ))?
+    };
+    rows.into_iter()
+        .map(|row| {
+            Ok(fireweed_engine::RetainedItemView {
+                item_id: ItemId::new(row.get::<_, String>(0))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                client_item_key: ClientItemKey::new(row.get::<_, String>(1))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                item_version: u64::try_from(row.get::<_, i64>(2))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                lifecycle_state: parse_state(&row.get::<_, String>(3))?,
+                priority: parse_priority(row.get(4))?,
+                not_before: row.get::<_, Option<i64>>(5).map(nanos_ts),
+                attempt_count: u32::try_from(row.get::<_, i64>(6))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                payload: row.get::<_, Option<Vec<u8>>>(7).map(Bytes::from),
+                metadata: metadata_from_json(row.get(8))?,
+            })
+        })
+        .collect()
 }
 
 fn live_items_sql(
@@ -6897,6 +7009,20 @@ impl ControlPlaneStore for PostgresRelationalBackend {
 }
 
 impl ProjectionRead for PostgresRelationalBackend {
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::RetainedItemView>>> + Send
+    {
+        let result = {
+            let mut guard = self.inner.lock().expect("poisoned");
+            retained_items_sql(&mut guard.client, shard, after, limit)
+        };
+        std::future::ready(result)
+    }
+
     fn select_eligible(
         &self,
         shard: &QueueKey,
@@ -7840,34 +7966,6 @@ fn claim_item_level_in_tx(
         std::slice::from_ref(&position),
         std::slice::from_ref(&envelope),
     )?;
-    let outbox_id = format!("pg-claim-{seq}");
-    let item_ids_json = serde_json::to_string(
-        &claimed_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|e| EngineError::Storage(e.to_string()))?;
-    st(tx.execute(
-        "INSERT INTO fireweed_claim_outbox (\
-         tenant_id, queue_id, outbox_id, item_ids, lease_token, lease_expires_at, \
-         request_id, request_fingerprint, worker_id, claim_unit, cohort_id, created_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL,$7,'item',NULL,$8)",
-        &[
-            &t,
-            &q,
-            &outbox_id,
-            &item_ids_json,
-            &req.lease_token.as_str(),
-            &exp,
-            &req.worker_id.as_str(),
-            &now_n,
-        ],
-    ))?;
-    st(tx.execute(
-        "DELETE FROM fireweed_claim_outbox WHERE tenant_id=$1 AND queue_id=$2 AND outbox_id=$3",
-        &[&t, &q, &outbox_id],
-    ))?;
     let mut gate_keys_by_id = item_gate_keys_by_id(tx, &req.shard, &claimed_ids)?;
     let mut items = Vec::with_capacity(rows.len());
     let mut token_ops = Vec::new();
@@ -8310,6 +8408,23 @@ impl RecoveryReadPort for PostgresRelationalBackend {
             Ok(payload.map(Bytes::from))
         })();
         std::future::ready(result)
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        std::future::ready(side_records_by_prefix_sql(
+            &mut self.inner.lock().expect("poisoned").client,
+            shard,
+            prefix,
+            page_size,
+            cursor,
+        ))
     }
 }
 
@@ -10896,6 +11011,16 @@ impl ProjectionStore for PostgresRelational {
         .map(|row| Bytes::from(row.get::<_, Vec<u8>>(0))))
     }
 
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<fireweed_engine::SideRecordPage> {
+        side_records_by_prefix_sql(&mut self.lock().client, shard, prefix, page_size, cursor)
+    }
+
     fn select_rich_claim(
         &self,
         shard: &QueueKey,
@@ -11318,6 +11443,15 @@ impl ProjectionStore for PostgresRelational {
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
         live_items_sql(&mut self.lock().client, shard, keys)
+    }
+
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+        retained_items_sql(&mut self.lock().client, shard, after, limit)
     }
 
     fn reap_terminal_items(
@@ -13579,7 +13713,8 @@ mod gated_group_summary_tests {
              AND not_before IS NOT NULL AND not_before>0 AND not_before<=10000000000",
         );
         assert!(
-            group_due.contains("fireweed_items_group_due_idx"),
+            group_due.contains("fireweed_items_group_due_idx")
+                || group_due.contains("fireweed_items_active_scope_idx"),
             "{group_due}"
         );
         let bounded: i64 = inner

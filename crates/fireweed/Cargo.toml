@@ -28,7 +28,6 @@ path = "src/lib.rs"
 # composition over the engine ports: push/upsert/claim/ack/nack/peek/metrics. Depends on the domain
 # (engine + core) only; a concrete backend + clock are injected (hexagonal).
 [dependencies]
-axon-esf.workspace = true
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 bytes = "1"
@@ -68,6 +67,11 @@ fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"
 # The postgres-constructor smoke test drives the sync postgres client via a non-tokio executor.
 postgres = "0.19"
+
+[[test]]
+name = "transition_entry_validation"
+path = "tests/transition_entry_validation.rs"
+required-features = ["memory"]
 
 [[test]]
 name = "ss_phased_capacity"
@@ -184,9 +188,6 @@ path = "tests/request_id_idempotency.rs"
 name = "storage_matrix_t0_t2"
 path = "tests/storage_matrix_t0_t2.rs"
 
-[[test]]
-name = "p3i_async_selection_ledger"
-path = "tests/p3i_async_selection_ledger.rs"
 
 [[test]]
 name = "p3b_async_config_validation"
@@ -231,11 +232,6 @@ required-features = ["objectlog", "turso", "postgres"]
 name = "p9s3_s3_transaction_parity"
 path = "tests/p9s3_s3_transaction_parity.rs"
 required-features = ["objectlog", "turso", "postgres"]
-
-[[test]]
-name = "p3b_non_s3_barrier_conformance"
-path = "tests/p3b_non_s3_barrier_conformance.rs"
-required-features = ["memory", "objectlog", "turso", "postgres"]
 
 [[test]]
 name = "functional_matrix_route_sources"

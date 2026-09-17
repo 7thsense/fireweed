@@ -242,7 +242,7 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
 ///
 /// By default operations complete on the polling thread (CPU-only / memory axes). When constructed
 /// with [`Self::new_with_blocking_offload`], each whole store operation runs on a private
-/// [`BoundedBlockingExecutor`] so rusqlite/disk work never stalls a Tokio worker (adapter-local
+/// [`BoundedBlockingExecutor`] so blocking disk work never stalls a Tokio worker (adapter-local
 /// offload — not process-wide `BlockingLibBackend`).
 ///
 /// Durable offload axes also enable **group-commit** on [`AsyncLogStore::append`]: concurrent

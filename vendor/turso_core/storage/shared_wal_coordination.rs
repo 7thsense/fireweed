@@ -3974,11 +3974,9 @@ mod tests {
             mapped.iter_latest_frames(boundary + 2, boundary + 2),
             vec![(13, boundary + 2)]
         );
-        assert!(
-            mapped
-                .iter_latest_frames(boundary + 3, boundary + 2)
-                .is_empty()
-        );
+        assert!(mapped
+            .iter_latest_frames(boundary + 3, boundary + 2)
+            .is_empty());
         assert_eq!(
             mapped.iter_latest_frames(boundary, boundary + 1),
             vec![(7, boundary), (9, boundary + 1)]

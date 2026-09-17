@@ -15,9 +15,9 @@ use fireweed_core::{
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    BatchUpdateSnapshotItem, Claimed, ClaimedItem, CommandPosition, EngineError, EngineResult, IdempotencyDecision,
-    ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage, PushFingerprint,
-    QueueKey, QueueMetrics,
+    BatchUpdateSnapshotItem, Claimed, ClaimedItem, CommandPosition, EngineError, EngineResult,
+    IdempotencyDecision, ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage,
+    PushFingerprint, QueueKey, QueueMetrics,
 };
 use fireweed_relational::{
     ClaimOutboxRow, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
@@ -715,6 +715,19 @@ impl TursoRelational {
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        self.item_claim_microbatch_on_serving_reader_with_gate_policy(shard, members, exclude, None)
+            .await
+    }
+
+    /// Reuse the admitted queue definition so disabled gates cost no SQL probe.
+    /// Dynamic policies still discover current memberships on every selection.
+    pub async fn item_claim_microbatch_on_serving_reader_with_gate_policy(
+        &self,
+        shard: &QueueKey,
+        members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+        exclude: &[ItemId],
+        gate_policy: Option<fireweed_core::GateKeyPolicy>,
+    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
         let fifo = self.claim_scan_is_fifo(shard);
         let mut connection = self.reader.lock().await;
         let rowid_floor = if fifo {
@@ -727,7 +740,10 @@ impl TursoRelational {
             shard,
             members,
             exclude,
-            rowid_floor,
+            crate::projection::ItemClaimScan {
+                rowid_floor,
+                gate_policy,
+            },
         )
         .await?;
         if fifo && let Some(next) = next_floor {
@@ -747,7 +763,11 @@ impl TursoRelational {
         exclude: &[ItemId],
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
         let (out, _) = Self::item_claim_microbatch_on_connection_from(
-            connection, shard, members, exclude, None,
+            connection,
+            shard,
+            members,
+            exclude,
+            crate::projection::ItemClaimScan::default(),
         )
         .await?;
         Ok(out)
@@ -758,7 +778,7 @@ impl TursoRelational {
         shard: &QueueKey,
         members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
         exclude: &[ItemId],
-        rowid_floor: Option<i64>,
+        scan: crate::projection::ItemClaimScan,
     ) -> EngineResult<(Vec<(Vec<ItemId>, Vec<ClaimedItem>)>, Option<i64>)> {
         // Latest `now` is the most inclusive eligibility instant across the generation.
         let Some(now) = members.iter().map(|member| member.0).max() else {
@@ -774,7 +794,7 @@ impl TursoRelational {
                 exclude,
                 &members[0].2,
                 members[0].3,
-                rowid_floor,
+                scan,
             )
             .await?;
         let mut out = Vec::with_capacity(members.len());
@@ -959,12 +979,18 @@ impl TursoRelational {
     }
 
     pub async fn server_retained_items_committed(
-        &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
     ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
         self.with_outcome_connection(|connection| {
             let shard = shard.clone();
-            Box::pin(async move { crate::projection::server_retained_items_on(connection, &shard, after, limit).await })
-        }).await
+            Box::pin(async move {
+                crate::projection::server_retained_items_on(connection, &shard, after, limit).await
+            })
+        })
+        .await
     }
 
     pub async fn server_live_items_committed(
@@ -1001,8 +1027,12 @@ impl TursoRelational {
         self.with_outcome_connection(|connection| {
             let shard = shard.clone();
             Box::pin(async move {
-                crate::projection::server_metrics_with_membership_on(connection, &shard, &identities)
-                    .await
+                crate::projection::server_metrics_with_membership_on(
+                    connection,
+                    &shard,
+                    &identities,
+                )
+                .await
             })
         })
         .await
@@ -2409,8 +2439,7 @@ mod committed_reader_tests {
 mod committed_pool_tests {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::time::{Duration, Instant};
 
     use fireweed_engine::{
@@ -2427,14 +2456,8 @@ mod committed_pool_tests {
     const SEVENTEEN_READER_DEADLINE: Duration = Duration::from_millis(31_050);
     const EVIDENCE_RETRY: Duration = Duration::from_millis(25);
 
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        Pin::new(future).poll(&mut Context::from_waker(&waker))
+        Pin::new(future).poll(&mut Context::from_waker(Waker::noop()))
     }
 
     fn wal_path(database_path: &Path) -> PathBuf {
@@ -3664,11 +3687,9 @@ mod projection_checkpoint_config_tests {
     async fn new_and_existing_files_use_their_actual_page_size() {
         let root = tempfile::tempdir().unwrap();
         let new_path = root.path().join("new.db");
-        let new = TursoRelational::open(
-            TursoConfig::local(&new_path).with_log_backed_projection(),
-        )
-        .await
-        .unwrap();
+        let new = TursoRelational::open(TursoConfig::local(&new_path).with_log_backed_projection())
+            .await
+            .unwrap();
         assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
         assert_eq!(

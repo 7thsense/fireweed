@@ -532,6 +532,8 @@ async fn ss_phased_capacity_smoke() {
     cell.cleanup();
 }
 
+// Keep the independent phase measurements explicit at this evidence boundary.
+#[allow(clippy::too_many_arguments)]
 fn write_evidence(
     cell: &Cell,
     phases: &[PhaseRow],
@@ -544,7 +546,7 @@ fn write_evidence(
 ) {
     let utc = chrono_like_utc();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/ss-phased")
+        .join("../../target/ss-phased")
         .join(&utc);
     let _ = std::fs::create_dir_all(&dir);
     let command = format!(

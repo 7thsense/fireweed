@@ -7,22 +7,20 @@ Use public storage axes:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
-bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend sqlite
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso
 bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend memory
-bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite
 bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend turso
 bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres
 ```
 
 The live kind smoke set is the chart-installable deployable set above
-(filesystem × {memory,sqlite,turso} and postgres × {memory,sqlite,turso,postgres}).
+(filesystem × {memory,turso} and postgres × {memory,turso,postgres}).
 That set equals the harness allow-list and the documented runtime cells in this
-file. The full 20-cell matrix is statically proven by `scripts/ci/helm-gate.sh`;
+file. The full 12-cell matrix is statically proven by `scripts/ci/helm-gate.sh`;
 process-local Class B cells (memory log) rely on T0–T3 and do not claim multi-node
 kind coverage.
 
-The `sqlite` and `turso` projections persist relational state on the chart's
+The `turso` projection persists relational state on the chart's
 storage volume; `memory` is ephemeral and rebuilds from a durable log after
 restart when the log axis is durable. Chart defaults select Turso.
 

@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 # In-cluster RESP load generator for the TP-002 E2 multi-node kind harness (ADR-008: the queue is the unit
-# of sharding). `run` drives the segmented object_log_sqlite_projection workload (pipelined XADD ingest,
+# of sharding). `run` drives the segmented object_log_turso_projection workload (pipelined XADD ingest,
 # XREADGROUP > claim, XACK finalize) against a set of owner Services over the cluster network (pod->pod), and
 # prints a measured per-run result JSON. `emit-row` folds three per-owner-count results (2/4/8) into one
 # TP-002 E2 verification-ledger row, judging the release bars and strict-validating the row.

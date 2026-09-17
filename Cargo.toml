@@ -1,13 +1,9 @@
 [workspace]
-# The hexagonal architecture in full (plan v4): the domain (core + engine + projection), the shared
-# conformance harness, the four driven adapters (memory/sqlite/postgres/objectlog), and the two driving
-# faces (RESP front + library facade) plus the composition root. The removed HTTP-service/Kafka/storage-
-# trait crates were deleted in Phase 6; the postgres adapter was rebuilt fresh to the engine ports
-# (OWED-resolution Chunk 4) via the durable-adapter template. `cargo test --workspace` covers exactly
-# the members below. It does not cover the independently routed
-# `crates/fireweed-bench/Cargo.toml` or `tools/fireweed-turso-compat-probe/Cargo.toml` workspaces;
-# their harnesses must be listed and invoked separately. PostgreSQL conformance is env-gated on
-# FIREWEED_PG_TEST_URL and remains registered remediation debt until its LOUD-skip paths are closed.
+# `cargo test --workspace` covers exactly the members below: domain, storage
+# adapters (memory/Turso/PostgreSQL/object-log), conformance, facade, server and tools.
+# Independently invoke `crates/fireweed-bench/Cargo.toml`, `vendor/turso_core/Cargo.toml`
+# and `vendor/object-log/Cargo.toml`; their tests are outside this workspace.
+# Live integrations require explicitly configured PostgreSQL, S3 and Kafka fixtures.
 members = [
     "crates/fireweed-core",
     "crates/fireweed-engine",
@@ -30,7 +26,7 @@ exclude = ["vendor/object-log", "vendor/turso_core", "vendor/turso", "vendor/tur
 resolver = "3"
 
 [workspace.package]
-version = "0.31.27"
+version = "0.31.28"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
@@ -51,6 +47,3 @@ axon""", tag = "v0.3.2" }
 # Keep a portable target CPU and the default unwind/error-checking policies.
 lto = "thin"
 codegen-units = 1
-
-[patch."https://github.com/7thsense/object-log.git"]
-object-log = { path = "vendor/object-log" }

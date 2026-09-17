@@ -1,57 +1,6 @@
-//! Table-driven T0–T2 harness for all 20 public storage-matrix cells, plus Class B T3
-//! (projection durability + rejection; no `durable_log_replay` claims) and Class A cell-batch
-//! T0–T4 coverage for **sqlite**, **postgres**, **filesystem**, and **s3** log batches.
-//!
-//! Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
-//!
-//! | Layer | Meaning |
-//! |-------|---------|
-//! | **T0 Construct** | `StorageConfig` open via [`fireweed::open`] / [`fireweed::open_async`] |
-//! | **T1 Lifecycle** | `create_queue` → `push` → `claim` → `complete` (+ Class B `fail`/reject) |
-//! | **T2 Reopen** | Class-correct recovery after process-local drop |
-//! | **T3 Contract** | Class B: projection durability + rejection; Class A log batches: TP-003 / request_id |
-//! | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/` for chart-installable cells |
-//!
-//! Class A (durable log): reopen recovers pending items.
-//! Class B `memory×memory`: process-local only — empty reopen is OK.
-//! Class B `memory×{sqlite,postgres}`: projection-only reopen keeps items.
-//!
-//! ## Sqlite log three cells (Class A) — T0–T4
-//!
-//! | Cell | T0–T2 | T3 TP-003 | T4 Helm |
-//! |------|-------|-----------|---------|
-//! | `sqlite×memory` | [`sqlite_log_three_cells_t0_t2`] | immutable axis fixture + separate run-owned TP-003 producer | `ci/sqlite-memory-values.yaml` |
-//! | `sqlite×sqlite` | same | axis `sqlite×sqlite` in that evidence file | `ci/sqlite-sqlite-values.yaml` |
-//! | `sqlite×postgres` | same (env-gated) | env-gated live DB | `ci/sqlite-postgres-values.yaml` |
-//!
-//! Server driver: `cargo test -p fireweed-server --lib sqlite_log`.
-//!
-//! ## Postgres log three cells (Class A) — T0–T4
-//!
-//! | Cell | T0–T2 | T3 TP-003 | T4 Helm |
-//! |------|-------|-----------|---------|
-//! | `postgres×memory` | [`postgres_log_three_cells_t0_t2`] (env-gated) | axis in `tp003-ac-txn-matrix-postgres-storage-pairs.jsonl` (+ legacy `tp003-ac-txn-matrix-postgres.jsonl`) | `ci/postgres-memory-values.yaml` |
-//! | `postgres×sqlite` | same (env-gated) | axis `postgres×sqlite` | `ci/postgres-sqlite-values.yaml` |
-//! | `postgres×postgres` | same (env-gated) | axis `postgres×postgres` | `ci/postgres-postgres-values.yaml` |
-//!
-//! Server driver: `cargo test -p fireweed-server --features postgres --lib postgres`.
-//! All three cells require `FIREWEED_PG_TEST_URL`; when unset they skip with `eprintln!` but
-//! remain registered.
-//!
-//! ## S3 log three cells (Class A) — T0–T4
-//!
-//! | Cell | T0–T2 / T3 request_id | T4 Helm |
-//! |------|------------------------|---------|
-//! | `s3×memory` | [`s3_log_three_cells_t0_t3_contract`] (env-gated live S3) | `ci/s3-memory-values.yaml` |
-//! | `s3×sqlite` | same | `ci/s3-sqlite-values.yaml` |
-//! | `s3×postgres` | same + `FIREWEED_PG_TEST_URL` | `ci/s3-postgres-values.yaml` |
-//!
-//! Unit construction (no network): `cargo test -p fireweed-server --lib s3_object_log`.
-//! Mandatory CI job requirements: `scripts/ci/s3-matrix-job-requirements.md`.
-//!
-//! Live fixtures: postgres cells need `FIREWEED_PG_TEST_URL` (and `--features postgres`);
-//! s3 cells need `FIREWEED_S3_TEST_ENDPOINT` (+ optional bucket/region/keys). Missing
-//! fixtures skip with `eprintln!` — the cell remains registered in the matrix table.
+//! T0–T3 lifecycle and recovery across the current 4-log × 3-projection matrix.
+//! Durable logs are authoritative; memory-log configurations have process-local durability.
+//! Historical TP-003 evidence fixtures are checked separately with their original labels.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -68,22 +17,20 @@ use fireweed::{
 static FIXTURE_ORDINAL: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
-// Matrix cell table (5 log × 4 projection = 20)
+// Matrix cell table (4 log × 3 projection = 12)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogAxis {
     Memory,
-    Sqlite,
     Postgres,
     Filesystem,
     S3,
 }
 
 impl LogAxis {
-    const ALL: [LogAxis; 5] = [
+    const ALL: [LogAxis; 4] = [
         LogAxis::Memory,
-        LogAxis::Sqlite,
         LogAxis::Postgres,
         LogAxis::Filesystem,
         LogAxis::S3,
@@ -92,7 +39,6 @@ impl LogAxis {
     fn name(self) -> &'static str {
         match self {
             LogAxis::Memory => "memory",
-            LogAxis::Sqlite => "sqlite",
             LogAxis::Postgres => "postgres",
             LogAxis::Filesystem => "filesystem",
             LogAxis::S3 => "s3",
@@ -115,15 +61,13 @@ impl LogAxis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionAxis {
     Memory,
-    Sqlite,
     Turso,
     Postgres,
 }
 
 impl ProjectionAxis {
-    const ALL: [ProjectionAxis; 4] = [
+    const ALL: [ProjectionAxis; 3] = [
         ProjectionAxis::Memory,
-        ProjectionAxis::Sqlite,
         ProjectionAxis::Turso,
         ProjectionAxis::Postgres,
     ];
@@ -131,7 +75,6 @@ impl ProjectionAxis {
     fn name(self) -> &'static str {
         match self {
             ProjectionAxis::Memory => "memory",
-            ProjectionAxis::Sqlite => "sqlite",
             ProjectionAxis::Turso => "turso",
             ProjectionAxis::Postgres => "postgres",
         }
@@ -147,10 +90,7 @@ impl ProjectionAxis {
 
     #[allow(dead_code)]
     fn is_local_deterministic(self) -> bool {
-        matches!(
-            self,
-            ProjectionAxis::Memory | ProjectionAxis::Sqlite | ProjectionAxis::Turso
-        )
+        matches!(self, ProjectionAxis::Memory | ProjectionAxis::Turso)
     }
 }
 
@@ -203,11 +143,11 @@ impl MatrixCell {
     }
 }
 
-fn all_matrix_cells() -> [MatrixCell; 20] {
+fn all_matrix_cells() -> [MatrixCell; 12] {
     let mut cells = [MatrixCell {
         log: LogAxis::Memory,
         projection: ProjectionAxis::Memory,
-    }; 20];
+    }; 12];
     let mut i = 0;
     for log in LogAxis::ALL {
         for projection in ProjectionAxis::ALL {
@@ -215,7 +155,7 @@ fn all_matrix_cells() -> [MatrixCell; 20] {
             i += 1;
         }
     }
-    assert_eq!(i, 20);
+    assert_eq!(i, 12);
     cells
 }
 
@@ -299,7 +239,6 @@ enum SkipReason {
     MissingPostgresUrl,
     MissingS3Endpoint,
     MissingObjectlogFeature,
-    MissingSqliteFeature,
     MissingMemoryFeature,
     MissingTursoFeature,
 }
@@ -318,9 +257,6 @@ impl SkipReason {
             }
             SkipReason::MissingObjectlogFeature => {
                 format!("storage_matrix_t0_t2: {cell_id} skipped (build without objectlog feature)")
-            }
-            SkipReason::MissingSqliteFeature => {
-                format!("storage_matrix_t0_t2: {cell_id} skipped (build without sqlite feature)")
             }
             SkipReason::MissingMemoryFeature => {
                 format!("storage_matrix_t0_t2: {cell_id} skipped (build without memory feature)")
@@ -344,11 +280,6 @@ fn skip_reason(cell: MatrixCell) -> Option<SkipReason> {
         && matches!(cell.log, LogAxis::Filesystem | LogAxis::S3)
     {
         return Some(SkipReason::MissingObjectlogFeature);
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    if matches!(cell.log, LogAxis::Sqlite) || matches!(cell.projection, ProjectionAxis::Sqlite) {
-        return Some(SkipReason::MissingSqliteFeature);
     }
 
     #[cfg(not(feature = "turso"))]
@@ -385,9 +316,6 @@ fn skip_reason(cell: MatrixCell) -> Option<SkipReason> {
 fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
     let log = match cell.log {
         LogAxis::Memory => LogConfig::Memory,
-        LogAxis::Sqlite => LogConfig::Sqlite {
-            path: root.join("log.db"),
-        },
         LogAxis::Postgres => {
             let url = std::env::var("FIREWEED_PG_TEST_URL").expect("checked by skip_reason");
             // Unique schema per open so sequential matrix cells do not share durable residue.
@@ -439,9 +367,6 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
 
     let projection = match cell.projection {
         ProjectionAxis::Memory => ProjectionStoreConfig::Memory,
-        ProjectionAxis::Sqlite => ProjectionStoreConfig::Sqlite {
-            path: root.join("projection.db"),
-        },
         ProjectionAxis::Turso => ProjectionStoreConfig::Turso {
             path: root.join("projection-turso.db"),
         },
@@ -758,11 +683,11 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Registers all 20 cells and runs T0–T2 (or documents skip) for each.
+/// Registers all 12 cells and runs T0–T2 (or documents skip) for each.
 #[tokio::test]
-async fn storage_matrix_t0_t2_all_twenty_cells() {
+async fn storage_matrix_t0_t2_all_twelve_cells() {
     let cells = all_matrix_cells();
-    assert_eq!(cells.len(), 20, "public matrix is exactly 20 cells");
+    assert_eq!(cells.len(), 12, "public matrix is exactly 12 cells");
 
     let mut ran = 0usize;
     let mut skipped = 0usize;
@@ -799,13 +724,13 @@ async fn storage_matrix_t0_t2_all_twenty_cells() {
     }
 
     assert_eq!(
-        class_a, 16,
-        "16 Class A cells (non-memory log × 4 projections)"
+        class_a, 9,
+        "9 Class A cells (non-memory log × 3 projections)"
     );
-    assert_eq!(class_b, 4, "4 Class B cells (memory log × 4 projections)");
-    assert_eq!(ran + skipped, 20, "every cell counted as ran or skipped");
+    assert_eq!(class_b, 3, "3 Class B cells (memory log × 3 projections)");
+    assert_eq!(ran + skipped, 12, "every cell counted as ran or skipped");
 
-    // Local deterministic Turso rows (memory/sqlite/filesystem × turso) must never skip when the
+    // Local deterministic Turso rows (memory/filesystem × turso) must never skip when the
     // turso feature is enabled — only live postgres/s3 fixture gaps may skip other rows.
     #[cfg(feature = "turso")]
     {
@@ -814,32 +739,32 @@ async fn storage_matrix_t0_t2_all_twenty_cells() {
             "deterministic local Turso rows must not skip; local_turso_ran={local_turso_ran} local_turso_skipped={local_turso_skipped}"
         );
         assert_eq!(
-            local_turso_ran, 3,
-            "expected exactly memory×turso, sqlite×turso, filesystem×turso; ran={local_turso_ran}"
+            local_turso_ran, 2,
+            "expected exactly memory×turso, filesystem×turso; ran={local_turso_ran}"
         );
     }
 
     // Default feature set always exercises local cells including Turso.
     assert!(
-        ran >= 9,
-        "expected ≥9 in-process cells (memory/sqlite/filesystem × memory/sqlite/turso) without live PG/S3; ran={ran} skipped={skipped}"
+        ran >= 4,
+        "expected ≥4 in-process cells (memory/filesystem × memory/turso) without live PG/S3; ran={ran} skipped={skipped}"
     );
 
     eprintln!(
-        "storage_matrix_t0_t2: ran={ran} skipped={skipped} local_turso_ran={local_turso_ran} (of 20 registered cells)"
+        "storage_matrix_t0_t2: ran={ran} skipped={skipped} local_turso_ran={local_turso_ran} (of 12 registered cells)"
     );
 }
 
 /// Structural registration: the table enumerates every public axis pair exactly once.
 #[test]
-fn storage_matrix_registers_exactly_20_distinct_cells() {
+fn storage_matrix_registers_exactly_12_distinct_cells() {
     let cells = all_matrix_cells();
-    assert_eq!(cells.len(), 20);
+    assert_eq!(cells.len(), 12);
 
     let mut ids: Vec<String> = cells.iter().map(|c| c.id()).collect();
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 20, "cell ids must be unique: {ids:?}");
+    assert_eq!(ids.len(), 12, "cell ids must be unique: {ids:?}");
 
     // Spot-check axes and reopen expectations.
     let mem_mem = cells
@@ -851,21 +776,21 @@ fn storage_matrix_registers_exactly_20_distinct_cells() {
         ReopenExpectation::ProcessLocalEmptyOk
     );
 
-    let mem_sqlite = cells
+    let mem_turso = cells
         .iter()
-        .find(|c| c.log == LogAxis::Memory && c.projection == ProjectionAxis::Sqlite)
+        .find(|c| c.log == LogAxis::Memory && c.projection == ProjectionAxis::Turso)
         .unwrap();
     assert_eq!(
-        mem_sqlite.reopen_expectation(),
+        mem_turso.reopen_expectation(),
         ReopenExpectation::ProjectionKeepsItems
     );
 
-    let sqlite_sqlite = cells
+    let filesystem_turso = cells
         .iter()
-        .find(|c| c.log == LogAxis::Sqlite && c.projection == ProjectionAxis::Sqlite)
+        .find(|c| c.log == LogAxis::Filesystem && c.projection == ProjectionAxis::Turso)
         .unwrap();
     assert_eq!(
-        sqlite_sqlite.reopen_expectation(),
+        filesystem_turso.reopen_expectation(),
         ReopenExpectation::RecoverPendingFromLog
     );
 
@@ -880,7 +805,7 @@ fn storage_matrix_registers_exactly_20_distinct_cells() {
 // Filesystem log three cells: full T0–T3 (Class A contract bar)
 // ---------------------------------------------------------------------------
 
-/// T0–T3 for filesystem×memory and filesystem×sqlite (always in-process).
+/// T0–T3 for filesystem×memory and filesystem×turso (always in-process).
 /// filesystem×postgres runs when `FIREWEED_PG_TEST_URL` + `--features postgres` are available.
 #[tokio::test]
 async fn filesystem_log_three_cells_t0_t3_contract() {
@@ -891,7 +816,7 @@ async fn filesystem_log_three_cells_t0_t3_contract() {
         },
         MatrixCell {
             log: LogAxis::Filesystem,
-            projection: ProjectionAxis::Sqlite,
+            projection: ProjectionAxis::Turso,
         },
         MatrixCell {
             log: LogAxis::Filesystem,
@@ -913,7 +838,7 @@ async fn filesystem_log_three_cells_t0_t3_contract() {
     // Always run the two local filesystem cells under default features.
     assert!(
         ran >= 2,
-        "filesystem×memory and filesystem×sqlite must run without live PG; ran={ran}"
+        "filesystem×memory and filesystem×turso must run without live PG; ran={ran}"
     );
     eprintln!("filesystem_log_three_cells_t0_t3_contract: ran={ran}/3");
 }
@@ -1047,38 +972,6 @@ async fn run_filesystem_cell_t0_t3(cell: MatrixCell) {
     assert_eq!(reopened.metrics(&key).await.unwrap().pending, 0);
 }
 
-/// Focused T0–T2 for the three Class A **sqlite log** cells (brief program cell batch).
-///
-/// Complements the full 20-cell table: always exercises `sqlite×memory` and `sqlite×sqlite`
-/// when the `sqlite` feature is on; `sqlite×postgres` follows the same skip rules as the table.
-#[tokio::test]
-async fn sqlite_log_three_cells_t0_t2() {
-    let cells = [
-        MatrixCell {
-            log: LogAxis::Sqlite,
-            projection: ProjectionAxis::Memory,
-        },
-        MatrixCell {
-            log: LogAxis::Sqlite,
-            projection: ProjectionAxis::Sqlite,
-        },
-        MatrixCell {
-            log: LogAxis::Sqlite,
-            projection: ProjectionAxis::Postgres,
-        },
-    ];
-    for cell in cells {
-        assert!(cell.is_class_a(), "{} must be Class A", cell.id());
-        assert_eq!(
-            cell.reopen_expectation(),
-            ReopenExpectation::RecoverPendingFromLog,
-            "{} Class A reopen",
-            cell.id()
-        );
-        run_cell_t0_t2(cell).await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // S3 log three cells: full T0–T3 (Class A contract bar; live S3 env-gated)
 // ---------------------------------------------------------------------------
@@ -1094,7 +987,7 @@ async fn s3_log_three_cells_t0_t3_contract() {
         },
         MatrixCell {
             log: LogAxis::S3,
-            projection: ProjectionAxis::Sqlite,
+            projection: ProjectionAxis::Turso,
         },
         MatrixCell {
             log: LogAxis::S3,
@@ -1116,7 +1009,7 @@ async fn s3_log_three_cells_t0_t3_contract() {
     if std::env::var("FIREWEED_S3_TEST_ENDPOINT").is_ok() {
         assert!(
             ran >= 2,
-            "with FIREWEED_S3_TEST_ENDPOINT set, s3×memory and s3×sqlite must run; ran={ran}"
+            "with FIREWEED_S3_TEST_ENDPOINT set, s3×memory and s3×turso must run; ran={ran}"
         );
     } else {
         eprintln!(
@@ -1287,7 +1180,7 @@ fn s3_log_t3_t4_evidence_and_helm_values_present() {
     let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
     for name in [
         "s3-memory-values.yaml",
-        "s3-sqlite-values.yaml",
+        "s3-turso-values.yaml",
         "s3-postgres-values.yaml",
     ] {
         let p = chart_ci.join(name);
@@ -1308,42 +1201,6 @@ fn s3_log_t3_t4_evidence_and_helm_values_present() {
     );
 }
 
-/// T3/T4 linkage for sqlite log cells: axis-named evidence file and Helm CI values exist.
-#[test]
-fn sqlite_log_t3_t4_evidence_and_helm_values_present() {
-    let fixture = fireweed_release::Fixture::new(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tp003-sqlite-axis.jsonl"),
-    )
-    .expect("open immutable sqlite axis fixture");
-    let body = std::fs::read_to_string(
-        fixture
-            .authorize(fireweed_release::EvidenceOperation::Read)
-            .expect("fixture authorizes reads"),
-    )
-    .expect("read sqlite axis fixture");
-    for axis in ["sqlite×memory", "sqlite×sqlite", "sqlite×postgres"] {
-        assert!(
-            body.contains(axis),
-            "TP-003 sqlite pair evidence must name axis {axis}"
-        );
-    }
-
-    let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
-    for name in [
-        "sqlite-memory-values.yaml",
-        "sqlite-sqlite-values.yaml",
-        "sqlite-postgres-values.yaml",
-    ] {
-        let p = chart_ci.join(name);
-        assert!(p.is_file(), "T4 Helm CI values missing: {}", p.display());
-        let v = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            v.contains("backend: sqlite"),
-            "{name} must set storage.log.backend=sqlite"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Postgres log three cells: full T0–T4 (Class A)
 // ---------------------------------------------------------------------------
@@ -1351,7 +1208,7 @@ fn sqlite_log_t3_t4_evidence_and_helm_values_present() {
 /// Focused T0–T2 for the three Class A **postgres log** cells (brief program cell batch).
 ///
 /// All three require `FIREWEED_PG_TEST_URL` + `--features postgres`. When the URL is unset each
-/// cell is still registered and documents the skip (same rules as the 20-cell table).
+/// cell is still registered and documents the skip (same rules as the 12-cell table).
 #[tokio::test]
 async fn postgres_log_three_cells_t0_t2() {
     let cells = [
@@ -1361,7 +1218,7 @@ async fn postgres_log_three_cells_t0_t2() {
         },
         MatrixCell {
             log: LogAxis::Postgres,
-            projection: ProjectionAxis::Sqlite,
+            projection: ProjectionAxis::Turso,
         },
         MatrixCell {
             log: LogAxis::Postgres,
@@ -1418,7 +1275,7 @@ fn postgres_log_t3_t4_evidence_and_helm_values_present() {
     let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
     for name in [
         "postgres-memory-values.yaml",
-        "postgres-sqlite-values.yaml",
+        "postgres-turso-values.yaml",
         "postgres-postgres-values.yaml",
     ] {
         let p = chart_ci.join(name);

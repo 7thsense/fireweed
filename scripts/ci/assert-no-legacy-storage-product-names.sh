@@ -2,11 +2,11 @@
 # Fail if legacy storage product names appear on public product surfaces.
 #
 # Public product axes (only):
-#   log:        memory | sqlite | postgres | filesystem | s3
-#   projection: memory | sqlite | turso | postgres
+#   log:        memory | postgres | filesystem | s3
+#   projection: memory | turso | postgres
 #
 # Hard-rejected legacy product names (no long-lived aliases):
-#   objectlog, inmemory, hybrid, hybrid-async, hybrid-strict
+#   sqlite, objectlog, inmemory, hybrid, hybrid-async, hybrid-strict
 #
 # turso is a public default projection (TD-010 / ADR-016) and must remain
 # accepted on chart schema, values, and env surfaces.

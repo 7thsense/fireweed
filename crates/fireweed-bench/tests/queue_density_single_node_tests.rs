@@ -26,8 +26,8 @@
 //! The DURABLE-backend density point (B3.2) is covered by a SEPARATE test in this same file,
 //! [`queue_density_single_node_durable_tests`]: it runs the SAME 0->100->1000 residency ladder on the DURABLE
 //! substrates the library facade exposes — the durable local-fs object-log authority (the composed object-log
-//! LOG axis of the production `object_log_sqlite_projection` runtime) AND a durable command LOG + derived
-//! on-disk SQLite PROJECTION (`composed_sqlite_log_sqlite_projection`, the projection axis that runtime
+//! LOG axis of the production `object_log_turso_projection` runtime) AND a durable command LOG + derived
+//! on-disk Turso PROJECTION (`composed_filesystem_log_turso_projection`, the projection axis that runtime
 //! materializes into) — plus, when a live DB is present, a reduced postgres point. It proves >=1000 DURABLE
 //! co-resident queues on one node with the hot queue still making progress.
 //!
@@ -50,7 +50,7 @@ use std::time::Instant;
 
 use fireweed::{
     ConfigSecret, Fireweed, NewItem, PostgresMode, PostgresRuntimeConfig, open_memory,
-    open_objectlog, open_postgres_runtime, open_sqlite_relational,
+    open_objectlog, open_postgres_runtime,
 };
 use fireweed_core::{
     EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
@@ -160,7 +160,7 @@ struct ResidencyPoint {
 /// pending items (left resident, never drained), then drive one hot queue and measure it. Verify every cold
 /// queue is still fully resident afterwards (undisturbed by the hot workload — a correctness-isolation
 /// check). Generic over the backend so the SAME residency ladder runs on the in-memory node AND on the
-/// durable `object_log_sqlite_projection` substrate.
+/// durable `object_log_turso_projection` substrate.
 fn measure_residency_on<F>(
     make_backend: F,
     density: usize,
@@ -172,7 +172,7 @@ where
     F: FnOnce() -> Fireweed,
 {
     let fireweed = make_backend();
-    futures::executor::block_on(async {
+    fireweed_objectlog::block_on_objectlog_future(async {
         for i in 0..density {
             let key = qk("density", &format!("cold{i}"));
             fireweed
@@ -442,15 +442,13 @@ fn queue_density_single_node_tests() {
 // honestly deferred: prove >=1000 DURABLE co-resident queues on one node with the hot queue still progressing.
 //
 // Two durable substrates together cover the durable projection substrate the
-// production `object_log_sqlite_projection` runtime is built from:
+// production `object_log_turso_projection` runtime is built from:
 //   - `object_log`: composed object-log backend — the durable local-fs OBJECT-LOG authority (segments written to
-//     disk), the LOG axis of the production `object_log_sqlite_projection` runtime;
-//   - `sqlite_log_sqlite_projection`: `composed_sqlite_log_sqlite_projection` — a durable command LOG paired
-//     with the DERIVED on-disk SQLite PROJECTION (`SqliteProjectionStore`), the SAME projection axis the
-//     production `object_log_sqlite_projection` backend materializes its queryable per-queue state into.
-// (The fused `fireweed_server::ObjectLogSqliteBackend` is a server-runtime backend that does NOT implement the
-// full internal port set — it is not independently drivable through the `Fireweed` facade — so the durable
-// density point is proven on the two durable substrates it is composed from.)
+//     disk), the LOG axis of the production `object_log_turso_projection` runtime;
+//   - `filesystem_log_turso_projection`: `composed_filesystem_log_turso_projection` — a durable command LOG paired
+//     with the DERIVED on-disk Turso PROJECTION (`TursoProjectionStore`), the SAME projection axis the
+//     production `object_log_turso_projection` backend materializes its queryable per-queue state into.
+// Both profiles are driven through the same public facade.
 // Plus, if a live DB is available, a reduced postgres point.
 // ===========================================================================
 
@@ -578,28 +576,22 @@ fn queue_density_single_node_durable_tests() {
         "must stand up >=1000 co-resident durable object_log queues"
     );
 
-    // ---- Durable substrate 2: durable SQLite LOG + durable SQLite PROJECTION (the projection axis the
-    // production object_log_sqlite_projection runtime materializes into) ----
+    // ---- Durable substrate 2: durable Turso LOG + durable Turso PROJECTION (the projection axis the
+    // production object_log_turso_projection runtime materializes into) ----
     let sp_points = run_durable_ladder(
-        "sqlite_log_sqlite_projection (durable log + durable SQLite projection)",
+        "filesystem_log_turso_projection (durable log + durable Turso projection)",
         &densities,
         |cleanup| {
-            let log = durable_tmp("sqlog.sqlite");
-            let proj = durable_tmp("sqproj.sqlite");
-            let _ = std::fs::remove_file(&log);
-            let _ = std::fs::remove_file(&proj);
-            cleanup.push(log);
-            cleanup.push(proj);
-            open_sqlite_relational(
-                cleanup.last().unwrap().to_str().unwrap(),
-                Arc::new(SysClock),
-            )
-            .expect("open durable SQLite projection backend")
+            let root = durable_tmp("turso");
+            let handle =
+                fireweed_bench::open_log_turso(&root, Arc::new(SysClock)).expect("open Turso");
+            cleanup.push(root);
+            handle
         },
         &mut cleanup,
     );
     let (sp_push_keep, sp_claim_keep) =
-        assert_durable_bars("sqlite_log_sqlite_projection", &sp_points, 1000);
+        assert_durable_bars("filesystem_log_turso_projection", &sp_points, 1000);
     assert!(
         sp_points
             .iter()
@@ -607,14 +599,14 @@ fn queue_density_single_node_durable_tests() {
             .unwrap()
             .density
             >= 1000,
-        "must stand up >=1000 co-resident durable sqlite_log_sqlite_projection queues"
+        "must stand up >=1000 co-resident durable filesystem_log_turso_projection queues"
     );
 
     // ---- Reduced POSTGRES density point (fail-closed on live DB) ----
     // 1000 durable queues on a live postgres schema (create_queue + seed each, per-queue) is impractically
     // slow for an in-process test, so postgres runs a REDUCED residency ladder (0 -> 100) purely to
     // demonstrate the same shape holds on a third durable backend. The object_log and
-    // sqlite_log_sqlite_projection substrates at 1000 above are the required deliverable; this is a
+    // filesystem_log_turso_projection substrates at 1000 above are the required deliverable; this is a
     // supporting, honestly-reduced point. Missing FIREWEED_PG_TEST_URL is a hard failure (no LOUD skip).
     let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
         "FIREWEED_PG_TEST_URL required for postgres durable density point (fail-closed live postgres; no LOUD skip)",
@@ -700,7 +692,7 @@ fn queue_density_single_node_durable_tests() {
         "object_log",
         cmd,
         &format!(
-            "in-process single node, durable local-fs composed object-log authority (segments on disk) — the LOG axis of the production object_log_sqlite_projection runtime; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
+            "in-process single node, durable local-fs composed object-log authority (segments on disk) — the LOG axis of the production object_log_turso_projection runtime; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
         ),
         full_bar,
         &ol_points,
@@ -711,10 +703,10 @@ fn queue_density_single_node_durable_tests() {
         .expect("emit durable object-log density row");
 
     let sp_row = durable_density_row(
-        "sqlite_log_sqlite_projection",
+        "filesystem_log_turso_projection",
         cmd,
         &format!(
-            "in-process single node, durable SQLite command LOG + derived on-disk SQLite PROJECTION (SqliteProjectionStore) — the projection axis the production object_log_sqlite_projection runtime materializes into; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
+            "in-process single node, durable filesystem command LOG + derived on-disk Turso PROJECTION (TursoProjectionStore) — the projection axis the production object_log_turso_projection runtime materializes into; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
         ),
         full_bar,
         &sp_points,
@@ -722,7 +714,7 @@ fn queue_density_single_node_durable_tests() {
         sp_claim_keep,
     );
     fireweed_release::append_row(&evidence_path, &sp_row)
-        .expect("emit durable sqlite-projection density row");
+        .expect("emit durable Turso-projection density row");
 
     if !pg_points.is_empty() {
         let pg_top = pg_points.iter().max_by_key(|p| p.density).unwrap();

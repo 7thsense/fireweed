@@ -309,6 +309,10 @@ struct Observations {
 // Snorri dispatches claimed transition inputs in one shared worker pool.
 const SHARED_DISPATCH: usize = 3;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Each worker owns its queue, stage identity, observations, population bound, and clock inputs"
+)]
 async fn worker(
     fw: Arc<Fireweed>,
     q: QueueKey,
@@ -448,7 +452,7 @@ async fn worker(
                 }
             } else {
                 if cfg.faults
-                    && id % 19 == 0
+                    && id.is_multiple_of(19)
                     && observations.transient_failures.lock().unwrap().insert(id)
                 {
                     if cfg.profile == Profile::Mutable {
@@ -476,7 +480,7 @@ async fn worker(
                     }
                     continue;
                 }
-                let failed = cfg.faults && id % 31 == 0;
+                let failed = cfg.faults && id.is_multiple_of(31);
                 if cfg.profile == Profile::Snorri {
                     commits.push(CommitEntry {
                         claim_ref: claim_ref(claimed),
@@ -657,7 +661,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
                     async move {
                     let chunk = &ids[batch_index * cfg.batch..((batch_index + 1) * cfg.batch).min(ids.len())];
                     let items: Vec<_> = chunk.iter().map(|id| item(*id, if cfg.profile == Profile::Bulk { 2 } else { 0 }, cfg.payload_bytes)).collect();
-                    let accepted = retry(deadline, || fw.push_batch(&q, items.clone())).await
+                    let accepted = retry(deadline, || fw.push_batch(q, items.clone())).await
                         .map_err(|e| format!("load shard {shard} starting recipient {}: {e}", chunk[0]))?;
                     loaded_ids.lock().unwrap().extend(accepted);
                     if std::env::var_os("FIREWEED_WORKLOAD_DEBUG").is_some() { eprintln!("loaded {}", chunk.len()); }

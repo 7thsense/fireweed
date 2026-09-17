@@ -322,7 +322,7 @@ where
             .map_err(|_| EngineError::Storage("async projection command count overflow".into()))?;
         let debt_bytes = crate::log_engine_store::exact_envelope_bytes(packed_commands)?;
         let mut state = self.inner.state.lock().await;
-        if follower_ids.iter().any(|id| *id == leader.id) {
+        if follower_ids.contains(&leader.id) {
             drop(state);
             return self
                 .poison(
@@ -586,15 +586,23 @@ where
     ) -> EngineResult<Option<Vec<(CommandPosition, RetainedMembershipChange)>>> {
         self.ensure_healthy(&target.queue)?;
         let start = match applied {
-            Some(applied) if applied.queue == target.queue
-                && applied.backend_epoch == target.backend_epoch => {
-                    let Some(start) = applied.sequence.checked_add(1) else { return Ok(None); };
-                    start
-                }
+            Some(applied)
+                if applied.queue == target.queue
+                    && applied.backend_epoch == target.backend_epoch =>
+            {
+                let Some(start) = applied.sequence.checked_add(1) else {
+                    return Ok(None);
+                };
+                start
+            }
             None if target.backend_epoch == 0 => 0,
             _ => return Ok(None),
         };
-        let Some(count @ 1..=16) = target.sequence.checked_sub(start).and_then(|n| n.checked_add(1)) else {
+        let Some(count @ 1..=16) = target
+            .sequence
+            .checked_sub(start)
+            .and_then(|n| n.checked_add(1))
+        else {
             return Ok(None);
         };
         let state = self.inner.state.lock().await;
@@ -1080,16 +1088,16 @@ where
                 }
             }
         };
-        if let Some(window) = joins.remove(&generation.entry_ids[0]) {
-            if std::env::var_os("FIREWEED_APPLY_TRACE").is_some() {
-                eprintln!(
-                    "apply_join us={} before={} after={} queue_waiter={}",
-                    window.started.elapsed().as_micros(),
-                    window.commands_before,
-                    generation.commands.len(),
-                    queue_has_coverage_waiter(&inner, &generation.shard),
-                );
-            }
+        if let Some(window) = joins.remove(&generation.entry_ids[0])
+            && std::env::var_os("FIREWEED_APPLY_TRACE").is_some()
+        {
+            eprintln!(
+                "apply_join us={} before={} after={} queue_waiter={}",
+                window.started.elapsed().as_micros(),
+                window.commands_before,
+                generation.commands.len(),
+                queue_has_coverage_waiter(&inner, &generation.shard),
+            );
         }
 
         #[cfg(test)]
@@ -1272,9 +1280,7 @@ fn next_coalesced_generation_excluding<'a>(
     excluded: &HashSet<QueueKey>,
 ) -> Option<ApplyGenerationPlan<'a>> {
     let (_, first) = next_runnable_excluding(state, excluded)?;
-    let Some(mut last) = first.positions.last().cloned() else {
-        return None;
-    };
+    let mut last = first.positions.last().cloned()?;
     let mut envelopes = generation_envelope_count(first);
     let mut seen_items = HashSet::new();
     insert_batch_item_ids(&mut seen_items, first);
@@ -1975,11 +1981,37 @@ mod tests {
         let mut genesis = batches[0].clone();
         genesis.positions = vec![pos(0)];
         install(vec![genesis.clone()]).await;
-        assert_eq!(coordinator.retained_membership_tail(None, &pos(0)).await.unwrap().unwrap().len(), 1);
-        assert!(coordinator.retained_membership_tail(None, &pos(1)).await.unwrap().is_none());
-        assert!(coordinator.retained_membership_tail(None, &CommandPosition::new(shard(), 1, 0)).await.unwrap().is_none());
+        assert_eq!(
+            coordinator
+                .retained_membership_tail(None, &pos(0))
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            coordinator
+                .retained_membership_tail(None, &pos(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .retained_membership_tail(None, &CommandPosition::new(shard(), 1, 0))
+                .await
+                .unwrap()
+                .is_none()
+        );
         install(vec![batches[1].clone(), batches[0].clone()]).await;
-        assert!(coordinator.retained_membership_tail(None, &pos(2)).await.unwrap().is_none());
+        assert!(
+            coordinator
+                .retained_membership_tail(None, &pos(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
         let tail = coordinator
             .retained_membership_tail(Some(&pos(0)), &pos(2))
             .await
@@ -2009,10 +2041,11 @@ mod tests {
                 .is_none()
         );
         let mut mixed = batches.clone();
-        mixed[1].commands[0].command = QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
-            item_ids: vec![ItemId::mint(1, 0, 7)],
-            force: true,
-        });
+        mixed[1].commands[0].command =
+            QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
+                item_ids: vec![ItemId::mint(1, 0, 7)],
+                force: true,
+            });
         install(mixed).await;
         assert!(
             coordinator
@@ -2648,7 +2681,7 @@ mod tests {
             .unwrap();
         let neighbor = pause_env("neighbor-ready");
         let reservation = coordinator
-            .reserve(other.clone(), &[neighbor.clone()])
+            .reserve(other.clone(), std::slice::from_ref(&neighbor))
             .await
             .unwrap();
         coordinator

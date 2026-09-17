@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P10r: functional-matrix route source registry and exact leaf verifier.
 
-Registers exact compile/list-addressable source leaves for the public 5×4
+Registers exact compile/list-addressable source leaves for the public 4×3
 storage matrix before P2r binds semantic requirements. Broad cargo substring
 filters are forbidden; every leaf carries an exact harness ID and invocation.
 
@@ -9,9 +9,9 @@ Categories (manifest-derived cardinalities):
   - p4_method_suite     provider-neutral API-005 ownership entries
   - t0_t2               storage_matrix_t0_t2 exact harness tests
   - ac_txn_dry_run      AC-TXN-5/5A style dry-run aggregates
-  - strict              20 ResponseBarrier::Strict cells
-  - object_log_async    8 filesystem/s3 AsyncProjection cells
-  - async_invalid       12 non-object-log AsyncProjection rejections
+  - strict              12 ResponseBarrier::Strict cells
+  - object_log_async    6 filesystem/s3 AsyncProjection cells
+  - async_invalid       6 non-object-log AsyncProjection rejections
   - class_b_server      server Class-B memory-log exact --lib leaves
   - inline_lib          other server --lib matrix leaves (exact module paths)
   - external_kafka      paired feature-on / feature-off tuples
@@ -44,24 +44,12 @@ PLAN_KEY = "P10r"
 # Exact server --lib leaves (no substring filters). Module-qualified test IDs.
 CLASS_B_SERVER_LEAVES = [
     "class_b_memory_log_tests::class_b_memory_memory_t0_t3",
-    "class_b_memory_log_tests::class_b_memory_sqlite_t0_t3",
     "class_b_memory_log_tests::class_b_memory_turso_t0_t3",
     "class_b_memory_log_tests::class_b_memory_postgres_t0_t3",
-    "class_b_memory_log_tests::class_b_all_four_cells_t0_t3",
-    "class_b_memory_log_tests::class_b_four_cells_never_claim_durable_log_replay",
-    "class_b_memory_log_tests::class_b_memory_projection_arms_exist_in_composition_root",
+    "class_b_memory_log_tests::class_b_all_cells_t0_t3",
 ]
 
 INLINE_LIB_LEAVES = [
-    "sqlite_log_matrix_tests::sqlite_log_composition_root_wires_three_projection_cells",
-    "sqlite_log_matrix_tests::sqlite_log_memory_lifecycle_and_reopen",
-    "sqlite_log_matrix_tests::sqlite_log_sqlite_lifecycle_and_reopen",
-    "sqlite_log_matrix_tests::sqlite_log_postgres_lifecycle_and_reopen",
-    "sqlite_log_matrix_tests::sqlite_log_t3_tp003_ac_txn_exact_pairs",
-    "sqlite_log_matrix_tests::sqlite_log_t3_evidence_axis_names_file_contract",
-    "sqlite_log_matrix_tests::sqlite_log_t4_helm_ci_values_and_gate",
-    "postgres_log_matrix_tests::postgres_log_composition_root_wires_three_projection_cells",
-    "postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs",
     "postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract",
     "postgres_log_matrix_tests::postgres_log_t4_helm_ci_values_and_gate",
     "byte_admission_wiring_tests::filesystem_object_log_postgres_projection_backend_spec_and_composition_root",
@@ -70,14 +58,12 @@ INLINE_LIB_LEAVES = [
 
 # T0–T2 exact harness tests under fireweed --test storage_matrix_t0_t2
 T0_T2_LEAVES = [
-    "storage_matrix_t0_t2_all_twenty_cells",
-    "storage_matrix_registers_exactly_20_distinct_cells",
+    "storage_matrix_t0_t2_all_twelve_cells",
+    "storage_matrix_registers_exactly_12_distinct_cells",
     "filesystem_log_three_cells_t0_t3_contract",
-    "sqlite_log_three_cells_t0_t2",
     "s3_log_three_cells_t0_t3_contract",
     "postgres_log_three_cells_t0_t2",
     "s3_log_t3_t4_evidence_and_helm_values_present",
-    "sqlite_log_t3_t4_evidence_and_helm_values_present",
     "postgres_log_t3_t4_evidence_and_helm_values_present",
 ]
 
@@ -169,15 +155,15 @@ def load_authority() -> dict:
     projections = list(axes["projections"])
     sep = axes["cell_id_separator"]
     cells = [f"{log}{sep}{proj}" for log in logs for proj in projections]
-    require(len(cells) == axes["required_cell_count"] == 20, "authority must enumerate 20 cells")
+    require(len(cells) == axes["required_cell_count"] == 12, "authority must enumerate 12 cells")
     barriers = document["response_barriers"]
-    require(barriers["strict"]["required_cell_count"] == 20, "strict count")
+    require(barriers["strict"]["required_cell_count"] == 12, "strict count")
     require(
-        barriers["async_projection"]["required_positive_cell_count"] == 8,
+        barriers["async_projection"]["required_positive_cell_count"] == 6,
         "async positive count",
     )
     require(
-        barriers["async_projection"]["required_pre_io_rejection_count"] == 12,
+        barriers["async_projection"]["required_pre_io_rejection_count"] == 6,
         "async rejection count",
     )
     return {
@@ -230,7 +216,7 @@ def leaf(
 
 def build_route_source_leaves(authority: dict) -> list[dict]:
     leaves: list[dict] = []
-    features_full = ["memory", "sqlite", "objectlog", "postgres", "turso"]
+    features_full = ["memory", "objectlog", "postgres", "turso"]
     target = "functional_matrix_route_sources"
     base_cargo = [
         "test",
@@ -242,7 +228,7 @@ def build_route_source_leaves(authority: dict) -> list[dict]:
         target,
     ]
 
-    # 20 strict + 8 async + 12 async-invalid exact leaves from the P10r module.
+    # 12 strict + 6 async + 6 async-invalid exact leaves from the P10r module.
     for cell in authority["cells"]:
         log, proj = cell.split(authority["sep"])
         fn = test_fn_for_cell("strict", cell)
@@ -289,9 +275,9 @@ def build_route_source_leaves(authority: dict) -> list[dict]:
 
     # AC-TXN dry-run aggregates.
     for name in (
-        "ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
-        "ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
-        "ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
+        "ac_txn_dry_run_strict_enumerates_all_12_manifest_cells",
+        "ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
+        "ac_txn_dry_run_object_log_async_enumerates_all_6_cells",
     ):
         leaves.append(
             leaf(
@@ -306,7 +292,7 @@ def build_route_source_leaves(authority: dict) -> list[dict]:
         )
 
     # T0–T2 exact harness leaves.
-    t0_features = ["memory", "sqlite", "objectlog", "postgres", "turso"]
+    t0_features = ["memory", "objectlog", "postgres", "turso"]
     t0_cargo = [
         "test",
         "-p",
@@ -371,12 +357,12 @@ def build_route_source_leaves(authority: dict) -> list[dict]:
                             "-p",
                             "fireweed",
                             "--features",
-                            "memory,sqlite,objectlog,postgres,turso",
+                            "memory,objectlog,postgres,turso",
                             "--test",
                             target_name,
                         ],
                         test_filter=filter_path,
-                        features=["memory", "sqlite", "objectlog", "postgres", "turso"],
+                        features=["memory", "objectlog", "postgres", "turso"],
                         cell_id=entry.get("cell_id"),
                         notes="P4 API-005 suite ownership exact cell module leaf",
                     )
@@ -471,17 +457,17 @@ def validate_leaves(leaves: list[dict], authority: dict) -> None:
         by_kind.setdefault(row["kind"], []).append(row)
 
     strict = by_kind.get("strict", [])
-    require(len(strict) == 20, f"strict leaves {len(strict)} != 20")
+    require(len(strict) == 12, f"strict leaves {len(strict)} != 12")
     require(
         {row["cell_id"] for row in strict} == set(authority["cells"]),
         "strict cell set mismatch",
     )
 
     async_pos = by_kind.get("object_log_async", [])
-    require(len(async_pos) == 8, f"object_log_async leaves {len(async_pos)} != 8")
+    require(len(async_pos) == 6, f"object_log_async leaves {len(async_pos)} != 6")
 
     async_neg = by_kind.get("async_invalid", [])
-    require(len(async_neg) == 12, f"async_invalid leaves {len(async_neg)} != 12")
+    require(len(async_neg) == 6, f"async_invalid leaves {len(async_neg)} != 6")
 
     require(by_kind.get("ac_txn_dry_run"), "missing ac_txn_dry_run leaves")
     require(by_kind.get("t0_t2"), "missing t0_t2 leaves")
@@ -515,11 +501,11 @@ def generate_document(leaves: list[dict], authority: dict) -> dict:
         "counts": {
             "leaves": len(leaves),
             "by_kind": by_kind,
-            "strict": 20,
-            "object_log_async": 8,
-            "async_invalid": 12,
+            "strict": 12,
+            "object_log_async": 6,
+            "async_invalid": 6,
         },
-        "server_objectlog_dev_tuple": ["memory", "sqlite", "postgres", "objectlog"],
+        "server_objectlog_dev_tuple": ["memory", "postgres", "objectlog"],
         "external_kafka_feature_tuples": ["feature-on", "feature-off"],
         "broad_substring_filters_forbidden": True,
         "p2r_mappings_authored": False,
@@ -551,9 +537,9 @@ def generate_s3_requirements(authority: dict) -> str:
         table_lines.append(f"| `{cell}` | {t0} | {live} | `{helm}` |")
 
     leaf_commands = [
-        "cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso "
+        "cargo test -p fireweed --features memory,objectlog,postgres,turso "
         "--test functional_matrix_route_sources -- --list strict_s3_memory --exact",
-        "cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso "
+        "cargo test -p fireweed --features memory,objectlog,postgres,turso "
         "--test storage_matrix_t0_t2 -- --list s3_log_three_cells_t0_t3_contract --exact",
         "cargo test -p fireweed-server --features postgres --lib "
         "-- --list byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root --exact",
@@ -650,7 +636,7 @@ Gate consumer: `bash scripts/ci/storage-matrix-gate.sh` reads
 |----------|------|
 | `docs/helix/04-build/functional-matrix-route-sources.json` | Exact functional-matrix source leaf registry (P10r) |
 | `cargo test -p fireweed --test functional_matrix_route_sources` | Strict / async / invalid dry-run source leaves |
-| `cargo test -p fireweed --test storage_matrix_t0_t2` | Table-driven 20-cell T0–T2 harness including s3×{{memory,sqlite,turso,postgres}} |
+| `cargo test -p fireweed --test storage_matrix_t0_t2` | Table-driven 12-cell T0–T2 harness including s3×{{memory,turso,postgres}} |
 | `scripts/ci/helm-gate.sh` | Renders s3×projection Helm CI values (+ shared multi-replica profiles) |
 | `docs/helix/04-build/storage-matrix-conformance-classes.md` §3 | Broader CI evidence layout |
 """
@@ -694,7 +680,7 @@ def list_required_leaves(leaves: list[dict], *, offline: bool = False) -> None:
     target compiles and the exact filter is present).
     """
     # Always list the P10r route-source module exhaustively first (cheap after one compile).
-    features = "memory,sqlite,objectlog,postgres,turso"
+    features = "memory,objectlog,postgres,turso"
     list_all = CARGO + [
         "test",
         "-p",
@@ -834,7 +820,7 @@ def main() -> int:
             print(
                 f"functional-matrix route sources self-test passed "
                 f"({document['counts']['leaves']} leaves; "
-                f"strict=20 async=8 invalid=12)"
+                f"strict=12 async=6 invalid=6)"
             )
 
         if args.list_leaves:

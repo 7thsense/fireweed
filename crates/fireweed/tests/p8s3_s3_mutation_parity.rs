@@ -1,7 +1,7 @@
 //! P8S3 — S3 queue, ownership, read, discovery, and mutation parity.
 //!
 //! Executable boundary (fireweed-f3cb9ad9): on the three S3 cells
-//! (`s3×memory`, `s3×sqlite`, `s3×postgres`) run exactly P6N's applicable
+//! (`s3×memory`, `s3×turso`, `s3×postgres`) run exactly P6N's applicable
 //! assertion/method set (`public_interface::run_p8_surface`) using P5aS3 open
 //! helpers and live P1s provenance; no unexpected `Unavailable`, skip, or
 //! provider-specific substitute.
@@ -14,7 +14,7 @@
 //! export FIREWEED_PG_TEST_URL='postgres://fireweed:fireweed@127.0.0.1:55432/fireweed'
 //! export CARGO_TARGET_DIR=/home/erik/Projects/fireweed-shared-target
 //! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
-//! rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres \
+//! rustup run 1.97.1 cargo test -p fireweed --features objectlog,turso,postgres \
 //!   --test p8s3_s3_query_parity -- --nocapture
 //! ```
 
@@ -217,17 +217,17 @@ async fn s3_memory_strict_p8_mutation_parity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_sqlite_strict_p8_mutation_parity() {
+async fn s3_turso_strict_p8_mutation_parity() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite");
     let ns = unique_ns("s3-sqlite");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_p8("s3--sqlite--strict", config).await;
+    run_p8("s3--turso--strict", config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

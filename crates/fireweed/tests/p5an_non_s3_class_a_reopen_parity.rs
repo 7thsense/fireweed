@@ -1,8 +1,8 @@
 //! P5aN — non-S3 Class A reopen and recovery-replay parity.
 //!
-//! The nine Class A cells owned here (no S3; Turso projection is out of this leaf):
-//!   log ∈ {sqlite, postgres, filesystem}
-//!   × projection ∈ {memory, sqlite, postgres}
+//! The six durable cells owned here (no S3):
+//!   log ∈ {postgres, filesystem}
+//!   × projection ∈ {memory, turso, postgres}
 //!
 //! Aggregate contract (P5a): after process death + reopen, definitions (including
 //! typed_indexes), counters/metrics, item IDs, request_id replay, lifecycle claim
@@ -347,7 +347,6 @@ async fn verify(cell: &str, fireweed: &Fireweed, snap: Snapshot) {
         "{cell}: typed index must find primary after reopen/rebuild"
     );
     assert_eq!(typed[0].item_id, snap.primary_id);
-
     // Lifecycle: claim a pending filler and complete it.
     if snap.pending > 0 {
         let claimed = fireweed
@@ -386,35 +385,8 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Local deterministic Class A cells (sqlite / filesystem × memory|sqlite)
+// Local deterministic durable cells (filesystem × memory|turso)
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn p5an_sqlite_memory_reopen() {
-    let root = FixtureRoot::new("sqlite_memory");
-    let path = root.path().join("log.sqlite");
-    assert_reopen("sqlite--memory", || {
-        fireweed::open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock))
-            .expect("open sqlite×memory")
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn p5an_sqlite_sqlite_reopen() {
-    let root = FixtureRoot::new("sqlite_sqlite");
-    let log = root.path().join("log.sqlite");
-    let proj = root.path().join("projection.sqlite");
-    assert_reopen("sqlite--sqlite", || {
-        fireweed::open_sqlite_sqlite_projection(
-            log.to_str().unwrap(),
-            proj.to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .expect("open sqlite×sqlite")
-    })
-    .await;
-}
 
 #[tokio::test]
 async fn p5an_filesystem_memory_reopen() {
@@ -427,29 +399,26 @@ async fn p5an_filesystem_memory_reopen() {
 }
 
 #[tokio::test]
-async fn p5an_filesystem_sqlite_reopen() {
-    let root = FixtureRoot::new("filesystem_sqlite");
-    let cfg = ObjectLogRuntimeConfig {
-        object_log: ObjectLogStorage::Local {
-            root: root.path().join("object-log"),
-        },
-        authority: ObjectLogAuthority::NativeConditionalWrite,
-        projection: ProjectionConfig::Sqlite {
-            path: root.path().join("projection.sqlite"),
-        },
-        response_barrier: ResponseBarrier::Strict,
-        segments: segments(),
-        namespace: format!("p5an-fs-sqlite-{}", std::process::id()),
-        recovery: RecoveryPolicy {
-            // Rebuild path is the sanctioned typed-index recovery route (e6ae8137).
-            incompatible_projection: RecoveryAction::RebuildProjection,
-            verify_checksums: true,
-            max_tail_commands: 1_000_000,
-        },
+async fn p5an_filesystem_turso_reopen() {
+    let root = FixtureRoot::new("filesystem_turso");
+    let mut cfg = StorageConfig::memory();
+    cfg.log = LogConfig::Filesystem {
+        root: root.path().join("object-log"),
     };
-    assert_reopen("filesystem--sqlite", || {
-        fireweed::open_objectlog_sqlite(cfg.clone(), Arc::new(SystemClock))
-            .expect("open filesystem×sqlite")
+    cfg.projection = ProjectionStoreConfig::Turso {
+        path: root.path().join("projection.db"),
+    };
+    cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+    cfg.segments = segments();
+    cfg.namespace = format!("p5an-fs-turso-{}", std::process::id());
+    cfg.recovery = RecoveryPolicy {
+        // Rebuild path is the sanctioned typed-index recovery route (e6ae8137).
+        incompatible_projection: RecoveryAction::RebuildProjection,
+        verify_checksums: true,
+        max_tail_commands: 1_000_000,
+    };
+    assert_reopen("filesystem--turso", || {
+        fireweed::open(cfg.clone(), Arc::new(SystemClock)).expect("open filesystem×turso")
     })
     .await;
 }
@@ -461,16 +430,6 @@ async fn p5an_filesystem_sqlite_reopen() {
 #[cfg(feature = "postgres")]
 mod postgres_cells {
     use super::*;
-
-    fn storage_cfg_sqlite_postgres(log: PathBuf, url: &str, schema: &str) -> StorageConfig {
-        let mut cfg = StorageConfig::memory();
-        cfg.log = LogConfig::Sqlite { path: log };
-        cfg.projection = ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(url.to_string()),
-        };
-        cfg.namespace = schema.to_string();
-        cfg
-    }
 
     fn storage_cfg_postgres_memory(url: &str, schema: &str) -> StorageConfig {
         let mut cfg = StorageConfig::memory();
@@ -486,7 +445,7 @@ mod postgres_cells {
         cfg
     }
 
-    fn storage_cfg_postgres_sqlite(url: &str, schema: &str, proj: PathBuf) -> StorageConfig {
+    fn storage_cfg_postgres_turso(url: &str, schema: &str, proj: PathBuf) -> StorageConfig {
         let mut cfg = StorageConfig::memory();
         cfg.log = LogConfig::Postgres {
             url: ConfigSecret::new(url.to_string()),
@@ -495,37 +454,9 @@ mod postgres_cells {
             node_id: None,
             coordination: None,
         };
-        cfg.projection = ProjectionStoreConfig::Sqlite { path: proj };
+        cfg.projection = ProjectionStoreConfig::Turso { path: proj };
         cfg.namespace = schema.to_string();
         cfg
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn p5an_sqlite_postgres_reopen() {
-        let url = pg_url();
-        let root = FixtureRoot::new("sqlite_postgres");
-        let log = root.path().join("log.sqlite");
-        let schema = format!("p5an_sqlite_pg_{}", std::process::id());
-        let first = fireweed::open_async(
-            storage_cfg_sqlite_postgres(log.clone(), &url, &schema),
-            Arc::new(SystemClock),
-        )
-        .await
-        .expect("open sqlite×postgres");
-        assert_reopen_after_seed("sqlite--postgres", first, || {
-            let log = log.clone();
-            let url = url.clone();
-            let schema = schema.clone();
-            async move {
-                fireweed::open_async(
-                    storage_cfg_sqlite_postgres(log, &url, &schema),
-                    Arc::new(SystemClock),
-                )
-                .await
-                .expect("reopen sqlite×postgres")
-            }
-        })
-        .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -554,28 +485,28 @@ mod postgres_cells {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn p5an_postgres_sqlite_reopen() {
+    async fn p5an_postgres_turso_reopen() {
         let url = pg_url();
-        let root = FixtureRoot::new("postgres_sqlite");
-        let schema = format!("p5an_pg_sqlite_{}", std::process::id());
-        let proj = root.path().join("projection.sqlite");
+        let root = FixtureRoot::new("postgres_turso");
+        let schema = format!("p5an_pg_turso_{}", std::process::id());
+        let proj = root.path().join("projection.db");
         let first = fireweed::open_async(
-            storage_cfg_postgres_sqlite(&url, &schema, proj.clone()),
+            storage_cfg_postgres_turso(&url, &schema, proj.clone()),
             Arc::new(SystemClock),
         )
         .await
-        .expect("open postgres×sqlite");
-        assert_reopen_after_seed("postgres--sqlite", first, || {
+        .expect("open postgres×turso");
+        assert_reopen_after_seed("postgres--turso", first, || {
             let url = url.clone();
             let schema = schema.clone();
             let proj = proj.clone();
             async move {
                 fireweed::open_async(
-                    storage_cfg_postgres_sqlite(&url, &schema, proj),
+                    storage_cfg_postgres_turso(&url, &schema, proj),
                     Arc::new(SystemClock),
                 )
                 .await
-                .expect("reopen postgres×sqlite")
+                .expect("reopen postgres×turso")
             }
         })
         .await;

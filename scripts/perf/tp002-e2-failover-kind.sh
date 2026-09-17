@@ -328,7 +328,7 @@ import json, sys
 row = {
  "schema_version":2,"suite":"tp002_e2_live_owner_failover","command":${E2_COMMAND@Q},
  "evidence_id":"E2_FAILOVER","evidence_tier":"release","scale":"release",
- "backend_profile":"object_log_sqlite_projection","bars_met":True,"replicas":3,
+ "backend_profile":"object_log_turso_projection","bars_met":True,"replicas":3,
  "image":${IMAGE@Q},"image_id":${IMAGE_ID@Q},"source_revision":${SOURCE_REV@Q},
  "chart_revision":${CHART_REV@Q},"postgres_image":${PG_IMAGE_REF@Q},"minio_image":${MINIO_IMAGE_REF@Q},
  "old_owner_id":${OLD_OWNER@Q},"new_owner_id":${NEW_OWNER@Q},"old_epoch":int(${OLD_EPOCH@Q}),"new_epoch":int(${NEW_EPOCH@Q}),
@@ -336,7 +336,7 @@ row = {
  "visible_items_before":int(${BEFORE@Q}),"visible_items_after":int(${AFTER@Q}),
  "lost_work":0,"double_leases":0,"corrupt_writes":0,"moved_count":1,"retry_count":1,"retry_succeeded":True,
  "moved_endpoint":${OWNER_IP@Q}+":8080",
- "topology":"kind: 3 fireweed pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
+ "topology":"kind: 3 fireweed pods; shared MinIO S3 object log; Postgres ownership; per-pod Turso projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
  "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
  "exclusions":"density throughput managed-cloud S3/Postgres and the SP-06 modeled handoff profile; performance is covered by the separate E3 lane",

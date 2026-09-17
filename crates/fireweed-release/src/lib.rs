@@ -1142,7 +1142,7 @@ fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Val
     }
     let profile_allowed = match id {
         "E0" | "E1" => row.backend_profile == "postgres_native",
-        "E2" => row.backend_profile == e2::RELEASE_BACKEND_PROFILE,
+        "E2" => e2::RELEASE_BACKEND_PROFILES.contains(&row.backend_profile.as_str()),
         "E3" => matches!(
             row.backend_profile.as_str(),
             "object_log_inmemory_projection" | "object_log_sqlite_projection"
@@ -1153,7 +1153,7 @@ fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Val
         errors.push(format!(
             "backend_profile {:?} is not governed for {id}; required E2 profile set is {:?}",
             row.backend_profile,
-            [e2::RELEASE_BACKEND_PROFILE]
+            e2::RELEASE_BACKEND_PROFILES
         ));
     }
     errors
@@ -1203,7 +1203,10 @@ pub mod e2 {
     ///
     /// `object_log_inmemory_projection` remains a comparator profile in the plan,
     /// but it is not a release authority for the headline E2 matrix.
-    pub const RELEASE_BACKEND_PROFILE: &str = "object_log_sqlite_projection";
+    /// Current profile and historical evidence profile. Historic rows keep their identity.
+    pub const RELEASE_BACKEND_PROFILE: &str = "object_log_turso_projection";
+    pub const RELEASE_BACKEND_PROFILES: &[&str] =
+        &[RELEASE_BACKEND_PROFILE, "object_log_sqlite_projection"];
     pub const CANONICAL_SWEEPS: [u64; 3] = [1, 2, 3];
     pub const CANONICAL_ITEMS_PER_QUEUE: u64 = 12_000;
     pub const CANONICAL_CONNS_PER_QUEUE: u64 = 8;
@@ -1319,7 +1322,7 @@ pub mod e2 {
         if row.suite != "performance_multi_node_object_log_e2_kind" {
             errors.push("unexpected E2 scale suite".into());
         }
-        if row.backend_profile != RELEASE_BACKEND_PROFILE {
+        if !RELEASE_BACKEND_PROFILES.contains(&row.backend_profile.as_str()) {
             errors.push("unexpected E2 release backend".into());
         }
         if row.scale != "release" || row.evidence_tier != "release" {
@@ -1707,14 +1710,14 @@ pub mod e2 {
         LedgerRow {
             suite: "performance_multi_node_object_log_e2_kind".into(),
             command: "scripts/perf/tp002-e2-kind.sh (fireweed-loadgen run -> emit-row; kind: CPU-limited server pods + lean in-cluster load Job)".into(),
-            backend_profile: "object_log_sqlite_projection".into(),
+            backend_profile: crate::e2::RELEASE_BACKEND_PROFILE.into(),
             scale: tier.into(),
             seed: 0,
             environment: format!(
                 "live multi-node ADR-008 owner cluster on a kind (Kubernetes-in-docker) cluster; \
                  {cores} cores; node image {node_image}; owner counts 2/4/8; each owner an independent \
-                 fireweed-service Deployment(replicas=1)+Service on object_log_sqlite_projection in SEGMENTED \
-                 group-commit mode (TD-004) with its own object-log root + sqlite projection on an emptyDir \
+                 fireweed-service Deployment(replicas=1)+Service on object_log_turso_projection in SEGMENTED \
+                 group-commit mode (TD-004) with its own object-log root + Turso projection on an emptyDir \
                  medium=Memory tmpfs, distinct FIREWEED_NODE_ID, disjoint FIREWEED_BOOTSTRAP_QUEUES, CPU \
                  request={req}/limit={lim}, {worker} worker threads; load driven by a LEAN, SEPARATED \
                  in-cluster Job (CPU limit {load}) speaking raw RESP pod->pod over Service ClusterIP to each \
@@ -2150,9 +2153,9 @@ pub mod density {
             ("wall_clock_capacity_only".into(), serde_json::json!(true)),
         ]);
         LedgerRow {
-            suite: "queue_density_live_objectlog_sqlite_release".into(),
+            suite: "queue_density_live_objectlog_turso_release".into(),
             command: meta.command.clone(),
-            backend_profile: "object_log_sqlite_projection".into(),
+            backend_profile: crate::e2::RELEASE_BACKEND_PROFILE.into(),
             scale: tier.into(),
             seed: meta.seed,
             environment: format!("{}; hardware={}", meta.topology, meta.hardware),
@@ -2170,11 +2173,17 @@ pub mod density {
 
     pub fn validate_release_row(row: &LedgerRow) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
-        if row.suite != "queue_density_live_objectlog_sqlite_release" {
-            errors.push("suite must be queue_density_live_objectlog_sqlite_release".into());
-        }
-        if row.backend_profile != "object_log_sqlite_projection" {
-            errors.push("backend_profile must be object_log_sqlite_projection".into());
+        if !matches!(
+            (row.suite.as_str(), row.backend_profile.as_str()),
+            (
+                "queue_density_live_objectlog_turso_release",
+                "object_log_turso_projection"
+            ) | (
+                "queue_density_live_objectlog_sqlite_release",
+                "object_log_sqlite_projection"
+            )
+        ) {
+            errors.push("density suite and projection profile must match".into());
         }
         if row.scale != "release" || row.evidence_tier != "release" {
             errors.push("density row must be release tier and scale".into());

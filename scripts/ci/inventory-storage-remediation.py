@@ -20,7 +20,6 @@ AUTHORITY = ROOT / "docs/helix/04-build/storage-authority-manifest.json"
 WORKSPACES = [
     "Cargo.toml",
     "crates/fireweed-bench/Cargo.toml",
-    "tools/fireweed-turso-compat-probe/Cargo.toml",
 ]
 SOURCE_SUFFIXES = {".rs", ".sh", ".py", ".toml", ".tsv", ".yml", ".yaml", ".lock"}
 EXCLUDED_DIGEST_PATHS = {
@@ -158,7 +157,7 @@ def tracked_files() -> list[str]:
     return sorted(
         path
         for path in raw.decode().split("\0")
-        if path and not path.startswith(excluded_prefixes)
+        if path and not path.startswith(excluded_prefixes) and (ROOT / path).is_file()
     )
 
 

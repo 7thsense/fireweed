@@ -1,3 +1,96 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -166,9 +166,6 @@
+ path = "benches/write_perf_benchmark.rs"
+ harness = false
+ 
+-[dependencies.aes]
+-version = "0.8.4"
+-
+ [dependencies.aes-gcm]
+ version = "0.10.3"
+ 
+@@ -218,9 +215,6 @@
+ [dependencies.either]
+ version = "1.15"
+ 
+-[dependencies.fallible-iterator]
+-version = "0.3.0"
+-
+ [dependencies.fastbloom]
+ version = "0.14.1"
+ default-features = false
+@@ -245,9 +239,6 @@
+ 
+ [dependencies.num-bigint]
+ version = "0.4"
+-
+-[dependencies.num-traits]
+-version = "0.2"
+ 
+ [dependencies.pack1]
+ version = "1.0.0"
+@@ -269,11 +260,6 @@
+ [dependencies.regex]
+ version = "1.11.1"
+ 
+-[dependencies.regex-syntax]
+-version = "0.8.5"
+-features = ["unicode"]
+-default-features = false
+-
+ [dependencies.roaring]
+ version = "0.11.2"
+ 
+@@ -331,9 +317,6 @@
+ [dependencies.twox-hash]
+ version = "2.1.1"
+ 
+-[dependencies.uncased]
+-version = "0.9.10"
+-
+ [dependencies.uuid]
+ version = "1.11.0"
+ features = [
+@@ -363,10 +346,6 @@
+ version = "4.2.1"
+ package = "codspeed-divan-compat"
+ 
+-[dev-dependencies.env_logger]
+-version = "0.11.6"
+-default-features = false
+-
+ [dev-dependencies.memory-stats]
+ version = "1.2.0"
+ 
+@@ -417,9 +396,6 @@
+ version = "0.9.8"
+ features = ["pure-rust"]
+ 
+-[target."cfg(loom)".dependencies.loom]
+-version = "0.7"
+-
+ [target.'cfg(not(any(target_family = "wasm", all(target_os = "windows", target_arch = "aarch64"))))'.dependencies.simsimd]
+ version = "6.5.3"
+ 
+@@ -445,9 +421,6 @@
+ 
+ [target.'cfg(target_family = "unix")'.dependencies.libc]
+ version = "0.2.172"
+-
+-[target.'cfg(target_family = "unix")'.dependencies.polling]
+-version = "3.7.4"
+ 
+ [target.'cfg(target_family = "unix")'.dependencies.rustix]
+ version = "1.0.5"
+@@ -496,3 +469,7 @@
+     "cfg(antithesis)",
+     "cfg(nightly)",
+ ]
++
++# turso_macros assertion expansions reference this under cfg(antithesis).
++[package.metadata.cargo-machete]
++ignored = ["antithesis_sdk"]
 --- a/connection.rs
 +++ b/connection.rs
 @@ -3721,6 +3721,31 @@
@@ -105,7 +198,93 @@
  }
 --- a/storage/pager.rs
 +++ b/storage/pager.rs
-@@ -4356,6 +4356,7 @@
+@@ -1094,6 +1094,8 @@
+ 
+ /// This will keep track of the state of current cache commit in order to not repeat work
+ struct CommitInfo {
++    // Opt-in diagnostic: post-publication auto-checkpoint wall time, including I/O yields.
++    checkpoint_trace: Option<(std::time::Instant, u128)>,
+     completions: Vec<Completion>,
+     completion_group: Option<Completion>,
+     state: CommitState,
+@@ -1113,6 +1115,7 @@
+ 
+ impl CommitInfo {
+     fn reset(&mut self) {
++        self.checkpoint_trace = None;
+         self.completions.clear();
+         self.completion_group = None;
+         self.state = CommitState::PrepareWal;
+@@ -1644,6 +1647,7 @@
+             subjournal: RwLock::new(None),
+             savepoints: Arc::new(RwLock::new(Vec::new())),
+             commit_info: RwLock::new(CommitInfo {
++                checkpoint_trace: None,
+                 completions: Vec::new(),
+                 completion_group: None,
+                 state: CommitState::PrepareWal,
+@@ -2924,11 +2928,30 @@
+         let Some(wal) = self.wal.as_ref() else {
+             return Ok(());
+         };
++        let previous = wal.connection_wal_pos();
+         let changed = wal.begin_read_tx()?;
+         if changed {
+-            // Someone else changed the database -> assume our page cache is invalid (this is default SQLite behavior, we can probably do better with more granular invalidation)
+-            self.clear_page_cache(false);
+-            // Invalidate cached schema cookie to force re-read on next access
++            let cached_pages = self.page_cache.read().len();
++            let clean = self.dirty_pages.read().is_empty() && self.pending_reads.read().is_empty();
++            let selective = clean
++                && wal
++                    .cache_invalidation_pages(previous, cached_pages)
++                    .is_some_and(|pages| {
++                        // Cursors can retain page/record references independently
++                        // of the cache. Preserve the existing invalidation boundary.
++                        self.invalidate_all_cursors();
++                        let mut cache = self.page_cache.write();
++                        pages.into_iter().all(|page| {
++                            usize::try_from(page)
++                                .is_ok_and(|page| cache.delete(PageCacheKey::new(page)).is_ok())
++                        })
++                    });
++            if !selective {
++                // Restart, lost history, rollback/in-flight state, alternate WAL,
++                // or a pinned entry retains the established full-clear behavior.
++                self.clear_page_cache(false);
++            }
++            // Invalidate cached schema cookie to force re-read on next access.
+             self.set_schema_cookie(None);
+         }
+         Ok(())
+@@ -3065,6 +3088,26 @@
+                         connection.get_sync_mode(),
+                         false,
+                     );
++                    if !matches!(&checkpoint_result, Ok(IOResult::IO(_))) {
++                        if let Some((started, started_unix_us)) =
++                            self.commit_info.write().checkpoint_trace.take()
++                        {
++                            let elapsed_us = started.elapsed().as_micros();
++                            match &checkpoint_result {
++                                Ok(IOResult::Done(result)) => eprintln!(
++                                    "auto_checkpoint db={:?} started_unix_us={} elapsed_us={} result=ok max_frame={} total_backfilled={} checkpoint_backfilled={}",
++                                    connection.db.path, started_unix_us, elapsed_us,
++                                    result.wal_max_frame, result.wal_total_backfilled,
++                                    result.wal_checkpoint_backfilled,
++                                ),
++                                Err(_) => eprintln!(
++                                    "auto_checkpoint db={:?} started_unix_us={} elapsed_us={} result=error",
++                                    connection.db.path, started_unix_us, elapsed_us,
++                                ),
++                                Ok(IOResult::IO(_)) => unreachable!(),
++                            }
++                        }
++                    }
+                     match checkpoint_result {
+                         Ok(IOResult::IO(io)) => return Ok(IOResult::IO(io)),
+                         Ok(IOResult::Done(_)) => complete_commit(),
+@@ -4356,6 +4399,7 @@
                      let mut commit_info = self.commit_info.write();
                      wal.commit_prepared_frames(&commit_info.prepared_frames);
                      wal.finalize_committed_pages(&commit_info.prepared_frames);
@@ -113,7 +292,26 @@
                      wal.finish_append_frames_commit()?;
                      self.dirty_pages.write().clear();
                      commit_info.prepared_frames.clear();
-@@ -5145,6 +5146,17 @@
+@@ -4363,6 +4407,18 @@
+                     let need_checkpoint = allowed_auto_actions.contains(WalAutoActions::Checkpoint)
+                         && wal.should_checkpoint();
+                     if need_checkpoint {
++                        // The existing VFS trace flag is already recorded as an unqualified
++                        // diagnostic by the workload recorder. No clock reads when disabled.
++                        commit_info.checkpoint_trace =
++                            std::env::var_os("FIREWEED_PROJECTION_IO_TRACE").map(|_| {
++                                (
++                                    std::time::Instant::now(),
++                                    std::time::SystemTime::now()
++                                        .duration_since(std::time::UNIX_EPOCH)
++                                        .unwrap_or_default()
++                                        .as_micros(),
++                                )
++                            });
+                         commit_info.state = CommitState::AutoCheckpoint;
+                     }
+                     return Ok(IOResult::Done(()));
+@@ -5145,6 +5201,17 @@
                              page_id as u32,
                          );
  
@@ -131,7 +329,7 @@
                          // Unpin page before finishing - it's added to freelist
                          page.unpin();
                          break;
-@@ -5161,6 +5173,9 @@
+@@ -5161,6 +5228,9 @@
                      let trunk_page_id = header.freelist_trunk_page.get();
  
                      let contents = page.get_contents();
@@ -141,9 +339,313 @@
                      // Point to previous trunk
                      contents
                          .write_u32_no_offset(FREELIST_TRUNK_OFFSET_NEXT_TRUNK_PTR, trunk_page_id);
+@@ -6637,3 +6707,189 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod selective_read_cache_tests {
++    use super::*;
++    use crate::{Database, DatabaseOpts, PlatformIO, Value};
++
++    fn fixture(shared: bool) -> (tempfile::TempDir, Arc<Connection>, Arc<Connection>) {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("cache.db");
++        let open = || {
++            Database::open_file_with_flags(
++                Arc::new(PlatformIO::new().unwrap()),
++                path.to_str().unwrap(),
++                OpenFlags::Create,
++                DatabaseOpts::new().with_multiprocess_wal(shared),
++                None,
++            )
++            .unwrap()
++        };
++        let db = open();
++        let writer = db.connect().unwrap();
++        writer.wal_auto_actions_disable();
++        writer
++            .execute("CREATE TABLE hot(id INTEGER PRIMARY KEY, v INTEGER)")
++            .unwrap();
++        writer.execute("INSERT INTO hot VALUES(1, 1)").unwrap();
++        writer
++            .execute("CREATE TABLE cold(id INTEGER PRIMARY KEY, v BLOB)")
++            .unwrap();
++        writer.execute("BEGIN").unwrap();
++        for id in 1..=32 {
++            writer
++                .execute(format!("INSERT INTO cold VALUES({id}, zeroblob(6000))"))
++                .unwrap();
++        }
++        writer.execute("COMMIT").unwrap();
++        // Separate Database handles exercise the persisted coordination index;
++        // the legacy mode instead uses the same in-process database instance.
++        let reader = if shared {
++            open().connect().unwrap()
++        } else {
++            db.connect().unwrap()
++        };
++        reader.wal_auto_actions_disable();
++        (dir, writer, reader)
++    }
++
++    fn rows(connection: &Arc<Connection>, sql: &str) -> Vec<Vec<Value>> {
++        connection.prepare(sql).unwrap().run_collect_rows().unwrap()
++    }
++
++    fn number(connection: &Arc<Connection>, sql: &str) -> i64 {
++        let values = rows(connection, sql);
++        let Value::Numeric(crate::numeric::Numeric::Integer(value)) = values[0][0] else {
++            panic!("expected integer")
++        };
++        value
++    }
++
++    fn warm_cold(connection: &Arc<Connection>) -> PageRef {
++        let root = number(
++            connection,
++            "SELECT rootpage FROM sqlite_schema WHERE name='cold'",
++        );
++        let values = rows(connection, "SELECT v FROM cold ORDER BY id");
++        assert_eq!(values.len(), 32);
++        for row in values {
++            let Value::Blob(bytes) = &row[0] else {
++                panic!("expected blob")
++            };
++            assert_eq!(bytes.as_slice(), &[0; 6000]);
++        }
++        connection
++            .get_pager()
++            .page_cache
++            .write()
++            .get(&PageCacheKey::new(root as usize))
++            .unwrap()
++            .unwrap()
++    }
++
++    #[test]
++    fn selective_read_cache_preserves_unchanged_pages_and_fresh_snapshot_values() {
++        for shared in [false, true] {
++            let (_dir, writer, reader) = fixture(shared);
++            let cold = warm_cold(&reader);
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 1);
++            writer.execute("UPDATE hot SET v=2 WHERE id=1").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 2);
++            assert!(
++                cold.is_loaded(),
++                "unmodified cached root was discarded, shared={shared}"
++            );
++            let root = warm_cold(&reader);
++            assert!(
++                Arc::ptr_eq(&cold, &root),
++                "the retained root must be the same cache entry"
++            );
++
++            reader.execute("BEGIN").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 2);
++            writer.execute("UPDATE hot SET v=3 WHERE id=1").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 2);
++            reader.execute("COMMIT").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 3);
++            assert!(cold.is_loaded());
++
++            writer.execute("BEGIN").unwrap();
++            writer.execute("UPDATE hot SET v=4 WHERE id=1").unwrap();
++            writer.execute("ROLLBACK").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 3);
++            writer.execute("UPDATE hot SET v=5 WHERE id=1").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 5);
++            reader.execute("BEGIN").unwrap();
++            reader.execute("UPDATE hot SET v=6 WHERE id=1").unwrap();
++            reader.execute("ROLLBACK").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 5);
++            assert_eq!(number(&writer, "SELECT v FROM hot WHERE id=1"), 5);
++
++            writer.execute("CREATE INDEX hot_v ON hot(v)").unwrap();
++            assert_eq!(
++                number(
++                    &reader,
++                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='hot_v'"
++                ),
++                1
++            );
++            assert_eq!(
++                number(&reader, "SELECT v FROM hot INDEXED BY hot_v WHERE v=5"),
++                5
++            );
++        }
++    }
++
++    #[test]
++    fn selective_read_cache_falls_back_across_checkpoint_restart_and_page_reuse() {
++        for shared in [false, true] {
++            let (_dir, writer, reader) = fixture(shared);
++            let cold = warm_cold(&reader);
++            let checkpoint = rows(&writer, "PRAGMA wal_checkpoint(TRUNCATE)");
++            assert_eq!(checkpoint[0][0], Value::from_i64(0));
++            writer.execute("UPDATE hot SET v=8 WHERE id=1").unwrap();
++            assert_eq!(number(&reader, "SELECT v FROM hot WHERE id=1"), 8);
++            assert!(
++                !cold.is_loaded(),
++                "restart must discard old-generation cache pages"
++            );
++            let cold = warm_cold(&reader);
++            writer.execute("BEGIN").unwrap();
++            for id in 2..=100 {
++                writer
++                    .execute(format!("INSERT INTO hot VALUES({id}, {id})"))
++                    .unwrap();
++            }
++            writer.execute("COMMIT").unwrap();
++            let checkpoint = rows(&writer, "PRAGMA wal_checkpoint(PASSIVE)");
++            assert_eq!(checkpoint[0][0], Value::from_i64(0));
++            assert_eq!(number(&reader, "SELECT COUNT(*) FROM hot"), 100);
++            assert!(
++                !cold.is_loaded(),
++                "backfill beyond the old snapshot must force full invalidation"
++            );
++
++            warm_cold(&reader);
++            writer.execute("DROP TABLE cold").unwrap();
++            assert_eq!(
++                number(
++                    &reader,
++                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='cold'"
++                ),
++                0
++            );
++            writer
++                .execute("CREATE TABLE cold(id INTEGER PRIMARY KEY, v BLOB)")
++                .unwrap();
++            writer
++                .execute("INSERT INTO cold VALUES(99, x'010203')")
++                .unwrap();
++            let values = rows(&reader, "SELECT id, v FROM cold");
++            assert_eq!(
++                values,
++                vec![vec![Value::from_i64(99), Value::Blob(vec![1, 2, 3])]]
++            );
++        }
++    }
++}
+--- a/storage/shared_wal_coordination.rs
++++ b/storage/shared_wal_coordination.rs
+@@ -2466,13 +2466,19 @@
+             .expect("shared WAL frame index block missing");
+         let mappings = self.frame_index_blocks.read();
+         let visible_slots = Self::visible_frame_index_slots(&mappings, len, max_frame);
+-        if visible_slots == 0 {
++        let first_slot = if min_frame == 0 {
++            0
++        } else {
++            Self::visible_frame_index_slots(&mappings, len, min_frame - 1)
++        };
++        if visible_slots <= first_slot {
+             return Vec::new();
+         }
+         let mut seen_pages = std::collections::BTreeSet::new();
+         let mut entries = Vec::new();
+         let last_block = (visible_slots - 1) / FRAME_INDEX_BLOCK_CAPACITY;
+-        for block_index in (0..=last_block).rev() {
++        let first_block = first_slot / FRAME_INDEX_BLOCK_CAPACITY;
++        for block_index in (first_block..=last_block).rev() {
+             let block_start_slot = block_index * FRAME_INDEX_BLOCK_CAPACITY;
+             let visible_entries = visible_slots
+                 .saturating_sub(block_start_slot)
+@@ -3961,6 +3967,21 @@
+         mapped.record_frame(13, boundary + 2);
+ 
+         assert_eq!(
++            mapped.iter_latest_frames(boundary + 1, boundary + 2),
++            vec![(9, boundary + 1), (13, boundary + 2)]
++        );
++        assert_eq!(
++            mapped.iter_latest_frames(boundary + 2, boundary + 2),
++            vec![(13, boundary + 2)]
++        );
++        assert!(mapped
++            .iter_latest_frames(boundary + 3, boundary + 2)
++            .is_empty());
++        assert_eq!(
++            mapped.iter_latest_frames(boundary, boundary + 1),
++            vec![(7, boundary), (9, boundary + 1)]
++        );
++        assert_eq!(
+             mapped.iter_latest_frames(0, boundary + 2),
+             vec![
+                 (7, boundary),
+@@ -3969,6 +3990,50 @@
+                 (13, boundary + 2),
+             ]
+         );
++    }
++
++    #[test]
++    fn mapped_shared_wal_coordination_frame_ranges_match_latest_visible_oracle() {
++        let dir = tempfile::tempdir().unwrap();
++        let mapped = create_mapping(&dir.path().join("coordination.tshm"));
++        let boundary = FRAME_INDEX_BLOCK_CAPACITY as u64;
++        let records: Vec<_> = (0..2 * boundary + 31)
++            .map(|slot| (1 + (slot * 37 + slot / 11) % 257, slot * 3 + 1))
++            .collect();
++        for &(page, frame) in &records {
++            mapped.record_frame(page, frame);
++        }
++        let mut ranges = vec![
++            (0, 0),
++            (0, u64::MAX),
++            (u64::MAX, u64::MAX),
++            (4, 1),
++            (2, 3),
++            (1, 1),
++            (1, 4),
++        ];
++        // Exercise both algorithms and both sides of the cutoff, including
++        // ranges crossing a block boundary, frame-ID gaps, and old snapshots
++        // whose pages have newer versions already present in the shared index.
++        for start in [0, 1, boundary - 2, boundary - 1, boundary, boundary + 7] {
++            for width in [0, 1, 2, 19, boundary - 1, boundary, boundary + 1] {
++                ranges.push((start * 3 + 1, (start + width) * 3));
++                ranges.push((start * 3, (start + width) * 3 + 1));
++            }
++        }
++        for (min, max) in ranges {
++            let mut expected = std::collections::BTreeMap::new();
++            for &(page, frame) in &records {
++                if min <= frame && frame <= max {
++                    expected.insert(page, frame);
++                }
++            }
++            assert_eq!(
++                mapped.iter_latest_frames(min, max),
++                expected.into_iter().collect::<Vec<_>>(),
++                "frame range {min}..={max}"
++            );
++        }
+     }
+ 
+     #[test]
 --- a/storage/wal.rs
 +++ b/storage/wal.rs
-@@ -726,6 +726,18 @@
+@@ -619,6 +619,16 @@
+     /// Begin a read transaction.
+     /// Returns whether the database state has changed since the last read transaction.
+     fn begin_read_tx(&self) -> Result<bool>;
++    /// Cached pages may survive only a provably append-only snapshot advance.
++    /// None requests the established full invalidation (also the default for
++    /// alternate WAL implementations). The result names every changed page.
++    fn cache_invalidation_pages(
++        &self,
++        _previous: (u32, u64),
++        _cached_pages: usize,
++    ) -> Option<Vec<u64>> {
++        None
++    }
+     /// MVCC helper: check if WAL state changed without starting a read tx.
+     fn mvcc_refresh_if_db_changed(&self) -> bool;
+ 
+@@ -726,6 +736,18 @@
      /// Complete append of frames by updating shared wal state. Before this
      /// all changes were stored locally.
      fn finish_append_frames_commit(&self) -> Result<()>;
@@ -162,7 +664,7 @@
  
      fn should_checkpoint(&self) -> bool;
      fn checkpoint(&self, pager: &Pager, mode: CheckpointMode)
-@@ -2662,7 +2674,7 @@
+@@ -2662,7 +2684,7 @@
      write_lock_held: AtomicBool,
  
      ongoing_checkpoint: RwLock<OngoingCheckpoint>,
@@ -171,7 +673,45 @@
      /// This is the index to the read_lock in WalFileShared that we are holding. This lock contains
      /// the max frame for this connection.
      max_frame_read_lock_index: AtomicUsize,
-@@ -3848,10 +3860,25 @@
+@@ -3261,6 +3283,37 @@
+         }
+     }
+ 
++    fn cache_invalidation_pages(
++        &self,
++        previous: (u32, u64),
++        cached_pages: usize,
++    ) -> Option<Vec<u64>> {
++        let state = self.connection_state();
++        let snapshot = state.snapshot;
++        let (previous_generation, previous_frame) = previous;
++        if state.read_guard == ReadGuardKind::None
++            || previous_generation != snapshot.checkpoint_seq
++            || previous_frame == 0
++            || previous_frame >= snapshot.max_frame
++            || snapshot.nbackfills > previous_frame
++            // Bound enumeration work by the cache that would otherwise clear.
++            // Each changed frame can introduce at most one changed page.
++            || snapshot.max_frame - previous_frame >= cached_pages as u64
++        {
++            return None;
++        }
++        // The read guard pins this generation, and committed prefixes cannot be
++        // overwritten. Include all writes after the old snapshot; the frozen
++        // upper bound excludes newer/uncommitted writer frames.
++        Some(
++            self.coordination
++                .iter_latest_frames(previous_frame + 1, snapshot.max_frame)
++                .into_iter()
++                .map(|(page, _)| page)
++                .collect(),
++        )
++    }
++
+     fn mvcc_refresh_if_db_changed(&self) -> bool {
+         WalFile::mvcc_refresh_if_db_changed(self)
+     }
+@@ -3848,10 +3901,25 @@
          Ok(())
      }
  
@@ -198,7 +738,7 @@
      }
  
      #[instrument(skip_all, level = Level::DEBUG)]
-@@ -4617,7 +4644,7 @@
+@@ -4617,7 +4685,7 @@
                  pages_to_checkpoint: Vec::new(),
                  inflight_reads: Vec::with_capacity(MAX_INFLIGHT_READS),
              }),
@@ -207,7 +747,7 @@
              buffer_pool,
              checkpoint_seq: AtomicU32::new(0),
              syncing: Arc::new(AtomicBool::new(false)),
-@@ -4774,8 +4801,12 @@
+@@ -4774,8 +4842,12 @@
                      let mut to_checkpoint = self
                          .coordination
                          .iter_latest_frames(oc_min_frame, oc_max_frame);
@@ -222,7 +762,7 @@
                      {
                          let mut oc = self.ongoing_checkpoint.write();
                          oc.pages_to_checkpoint = to_checkpoint;
-@@ -9286,6 +9317,66 @@
+@@ -9286,6 +9358,66 @@
      }
  
      #[test]
@@ -289,6 +829,39 @@
      fn test_wal_restart_blocks_readers() {
          let (db, _) = get_database();
          let conn1 = db.connect().unwrap();
+--- a/translate/emitter/update.rs
++++ b/translate/emitter/update.rs
+@@ -1836,6 +1836,19 @@
+             (None, None)
+         };
+ 
++        // A row outside a partial index has no new key. Skip expression
++        // evaluation and record construction as well as the constraint check;
++        // Phase 3 uses this same predicate before reading the key registers.
++        let skip_new_key = new_satisfies_where.map(|reg| {
++            let label = program.allocate_label();
++            program.emit_insn(Insn::IfNot {
++                reg,
++                target_pc: label,
++                jump_if_null: true,
++            });
++            label
++        });
++
+         // Build new index key for constraint checking and later insertion (Phase 3).
+         let num_cols = index.columns.len();
+         let idx_start_reg = program.alloc_registers(num_cols + 1);
+@@ -2025,6 +2038,10 @@
+             }
+ 
+             program.preassign_label_to_next_insn(constraint_check);
++        }
++
++        if let Some(label) = skip_new_key {
++            program.preassign_label_to_next_insn(label);
+         }
+ 
+         idx_phase_ctxs.push(IndexUpdatePhaseCtx {
 --- a/translate/pragma.rs
 +++ b/translate/pragma.rs
 @@ -34,6 +34,9 @@
@@ -333,36 +906,302 @@
          return Ok(());
      }
  
---- a/translate/emitter/update.rs
-+++ b/translate/emitter/update.rs
-@@ -1836,6 +1836,19 @@ fn emit_update_insns<'a>(
-             (None, None)
-         };
+--- a/types.rs
++++ b/types.rs
+@@ -3898,6 +3898,107 @@
+     }
  
-+        // A row outside a partial index has no new key. Skip expression
-+        // evaluation and record construction as well as the constraint check;
-+        // Phase 3 uses this same predicate before reading the key registers.
-+        let skip_new_key = new_satisfies_where.map(|reg| {
-+            let label = program.allocate_label();
-+            program.emit_insn(Insn::IfNot {
-+                reg,
-+                target_pc: label,
-+                jump_if_null: true,
-+            });
-+            label
-+        });
-+
-         // Build new index key for constraint checking and later insertion (Phase 3).
-         let num_cols = index.columns.len();
-         let idx_start_reg = program.alloc_registers(num_cols + 1);
-@@ -2027,6 +2040,10 @@ fn emit_update_insns<'a>(
-             program.preassign_label_to_next_insn(constraint_check);
-         }
- 
-+        if let Some(label) = skip_new_key {
-+            program.preassign_label_to_next_insn(label);
+     #[test]
++    fn record_encoding_matches_independent_serializer_across_sizes() {
++        let cases = std::vec![
++            std::vec![],
++            std::vec![
++                Value::Blob(std::vec![0xa5; 16_384]),
++                Value::Text(Text::new("large"))
++            ],
++            std::vec![Value::Null, Value::from_i64(0), Value::from_i64(1)],
++            std::vec![
++                Value::from_i64(-129),
++                Value::from_i64(32_768),
++                Value::from_i64(i64::MAX),
++                Value::from_f64(3.25)
++            ],
++            std::vec![
++                Value::Text(Text::new("雪\0λ".repeat(100))),
++                Value::Blob(std::vec![0, 255])
++            ],
++            (0..200)
++                .map(|i| Value::Text(Text::new(format!("field-{i}"))))
++                .collect(),
++            std::vec![],
++        ];
++        for values in cases {
++            let registers: std::vec::Vec<_> = values.iter().cloned().map(Register::Value).collect();
++            let reference = Record::new(values.into_iter().try_collect().unwrap());
++            let mut expected = std::vec::Vec::new();
++            reference.serialize(&mut expected);
++            let record = ImmutableRecord::from_registers(&registers, registers.len()).unwrap();
++            assert_eq!(record.get_payload(), expected.as_slice());
 +        }
++    }
 +
-         idx_phase_ctxs.push(IndexUpdatePhaseCtx {
-             idx_cursor_id: *idx_cursor_id,
-             record_reg: *record_reg,
++    #[test]
++    fn text_prefix_continuation_matches_decoded_ordering() {
++        use std::cmp::Ordering::{Equal, Greater, Less};
++        let tails = vec![
++            Value::Null,
++            Value::from_i64(-129),
++            Value::from_i64(0),
++            Value::from_i64(1),
++            Value::from_i64(i64::MAX),
++            Value::from_f64(1.5),
++            Value::Text(Text::new("")),
++            Value::Text(Text::new("Queue")),
++            Value::Text(Text::new("queue ")),
++            Value::Blob(vec![0, 255]),
++        ];
++        for tenant in ["".to_owned(), "tenant".to_owned(), "雪".repeat(80)] {
++            for direction in [SortOrder::Asc, SortOrder::Desc] {
++                for collation in [
++                    CollationSeq::Binary,
++                    CollationSeq::NoCase,
++                    CollationSeq::Rtrim,
++                ] {
++                    let index = create_index_info(
++                        3,
++                        vec![SortOrder::Asc, direction, direction],
++                        vec![CollationSeq::Binary, collation, CollationSeq::Binary],
++                    );
++                    for lhs_tail in &tails {
++                        for rhs_tail in &tails {
++                            let lhs = vec![
++                                Value::Text(Text::new(tenant.clone())),
++                                lhs_tail.clone(),
++                                Value::from_i64(42),
++                            ];
++                            let rhs = vec![
++                                Value::Text(Text::new(tenant.clone())),
++                                rhs_tail.clone(),
++                                Value::from_i64(43),
++                            ];
++                            for lhs_len in 1..=3 {
++                                let serialized = create_record(lhs[..lhs_len].to_vec());
++                                let lhs_refs: Vec<_> =
++                                    lhs[..lhs_len].iter().map(Value::as_ref).collect();
++                                for rhs_len in 1..=3 {
++                                    let rhs_refs: Vec<_> =
++                                        rhs[..rhs_len].iter().map(Value::as_ref).collect();
++                                    for tie in [Less, Equal, Greater] {
++                                        let expected = compare_immutable_for_testing(
++                                            &lhs_refs,
++                                            &rhs_refs,
++                                            &index.key_info,
++                                            tie,
++                                        );
++                                        let actual = RecordCompare::String
++                                            .compare(&serialized, rhs_refs.iter(), &index, 0, tie)
++                                            .unwrap();
++                                        assert_eq!(actual, expected, "lhs={lhs_refs:?} rhs={rhs_refs:?} direction={direction:?} collation={collation:?} tie={tie:?}");
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
+     fn test_skip_parameter() {
+         let index_info = create_index_info(
+             3,
+--- a/vdbe/execute.rs
++++ b/vdbe/execute.rs
+@@ -11325,11 +11325,39 @@
+         },
+         insn
+     );
+-    for i in 0..=*extra_amount {
+-        state.registers[*dst_reg + i] = state.registers[*src_reg + i].clone();
+-    }
++    copy_register_range(&mut state.registers, *src_reg, *dst_reg, *extra_amount)?;
+     state.pc += 1;
+     Ok(InsnFunctionStepResult::Step)
++}
++
++fn copy_register_range(
++    registers: &mut [Register],
++    source: usize,
++    destination: usize,
++    extra: usize,
++) -> Result<()> {
++    // Preserve sequential copy behavior even if the ranges overlap.
++    for offset in 0..=extra {
++        let src = source + offset;
++        let dst = destination + offset;
++        if src == dst {
++            // Still validate the register index for malformed bytecode.
++            let _ = &registers[src];
++            continue;
++        }
++        let (source, destination) = if src < dst {
++            let (left, right) = registers.split_at_mut(dst);
++            (&left[src], &mut right[0])
++        } else {
++            let (left, right) = registers.split_at_mut(src);
++            (&right[0], &mut left[dst])
++        };
++        match source {
++            Register::Value(value) => destination.copy_from_value(value)?,
++            other => *destination = other.clone(),
++        }
++    }
++    Ok(())
+ }
+ 
+ /// Reopening a cursor slot invalidates any deferred seek that points to it or
+@@ -13293,7 +13321,11 @@
+     _pager: &Arc<Pager>,
+ ) -> Result<InsnFunctionStepResult> {
+     load_insn!(Variable { index, dest }, insn);
+-    state.registers[*dest].set_value(state.get_parameter(*index));
++    let value = state
++        .parameters
++        .get(index.get() - 1)
++        .unwrap_or(&Value::Null);
++    state.registers[*dest].copy_from_value(value)?;
+     state.pc += 1;
+     Ok(InsnFunctionStepResult::Step)
+ }
+@@ -16933,6 +16965,99 @@
+     use crate::vdbe::BranchOffset;
+     use crate::{Database, DatabaseOpts, MemoryIO, IO};
+ 
++    #[test]
++    fn test_register_copy_reuses_buffers_and_preserves_independence() {
++        let mut text = String::with_capacity(128);
++        text.push_str("old destination");
++        let text_ptr = text.as_ptr();
++        let mut blob = std::vec::Vec::with_capacity(128);
++        blob.extend_from_slice(b"old blob");
++        let blob_ptr = blob.as_ptr();
++        let mut registers = std::vec![
++            Register::Value(Value::Text(crate::types::Text::new("new text".to_owned()))),
++            Register::Value(Value::Blob(b"new blob".to_vec())),
++            Register::Value(Value::Text(crate::types::Text::new(text))),
++            Register::Value(Value::Blob(blob)),
++        ];
++        copy_register_range(&mut registers, 0, 2, 1).unwrap();
++        assert_eq!(registers[0], registers[2]);
++        assert_eq!(registers[1], registers[3]);
++        match &registers[2] {
++            Register::Value(Value::Text(value)) => assert_eq!(value.as_str().as_ptr(), text_ptr),
++            _ => panic!("expected text"),
++        }
++        match &registers[3] {
++            Register::Value(Value::Blob(value)) => assert_eq!(value.as_ptr(), blob_ptr),
++            _ => panic!("expected blob"),
++        }
++        registers[0] = Register::Value(Value::Null);
++        registers[1] = Register::Value(Value::Blob(b"changed".to_vec()));
++        assert_eq!(registers[2].get_value(), &Value::from_text("new text"));
++        assert_eq!(registers[3].get_value(), &Value::Blob(b"new blob".to_vec()));
++    }
++
++    #[test]
++    fn test_register_copy_preserves_overlapping_range_behavior() {
++        for (source, destination) in [(0, 1), (1, 0), (0, 0)] {
++            let mut actual = std::vec![
++                Register::Value(Value::from_text("a")),
++                Register::Value(Value::from_text("bb")),
++                Register::Value(Value::from_text("ccc")),
++            ];
++            let mut expected = actual.clone();
++            for offset in 0..=1 {
++                expected[destination + offset] = expected[source + offset].clone();
++            }
++            copy_register_range(&mut actual, source, destination, 1).unwrap();
++            assert_eq!(actual, expected);
++        }
++    }
++
++    #[test]
++    fn test_register_copy_parameter_growth_null_and_subtype() {
++        let stmt = prepare_test_statement();
++        let mut state = ProgramState::new(1, 0);
++        let insn = Insn::Variable {
++            index: std::num::NonZeroUsize::new(1).unwrap(),
++            dest: 0,
++        };
++        let mut values = std::vec![
++            Value::from_text("small"),
++            Value::Blob(std::vec![7; 8192]),
++            Value::Blob(std::vec![8; 3]),
++            Value::Null,
++            Value::from_text("large".repeat(2048)),
++        ];
++        #[cfg(feature = "json")]
++        values.push(Value::Text(crate::types::Text::json(
++            "{\"ok\":true}".into(),
++        )));
++        values.push(Value::from_text("normal owned text".to_owned()));
++        values.push(Value::from_text("static text"));
++        values.push(Value::from_i64(42));
++        for value in values {
++            state.parameters = std::vec![value.clone()];
++            op_variable(stmt.get_program(), &mut state, &insn, stmt.get_pager()).unwrap();
++            assert_eq!(state.registers[0].get_value(), &value);
++            if let Value::Text(expected) = &value {
++                let Value::Text(actual) = state.registers[0].get_value() else {
++                    panic!("expected text")
++                };
++                assert_eq!(actual.subtype, expected.subtype);
++                if matches!(&expected.value, std::borrow::Cow::Borrowed(_)) {
++                    assert!(matches!(&actual.value, std::borrow::Cow::Borrowed(_)));
++                }
++            }
++            state.parameters.clear();
++            assert_eq!(state.registers[0].get_value(), &value);
++        }
++        op_variable(stmt.get_program(), &mut state, &insn, stmt.get_pager()).unwrap();
++        assert!(
++            state.registers[0].is_null(),
++            "unbound parameters remain NULL"
++        );
++    }
++
+     fn prepare_test_statement() -> Statement {
+         let io: Arc<dyn IO> = Arc::new(MemoryIO::new());
+         let db = Database::open_file_with_flags(
+--- a/vdbe/mod.rs
++++ b/vdbe/mod.rs
+@@ -365,6 +365,28 @@
+                 *self = Register::Value(val);
+             }
+         }
++    }
++
++    /// Deep-copy a value, retaining a compatible destination buffer.
++    /// Unlike set_value, the source remains owned by its parameter/register.
++    #[inline]
++    pub fn copy_from_value(&mut self, value: &Value) -> Result<()> {
++        match (self, value) {
++            (Register::Value(Value::Text(existing)), Value::Text(source)) => {
++                if matches!(&source.value, std::borrow::Cow::Borrowed(_)) {
++                    // Static text already clones without an allocation. Do not
++                    // turn that cheap copy into a new owned string.
++                    *existing = source.clone();
++                } else {
++                    existing.do_extend(source)?;
++                }
++            }
++            (Register::Value(Value::Blob(existing)), Value::Blob(source)) => {
++                existing.do_extend(source)?;
++            }
++            (destination, source) => *destination = Register::Value(source.clone()),
++        }
++        Ok(())
+     }
+ }
+ 

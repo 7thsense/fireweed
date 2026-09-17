@@ -1,6 +1,25 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -63,6 +63,7 @@
+@@ -44,25 +44,15 @@
+ path = "src/lib.rs"
+ doc = false
+ 
+-[dependencies.env_logger]
+-version = "0.11.6"
+-default-features = false
+-
+-[dependencies.parking_lot]
+-version = "0.12.4"
+-features = ["send_guard"]
+-
+ [dependencies.tracing]
+ version = "0.1.41"
+-
+-[dependencies.tracing-appender]
+-version = "0.2.3"
+ 
+ [dependencies.tracing-subscriber]
+ version = "0.3.20"
  features = ["env-filter"]
  
  [dependencies.turso_core]
@@ -8,3 +27,17 @@
  version = "0.7.2"
  features = [
      "conn_raw_api",
+@@ -79,5 +69,11 @@
+ [dev-dependencies.tempfile]
+ version = "3.20.0"
+ 
+-[build-dependencies.bindgen]
+-version = "0.69.5"
++
++# Enables Send guards used by turso_core in the SDK's Send futures.
++[dependencies.parking_lot]
++version = "0.12.4"
++features = ["send_guard"]
++
++[package.metadata.cargo-machete]
++ignored = ["parking_lot"]

@@ -1,40 +1,27 @@
-//! Canonical TP-005 cell register: log--projection (exactly 20 for full).
+//! Canonical TP-005 cell register: log--projection (exactly 12 for full).
 
-/// Full matrix: 5 logs × 4 projections.
+/// Full matrix: 4 logs × 3 projections.
 pub const FULL_CELL_IDS: &[&str] = &[
     "memory--memory",
-    "memory--sqlite",
     "memory--turso",
     "memory--postgres",
-    "sqlite--memory",
-    "sqlite--sqlite",
-    "sqlite--turso",
-    "sqlite--postgres",
     "postgres--memory",
-    "postgres--sqlite",
     "postgres--turso",
     "postgres--postgres",
     "filesystem--memory",
-    "filesystem--sqlite",
     "filesystem--turso",
     "filesystem--postgres",
     "s3--memory",
-    "s3--sqlite",
     "s3--turso",
     "s3--postgres",
 ];
 
 /// Smoke: local logs × local projections (no live PG/S3 required).
-/// 3 logs × 3 projections = 9 cells.
+/// 2 logs × 2 projections = 4 cells.
 pub const SMOKE_CELL_IDS: &[&str] = &[
     "memory--memory",
-    "memory--sqlite",
     "memory--turso",
-    "sqlite--memory",
-    "sqlite--sqlite",
-    "sqlite--turso",
     "filesystem--memory",
-    "filesystem--sqlite",
     "filesystem--turso",
 ];
 
@@ -49,11 +36,11 @@ pub fn parse_cell(cell: &str) -> Result<(&str, &str), String> {
         .split_once("--")
         .ok_or_else(|| format!("cell id must be log--projection, got {cell:?}"))?;
     match log {
-        "memory" | "sqlite" | "postgres" | "filesystem" | "s3" => {}
+        "memory" | "postgres" | "filesystem" | "s3" => {}
         _ => return Err(format!("unknown log axis {log:?} in cell {cell:?}")),
     }
     match proj {
-        "memory" | "sqlite" | "turso" | "postgres" => {}
+        "memory" | "turso" | "postgres" => {}
         _ => return Err(format!("unknown projection axis {proj:?} in cell {cell:?}")),
     }
     Ok((log, proj))
@@ -69,12 +56,10 @@ pub fn is_durable_log_cell(cell: &str) -> bool {
 /// Disposable projection rebuild: durable object log + non-memory projection.
 pub fn is_maintenance_cell(cell: &str) -> bool {
     // Disposable projection rebuild (verify/delete/rebuild) is only available for
-    // object-log cells with SQLite or Postgres projections. Memory has no durable
+    // object-log cells with Postgres projections. Memory has no durable
     // projection to rebuild; Turso does not advertise the maintenance control plane.
     parse_cell(cell)
-        .map(|(log, proj)| {
-            matches!(log, "filesystem" | "s3") && matches!(proj, "sqlite" | "postgres")
-        })
+        .map(|(log, proj)| matches!(log, "filesystem" | "s3") && matches!(proj, "postgres"))
         .unwrap_or(false)
 }
 
@@ -88,24 +73,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn full_register_is_exactly_twenty_canonical_pairs() {
-        assert_eq!(FULL_CELL_IDS.len(), 20);
+    fn full_register_is_exactly_twelve_canonical_pairs() {
+        assert_eq!(FULL_CELL_IDS.len(), 12);
         let mut seen = std::collections::BTreeSet::new();
         for cell in FULL_CELL_IDS {
             let (log, proj) = parse_cell(cell).expect("parse");
             assert!(seen.insert((log, proj)));
             assert_eq!(barrier_class(cell), "Strict");
         }
-        assert_eq!(seen.len(), 20);
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]
-    fn smoke_is_nine_local_cells() {
-        assert_eq!(SMOKE_CELL_IDS.len(), 9);
+    fn smoke_is_four_local_cells() {
+        assert_eq!(SMOKE_CELL_IDS.len(), 4);
         for cell in SMOKE_CELL_IDS {
             let (log, proj) = parse_cell(cell).unwrap();
-            assert!(matches!(log, "memory" | "sqlite" | "filesystem"));
-            assert!(matches!(proj, "memory" | "sqlite" | "turso"));
+            assert!(matches!(log, "memory" | "filesystem"));
+            assert!(matches!(proj, "memory" | "turso"));
         }
     }
 
@@ -116,12 +101,12 @@ mod tests {
             .copied()
             .filter(|c| is_maintenance_cell(c))
             .collect();
-        // filesystem|s3 × sqlite|postgres (turso has no projection rebuild control plane)
-        assert_eq!(cells.len(), 4);
+        // filesystem|s3 × postgres (turso has no projection rebuild control plane)
+        assert_eq!(cells.len(), 2);
         for cell in cells {
             let (log, proj) = parse_cell(cell).unwrap();
             assert!(matches!(log, "filesystem" | "s3"));
-            assert!(matches!(proj, "sqlite" | "postgres"));
+            assert!(matches!(proj, "postgres"));
         }
     }
 }

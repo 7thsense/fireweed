@@ -81,11 +81,11 @@ jobs:
       - name: Public workflow correctness and log recovery
         run: cargo +1.97.1 test -p fireweed-workload
 
-      # Fireweed facade: 20-cell register Turso route leaves + composition matrix.
-      - name: Fireweed 20-cell Turso route tests
+      # Fireweed facade: 12-cell register Turso route leaves + composition matrix.
+      - name: Fireweed 12-cell Turso route tests
         run: >
           cargo +1.97.1 test -p fireweed --all-features
-          --test storage_matrix_t0_t2 storage_matrix_t0_t2_all_twenty_cells
+          --test storage_matrix_t0_t2 storage_matrix_t0_t2_all_twelve_cells
           -- --exact
 
       - name: Fireweed facade Turso full matrix
@@ -107,11 +107,12 @@ jobs:
       - name: fireweed-server clippy (all features)
         run: cargo +1.97.1 clippy -p fireweed-server --all-targets --all-features -- -D warnings
 
-      - name: fireweed-server tests (default features)
-        run: cargo +1.97.1 test -p fireweed-server
+      # Live PostgreSQL/S3/Kafka suites run with fixtures in governed-product.
+      - name: Server configuration unit tests (default features)
+        run: cargo +1.97.1 test -p fireweed-server --lib env_config::tests -- --test-threads=1
 
-      - name: fireweed-server tests (all features)
-        run: cargo +1.97.1 test -p fireweed-server --all-features
+      - name: Server public configuration tests
+        run: cargo +1.97.1 test -p fireweed-server --test env_config -- --test-threads=1
 
       # Exact public default selector + Class A delete-rebuild from authoritative log.
       - name: public default Turso env selector
@@ -126,10 +127,10 @@ jobs:
           env_config::tests::public_projection_help_and_parser_are_bijective
           -- --exact
 
-      - name: all five log specs accept Turso
+      - name: all four log specs accept Turso
         run: >
           cargo +1.97.1 test -p fireweed-server --all-features
-          env_config::tests::all_five_log_specs_accept_turso
+          env_config::tests::all_four_log_specs_accept_turso
           -- --exact
 
       - name: Turso startup validation precedes storage I/O

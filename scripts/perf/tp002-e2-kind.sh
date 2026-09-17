@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TP-002 E2 multi-node object_log_sqlite_projection release evidence on a kind cluster (ADR-008: the queue is
+# TP-002 E2 multi-node object_log_turso_projection release evidence on a kind cluster (ADR-008: the queue is
 # the unit of sharding). Beads pqueue-a983b5e2 + pqueue-b5af53fb.
 #
 # WHY KIND (the design): prior raw-docker E2 missed the bars because a single fat ~64-thread HOST load driver
@@ -10,7 +10,7 @@
 # (immune to this sandbox's host->pod sustained-loopback signal-16 kill).
 #
 # For each owner count K in {2,4,8}: deploy K independent fireweed-service Deployments+Services (segmented
-# object_log_sqlite_projection, distinct FIREWEED_NODE_ID, DISJOINT FIREWEED_BOOTSTRAP_QUEUES, emptyDir
+# object_log_turso_projection, distinct FIREWEED_NODE_ID, DISJOINT FIREWEED_BOOTSTRAP_QUEUES, emptyDir
 # medium=Memory tmpfs), run a load Job that drives the workload + proves one-owner-per-queue, collect the
 # measured RESULT json. Three full sweeps; each sweep folds its 2/4/8 results into one E2 ledger row
 # (release-tier only when all four bars hold). Reliable pass == all sweeps release-tier.
@@ -108,15 +108,14 @@ spec:
             requests: { cpu: "${SERVER_CPU_REQUEST}", memory: "256Mi" }
             limits: { cpu: "${SERVER_CPU_LIMIT}", memory: "1Gi" }
           env:
-            - { name: FIREWEED_LOG_BACKEND, value: "objectlog" }
-            - { name: FIREWEED_PROJECTION_BACKEND, value: "sqlite" }
-            - { name: FIREWEED_OBJECT_LOG_MODE, value: "segmented" }
+            - { name: FIREWEED_LOG_BACKEND, value: "filesystem" }
+            - { name: FIREWEED_PROJECTION_BACKEND, value: "turso" }
             - { name: FIREWEED_SEGMENT_TARGET_BYTES, value: "${SEG_TARGET_BYTES}" }
             - { name: FIREWEED_SEGMENT_MAX_LATENCY_MS, value: "${SEG_LATENCY_MS}" }
             - { name: FIREWEED_WORKER_THREADS, value: "${WORKER_THREADS}" }
             - { name: FIREWEED_NODE_ID, value: "${node_id}" }
             - { name: FIREWEED_OBJECT_LOG_ROOT, value: "/data/olog" }
-            - { name: FIREWEED_SQLITE_PROJECTION_PATH, value: "/data/proj.db" }
+            - { name: FIREWEED_TURSO_PROJECTION_PATH, value: "/data/proj.db" }
             - { name: FIREWEED_LISTEN_ADDR, value: "0.0.0.0:8080" }
             - { name: FIREWEED_BOOTSTRAP_QUEUES, value: "${queues}" }
             - { name: FIREWEED_RECLAIM_INTERVAL_MS, value: "60000" }

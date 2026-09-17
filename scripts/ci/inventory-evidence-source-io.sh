@@ -445,11 +445,9 @@ def validate() -> None:
         "legacy untyped evidence_dir helper remains in the evidence call graph",
     )
     source_symbols = {surface["symbol"] for surface in surfaces}
-    required_tp003_surfaces = {
-        "render_evidence",
-        "sqlite_log_t3_tp003_ac_txn_exact_pairs",
-        "postgres_log_t3_tp003_ac_txn_exact_pairs",
-    }
+    # The retired SQLite-era matrix producers no longer exist. Current TP-003
+    # runtime suites share the conformance evidence renderer and typed writers.
+    required_tp003_surfaces = {"render_evidence"}
     require(
         required_tp003_surfaces <= source_symbols,
         f"missing TP-003 typed producer surfaces: {sorted(required_tp003_surfaces - source_symbols)}",

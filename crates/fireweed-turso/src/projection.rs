@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
-    QueueDefinition, QueueIndex, RequestId, UtcTimestamp,
+    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, QueueDefinition,
+    RequestId, UtcTimestamp,
 };
 use fireweed_engine::{
     AsyncProjectionStore, BatchUpdateSnapshotItem, ClaimCompatibility, ClaimRef, ClaimUnit,
@@ -78,16 +78,6 @@ pub(crate) fn trace_sql(sql: &str, binds: usize, rows: usize, elapsed: Duration)
     );
 }
 
-/// Truncate only when the WAL is already large and no reader snapshot is live.
-/// `busy_timeout=0` makes TRUNCATE fail immediately if a Deferred reader holds
-/// the WAL; apply then continues and the next quiet apply retries.
-/// Standalone OFF-mode projections retain the 1,000-frame automatic policy and
-/// this truncation workaround. Log-backed projections use NORMAL accounting
-/// and an explicitly verified checkpoint limit, and bypass forced truncation.
-/// Explicit checkpoints clear the pager cache and TRUNCATE syncs the WAL; keep
-/// the OFF-mode workaround bounded rather than accumulating unreusable history.
-// The byte budget is derived at open from the actual database page size.
-
 pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {
     if database == Path::new(":memory:") {
         return None;
@@ -97,6 +87,15 @@ pub(crate) fn sqlite_wal_path(database: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
+/// Truncate only when the WAL is already large and no reader snapshot is live.
+/// `busy_timeout=0` makes TRUNCATE fail immediately if a Deferred reader holds
+/// the WAL; apply then continues and the next quiet apply retries.
+/// Standalone OFF-mode projections retain the 1,000-frame automatic policy and
+/// this truncation workaround. Log-backed projections use NORMAL accounting
+/// and an explicitly verified checkpoint limit, and bypass forced truncation.
+/// Explicit checkpoints clear the pager cache and TRUNCATE syncs the WAL; keep
+/// the OFF-mode workaround bounded rather than accumulating unreusable history.
+/// The byte budget is derived at open from the actual database page size.
 pub(crate) async fn truncate_wal_if_unpinned(
     writer: &Mutex<Connection>,
     wal_path: Option<&Path>,
@@ -407,47 +406,11 @@ fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
     Ok(())
 }
 
-fn cohort_id_for(group_key: &str, now: i64) -> String {
-    format!("coh:{group_key}:{now}")
-}
-
-fn cohort_retention_until(definition: &QueueDefinition, now: i64) -> i64 {
-    now.saturating_add(
-        i64::try_from(definition.terminal_retention_ms)
-            .unwrap_or(i64::MAX)
-            .saturating_mul(1_000_000),
-    )
-}
-
-fn index_is_unique(index: &QueueIndex) -> bool {
-    match &index.declaration {
-        IndexDeclaration::Single(definition) => definition.unique,
-        IndexDeclaration::Compound(definition) => definition.unique,
-    }
-}
-
-// Stay below SQLite's conservative 999-variable profile even when Turso is
-// configured with a larger limit. Each accepted push lowers to one statement
-// per bounded chunk, never one future/statement per item, gate, or index row.
-const PUSH_ITEM_CHUNK: usize = 47; // 47 * 19 binds = 893
-const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
-const PUSH_INDEX_CHUNK: usize = 180; // 180 * 5 binds = 900
 const UNIQUE_CHECK_CHUNK: usize = 448; // 2 common + 448 * 2 binds = 898
 const GROUP_SUMMARY_CHUNK: usize = 897; // tenant + queue + now + 897 group binds = 900
 const VALIDATION_ITEM_CHUNK: usize = 897; // tenant + queue + 897 item-id binds = 899
 const PUSH_IDENTITY_CHECK_CHUNK: usize = 448; // tenant + queue + now + 448 * 2 inputs = 899
 const GROUP_COUNT_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
-const COHORT_READ_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
-const COHORT_GENERATION_WRITE_CHUNK: usize = 90; // 90 * 10 row binds = 900
-const COHORT_ACTIVE_WRITE_CHUNK: usize = 224; // tenant + queue + 224 * 4 updates = 898
-const SCHEDULE_UPDATE_CHUNK: usize = 299; // tenant + queue + 299 * 3 updates = 899
-const GATE_BLOCK_WRITE_CHUNK: usize = 300; // 300 * 3 row binds = 900
-const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds = 900
-const SIDE_RECORD_WRITE_CHUNK: usize = 225; // 225 * 4 row binds = 900
-const KEY_RETENTION_WRITE_CHUNK: usize = 180; // 180 * 5 row binds = 900
-const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
-const API001_UPDATE_CHUNK: usize = 89; // tenant + queue + 89 * 10 row binds = 892
-const API001_GATE_DELETE_CHUNK: usize = 898; // tenant + queue + 898 item binds = 900
 
 fn values_rows(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(","));
@@ -512,146 +475,25 @@ async fn validation_rows_by_item(
     Ok(by_item)
 }
 
-fn typed_index_keys(
-    indexes: &[QueueIndex],
-    index_fields: &std::collections::BTreeMap<String, fireweed_core::TypedValue>,
-    entity: Option<&serde_json::Value>,
-) -> EngineResult<Vec<(String, Vec<u8>)>> {
-    fireweed_engine::index_fields::typed_index_keys_for_item(indexes, index_fields, entity)
-}
-
-async fn check_typed_unique_conflicts(
+async fn validate_secondary_indexes_on_insert(
     transaction: &Connection,
     tenant: &str,
     queue: &str,
-    indexes: &[QueueIndex],
-    keys: &[(String, Vec<u8>)],
-) -> EngineResult<()> {
-    let unique = keys
-        .iter()
-        .filter(|(name, _)| {
-            indexes
-                .iter()
-                .find(|index| index.name == *name)
-                .is_some_and(index_is_unique)
-        })
-        .collect::<Vec<_>>();
-    for chunk in unique.chunks(UNIQUE_CHECK_CHUNK) {
-        let mut params = Vec::with_capacity(chunk.len() * 2 + 2);
-        for (name, key) in chunk {
-            params.extend([Value::Text(name.clone()), Value::Blob(key.clone())]);
-        }
-        params.extend([
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ]);
-        if one_row(
-            transaction,
-            &format!(
-                "WITH incoming(index_name,index_key) AS (VALUES {}) \
-                 SELECT 1 FROM fireweed_item_index existing JOIN incoming \
-                 ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
-                 WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
-                values_rows(chunk.len(), 2)
-            ),
-            params,
-        )
-        .await?
-        .is_some()
-        {
-            return Err(EngineError::Conflict);
-        }
-    }
-    Ok(())
-}
-
-async fn insert_typed_index_rows(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    item_id: &str,
-    keys: &[(String, Vec<u8>)],
-) -> EngineResult<()> {
-    for chunk in keys.chunks(PUSH_INDEX_CHUNK) {
-        let mut params = Vec::with_capacity(chunk.len() * 5);
-        for (name, key) in chunk {
-            params.extend([
-                Value::Text(tenant.to_string()),
-                Value::Text(queue.to_string()),
-                Value::Text(name.clone()),
-                Value::Blob(key.clone()),
-                Value::Text(item_id.to_string()),
-            ]);
-        }
-        transaction
-            .execute(
-                format!(
-                    "INSERT INTO fireweed_item_index \
-                     (tenant_id,queue_id,index_name,index_key,item_id) VALUES {} \
-                     ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
-                     index_key=excluded.index_key",
-                    values_rows(chunk.len(), 5)
-                ),
-                params,
-            )
-            .await
-            .map_err(storage)?;
-    }
-    Ok(())
-}
-
-async fn delete_typed_index_rows(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    ids: &[ItemId],
-) -> EngineResult<()> {
-    execute_for_items(
-        transaction,
-        sql::delete_item_indexes,
-        vec![tenant.to_string().into(), queue.to_string().into()],
-        ids,
-    )
-    .await
-    .map(|_| ())
-}
-
-async fn replace_typed_indexes_for_entity(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    indexes: &[QueueIndex],
-    item_id: ItemId,
-    entity: &serde_json::Value,
-) -> EngineResult<std::collections::BTreeMap<String, fireweed_core::TypedValue>> {
-    let extracted =
-        fireweed_engine::index_fields::extract_index_fields_from_entity(indexes, entity)?;
-    let keys = typed_index_keys(indexes, &extracted, None)?;
-    delete_typed_index_rows(transaction, tenant, queue, std::slice::from_ref(&item_id)).await?;
-    check_typed_unique_conflicts(transaction, tenant, queue, indexes, &keys).await?;
-    insert_typed_index_rows(transaction, tenant, queue, &item_id.to_string(), &keys).await?;
-    Ok(extracted)
-}
-
-async fn maintain_typed_indexes_on_insert(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    indexes: &[QueueIndex],
+    definition: &QueueDefinition,
     items: &[PushItem],
-    persist: bool,
 ) -> EngineResult<()> {
     let mut batch_unique: HashMap<(String, Vec<u8>), String> = HashMap::new();
-    let mut rows = Vec::with_capacity(items.len());
     let mut unique_rows = Vec::new();
     for item in items {
         let item_id = item.item_id.to_string();
-        let keys = typed_index_keys(indexes, &item.index_fields, item.entity_document.as_ref())?;
+        let keys = fireweed_relational::secondary_index_keys(
+            definition,
+            &item.fields,
+            &item.index_fields,
+            item.entity_document.as_ref(),
+        )?;
         for (name, key) in &keys {
-            let unique = indexes
-                .iter()
-                .find(|index| index.name == *name)
-                .is_some_and(index_is_unique);
+            let unique = fireweed_relational::secondary_index_is_unique(definition, name);
             if !unique {
                 continue;
             }
@@ -664,7 +506,6 @@ async fn maintain_typed_indexes_on_insert(
             }
             unique_rows.push((name.clone(), key.clone()));
         }
-        rows.push((item_id, keys));
     }
 
     for chunk in unique_rows.chunks(UNIQUE_CHECK_CHUNK) {
@@ -687,294 +528,7 @@ async fn maintain_typed_indexes_on_insert(
         }
     }
 
-    if !persist {
-        return Ok(());
-    }
-    let rows: Vec<_> = rows
-        .into_iter()
-        .flat_map(|(item_id, keys)| {
-            keys.into_iter()
-                .map(move |(name, key)| (item_id.clone(), name, key))
-        })
-        .collect();
-    for chunk in rows.chunks(PUSH_INDEX_CHUNK) {
-        let mut parameters: Vec<Value> = Vec::with_capacity(chunk.len() * 5);
-        for (item_id, name, key) in chunk {
-            parameters.extend([
-                tenant.to_string().into(),
-                queue.to_string().into(),
-                name.clone().into(),
-                Value::Blob(key.clone()),
-                item_id.clone().into(),
-            ]);
-        }
-        transaction
-            .execute(
-                format!(
-                    "INSERT INTO fireweed_item_index \
-                     (tenant_id,queue_id,index_name,index_key,item_id) VALUES {} \
-                     ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
-                     index_key=excluded.index_key",
-                    values_rows(chunk.len(), 5)
-                ),
-                parameters,
-            )
-            .await
-            .map_err(storage)?;
-    }
     Ok(())
-}
-
-async fn upsert_cohorts(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    items: &[PushItem],
-    now: i64,
-) -> EngineResult<()> {
-    let mut cohort_order = Vec::new();
-    let mut cohorts: HashMap<String, (i64, i64)> = HashMap::new();
-    for item in items {
-        if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
-            let size = i64::try_from(size).map_err(|_| EngineError::Conflict)?;
-            let group = group.as_str().to_string();
-            let entry = cohorts.entry(group.clone()).or_insert_with(|| {
-                cohort_order.push(group);
-                (size, 0)
-            });
-            if entry.0 != size {
-                return Err(EngineError::Conflict);
-            }
-            entry.1 += 1;
-        }
-    }
-    let mut generation_rows = Vec::new();
-    let mut active_rows = Vec::new();
-    for groups in cohort_order.chunks(COHORT_READ_CHUNK) {
-        let placeholders = (0..groups.len())
-            .map(|offset| format!("?{}", offset + 3))
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut params = vec![tenant.to_string().into(), queue.to_string().into()];
-        params.extend(groups.iter().cloned().map(Value::Text));
-        let mut rows = transaction
-            .query(
-                format!(
-                    "SELECT group_key,cohort_size,member_count,state,retention_until \
-                     FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 \
-                     AND group_key IN ({placeholders})"
-                ),
-                params,
-            )
-            .await
-            .map_err(storage)?;
-        let mut existing = HashMap::with_capacity(groups.len());
-        while let Some(row) = rows.next().await.map_err(storage)? {
-            existing.insert(
-                row.get::<String>(0).map_err(storage)?,
-                (
-                    row.get::<i64>(1).map_err(storage)?,
-                    row.get::<i64>(2).map_err(storage)?,
-                    row.get::<String>(3).map_err(storage)?,
-                    optional_integer(&row.get_value(4).map_err(storage)?)?,
-                ),
-            );
-        }
-        for group in groups {
-            let (size, added) = cohorts[group];
-            match existing.get(group) {
-                None => {
-                    if added > size {
-                        return Err(EngineError::Conflict);
-                    }
-                    let state = if added >= size { "complete" } else { "forming" };
-                    generation_rows.push((
-                        group.clone(),
-                        cohort_id_for(group, now),
-                        size,
-                        added,
-                        state,
-                    ));
-                }
-                Some((old_size, old_count, old_state, retention)) if old_state == "terminal" => {
-                    if retention.is_some_and(|until| until > now) || added > size {
-                        return Err(EngineError::Conflict);
-                    }
-                    let state = if added >= size { "complete" } else { "forming" };
-                    generation_rows.push((
-                        group.clone(),
-                        cohort_id_for(group, now),
-                        size,
-                        added,
-                        state,
-                    ));
-                }
-                Some((old_size, old_count, old_state, _)) => {
-                    if *old_size != size || old_count.saturating_add(added) > *old_size {
-                        return Err(EngineError::Conflict);
-                    }
-                    let count = old_count + added;
-                    let state = if old_state == "leased" {
-                        "leased"
-                    } else if count >= *old_size {
-                        "complete"
-                    } else {
-                        "forming"
-                    };
-                    active_rows.push((group.clone(), count, state));
-                }
-            }
-        }
-    }
-
-    for chunk in generation_rows.chunks(COHORT_GENERATION_WRITE_CHUNK) {
-        let mut params = Vec::with_capacity(chunk.len() * 10);
-        for (group, cohort_id, size, count, state) in chunk {
-            params.extend([
-                Value::Text(tenant.to_string()),
-                Value::Text(queue.to_string()),
-                Value::Text(group.clone()),
-                Value::Text(cohort_id.clone()),
-                Value::Integer(*size),
-                Value::Integer(*count),
-                Value::Text((*state).to_string()),
-                Value::Integer(now),
-                if *state == "complete" {
-                    Value::Integer(now)
-                } else {
-                    Value::Null
-                },
-                Value::Integer(now),
-            ]);
-        }
-        transaction
-            .execute(
-                format!(
-                    "INSERT INTO fireweed_cohorts \
-                     (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
-                      cohort_created_at,first_eligible_at,created_at) VALUES {} \
-                     ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
-                      cohort_id=excluded.cohort_id,cohort_size=excluded.cohort_size,\
-                      member_count=excluded.member_count,state=excluded.state,\
-                      cohort_created_at=excluded.cohort_created_at,\
-                      first_eligible_at=excluded.first_eligible_at,expire_command_pos=NULL,\
-                      cohort_lease_token_hash=NULL,retention_until=NULL,created_at=excluded.created_at",
-                    values_rows(chunk.len(), 10)
-                ),
-                params,
-            )
-            .await
-            .map_err(storage)?;
-    }
-    for chunk in active_rows.chunks(COHORT_ACTIVE_WRITE_CHUNK) {
-        let mut params = Vec::with_capacity(chunk.len() * 4 + 2);
-        for (group, count, state) in chunk {
-            params.extend([
-                Value::Text(group.clone()),
-                Value::Integer(*count),
-                Value::Text((*state).to_string()),
-                if *state == "complete" {
-                    Value::Integer(now)
-                } else {
-                    Value::Null
-                },
-            ]);
-        }
-        params.extend([
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ]);
-        transaction
-            .execute(
-                format!(
-                    "WITH updates(group_key,member_count,state,completed_at) AS (VALUES {}) \
-                     UPDATE fireweed_cohorts AS c SET member_count=u.member_count,state=u.state,\
-                      first_eligible_at=CASE WHEN u.state='complete' AND c.first_eligible_at IS NULL \
-                      THEN u.completed_at ELSE c.first_eligible_at END \
-                     FROM updates AS u WHERE c.group_key=u.group_key \
-                      AND c.tenant_id=? AND c.queue_id=?",
-                    values_rows(chunk.len(), 4)
-                ),
-                params,
-            )
-            .await
-            .map_err(storage)?;
-    }
-    Ok(())
-}
-
-async fn cohort_item_ids(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    cohort_id: &CohortId,
-) -> EngineResult<(GroupKey, Vec<ItemId>)> {
-    let row = one_row(
-        transaction,
-        "SELECT group_key FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
-        vec![
-            tenant.to_string().into(),
-            queue.to_string().into(),
-            cohort_id.as_str().to_string().into(),
-        ],
-    )
-    .await?
-    .ok_or(EngineError::NotFound)?;
-    let group = GroupKey::new(text(&row[0])?).map_err(storage)?;
-    let mut rows = transaction
-        .query(
-            "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-             AND superseded=0 AND cohort_size IS NOT NULL AND lifecycle_state NOT IN ('Complete','Failed') \
-             ORDER BY priority_sort,created_seq",
-            vec![
-                Value::Text(tenant.to_string()),
-                Value::Text(queue.to_string()),
-                Value::Text(group.as_str().to_string()),
-            ],
-        )
-        .await
-        .map_err(storage)?;
-    let mut ids = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage)? {
-        ids.push(ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
-    }
-    Ok((group, ids))
-}
-
-async fn groups_for_items(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    ids: &[ItemId],
-) -> EngineResult<Vec<GroupKey>> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut groups = HashSet::new();
-    for chunk in ids.chunks(VALIDATION_ITEM_CHUNK) {
-        let mut params = vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ];
-        append_item_ids(&mut params, chunk);
-        let mut rows = transaction
-            .query(
-                format!(
-                    "SELECT DISTINCT group_key FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
-                     AND group_key IS NOT NULL AND item_id IN ({})",
-                    vec!["?"; chunk.len()].join(",")
-                ),
-                params,
-            )
-            .await
-            .map_err(storage)?;
-        while let Some(row) = rows.next().await.map_err(storage)? {
-            groups.insert(
-                GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?,
-            );
-        }
-    }
-    Ok(groups.into_iter().collect())
 }
 
 async fn relect_group_summaries(
@@ -1370,163 +924,6 @@ async fn select_whole_cohort(
     })
 }
 
-async fn cohort_state(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    cohort_id: &CohortId,
-) -> EngineResult<String> {
-    let row = one_row(
-        transaction,
-        "SELECT state FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
-        vec![
-            tenant.to_string().into(),
-            queue.to_string().into(),
-            cohort_id.as_str().to_string().into(),
-        ],
-    )
-    .await?
-    .ok_or(EngineError::NotFound)?;
-    text(&row[0])
-}
-
-fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
-    params.extend(ids.iter().map(|item| Value::Text(item.to_string())));
-}
-
-async fn execute_for_items<F>(
-    transaction: &Connection,
-    query_for: F,
-    params: Vec<Value>,
-    ids: &[ItemId],
-) -> EngineResult<u64>
-where
-    F: Fn(usize) -> String,
-{
-    let chunk_size = SQLITE_BIND_CAP
-        .checked_sub(params.len())
-        .filter(|size| *size > 0)
-        .ok_or_else(|| storage("item statement has no bind capacity"))?;
-    let mut changed = 0_u64;
-    for chunk in ids.chunks(chunk_size) {
-        let mut chunk_params = params.clone();
-        append_item_ids(&mut chunk_params, chunk);
-        changed = changed.saturating_add(
-            transaction
-                .execute(query_for(chunk.len()), chunk_params)
-                .await
-                .map_err(storage)?,
-        );
-    }
-    Ok(changed)
-}
-
-async fn update_item_schedules(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    schedules: &[(ItemId, Option<i64>, i64)],
-) -> EngineResult<()> {
-    for chunk in schedules.chunks(SCHEDULE_UPDATE_CHUNK) {
-        let mut params = Vec::with_capacity(chunk.len() * 3 + 2);
-        for (item_id, not_before, eligible_since) in chunk {
-            params.extend([
-                Value::Text(item_id.to_string()),
-                not_before.map_or(Value::Null, Value::Integer),
-                Value::Integer(*eligible_since),
-            ]);
-        }
-        params.extend([
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ]);
-        transaction
-            .execute(
-                format!(
-                    "WITH schedules(item_id,not_before,eligible_since) AS (VALUES {}) \
-                     UPDATE fireweed_items AS i SET not_before=s.not_before,\
-                      eligible_since=s.eligible_since FROM schedules AS s \
-                     WHERE i.item_id=s.item_id AND i.tenant_id=? AND i.queue_id=?",
-                    values_rows(chunk.len(), 3)
-                ),
-                params,
-            )
-            .await
-            .map_err(storage)?;
-    }
-    Ok(())
-}
-
-async fn retry_info_by_item(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    ids: &[ItemId],
-) -> EngineResult<HashMap<ItemId, (i64, i64)>> {
-    let mut info = HashMap::with_capacity(ids.len());
-    for chunk in ids.chunks(GROUP_COUNT_CHUNK) {
-        let mut params = vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ];
-        append_item_ids(&mut params, chunk);
-        let mut rows = transaction
-            .query(&sql::select_retry_info(chunk.len()), params)
-            .await
-            .map_err(storage)?;
-        while let Some(row) = rows.next().await.map_err(storage)? {
-            info.insert(
-                ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?,
-                (
-                    row.get::<i64>(1).map_err(storage)?,
-                    row.get::<i64>(2).map_err(storage)?,
-                ),
-            );
-        }
-    }
-    Ok(info)
-}
-
-async fn extend_claim_by_query_replays(
-    transaction: &Connection,
-    shard: &QueueKey,
-    renewed_item_ids: &[ItemId],
-    renewed_expires_at: UtcTimestamp,
-) -> EngineResult<()> {
-    if renewed_item_ids.is_empty() {
-        return Ok(());
-    }
-    let tenant = shard.tenant_id.as_str().to_string();
-    let queue = shard.queue_id.as_str().to_string();
-    let renewed = serde_json::to_string(
-        &renewed_item_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(storage)?;
-    transaction
-        .execute(
-            "UPDATE fireweed_request_idempotency SET expires_at=max(expires_at,?4) \
-         WHERE tenant_id=?1 AND queue_id=?2 AND operation='claim_by_query' AND request_id IN ( \
-           SELECT edge.request_id FROM fireweed_claim_replay_items edge \
-           JOIN json_each(?3) renewed ON renewed.value=edge.item_id \
-           WHERE edge.tenant_id=?1 AND edge.queue_id=?2 GROUP BY edge.request_id \
-           HAVING COUNT(*)=(SELECT COUNT(*) FROM fireweed_claim_replay_items all_edges \
-             WHERE all_edges.tenant_id=?1 AND all_edges.queue_id=?2 \
-               AND all_edges.request_id=edge.request_id))",
-            vec![
-                tenant.into(),
-                queue.into(),
-                renewed.into(),
-                Value::Integer(ts_nanos(renewed_expires_at)),
-            ],
-        )
-        .await
-        .map_err(storage)?;
-    Ok(())
-}
-
 async fn definition_in_transaction(
     connection: &Connection,
     shard: &QueueKey,
@@ -1674,6 +1071,10 @@ fn collect_api001_updates(commands: &[CommandEnvelope]) -> Option<Vec<&UpdateFie
     Some(updates)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The detached apply task explicitly owns every shared resource through cancellation"
+)]
 async fn apply_owned(
     writer: Arc<Mutex<Connection>>,
     live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
@@ -2088,6 +1489,23 @@ pub(crate) async fn server_update_snapshot_on(
     Ok(keys.iter().filter_map(|key| by_key.remove(key)).collect())
 }
 
+pub(crate) fn retained_items_sql(same_width: bool) -> String {
+    let cursor = if same_width {
+        "length(i.item_id)=?3 AND i.item_id>?5"
+    } else {
+        "length(i.item_id)>?3"
+    };
+    format!(
+        "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.not_before,i.retry_count,\
+         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.metadata \
+         FROM fireweed_items i INDEXED BY fireweed_items_retained_numeric_idx \
+         LEFT JOIN fireweed_item_payloads p \
+         ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.superseded=0 AND {cursor} \
+         ORDER BY length(i.item_id),i.item_id LIMIT ?4"
+    )
+}
+
 pub(crate) async fn server_retained_items_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -2097,15 +1515,27 @@ pub(crate) async fn server_retained_items_on(
     if !(1..=1000).contains(&limit) {
         return Err(EngineError::Invalid("retained page size must be 1..1000"));
     }
-    let rows = query_value_rows(connection,
-        "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.not_before,i.retry_count,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.metadata \
-         FROM fireweed_items i LEFT JOIN fireweed_item_payloads p \
-         ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
-         WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id>?3 AND i.superseded=0 \
-         ORDER BY i.item_id LIMIT ?4",
-        vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(),
-             after.map(|id| id.to_string()).unwrap_or_default().into(), (limit as i64).into()]).await?;
+    let anchor = after.map(|id| id.to_string()).unwrap_or_default();
+    let width = anchor.len() as i64;
+    let mut rows = Vec::with_capacity(limit);
+    // Decimal IDs sort numerically by (width, bytes). Splitting the cursor into
+    // disjoint seeks lets both pages use the retained-order index without OR
+    // residual scans, a full-queue sort, or hydration of unselected payloads.
+    for same_width in [true, false] {
+        if rows.len() == limit || (same_width && after.is_none()) {
+            continue;
+        }
+        let mut params = vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+            Value::Integer(width),
+            Value::Integer((limit - rows.len()) as i64),
+        ];
+        if same_width {
+            params.push(Value::Text(anchor.clone()));
+        }
+        rows.extend(query_value_rows(connection, retained_items_sql(same_width), params).await?);
+    }
     rows.into_iter()
         .map(|v| {
             Ok(fireweed_engine::RetainedItemView {
@@ -2295,7 +1725,8 @@ pub(crate) async fn server_metrics_with_membership_on(
         ))
     };
     let cursor_epoch = optional_integer(&values[5])?
-        .map(|epoch| nonnegative_u64(epoch, "assignment epoch")).transpose()?;
+        .map(|epoch| nonnegative_u64(epoch, "assignment epoch"))
+        .transpose()?;
     let mut presence = std::collections::HashMap::new();
     for values in rows {
         let Some(id) = optional_text(&values[6])? else {
@@ -2310,7 +1741,8 @@ pub(crate) async fn server_metrics_with_membership_on(
             id,
             crate::MetricsMembershipRow {
                 item_version: optional_integer(&values[10])?
-                    .map(|v| nonnegative_u64(v, "item version")).transpose()?,
+                    .map(|v| nonnegative_u64(v, "item version"))
+                    .transpose()?,
                 state,
                 superseded,
                 active_key_exists: integer(&values[9])? != 0,
@@ -2417,131 +1849,6 @@ fn class_s_item_from_driver_row(
     })
 }
 
-/// Select pending item-Claim IDs. Never reads payload, fields, or other blobs.
-///
-/// FIFO queues walk `rowid` from a process-local floor (`NOT INDEXED`, `ORDER BY
-/// rowid`). Everyone else orders indexed columns only (`priority_sort`,
-/// `created_seq`). Bodies load later by primary key.
-pub async fn select_item_claim_ids_on(
-    connection: &Connection,
-    shard: &QueueKey,
-    now: UtcTimestamp,
-    max: usize,
-    exclude: &[ItemId],
-    rowid_floor: Option<i64>,
-) -> EngineResult<Vec<ItemId>> {
-    if max == 0 {
-        return Ok(Vec::new());
-    }
-    let tenant = shard.tenant_id.as_str();
-    let queue = shard.queue_id.as_str();
-    if queue_paused(connection, tenant, queue).await? {
-        return Ok(Vec::new());
-    }
-    let gated = !query_driver_value_rows(
-        connection,
-        "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
-        vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-        ],
-    )
-    .await?
-    .is_empty();
-    let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
-    let mut chosen = Vec::with_capacity(max);
-    if !gated && let Some(mut floor) = rowid_floor {
-        const FIFO_SQL: &str = "SELECT item_id,rowid FROM fireweed_items NOT INDEXED \
-             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-             AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-             AND eligible_since IS NOT NULL AND rowid>=?5 ORDER BY rowid LIMIT ?4";
-        let mut first_page = true;
-        while chosen.len() < max {
-            let extra = if first_page {
-                exclude_set.len().min(1_600)
-            } else {
-                0
-            };
-            first_page = false;
-            let fetch = max
-                .saturating_sub(chosen.len())
-                .saturating_add(extra)
-                .max(1);
-            let params = vec![
-                Value::Text(tenant.to_string()),
-                Value::Text(queue.to_string()),
-                Value::Integer(ts_nanos(now)),
-                Value::Integer(i64::try_from(fetch).map_err(storage)?),
-                Value::Integer(floor.max(1)),
-            ];
-            let rows = query_driver_value_rows(connection, FIFO_SQL, params).await?;
-            if rows.is_empty() {
-                break;
-            }
-            let mut last_rowid = floor;
-            for values in rows {
-                last_rowid = integer(&values[1])?;
-                let id = ItemId::new(text(&values[0])?).map_err(storage)?;
-                if exclude_set.contains(&id) {
-                    continue;
-                }
-                chosen.push(id);
-                if chosen.len() == max {
-                    break;
-                }
-            }
-            let next = last_rowid.saturating_add(1);
-            if next <= floor {
-                break;
-            }
-            floor = next;
-        }
-        return Ok(chosen);
-    }
-    let mut offset: i64 = 0;
-    // Match the pending index's leading order keys. Generic gated selection
-    // retains its downstream eligibility checks without ordering by payload.
-    let query = if gated {
-        "SELECT item_id FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
-         JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
-         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
-         ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4"
-    } else {
-        "SELECT item_id FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         ORDER BY priority_sort,created_seq LIMIT ?3 OFFSET ?4"
-    };
-    while chosen.len() < max {
-        let skip = exclude_set.len().min(1_600).saturating_sub(offset as usize);
-        let fetch = max.saturating_sub(chosen.len()).saturating_add(skip).max(1);
-        let params = vec![
-            Value::Text(tenant.to_string()),
-            Value::Text(queue.to_string()),
-            Value::Integer(i64::try_from(fetch).map_err(storage)?),
-            Value::Integer(offset),
-        ];
-        let rows = query_driver_value_rows(connection, query, params).await?;
-        if rows.is_empty() {
-            break;
-        }
-        offset = offset.saturating_add(i64::try_from(rows.len()).map_err(storage)?);
-        for values in rows {
-            let id = ItemId::new(text(&values[0])?).map_err(storage)?;
-            if exclude_set.contains(&id) {
-                continue;
-            }
-            chosen.push(id);
-            if chosen.len() == max {
-                break;
-            }
-        }
-    }
-    Ok(chosen)
-}
-
 // Scan only index entries for eligibility, then materialize selected IDs. The
 // CROSS JOIN keeps the bounded candidate list outside full-row primary-key seeks.
 const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.item_version,i.retry_count,i.priority,i.group_key,\
@@ -2552,7 +1859,7 @@ const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WH
        WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
         AND priority_sort>=?4 AND (priority_sort>?4 OR created_seq>?5) \
         AND cohort_size IS NULL AND eligible_since IS NOT NULL \
-        AND (not_before IS NULL OR not_before<=?6) \
+        AND (not_before IS NULL OR not_before<=?6) /* gate eligibility */ \
        ORDER BY priority_sort,created_seq LIMIT ?3\
      ) t \
      CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
@@ -2560,9 +1867,25 @@ const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WH
      LEFT JOIN fireweed_item_payloads p \
        ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id ORDER BY t.priority_sort,t.created_seq";
 
+const ITEM_CLAIM_GATE_FILTER: &str = "AND NOT EXISTS (\
+    SELECT 1 FROM fireweed_item_gates g JOIN fireweed_gate_state b \
+    ON b.tenant_id=g.tenant_id AND b.queue_id=g.queue_id AND b.gate_key=g.gate_key \
+    WHERE g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=fireweed_items.item_id)";
+
+/// Scan hints from the queue definition and the serving-reader cursor.
+#[derive(Default)]
+pub struct ItemClaimScan {
+    pub rowid_floor: Option<i64>,
+    pub gate_policy: Option<fireweed_core::GateKeyPolicy>,
+}
+
 /// Next due item-Claim rows with bodies in indexed priority or FIFO order.
 /// Priority scans filter eligibility before bounded full-row/payload loading;
 /// FIFO scans retain their rowid cursor and check residual eligibility in-process.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Borrowed-snapshot selection keeps scope, eligibility, lease, and scan inputs explicit"
+)]
 pub async fn select_and_materialize_item_claims_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -2571,7 +1894,7 @@ pub async fn select_and_materialize_item_claims_on(
     exclude: &[ItemId],
     lease_token: &LeaseToken,
     lease_expires_at: UtcTimestamp,
-    rowid_floor: Option<i64>,
+    scan: ItemClaimScan,
 ) -> EngineResult<(Vec<ItemId>, Vec<ClaimedItem>, Option<i64>)> {
     if max == 0 {
         return Ok((Vec::new(), Vec::new(), None));
@@ -2581,6 +1904,17 @@ pub async fn select_and_materialize_item_claims_on(
     if queue_paused(connection, tenant, queue).await? {
         return Ok((Vec::new(), Vec::new(), None));
     }
+    // Ungated queues retain the covered claim scan. A single queue-prefix probe
+    // avoids an unnecessary gate seek per candidate on the ordinary hot path.
+    let gated = scan.gate_policy != Some(fireweed_core::GateKeyPolicy::None)
+        && !query_driver_value_rows(
+            connection,
+            "SELECT 1 FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+            vec![tenant.to_string().into(), queue.to_string().into()],
+        )
+        .await?
+        .is_empty();
+    let gate_filter = if gated { ITEM_CLAIM_GATE_FILTER } else { "" };
     let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
     let expires = ts_nanos(lease_expires_at);
     let now_n = ts_nanos(now);
@@ -2588,7 +1922,7 @@ pub async fn select_and_materialize_item_claims_on(
     let mut ids = Vec::with_capacity(max);
     let mut carriers = Vec::with_capacity(max);
     let mut next_floor = None;
-    if let Some(mut floor) = rowid_floor {
+    if let Some(mut floor) = scan.rowid_floor {
         const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,CASE WHEN p.item_id IS NULL THEN t.payload ELSE p.payload END,t.item_version,t.retry_count,t.priority,t.group_key,\
              t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.rowid \
              FROM (\
@@ -2596,10 +1930,11 @@ pub async fn select_and_materialize_item_claims_on(
                 not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
                FROM fireweed_items NOT INDEXED \
                WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-                AND rowid>=?4 ORDER BY rowid LIMIT ?3\
+                AND rowid>=?4 /* gate eligibility */ ORDER BY rowid LIMIT ?3\
              ) t \
              LEFT JOIN fireweed_item_payloads p \
                ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id";
+        let fifo_sql = FIFO_SQL.replace("/* gate eligibility */", gate_filter);
         let mut first_page = true;
         while ids.len() < max {
             let extra = if first_page {
@@ -2616,7 +1951,7 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Integer(floor.max(1)),
             ];
             let mut rows = connection
-                .query(FIFO_SQL, params)
+                .query(&fifo_sql, params)
                 .await
                 .map_err(driver_read_error)?;
             let mut page = 0usize;
@@ -2627,11 +1962,9 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let Some((id, item)) = class_s_item_from_owned_values(
-                    row.into_values(),
-                    expires,
-                    &exclude_set,
-                )? else {
+                let Some((id, item)) =
+                    class_s_item_from_owned_values(row.into_values(), expires, &exclude_set)?
+                else {
                     continue;
                 };
                 ids.push(id);
@@ -2651,6 +1984,7 @@ pub async fn select_and_materialize_item_claims_on(
         }
         next_floor = Some(floor);
     } else {
+        let ordered_sql = ORDERED_ITEM_CLAIM_SQL.replace("/* gate eligibility */", gate_filter);
         let mut after_priority = Vec::<u8>::new();
         let mut after_sequence = i64::MIN;
         let mut first_page = true;
@@ -2671,7 +2005,7 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Integer(now_n),
             ];
             let mut rows = connection
-                .query(ORDERED_ITEM_CLAIM_SQL, params)
+                .query(&ordered_sql, params)
                 .await
                 .map_err(driver_read_error)?;
             let mut page = 0usize;
@@ -2683,11 +2017,9 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let Some((id, item)) = class_s_item_from_owned_values(
-                    row.into_values(),
-                    expires,
-                    &exclude_set,
-                )? else {
+                let Some((id, item)) =
+                    class_s_item_from_owned_values(row.into_values(), expires, &exclude_set)?
+                else {
                     continue;
                 };
                 ids.push(id);
@@ -2708,6 +2040,32 @@ pub async fn select_and_materialize_item_claims_on(
             exclude.len(),
             started.elapsed().as_micros()
         );
+    }
+    if gated && !ids.is_empty() {
+        let mut memberships = HashMap::<ItemId, Vec<String>>::new();
+        for chunk in ids.chunks(SQLITE_BIND_CAP - 2) {
+            let values = (0..chunk.len())
+                .map(|index| format!("(?{})", index + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut params = vec![tenant.to_string().into(), queue.to_string().into()];
+            params.extend(chunk.iter().map(|id| Value::Text(id.to_string())));
+            // Each selected ID seeks its membership prefix; this never hydrates
+            // gates for the rest of the queue.
+            let sql = format!(
+                "WITH incoming(item_id) AS (VALUES {values}) \
+                 SELECT g.item_id,g.gate_key FROM incoming CROSS JOIN fireweed_item_gates g \
+                 ON g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=incoming.item_id"
+            );
+            for row in query_driver_value_rows(connection, sql, params).await? {
+                let id = ItemId::new(text(&row[0])?).map_err(storage)?;
+                memberships.entry(id).or_default().push(text(&row[1])?);
+            }
+        }
+        for (id, carrier) in ids.iter().zip(&mut carriers) {
+            carrier.gate_keys = memberships.remove(id).unwrap_or_default();
+            carrier.gate_keys.sort();
+        }
     }
     let items = render_class_s_claimed_items(lease_token, carriers)?;
     Ok((ids, items, next_floor))
@@ -2843,6 +2201,286 @@ fn addressed_item_rows_sql(count: usize, with_payload: bool) -> String {
                  {payload_join} \
                  LEFT JOIN fireweed_lease_bearers b INDEXED BY sqlite_autoindex_fireweed_lease_bearers_1 ON b.tenant_id=?1 AND b.queue_id=?2 AND b.item_id=i.item_id"
     )
+}
+
+pub(crate) fn mutation_image_item_from_values(
+    shard: &QueueKey,
+    values: &[Value],
+    gate_keys: Vec<String>,
+) -> EngineResult<fireweed_projection::ProjectionImageItem> {
+    let state = parse_state(&text(&values[12])?).map_err(storage)?;
+    let cohort_size = optional_integer(&values[6])?
+        .map(|size| nonnegative_u64(size, "cohort_size"))
+        .transpose()?;
+    Ok(fireweed_projection::ProjectionImageItem {
+        item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
+        client_item_key: ClientItemKey::new(text(&values[1])?).map_err(storage)?,
+        priority: parse_priority(optional_text(&values[2])?)?,
+        not_before: optional_integer(&values[3])?.map(nanos_ts),
+        eligible_since: optional_integer(&values[4])?.map(nanos_ts),
+        group_key: optional_text(&values[5])?
+            .map(GroupKey::new)
+            .transpose()
+            .map_err(storage)?,
+        cohort_size,
+        payload: optional_blob(&values[7])?.map(Bytes::from),
+        fields: fields_from_json(text(&values[8])?)?,
+        metadata: metadata_from_json(text(&values[9])?)?,
+        gate_keys,
+        index_fields: fireweed_engine::index_fields::decode_index_fields_blob(
+            optional_blob(&values[10])?.as_deref(),
+        )?,
+        entity_document: entity_from_json(optional_text(&values[11])?)?,
+        state,
+        item_version: nonnegative_u64(integer(&values[13])?, "item_version")?,
+        attempt_count: nonnegative_u32(integer(&values[14])?, "retry_count")?,
+        max_attempts: nonnegative_u32(integer(&values[15])?, "max_attempts")?,
+        created_seq: nonnegative_u64(integer(&values[16])?, "created_seq")?,
+        lease_token: optional_text(&values[17])?
+            .map(LeaseToken::new)
+            .transpose()
+            .map_err(storage)?,
+        lease_expires_at: optional_integer(&values[18])?.map(nanos_ts),
+        lease_is_cohort: state == ItemState::Leased && cohort_size.is_some(),
+        worker_id: optional_text(&values[19])?
+            .map(fireweed_core::WorkerId::new)
+            .transpose()
+            .map_err(storage)?,
+        fenced: integer(&values[20])? != 0,
+        superseded: integer(&values[21])? != 0,
+        terminal_at: optional_integer(&values[22])?.map(nanos_ts),
+        terminal_position: optional_integer(&values[23])?
+            .map(|epoch| {
+                Ok::<_, EngineError>(CommandPosition::new(
+                    shard.clone(),
+                    nonnegative_u64(epoch, "terminal_epoch")?,
+                    nonnegative_u64(integer(&values[24])?, "terminal_sequence")?,
+                ))
+            })
+            .transpose()?,
+    })
+}
+
+/// Full-key candidate reads. The caller owns the reader transaction/fence.
+pub(crate) async fn load_mutation_items_on(
+    connection: &Connection,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    with_payload: bool,
+) -> EngineResult<Vec<fireweed_projection::ProjectionImageItem>> {
+    let mut items = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(SQLITE_BIND_CAP - 2) {
+        let values = (0..chunk.len())
+            .map(|i| format!("(?{})", i + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = vec![
+            shard.tenant_id.as_str().to_string().into(),
+            shard.queue_id.as_str().to_string().into(),
+        ];
+        params.extend(chunk.iter().map(|id| id.to_string().into()));
+        let rows = query_value_rows(
+            connection,
+            addressed_item_rows_sql(chunk.len(), with_payload),
+            params.clone(),
+        )
+        .await?;
+        let mut gates: HashMap<ItemId, Vec<String>> = HashMap::new();
+        for row in query_value_rows(
+            connection,
+            format!(
+                "WITH incoming(item_id) AS (VALUES {values}) \
+                 SELECT g.item_id,g.gate_key FROM incoming CROSS JOIN fireweed_item_gates g \
+                 ON g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=incoming.item_id \
+                 ORDER BY g.item_id,g.gate_key"
+            ),
+            params,
+        )
+        .await?
+        {
+            gates
+                .entry(ItemId::new(text(&row[0])?).map_err(storage)?)
+                .or_default()
+                .push(text(&row[1])?);
+        }
+        for values in rows {
+            let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+            items.push(mutation_image_item_from_values(
+                shard,
+                &values,
+                gates.remove(&id).unwrap_or_default(),
+            )?);
+        }
+    }
+    Ok(items)
+}
+
+/// Complete queue state for cross-row planning, read under the caller's snapshot.
+pub(crate) async fn load_queue_image_on(
+    connection: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<fireweed_projection::ProjectionImage> {
+    let params = vec![
+        Value::Text(shard.tenant_id.as_str().to_string()),
+        Value::Text(shard.queue_id.as_str().to_string()),
+    ];
+    let row = one_row(
+        connection,
+        "SELECT q.paused,q.pause_drain_intake,c.next_seq,c.next_item_seq,c.assignment_epoch \
+         FROM queues q JOIN relational_cursor c ON c.tenant=q.tenant AND c.queue=q.queue \
+         WHERE q.tenant=?1 AND q.queue=?2",
+        params.clone(),
+    )
+    .await?
+    .ok_or(EngineError::NotFound)?;
+    let next_seq = nonnegative_u64(integer(&row[2])?, "next_seq")?;
+    let epoch = nonnegative_u64(integer(&row[4])?, "assignment_epoch")?;
+    let mut image = fireweed_projection::ProjectionImage {
+        high_water: next_seq
+            .checked_sub(1)
+            .map(|sequence| CommandPosition::new(shard.clone(), epoch, sequence)),
+        paused: integer(&row[0])? != 0,
+        pause_drain_intake: integer(&row[1])? != 0,
+        next_seq: nonnegative_u64(integer(&row[3])?, "next_item_seq")?,
+        blocked_gates: Default::default(),
+        items: Vec::new(),
+        side_records: Default::default(),
+        instance_fences: Default::default(),
+        metrics: QueueMetrics::default(),
+    };
+    for row in query_value_rows(
+        connection,
+        "SELECT gate_key FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 ORDER BY gate_key",
+        params.clone(),
+    )
+    .await?
+    {
+        image.blocked_gates.insert(text(&row[0])?);
+    }
+    let mut gates: HashMap<ItemId, Vec<String>> = HashMap::new();
+    for row in query_value_rows(
+        connection,
+        "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 \
+         ORDER BY item_id,gate_key",
+        params.clone(),
+    )
+    .await?
+    {
+        gates
+            .entry(ItemId::new(text(&row[0])?).map_err(storage)?)
+            .or_default()
+            .push(text(&row[1])?);
+    }
+    for values in query_value_rows(
+        connection,
+        "SELECT i.item_id,i.client_item_key,i.priority,i.not_before,i.eligible_since,i.group_key,i.cohort_size,\
+         CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END,\
+         i.fields,i.metadata,i.index_fields,i.entity_document,i.lifecycle_state,i.item_version,\
+         i.retry_count,i.max_attempts,i.created_seq,b.lease_token,i.lease_expires_at,i.worker_id,\
+         i.fenced,i.superseded,i.terminal_at,i.terminal_command_epoch,i.last_command_sequence \
+         FROM fireweed_items i \
+         LEFT JOIN fireweed_item_payloads p ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+         LEFT JOIN fireweed_lease_bearers b ON b.tenant_id=i.tenant_id AND b.queue_id=i.queue_id AND b.item_id=i.item_id \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 ORDER BY i.created_seq,i.item_id",
+        params,
+    )
+    .await?
+    {
+        let id = ItemId::new(text(&values[0])?).map_err(storage)?;
+        image.items.push(mutation_image_item_from_values(
+            shard,
+            &values,
+            gates.remove(&id).unwrap_or_default(),
+        )?);
+    }
+    Ok(image)
+}
+
+fn overlay_pending_claims(
+    items: &mut [fireweed_projection::ProjectionImageItem],
+    pending_claims: &[fireweed_engine::ClaimCommand],
+) -> EngineResult<()> {
+    let claims_by_id: HashMap<_, _> = pending_claims
+        .iter()
+        .flat_map(|claim| claim.item_ids.iter().map(move |id| (*id, claim)))
+        .collect();
+    for item in items {
+        if let Some(claim) = claims_by_id.get(&item.item_id) {
+            match item.state {
+                ItemState::Pending => {
+                    item.state = ItemState::Leased;
+                    item.item_version = item
+                        .item_version
+                        .checked_add(1)
+                        .ok_or_else(|| storage("item version overflow"))?;
+                    item.attempt_count = item
+                        .attempt_count
+                        .checked_add(1)
+                        .ok_or_else(|| storage("attempt count overflow"))?;
+                    item.lease_token = Some(claim.lease_token.clone());
+                    item.lease_expires_at = Some(claim.lease_expires_at);
+                    item.worker_id = claim.worker_id.clone();
+                }
+                ItemState::Leased if item.lease_token.as_ref() == Some(&claim.lease_token) => {}
+                _ => return Err(storage("claim tail conflicts with projection state")),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_update_definition(
+    definition: &QueueDefinition,
+    command: &UpdateFieldsCommand,
+) -> EngineResult<()> {
+    fireweed_engine::validate_api001_reserved_write_fields(&command.field_ops)?;
+    if let Some(fields) = &command.set_fields {
+        let replacements = fields
+            .iter()
+            .map(|(key, value)| (key.clone(), Some(value.clone())))
+            .collect::<BTreeMap<_, _>>();
+        fireweed_engine::validate_api001_reserved_write_fields(&replacements)?;
+    }
+    let schema = definition
+        .entity_schema
+        .as_ref()
+        .and_then(|descriptor| descriptor.entity_schema.as_ref())
+        .map(fireweed_engine::compile_entity_schema)
+        .transpose()?;
+    fireweed_engine::validate_entity(schema.as_ref(), command.set_entity_document.as_ref())?;
+    if let Some(gates) = &command.set_gate_keys {
+        fireweed_engine::validate_gate_key_sets(definition, std::iter::once(gates.as_slice()))?;
+    }
+    Ok(())
+}
+
+fn validate_update_in_projection(
+    projection: &fireweed_projection::ProjectionData,
+    command: &UpdateFieldsCommand,
+    expected_version: Option<u64>,
+    old_fields: Option<&BTreeMap<String, Bytes>>,
+) -> EngineResult<u64> {
+    projection.update_fields_validate(&command.item_id, expected_version)?;
+    let mut field_ops = BTreeMap::new();
+    if let Some(fields) = &command.set_fields {
+        if let Some(old) = old_fields {
+            field_ops.extend(old.keys().map(|key| (key.clone(), None)));
+        }
+        field_ops.extend(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), Some(value.clone()))),
+        );
+    }
+    field_ops.extend(command.field_ops.clone());
+    projection.index_validate_update_with_entity(
+        &command.item_id,
+        &field_ops,
+        command.set_entity_document.as_ref(),
+    )?;
+    projection
+        .item_version(&command.item_id)
+        .ok_or(EngineError::NotFound)
 }
 
 fn lease_target_rows_sql(count: usize) -> String {
@@ -3105,6 +2743,229 @@ impl TursoRelational {
         server_update_snapshot_on(&connection, shard, keys).await
     }
 
+    /// Plan against one consistent queue image whenever selectors or cross-row
+    /// constraints require it. Independent addressed workflow mutations retain
+    /// bounded primary-key reads. The caller holds the queue mutation fence and
+    /// covers the log frontier except for the supplied Claim-only tail.
+    pub async fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        definition: &QueueDefinition,
+        request: &fireweed_engine::ItemMutationRequest,
+        pending_claims: &[fireweed_engine::ClaimCommand],
+    ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
+        use fireweed_engine::{ItemMutationOperation, ItemMutationOutcome};
+        if shard.tenant_id != definition.tenant_id || shard.queue_id != definition.queue_id {
+            return Err(EngineError::Invalid("mutation definition queue mismatch"));
+        }
+        if matches!(&request.operation, ItemMutationOperation::Addressed { entries } if entries.len() > 1000)
+        {
+            return Err(EngineError::Invalid(
+                "addressed mutation batch exceeds 1000 items",
+            ));
+        }
+        let independent = definition.secondary_indexes.is_empty()
+            && definition.typed_indexes.is_empty()
+            && definition.entity_schema.is_none()
+            && definition.cohort_policy.is_none()
+            && request.gate_changes.is_empty()
+            && matches!(&request.operation, ItemMutationOperation::Addressed { .. });
+        if independent {
+            match self
+                .plan_addressed_item_mutation(shard, definition, request, pending_claims)
+                .await
+            {
+                Err(EngineError::Unavailable) => {}
+                result => return result,
+            }
+        }
+        let mut image = self.mutation_queue_image(shard).await?;
+        overlay_pending_claims(&mut image.items, pending_claims)?;
+        let schema = definition
+            .entity_schema
+            .as_ref()
+            .and_then(|descriptor| descriptor.entity_schema.as_ref())
+            .map(fireweed_engine::compile_entity_schema)
+            .transpose()?;
+        // Resolve dry runs too when schema validation needs the proposed entity.
+        // Only the returned scratch command is discarded; no SQL write occurs.
+        let mut planning_request = request.clone();
+        if schema.is_some() {
+            planning_request.dry_run = false;
+        }
+        let mut plan = fireweed_projection::ProjectionData::plan_item_mutation_image(
+            definition,
+            image,
+            &planning_request,
+        )?;
+        for mutation in &plan.command.items {
+            if let Some(values) = mutation.action.replacement_values() {
+                fireweed_engine::validate_entity(schema.as_ref(), values.entity_document.as_ref())?;
+            }
+        }
+        if request.dry_run && !planning_request.dry_run {
+            plan.response.dry_run = true;
+            for result in &mut plan.response.results {
+                result.outcome = match result.outcome.clone() {
+                    ItemMutationOutcome::Updated {
+                        item_version,
+                        state,
+                    } => ItemMutationOutcome::WouldUpdate {
+                        item_version,
+                        state,
+                    },
+                    ItemMutationOutcome::Purged => ItemMutationOutcome::WouldPurge,
+                    other => other,
+                };
+            }
+            plan.command.items.clear();
+        }
+        Ok(plan)
+    }
+
+    pub(crate) async fn mutation_queue_image(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<fireweed_projection::ProjectionImage> {
+        let mut connection = self.reader.lock().await;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .await
+            .map_err(storage)?;
+        match load_queue_image_on(&transaction, shard).await {
+            Ok(image) => {
+                transaction.commit().await.map_err(storage)?;
+                Ok(image)
+            }
+            Err(error) => Err(rollback_preserving_error(transaction, error).await),
+        }
+    }
+
+    /// Plan best-effort batch replacements against one complete queue snapshot.
+    /// The caller holds the queue mutation fence through append, including when
+    /// all entries are rejected and only the idempotent response is persisted.
+    pub async fn server_plan_batch_update(
+        &self,
+        shard: &QueueKey,
+        definition: &QueueDefinition,
+        updates: Vec<fireweed_engine::BatchUpdateEntry>,
+    ) -> EngineResult<fireweed_engine::PlannedBatchUpdate> {
+        if shard.tenant_id != definition.tenant_id || shard.queue_id != definition.queue_id {
+            return Err(EngineError::Invalid("update definition queue mismatch"));
+        }
+        let refs = updates
+            .iter()
+            .map(|update| update.item_ref.clone())
+            .collect::<Vec<_>>();
+        let image = self.mutation_queue_image(shard).await?;
+        let projection = fireweed_projection::ProjectionData::from_image(definition, image)?;
+        let snapshot = projection.batch_update_snapshot(&refs);
+        let mut plan = fireweed_engine::plan_batch_update(definition, true, updates, snapshot);
+        let commands = plan
+            .commands
+            .iter()
+            .map(|(_, command)| command.clone())
+            .collect::<Vec<_>>();
+        let accepted = projection.batch_update_preflight(&commands)?;
+        if accepted.len() != commands.len() {
+            return Err(EngineError::Storage(
+                "batch update preflight returned a mismatched result count".into(),
+            ));
+        }
+        plan.commands = plan
+            .commands
+            .into_iter()
+            .zip(accepted)
+            .filter_map(|((outcome_index, command), accepted)| {
+                if accepted {
+                    Some((outcome_index, command))
+                } else {
+                    plan.outcomes[outcome_index] = fireweed_engine::BatchUpdateOutcome::Invalid;
+                    None
+                }
+            })
+            .collect();
+        Ok(plan)
+    }
+
+    /// Validate a scalar update against complete queue indexes without applying it.
+    /// The caller holds the queue mutation fence until its log append completes.
+    pub async fn server_validate_update_fields(
+        &self,
+        shard: &QueueKey,
+        definition: &QueueDefinition,
+        command: &UpdateFieldsCommand,
+        expected_version: Option<u64>,
+    ) -> EngineResult<u64> {
+        if shard.tenant_id != definition.tenant_id || shard.queue_id != definition.queue_id {
+            return Err(EngineError::Invalid("update definition queue mismatch"));
+        }
+        validate_update_definition(definition, command)?;
+        let image = self.mutation_queue_image(shard).await?;
+        let old_fields = image
+            .items
+            .iter()
+            .find(|item| item.item_id == command.item_id)
+            .map(|item| item.fields.clone());
+        let projection = fireweed_projection::ProjectionData::from_image(definition, image)?;
+        validate_update_in_projection(&projection, command, expected_version, old_fields.as_ref())
+    }
+
+    /// Validate a whole bounded update batch against successive scratch states.
+    /// Nothing is appended or applied to SQL, even when a later sibling fails.
+    pub async fn server_validate_bounded_updates(
+        &self,
+        shard: &QueueKey,
+        definition: &QueueDefinition,
+        updates: &[fireweed_engine::BoundedMutationUpdate],
+    ) -> EngineResult<()> {
+        if shard.tenant_id != definition.tenant_id || shard.queue_id != definition.queue_id {
+            return Err(EngineError::Invalid("update definition queue mismatch"));
+        }
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let image = self.mutation_queue_image(shard).await?;
+        let ids = updates
+            .iter()
+            .map(|update| update.command.item_id)
+            .collect::<HashSet<_>>();
+        let mut old_fields = image
+            .items
+            .iter()
+            .filter(|item| ids.contains(&item.item_id))
+            .map(|item| (item.item_id, item.fields.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut projection = fireweed_projection::ProjectionData::from_image(definition, image)?;
+        for update in updates {
+            let command = &update.command;
+            validate_update_definition(definition, command)?;
+            validate_update_in_projection(
+                &projection,
+                command,
+                Some(update.expected_item_version),
+                old_fields.get(&command.item_id),
+            )?;
+            projection.apply_command(&QueueCommand::UpdateFields(command.clone()))?;
+            if let Some(fields) = old_fields.get_mut(&command.item_id) {
+                if let Some(replacements) = &command.set_fields {
+                    *fields = replacements.clone();
+                }
+                for (key, value) in &command.field_ops {
+                    match value {
+                        Some(value) => {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                        None => {
+                            fields.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Plan addressed mutations from full-key reads. The caller must hold the queue's
     /// mutation fence through append and cover the committed log frontier, except
     /// for the supplied contiguous, disjoint authoritative Claim-only tail.
@@ -3116,13 +2977,13 @@ impl TursoRelational {
         pending_claims: &[fireweed_engine::ClaimCommand],
     ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
         use fireweed_engine::ItemMutationOperation;
-        use fireweed_projection::{ProjectionData, ProjectionImageItem};
+        use fireweed_projection::ProjectionData;
         let ItemMutationOperation::Addressed { entries } = &request.operation else {
             return Err(EngineError::Unavailable);
         };
         // Unique-index validation needs rows outside the addressed set. Cohort
-        // changes likewise need the complete group. Do not validate either against
-        // an incomplete image; these shapes retain their unsupported status.
+        // changes likewise need the complete group. The general planner loads a
+        // complete image for these shapes rather than using this bounded path.
         if !definition.secondary_indexes.is_empty()
             || !definition.typed_indexes.is_empty()
             || definition.entity_schema.is_some()
@@ -3164,118 +3025,15 @@ impl TursoRelational {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        for chunk in ids.chunks(SQLITE_BIND_CAP - 2) {
-            let values = (0..chunk.len())
-                .map(|i| format!("(?{})", i + 3))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut params = vec![
-                shard.tenant_id.as_str().to_string().into(),
-                shard.queue_id.as_str().to_string().into(),
-            ];
-            params.extend(chunk.iter().map(|id| id.to_string().into()));
-            let rows = query_value_rows(
-                &connection,
-                addressed_item_rows_sql(chunk.len(), with_payload),
-                params.clone(),
-            )
-            .await?;
-            let mut gates: HashMap<ItemId, Vec<String>> = HashMap::new();
-            for row in query_value_rows(
-                &connection,
-                format!(
-                    "WITH incoming(item_id) AS (VALUES {values}) \
-                 SELECT g.item_id,g.gate_key FROM incoming CROSS JOIN fireweed_item_gates g \
-                 ON g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=incoming.item_id"
-                ),
-                params,
-            )
-            .await?
-            {
-                gates
-                    .entry(ItemId::new(text(&row[0])?).map_err(storage)?)
-                    .or_default()
-                    .push(text(&row[1])?);
-            }
-            for v in rows {
-                if !matches!(v[5], Value::Null) || !matches!(v[6], Value::Null) {
-                    return Err(EngineError::Unavailable);
-                }
-                let item_id = ItemId::new(text(&v[0])?).map_err(storage)?;
-                image.items.push(ProjectionImageItem {
-                    item_id,
-                    client_item_key: ClientItemKey::new(text(&v[1])?).map_err(storage)?,
-                    priority: parse_priority(optional_text(&v[2])?)?,
-                    not_before: optional_integer(&v[3])?.map(nanos_ts),
-                    eligible_since: optional_integer(&v[4])?.map(nanos_ts),
-                    group_key: None,
-                    cohort_size: None,
-                    payload: optional_blob(&v[7])?.map(Bytes::from),
-                    fields: fields_from_json(text(&v[8])?)?,
-                    metadata: metadata_from_json(text(&v[9])?)?,
-                    gate_keys: gates.remove(&item_id).unwrap_or_default(),
-                    index_fields: fireweed_engine::index_fields::decode_index_fields_blob(
-                        optional_blob(&v[10])?.as_deref(),
-                    )?,
-                    entity_document: entity_from_json(optional_text(&v[11])?)?,
-                    state: parse_state(&text(&v[12])?).map_err(storage)?,
-                    item_version: nonnegative_u64(integer(&v[13])?, "item_version")?,
-                    attempt_count: nonnegative_u32(integer(&v[14])?, "retry_count")?,
-                    max_attempts: nonnegative_u32(integer(&v[15])?, "max_attempts")?,
-                    created_seq: nonnegative_u64(integer(&v[16])?, "created_seq")?,
-                    lease_token: optional_text(&v[17])?
-                        .map(LeaseToken::new)
-                        .transpose()
-                        .map_err(storage)?,
-                    lease_expires_at: optional_integer(&v[18])?.map(nanos_ts),
-                    lease_is_cohort: false,
-                    worker_id: optional_text(&v[19])?
-                        .map(fireweed_core::WorkerId::new)
-                        .transpose()
-                        .map_err(storage)?,
-                    fenced: integer(&v[20])? != 0,
-                    superseded: integer(&v[21])? != 0,
-                    terminal_at: optional_integer(&v[22])?.map(nanos_ts),
-                    terminal_position: optional_integer(&v[23])?
-                        .map(|epoch| {
-                            Ok::<_, EngineError>(CommandPosition::new(
-                                shard.clone(),
-                                nonnegative_u64(epoch, "terminal_epoch")?,
-                                nonnegative_u64(integer(&v[24])?, "terminal_sequence")?,
-                            ))
-                        })
-                        .transpose()?,
-                });
-            }
-        }
-        let claims_by_id: HashMap<_, _> = pending_claims
+        image.items = load_mutation_items_on(&connection, shard, &ids, with_payload).await?;
+        if image
+            .items
             .iter()
-            .flat_map(|claim| claim.item_ids.iter().map(move |id| (*id, claim)))
-            .collect();
-        for item in &mut image.items {
-            if let Some(claim) = claims_by_id.get(&item.item_id) {
-                match item.state {
-                    ItemState::Pending => {
-                        item.state = ItemState::Leased;
-                        item.item_version = item
-                            .item_version
-                            .checked_add(1)
-                            .ok_or_else(|| storage("item version overflow"))?;
-                        item.attempt_count = item
-                            .attempt_count
-                            .checked_add(1)
-                            .ok_or_else(|| storage("attempt count overflow"))?;
-                        item.lease_token = Some(claim.lease_token.clone());
-                        item.lease_expires_at = Some(claim.lease_expires_at);
-                        item.worker_id = claim.worker_id.clone();
-                    }
-                    ItemState::Leased if item.lease_token.as_ref() == Some(&claim.lease_token) => {
-                        // Apply caught up while the SQL snapshot was being read.
-                    }
-                    _ => return Err(storage("claim tail conflicts with projection state")),
-                }
-            }
+            .any(|item| item.group_key.is_some() || item.cohort_size.is_some())
+        {
+            return Err(EngineError::Unavailable);
         }
+        overlay_pending_claims(&mut image.items, pending_claims)?;
         ProjectionData::plan_item_mutation_image(definition, image, request)
     }
 
@@ -3452,6 +3210,91 @@ impl AsyncProjectionStore for TursoRelational {
         }
     }
 
+    fn read_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<
+        Output = EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>>,
+    > + Send {
+        async move {
+            let connection = self.reader.lock().await;
+            let row = one_row(
+                &connection,
+                "SELECT response_payload FROM fireweed_request_idempotency \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND operation='commit' AND request_id=?3",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    request_id.as_str().to_string().into(),
+                ],
+            )
+            .await?;
+            row.map(|values| serde_json::from_str(&text(&values[0])?).map_err(storage))
+                .transpose()
+        }
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: QueueKey,
+        prefix: Vec<u8>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        async move {
+            let page_size = page_size.min(1000);
+            let start = cursor.unwrap_or_else(|| prefix.clone());
+            let mut upper = prefix.clone();
+            while upper.last() == Some(&u8::MAX) {
+                upper.pop();
+            }
+            let upper = if let Some(last) = upper.last_mut() {
+                *last += 1;
+                Some(upper)
+            } else {
+                None
+            };
+            let mut params = vec![
+                Value::Text(shard.tenant_id.as_str().to_string()),
+                Value::Text(shard.queue_id.as_str().to_string()),
+                Value::Blob(start),
+                Value::Integer((page_size + 1) as i64),
+            ];
+            let upper_clause = if let Some(upper) = upper {
+                params.push(Value::Blob(upper));
+                " AND key<?5"
+            } else {
+                ""
+            };
+            let connection = self.reader.lock().await;
+            let rows = query_value_rows(
+                &connection,
+                format!(
+                    "SELECT key,payload FROM fireweed_side_records \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND key>=?3{upper_clause} \
+                     ORDER BY key LIMIT ?4"
+                ),
+                params,
+            )
+            .await?;
+            let mut page = fireweed_engine::SideRecordPage::default();
+            for values in rows {
+                let key = blob(&values[0])?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if page.entries.len() == page_size {
+                    page.next_cursor = Some(key);
+                    break;
+                }
+                page.entries.push((key, Bytes::from(blob(&values[1])?)));
+            }
+            Ok(page)
+        }
+    }
+
     fn instance_fence(
         &self,
         shard: QueueKey,
@@ -3492,7 +3335,7 @@ impl AsyncProjectionStore for TursoRelational {
             let connection = reader.lock().await;
             let tenant = shard.tenant_id.as_str().to_string();
             let queue = shard.queue_id.as_str().to_string();
-            let result = async {
+            async {
                 let definition = definition_in_transaction(&connection, &shard).await?;
                 let mut keys = HashSet::new();
                 let mut item_ids = HashSet::new();
@@ -3600,18 +3443,16 @@ impl AsyncProjectionStore for TursoRelational {
                         }
                     }
                 }
-                maintain_typed_indexes_on_insert(
+                validate_secondary_indexes_on_insert(
                     &connection,
                     &tenant,
                     &queue,
-                    &definition.typed_indexes,
+                    &definition,
                     &items,
-                    false,
                 )
                 .await?;
                 Ok(())
-            }.await;
-            result
+            }.await
         }
     }
 
@@ -4577,312 +4418,6 @@ impl AsyncProjectionStore for TursoRelational {
 }
 
 #[cfg(test)]
-mod push_batch_lowering_tests {
-    use fireweed_conformance::item;
-    use fireweed_core::{IndexDeclaration, IndexDef, IndexType, ItemId, QueueIndex};
-
-    use super::{
-        COHORT_ACTIVE_WRITE_CHUNK, COHORT_GENERATION_WRITE_CHUNK, COHORT_READ_CHUNK,
-        GATE_BLOCK_WRITE_CHUNK, GROUP_COUNT_CHUNK, GROUP_SUMMARY_CHUNK, KEY_RETENTION_WRITE_CHUNK,
-        PUSH_GATE_CHUNK, PUSH_IDENTITY_CHECK_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK,
-        SCHEDULE_UPDATE_CHUNK, SIDE_RECORD_WRITE_CHUNK, UNIQUE_CHECK_CHUNK, VALIDATION_ITEM_CHUNK,
-        index_is_unique, typed_index_keys,
-    };
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct StatementShape {
-        item_inserts: usize,
-        gate_inserts: usize,
-        unique_checks: usize,
-        index_inserts: usize,
-    }
-
-    fn statement_shape(
-        items: &[fireweed_engine::PushItem],
-        indexes: &[QueueIndex],
-    ) -> StatementShape {
-        let gate_rows = items.iter().map(|item| item.gate_keys.len()).sum::<usize>();
-        let keys = items
-            .iter()
-            .flat_map(|item| {
-                typed_index_keys(indexes, &item.index_fields, item.entity_document.as_ref())
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let unique_rows = keys
-            .iter()
-            .filter(|(name, _)| {
-                indexes
-                    .iter()
-                    .find(|index| index.name == *name)
-                    .is_some_and(index_is_unique)
-            })
-            .count();
-        StatementShape {
-            item_inserts: items.len().div_ceil(PUSH_ITEM_CHUNK),
-            gate_inserts: gate_rows.div_ceil(PUSH_GATE_CHUNK),
-            unique_checks: unique_rows.div_ceil(UNIQUE_CHECK_CHUNK),
-            index_inserts: keys.len().div_ceil(PUSH_INDEX_CHUNK),
-        }
-    }
-
-    fn indexed_gated_items(count: usize) -> (Vec<fireweed_engine::PushItem>, Vec<QueueIndex>) {
-        let items = (0..count)
-            .map(|offset| {
-                let mut item = item(
-                    &ItemId::from_u64(offset as u64 + 1).to_string(),
-                    &format!("batch-{offset}"),
-                    0,
-                );
-                item.gate_keys = vec![format!("gate-{offset}")];
-                item.entity_document = Some(serde_json::json!({
-                    "email": format!("user-{offset}@example.com")
-                }));
-                item
-            })
-            .collect();
-        let indexes = vec![QueueIndex {
-            name: "by_email".to_string(),
-            declaration: IndexDeclaration::Single(IndexDef {
-                field: "email".to_string(),
-                index_type: IndexType::String,
-                unique: true,
-            }),
-        }];
-        (items, indexes)
-    }
-
-    #[test]
-    fn accepted_push_statement_count_is_constant_within_item_chunk() {
-        let (one, indexes) = indexed_gated_items(1);
-        let (full_chunk, _) = indexed_gated_items(PUSH_ITEM_CHUNK);
-        let expected = StatementShape {
-            item_inserts: 1,
-            gate_inserts: 1,
-            unique_checks: 1,
-            index_inserts: 1,
-        };
-        assert_eq!(statement_shape(&one, &indexes), expected);
-        assert_eq!(statement_shape(&full_chunk, &indexes), expected);
-
-        let (over_chunk, _) = indexed_gated_items(PUSH_ITEM_CHUNK + 1);
-        assert_eq!(
-            statement_shape(&over_chunk, &indexes),
-            StatementShape {
-                item_inserts: 2,
-                gate_inserts: 1,
-                unique_checks: 1,
-                index_inserts: 1,
-            },
-            "only crossing the declared bind-safe chunk adds an item statement"
-        );
-    }
-
-    #[test]
-    fn group_summary_await_count_grows_only_at_bind_safe_chunk_boundaries() {
-        let awaited_statements = |groups: usize| groups.div_ceil(GROUP_SUMMARY_CHUNK);
-        assert_eq!(awaited_statements(0), 0);
-        assert_eq!(awaited_statements(1), 1);
-        assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK), 1);
-        assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK + 1), 2);
-        assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK * 10), 10);
-    }
-
-    #[test]
-    fn lease_validation_select_count_grows_only_at_bind_safe_chunk_boundaries() {
-        let awaited_selects = |items: usize| items.div_ceil(VALIDATION_ITEM_CHUNK);
-        assert_eq!(awaited_selects(0), 0);
-        assert_eq!(awaited_selects(1), 1);
-        assert_eq!(awaited_selects(100), 1);
-        assert_eq!(awaited_selects(1_000), 2);
-
-        let source = include_str!("projection.rs");
-        let helper = source
-            .split("async fn validation_rows_by_item(")
-            .nth(1)
-            .unwrap()
-            .split("fn typed_index_keys(")
-            .next()
-            .unwrap();
-        assert_eq!(helper.matches(".query(").count(), 1);
-
-        let purge = source
-            .split("pub(crate) async fn purge_items_validate(")
-            .nth(1)
-            .unwrap()
-            .split("/// RESP/server read surface")
-            .next()
-            .unwrap();
-        // renew_validate is followed by commit_validate (also set-based), then finalize_validate.
-        // Bound each body to the next sibling method so an intervening validation helper is not
-        // attributed to renew.
-        let renew = source
-            .split("fn renew_validate(")
-            .nth(1)
-            .unwrap()
-            .split("fn commit_validate(")
-            .next()
-            .unwrap();
-        let finalize = source
-            .split("fn finalize_validate(")
-            .nth(1)
-            .unwrap()
-            .split("fn cohort_lease_validate(")
-            .next()
-            .unwrap();
-        for operation in [purge, renew, finalize] {
-            assert_eq!(operation.matches("validation_rows_by_item(").count(), 1);
-            assert!(!operation.contains("one_row("));
-        }
-    }
-
-    #[test]
-    fn legacy_batch_helper_chunk_arithmetic_stays_bounded() {
-        // This checks helper sizing only, not executed SQL. The resolved-item
-        // replacement test below exercises actual statement counts and plans.
-        #[derive(Debug, PartialEq, Eq)]
-        struct RoundTrips {
-            push_identity_reads: usize,
-            group_count_reads: usize,
-            cohort_reads: usize,
-            cohort_generation_writes: usize,
-            cohort_active_writes: usize,
-            schedule_writes: usize,
-            gate_block_writes: usize,
-            side_record_writes: usize,
-            retention_writes: usize,
-        }
-        let shape = |cardinality: usize| RoundTrips {
-            push_identity_reads: cardinality.div_ceil(PUSH_IDENTITY_CHECK_CHUNK),
-            group_count_reads: cardinality.div_ceil(GROUP_COUNT_CHUNK),
-            cohort_reads: cardinality.div_ceil(COHORT_READ_CHUNK),
-            cohort_generation_writes: cardinality.div_ceil(COHORT_GENERATION_WRITE_CHUNK),
-            cohort_active_writes: cardinality.div_ceil(COHORT_ACTIVE_WRITE_CHUNK),
-            schedule_writes: cardinality.div_ceil(SCHEDULE_UPDATE_CHUNK),
-            gate_block_writes: cardinality.div_ceil(GATE_BLOCK_WRITE_CHUNK),
-            side_record_writes: cardinality.div_ceil(SIDE_RECORD_WRITE_CHUNK),
-            retention_writes: cardinality.div_ceil(KEY_RETENTION_WRITE_CHUNK),
-        };
-        assert_eq!(
-            shape(1),
-            RoundTrips {
-                push_identity_reads: 1,
-                group_count_reads: 1,
-                cohort_reads: 1,
-                cohort_generation_writes: 1,
-                cohort_active_writes: 1,
-                schedule_writes: 1,
-                gate_block_writes: 1,
-                side_record_writes: 1,
-                retention_writes: 1,
-            }
-        );
-        assert_eq!(
-            shape(100),
-            RoundTrips {
-                push_identity_reads: 1,
-                group_count_reads: 1,
-                cohort_reads: 1,
-                cohort_generation_writes: 2,
-                cohort_active_writes: 1,
-                schedule_writes: 1,
-                gate_block_writes: 1,
-                side_record_writes: 1,
-                retention_writes: 1,
-            }
-        );
-        assert_eq!(
-            shape(1_000),
-            RoundTrips {
-                push_identity_reads: 3,
-                group_count_reads: 2,
-                cohort_reads: 2,
-                cohort_generation_writes: 12,
-                cohort_active_writes: 5,
-                schedule_writes: 4,
-                gate_block_writes: 4,
-                side_record_writes: 5,
-                retention_writes: 6,
-            }
-        );
-
-        let source = include_str!("projection.rs");
-        let cohorts = source
-            .split("async fn upsert_cohorts(")
-            .nth(1)
-            .unwrap()
-            .split("async fn cohort_item_ids(")
-            .next()
-            .unwrap();
-        assert!(!cohorts.contains("for (group, (size, added))"));
-        assert!(cohorts.contains("cohort_order.chunks(COHORT_READ_CHUNK)"));
-        assert!(cohorts.contains("generation_rows.chunks(COHORT_GENERATION_WRITE_CHUNK)"));
-        assert!(cohorts.contains("active_rows.chunks(COHORT_ACTIVE_WRITE_CHUNK)"));
-
-        let validate = source
-            .split("fn validate_push(")
-            .nth(1)
-            .unwrap()
-            .split("fn pause_blocks_intake(")
-            .next()
-            .unwrap();
-        let item_validation = validate
-            .split("for item in &items {")
-            .nth(1)
-            .unwrap()
-            .split("for chunk in items.chunks")
-            .next()
-            .unwrap();
-        assert!(!item_validation.contains(".await"));
-        assert!(validate.contains("items.chunks(PUSH_IDENTITY_CHECK_CHUNK)"));
-        assert!(validate.contains("group_order.chunks(GROUP_COUNT_CHUNK)"));
-    }
-
-    #[test]
-    fn rich_claim_and_replay_lowering_is_set_based_and_request_bounded() {
-        let source = include_str!("projection.rs");
-        let group = source
-            .split("async fn select_group_batching(")
-            .nth(1)
-            .unwrap()
-            .split("async fn select_same_group(")
-            .next()
-            .unwrap();
-        assert_eq!(group.matches(".query(").count(), 1);
-        assert!(group.contains("LIMIT ?4"));
-        assert!(group.contains("LIMIT ?6"));
-        assert!(!group.contains("OFFSET"));
-        assert!(!group.contains("group_eligible_items("));
-
-        let cohort = source
-            .split("async fn select_whole_cohort(")
-            .nth(1)
-            .unwrap()
-            .split("async fn cohort_state(")
-            .next()
-            .unwrap();
-        assert!(cohort.contains("LIMIT 1"));
-        assert!(!cohort.contains("for ("));
-        assert!(!cohort.contains("OFFSET"));
-
-        let replay = source
-            .split("async fn extend_claim_by_query_replays(")
-            .nth(1)
-            .unwrap()
-            .split("async fn definition_in_transaction(")
-            .next()
-            .unwrap();
-        assert_eq!(replay.matches(".execute(").count(), 1);
-        assert!(!replay.contains(".query("));
-        assert!(!replay.contains("for request_id"));
-        for cardinality in [1_usize, 100, 1_000] {
-            let awaited_sql_statements = usize::from(cardinality > 0);
-            assert_eq!(awaited_sql_statements, 1);
-        }
-    }
-}
-
-#[cfg(test)]
 mod committed_pool_helper_tests {
     use std::collections::BTreeMap;
 
@@ -4899,7 +4434,7 @@ mod committed_pool_helper_tests {
 
     use super::{
         TursoRelational, finish_retained_claimed, materialize_grouped_cohort_claimed_on,
-        select_item_claim_ids_on,
+        select_and_materialize_item_claims_on,
     };
 
     fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -5231,7 +4766,7 @@ mod committed_pool_helper_tests {
         assert!(render.contains("lifecycle_state='Leased'"));
         let select_helper = between(
             projection,
-            "pub async fn select_item_claim_ids_on(",
+            "pub async fn select_and_materialize_item_claims_on(",
             "pub async fn materialize_grouped_cohort_claimed_on(",
         );
         assert!(
@@ -5255,8 +4790,8 @@ mod committed_pool_helper_tests {
             !select_helper.contains("ORDER BY payload"),
             "Claim must not sort on the payload blob"
         );
-        asserts_no_pool_borrow(select_helper, "select_item_claim_ids_on");
-        let _ = select_item_claim_ids_on;
+        asserts_no_pool_borrow(select_helper, "select_and_materialize_item_claims_on");
+        let _ = select_and_materialize_item_claims_on;
     }
 
     #[test]
@@ -5916,21 +5451,58 @@ mod item_mutation_tests {
         let definition = qdef();
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         let store = TursoRelational::in_memory().await.unwrap();
-        AsyncProjectionStore::ensure_shard(&store, definition).await.unwrap();
-        let plan = store.query(format!("EXPLAIN QUERY PLAN {}", super::METRICS_MEMBERSHIP_SQL),
-            vec![shard.tenant_id.as_str().into(), shard.queue_id.as_str().into(), "[]".into()]).await.unwrap();
-        let details = plan.iter().map(|row| super::text(&row.values[3]).unwrap()).collect::<Vec<_>>();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        let plan = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {}", super::METRICS_MEMBERSHIP_SQL),
+                vec![
+                    shard.tenant_id.as_str().into(),
+                    shard.queue_id.as_str().into(),
+                    "[]".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let details = plan
+            .iter()
+            .map(|row| super::text(&row.values[3]).unwrap())
+            .collect::<Vec<_>>();
         for (table, key) in [("i", "item_id"), ("k", "client_item_key")] {
-            assert!(details.iter().any(|line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))), "{details:?}");
+            assert!(
+                details.iter().any(
+                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
+                ),
+                "{details:?}"
+            );
         }
-        let identities = (1..=8192).map(|n| (fireweed_core::ItemId::mint(1, 0, n),
-            Some(fireweed_core::ClientItemKey::new(format!("key-{n}")).unwrap()))).collect::<Vec<_>>();
+        let identities = (1..=8192)
+            .map(|n| {
+                (
+                    fireweed_core::ItemId::mint(1, 0, n),
+                    Some(fireweed_core::ClientItemKey::new(format!("key-{n}")).unwrap()),
+                )
+            })
+            .collect::<Vec<_>>();
         let started = std::time::Instant::now();
-        let snapshot = store.server_metrics_with_membership_committed(&shard, &identities).await.unwrap().unwrap();
-        eprintln!("8192 membership identities read in {:?}; plan={details:?}", started.elapsed());
+        let snapshot = store
+            .server_metrics_with_membership_committed(&shard, &identities)
+            .await
+            .unwrap()
+            .unwrap();
+        eprintln!(
+            "8192 membership identities read in {:?}; plan={details:?}",
+            started.elapsed()
+        );
         assert_eq!(snapshot.rows.len(), identities.len());
-        assert!(snapshot.rows.values().all(|row| row.state.is_none() && !row.active_key_exists));
+        assert!(
+            snapshot
+                .rows
+                .values()
+                .all(|row| row.state.is_none() && !row.active_key_exists)
+        );
         assert_eq!(snapshot.metrics.pending, 0);
     }
 
@@ -5995,7 +5567,10 @@ mod item_mutation_tests {
         assert!(empty.rows.is_empty());
         assert!(
             store
-                .server_metrics_with_membership_committed(&shard, &vec![identities[0].clone(); 8193])
+                .server_metrics_with_membership_committed(
+                    &shard,
+                    &vec![identities[0].clone(); 8193]
+                )
                 .await
                 .is_err()
         );
@@ -6068,7 +5643,8 @@ mod item_mutation_tests {
                         unreachable!()
                     };
                     values.invalidate_lease = true;
-                    values.state = [ItemState::Complete, ItemState::Failed, ItemState::Pending][i % 3];
+                    values.state =
+                        [ItemState::Complete, ItemState::Failed, ItemState::Pending][i % 3];
                     mutation
                 })
                 .collect::<Vec<_>>();
@@ -6322,8 +5898,17 @@ mod item_mutation_tests {
     #[tokio::test]
     #[ignore = "explicit retained-VM SQL diagnostic, not workflow qualification"]
     async fn compare_retained_direct_and_joined_replacements() {
-        compare_retained_replacement_shapes(&["joined", "direct", "direct_analyzed", "direct_analyzed", "joined"], 20_000)
-            .await;
+        compare_retained_replacement_shapes(
+            &[
+                "joined",
+                "direct",
+                "direct_analyzed",
+                "direct_analyzed",
+                "joined",
+            ],
+            20_000,
+        )
+        .await;
     }
 
     async fn compare_retained_replacement_shapes(shapes: &[&'static str], count: usize) {
@@ -6393,7 +5978,10 @@ mod item_mutation_tests {
                 fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH
             };
             if shape == "direct_analyzed" {
-                store.execute("ANALYZE fireweed_items", vec![]).await.unwrap();
+                store
+                    .execute("ANALYZE fireweed_items", vec![])
+                    .await
+                    .unwrap();
             }
             let plan = store
                 .query(
@@ -6625,8 +6213,7 @@ mod item_mutation_tests {
                 mutation
             })
             .collect();
-        let image_sql =
-            "SELECT * FROM fireweed_items WHERE item_id<>'999999' ORDER BY tenant_id,queue_id,item_id";
+        let image_sql = "SELECT * FROM fireweed_items WHERE item_id<>'999999' ORDER BY tenant_id,queue_id,item_id";
         let before: Vec<_> = fast
             .query(image_sql, vec![])
             .await
@@ -6745,7 +6332,9 @@ mod item_mutation_tests {
         for mutation in &mut mutations.items {
             match &mut mutation.action {
                 ResolvedItemMutationAction::Replace(values)
-                | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => values.item_version += 1,
+                | ResolvedItemMutationAction::ReplaceKeepingPayload(values) => {
+                    values.item_version += 1
+                }
                 _ => unreachable!(),
             }
         }

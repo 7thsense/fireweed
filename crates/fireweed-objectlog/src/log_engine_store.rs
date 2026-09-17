@@ -210,11 +210,9 @@ impl PackedAppendError {
     pub fn into_engine(self) -> EngineError {
         match self {
             Self::BeforePosition(error) => error,
-            Self::PostPositionAmbiguous { shard, reason } => {
-                EngineError::Storage(format!(
-                    "object-log post-position ambiguous: {reason}; shard={shard:?}"
-                ))
-            }
+            Self::PostPositionAmbiguous { shard, reason } => EngineError::Storage(format!(
+                "object-log post-position ambiguous: {reason}; shard={shard:?}"
+            )),
         }
     }
 }
@@ -1474,15 +1472,11 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                         .map(|s| s.to_vec())
                         .unwrap_or_default();
                     offset += n;
-                    let apply_batch = if let Some(commands) = leader_commands.take() {
-                        Some(PackedApplyBatch {
-                            positions: positions.clone(),
-                            commands,
-                            transferred_reservation_ids: transferred_reservation_ids.clone(),
-                        })
-                    } else {
-                        None
-                    };
+                    let apply_batch = leader_commands.take().map(|commands| PackedApplyBatch {
+                        positions: positions.clone(),
+                        commands,
+                        transferred_reservation_ids: transferred_reservation_ids.clone(),
+                    });
                     let _ = w.tx.send(Ok(PackedAppendOutcome {
                         positions: slice,
                         apply_batch,
@@ -1796,18 +1790,52 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 return Ok(Some(p));
             }
             let key = self.high_water_key(&shard);
-            match self.blob.get(&key).await.map_err(store_err)? {
+            // Persisted metadata is a sparse recovery hint, not the durable tail:
+            // advance_high_water_held writes it only every 64 appends. Verify the
+            // hinted record and follow committed log pages before caching a tail.
+            let hint = match self.blob.get(&key).await.map_err(store_err)? {
                 Some(bytes) => {
                     let doc: HighWaterDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
-                    let pos = CommandPosition::new(shard, doc.backend_epoch, doc.sequence);
-                    self.high_water
-                        .lock()
-                        .expect("high_water")
-                        .insert(pk, pos.clone());
-                    Ok(Some(pos))
+                    Some(CommandPosition::new(
+                        shard.clone(),
+                        doc.backend_epoch,
+                        doc.sequence,
+                    ))
                 }
-                None => Ok(None),
+                None => None,
+            };
+            let mut from = hint.as_ref().and_then(|position| {
+                position.sequence.checked_sub(1).map(|sequence| {
+                    CommandPosition::new(shard.clone(), position.backend_epoch, sequence)
+                })
+            });
+            let mut recovered = None;
+            loop {
+                let page = AsyncLogStore::read_from(self, shard.clone(), from, 256).await?;
+                let Some((last, _)) = page.entries.last() else {
+                    break;
+                };
+                recovered = Some(last.clone());
+                from = page.next;
+                if from.is_none() {
+                    break;
+                }
             }
+            if hint.is_some() && recovered.is_none() {
+                return Err(EngineError::Storage(
+                    "object-log high-water hint has no corresponding durable records".into(),
+                ));
+            }
+            // An append may have completed while recovery read the log. Never
+            // replace that newer cached position with an older recovery result.
+            let mut cache = self.high_water.lock().expect("high_water");
+            if let Some(position) = recovered {
+                let entry = cache.entry(pk.clone()).or_insert_with(|| position.clone());
+                if entry.precedes(&position) {
+                    *entry = position;
+                }
+            }
+            Ok(cache.get(&pk).cloned())
         }
     }
 
@@ -2009,6 +2037,75 @@ mod tests {
             typed_indexes: Vec::new(),
             emit_change_records: false,
         }
+    }
+
+    #[tokio::test]
+    async fn high_water_recovers_tail_beyond_sparse_metadata_hint() {
+        let root = temp_root("high-water-sparse-hint");
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        log.create_or_read_definition(definition).await.unwrap();
+        let epoch = log.current_epoch(shard.clone()).await.unwrap();
+        let mut expected = None;
+        for i in 0..3 {
+            expected = log
+                .append(shard.clone(), vec![pause_env(&format!("hint-{i}"))], epoch)
+                .await
+                .unwrap()
+                .last()
+                .cloned();
+        }
+        // Simulate reopening: discard the process cache while retaining the first
+        // append's persisted hint and all three acknowledged log records.
+        log.high_water.lock().unwrap().clear();
+        assert_eq!(log.high_water(shard.clone()).await.unwrap(), expected);
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        assert_eq!(reopened.high_water(shard).await.unwrap(), expected);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn high_water_without_hint_recovers_multiple_pages_and_epochs() {
+        let root = temp_root("high-water-no-hint-pages");
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        log.create_or_read_definition(definition).await.unwrap();
+        let first_epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let first: Vec<_> = (0..300).map(|i| pause_env(&format!("first-{i}"))).collect();
+        log.append(shard.clone(), first, first_epoch).await.unwrap();
+        let second_epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let second: Vec<_> = (0..300)
+            .map(|i| pause_env(&format!("second-{i}")))
+            .collect();
+        let expected = log
+            .append(shard.clone(), second, second_epoch)
+            .await
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap();
+        assert_eq!(expected.backend_epoch, second_epoch);
+        assert_eq!(expected.sequence, 599);
+        // Lose the optional hint entirely, forcing three recovery pages that
+        // cross both a packed batch boundary and an ownership epoch change.
+        log.blob.delete(&log.high_water_key(&shard)).await.unwrap();
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        assert_eq!(reopened.high_water(shard).await.unwrap(), Some(expected));
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -3324,18 +3421,19 @@ mod tests {
             lane: PackLane::Mutate,
         };
         let first = AtomicBool::new(false);
-        let second = AtomicBool::new(false);
         first.store(true, Ordering::Release);
         assert!(matches!(
             log.unpack_packed_result(Err(()), &group, &first),
             Err(PackedAppendError::PostPositionAmbiguous { .. })
         ));
-        assert!(matches!(
-            log.unpack_packed_result(Err(()), &group, &second),
-            Err(PackedAppendError::BeforePosition(_))
-        ));
-        second.store(true, Ordering::Release);
-        drop(second);
+        {
+            let second = AtomicBool::new(false);
+            assert!(matches!(
+                log.unpack_packed_result(Err(()), &group, &second),
+                Err(PackedAppendError::BeforePosition(_))
+            ));
+            second.store(true, Ordering::Release);
+        }
         assert!(matches!(
             log.unpack_packed_result(Err(()), &group, &first),
             Err(PackedAppendError::PostPositionAmbiguous { .. })

@@ -19,7 +19,6 @@
 //! cargo test -p fireweed-objectlog s3_emission_cursor_native_cas -- --nocapture
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -38,7 +37,7 @@ use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
 use fireweed_server::{
     BackendSpec, ChangeRecordSinkConfig, ChangeRecordSinkMode, Config, ControlPlaneSpec, LogSpec,
     ObjectLogSpec, ProjectionSpec, ResponseBarrierSpec, S3CredentialSource, SegmentConfig,
-    emit_change_record_tick, spawn_change_record_emitter, start,
+    emit_change_record_tick, start,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -205,14 +204,6 @@ fn kafka_sink() -> ChangeRecordSinkConfig {
     }
 }
 
-fn tmp_file(tag: &str, ext: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("{}.{}", unique_tag(tag), ext));
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-    path
-}
-
 fn pause_envelope(id: &str) -> CommandEnvelope {
     CommandEnvelope {
         command_id: CommandId::new(id),
@@ -277,38 +268,6 @@ fn p8cs_delivery_mode_resolution_matrix() {
 }
 
 // ── Source guard: S3 arms reach emission only via shared finalizer ──────────
-
-#[cfg(any())]
-#[test]
-fn p8cs_s3_arms_use_shared_finalizer_not_direct_spawn() {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
-    // Production start must route S3 × memory/sqlite/postgres through the shared helper chain.
-    for helper in [
-        "open_objectlog_s3_memory_backend",
-        "open_objectlog_s3_postgres_backend",
-        "finalize_objectlog_async_owned",
-        "finalize_objectlog_blocking_owned",
-        "finalize_with_change_record_delivery",
-    ] {
-        assert!(
-            source.contains(helper),
-            "server composition root must name {helper} for P8cs"
-        );
-    }
-    // Direct spawn in production start arms is forbidden (P8c residual invariant).
-    let production = source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production source before cfg(test)");
-    let direct_spawns = production
-        .matches("spawn_change_record_emitter_if_enabled(")
-        .count();
-    // Only the shared finalizer body may call it (exactly one production call site).
-    assert_eq!(
-        direct_spawns, 1,
-        "exactly one production call to spawn_change_record_emitter_if_enabled (shared finalizer)"
-    );
-}
 
 // ── S3 log-axis cursor lifecycle (native CAS substrate) ─────────────────────
 
@@ -454,29 +413,6 @@ async fn p8cs_s3_memory_embedded_emitter_lifecycle() {
     smoke_s3_embedded_cell(config, "s3×memory", &stream).await;
 }
 
-#[cfg(any())]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn p8cs_s3_sqlite_embedded_emitter_lifecycle() {
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let (endpoint, bucket, region, access, secret) = require_s3();
-    let def = qdef_named("p8cs", &unique_tag("sql"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let proj = tmp_file("s3-sqlite-proj", "sqlite");
-    let config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::Sqlite { path: proj.clone() },
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-        },
-        vec![def],
-    );
-    smoke_s3_embedded_cell(config, "s3×sqlite", &stream).await;
-    let _ = std::fs::remove_file(&proj);
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_postgres_embedded_emitter_lifecycle() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
@@ -537,44 +473,6 @@ async fn p8cs_s3_memory_http_delivery_smoke_through_spawned_task() {
         .expect("acceptor join");
 
     server.shutdown_and_drain(Duration::from_secs(5)).await;
-}
-
-#[cfg(any())]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn p8cs_s3_sqlite_http_delivery_smoke_through_spawned_task() {
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let (endpoint, bucket, region, access, secret) = require_s3();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let acceptor = tokio::spawn(accept_one_http_ok(listener));
-
-    let def = qdef_named("p8cs", &unique_tag("http-sql"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let proj = tmp_file("s3-http-sqlite", "sqlite");
-    let mut config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::Sqlite { path: proj.clone() },
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-        },
-        vec![def],
-    );
-    config.change_record_sink = http_sink(port);
-    let server = start(config)
-        .await
-        .expect("s3×sqlite HTTP delivery must start");
-    redis_xadd(server.addr(), &stream).await;
-
-    tokio::time::timeout(Duration::from_secs(10), acceptor)
-        .await
-        .expect("HTTP sink must receive delivery from spawned emitter")
-        .expect("acceptor join");
-
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_file(&proj);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -776,91 +674,6 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
         "durable S3 cursor at/past emitted position for reap coupling: cursor={cursor:?} terminal={:?}",
         pos_a[0]
     );
-}
-
-#[cfg(any())]
-#[cfg(any())]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn p8cs_s3_sqlite_cursor_and_emitter_cancel_join() {
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let (endpoint, bucket, region, access, secret) = require_s3();
-    let tag = unique_tag("sql-cursor");
-    let data_prefix = format!("fwlog-{tag}/");
-    let meta_prefix = format!("fwmeta-{tag}/");
-    let flush = flush_config_from_segment(262_144, 1);
-    let proj = tmp_file("s3-sql-cursor", "sqlite");
-
-    let backend = fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
-        ObjectLogEngineStore::open_s3_with_prefixes(
-            &endpoint,
-            &region,
-            &bucket,
-            &access,
-            &secret,
-            data_prefix,
-            meta_prefix,
-            flush,
-        )
-        .await
-        .expect("open S3 log"),
-        fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap()).expect("proj"),
-        0,
-    )
-    .await
-    .expect("s3×sqlite product");
-
-    let def = qdef_named("p8cs", &unique_tag("sqlc"));
-    let key = shard_of(&def);
-    backend.create_queue(def.clone()).await.unwrap();
-    for i in 0..4u32 {
-        backend
-            .push(
-                &key,
-                vec![PushSpec::default()],
-                UtcTimestamp::new(i as i64, 0).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-    }
-
-    let sink = CountingSink::default();
-    backend
-        .with_log(|log| {
-            fireweed_objectlog::block_on_objectlog(log.emit_change_record_tail(
-                &key,
-                &sink,
-                2,
-                UtcTimestamp::new(10, 0).unwrap(),
-                None,
-            ))
-        })
-        .unwrap();
-    let cursor = backend
-        .with_log(|log| fireweed_objectlog::block_on_objectlog(log.emission_cursor(&key)))
-        .unwrap()
-        .expect("cursor after emit");
-    assert!(cursor.sequence >= 1, "cursor advanced: {cursor:?}");
-
-    // Real emitter task cancel/join over the durable S3×sqlite backend.
-    let backend = Arc::new(backend);
-    let handle = spawn_change_record_emitter(
-        Arc::clone(&backend),
-        Arc::new(CountingSink::default()) as Arc<dyn ChangeRecordSink>,
-        vec![def],
-        ChangeRecordSinkConfig {
-            enabled: true,
-            tick_interval: Duration::from_millis(5),
-            batch_size: 2,
-            ..ChangeRecordSinkConfig::default()
-        },
-    );
-    tokio::time::sleep(Duration::from_millis(40)).await;
-    handle.abort();
-    let join_err = handle.await.expect_err("emitter must be cancelled");
-    assert!(join_err.is_cancelled(), "join must report cancellation");
-
-    let _ = std::fs::remove_file(&proj);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

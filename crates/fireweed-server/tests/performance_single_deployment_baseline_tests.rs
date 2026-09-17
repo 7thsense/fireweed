@@ -60,8 +60,31 @@ const CONFIGURED_CONCURRENCY: u64 = 2;
 const SMOKE_PROGRESS_BOUND_MS: u64 = 60_000;
 const GROUP_CARDINALITY: u64 = 64;
 
-type AcceptanceCompletion = Arc<(Mutex<Option<Instant>>, Condvar)>;
+type AcceptanceCompletion = Arc<(Mutex<Option<Result<Instant, &'static str>>>, Condvar)>;
 type PendingAcceptances = HashMap<u32, (Instant, AcceptanceCompletion)>;
+
+// Worker failure must release the sampler and any pending admission handoff.
+// Otherwise a useful assertion failure turns into an indefinitely hung suite.
+struct WorkerCompletion {
+    done: Arc<AtomicBool>,
+    pending: Option<Arc<Mutex<PendingAcceptances>>>,
+}
+impl Drop for WorkerCompletion {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(pending) = &self.pending {
+            let pending = pending.lock().unwrap_or_else(|error| error.into_inner());
+            for (_, completion) in pending.values() {
+                let (value, ready) = &**completion;
+                let mut value = value.lock().unwrap_or_else(|error| error.into_inner());
+                if value.is_none() {
+                    *value = Some(Err("producer exited before publishing acceptance"));
+                }
+                ready.notify_all();
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct RunCaps {
@@ -1044,6 +1067,7 @@ fn performance_single_deployment_baseline_tests() {
                 let barrier = Arc::clone(&barrier);
                 let runtime = Arc::clone(&runtime);
                 move || {
+                    let _completion = WorkerCompletion { done: Arc::clone(&producer_done), pending: Some(Arc::clone(&pending)) };
                     let _runtime = runtime.enter();
                     let _worker = workers.start();
                         barrier.wait();
@@ -1093,7 +1117,7 @@ fn performance_single_deployment_baseline_tests() {
                                 accept_completed.duration_since(accept_started).as_nanos() as u64;
                             {
                                 let (completed, ready) = &*completion;
-                                *completed.lock().unwrap() = Some(accept_completed);
+                                *completed.lock().unwrap() = Some(Ok(accept_completed));
                                 ready.notify_all();
                             }
                             for offset in 0..n {
@@ -1152,6 +1176,7 @@ fn performance_single_deployment_baseline_tests() {
                 let barrier = Arc::clone(&barrier);
                 let runtime = Arc::clone(&runtime);
                 move || {
+                    let _completion = WorkerCompletion { done: Arc::clone(&consumer_done), pending: None };
                     let _runtime = runtime.enter();
                     let _worker = workers.start();
                     barrier.wait();
@@ -1204,6 +1229,7 @@ fn performance_single_deployment_baseline_tests() {
                             while completed.is_none() {
                                 completed = ready.wait(completed).unwrap();
                             }
+                            completed.as_ref().unwrap().as_ref().expect("producer acceptance failed");
                         }
                         if result.claimed >= next_scope_sample
                             && !pending.lock().unwrap().is_empty()
@@ -1256,7 +1282,7 @@ fn performance_single_deployment_baseline_tests() {
                                 while completed.is_none() {
                                     completed = ready.wait(completed).unwrap();
                                 }
-                                completed.expect("producer published acceptance completion")
+                                completed.expect("producer published acceptance completion").expect("producer acceptance failed")
                             };
                             let lower = claim_started
                                 .checked_duration_since(accept_completed)

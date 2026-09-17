@@ -222,7 +222,7 @@ fn rps(claimed: usize, ms: u128) -> f64 {
 /// (the long-held cursor `FOR UPDATE` in the group/cohort claim path serializes them regardless of
 /// `claim_pool_size`; the pool only adds acquisition/lock-wait overhead on top).
 #[test]
-fn cohort_claim_pool_does_not_scale_on_one_queue() {
+fn cohort_claim_pool_drains_same_queue_without_loss() {
     let url = std::env::var("FIREWEED_PG_TEST_URL")
         .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
@@ -259,19 +259,9 @@ fn cohort_claim_pool_does_not_scale_on_one_queue() {
         pooled_rps / single_rps.max(1.0)
     );
 
-    // Physics bar for the BUG: pooled/multi-worker same-queue cohort claims must be no faster than
-    // single-connection — not merely "under the 1.25x scale-out bar", since the root cause (a
-    // process-wide Mutex<Inner> held for the whole group/cohort claim, see the module doc) gives
-    // pooled workers zero added parallelism plus extra acquire_claim_client/lock-wait overhead on
-    // top, so pooled should be flat-to-worse, never faster. This is expected to start failing once
-    // the group/cohort mutex is narrowed — that is the fix this test exists to motivate.
-    assert!(
-        pooled_rps < single_rps,
-        "pooled same-queue cohort claim rate {pooled_rps:.0} items/s unexpectedly beat the \
-         single-connection rate {single_rps:.0} items/s — the process-wide Mutex<Inner> serializing \
-         claim_with_client_unit (relational.rs ClaimPort::claim) may have been narrowed; re-derive \
-         this test's bar against the new claim path"
-    );
+    // Scheduler noise can make either repetition marginally faster. Correctness
+    // is asserted above; this diagnostic comparison must not require a known
+    // bottleneck to remain unfixed or fail when throughput improves.
 }
 
 /// AC2 — a configuration exists where end-to-end throughput at w=4 exceeds w=1: one independent

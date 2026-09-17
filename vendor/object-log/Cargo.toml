@@ -41,5 +41,4 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "rt-multi-
 aws-sdk-s3 = { version = "1.122", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"], optional = true }
 
 [dev-dependencies]
-proptest = "1"
 tempfile = "3"

@@ -3,8 +3,8 @@
 Source: https://github.com/7thsense/object-log, tag v0.3.1,
 commit dcd37c0e7de3afa26e671245faf41ee513c984ec.
 
-Cargo.toml, README, licenses, src and tests are copied unchanged from that
-commit. Fireweed patches this package locally to evaluate combining already
+Cargo.toml, README, licenses, src and tests originate from that commit.
+Fireweed patches this package locally to evaluate combining already
 completed ordered data uploads into one durable manifest publication. No
 storage-format migration or relaxed durability barrier is intended.
 
@@ -14,13 +14,17 @@ error, durability and recovery tests before workflow measurements.
 
 ## Local changes
 
+- Remove the unused `proptest` development dependency. Check in the standalone
+  test lockfile so `--locked` tests reproduce the refreshed dependency graph.
+
 - Retain the earliest failed PUT/manifest enqueue position for cumulative
   flush barriers. Barriers before that position can succeed; covering barriers
   return the original failure even if later appends succeed. Producer error
   handling, offset assignment and on-disk formats are unchanged.
-- Root Cargo.lock changes only the object-log source from its pinned Git entry
-  to this path. Standalone tests use an ignored local lockfile and a separate
-  target directory to avoid changing Fireweed build artifacts.
+- Fireweed depends directly on this vendored path. Cargo workspace patches do
+  not propagate to dependent workspaces; the benchmark and public-consumer
+  fixtures must resolve the same log implementation as the product. Standalone
+  log tests use a checked-in standalone lockfile and a separate target directory.
 
 - Opted-in built-in sequencers can commit a bounded contiguous ready success
   prefix of uploaded objects in one manifest. The configured maximum in-flight
@@ -54,11 +58,10 @@ error, durability and recovery tests before workflow measurements.
 
 ## Reproduce focused tests
 
-From the Fireweed repository root, seed the ignored standalone test lockfile
-from the archived lock and keep its build artifacts separate:
+From the Fireweed repository root, use the checked-in standalone test lockfile
+and keep its build artifacts separate:
 
 ```sh
-cp docs/helix/04-build/evidence/workflow-capacity/fireweed-object-log-test-Cargo.lock vendor/object-log/Cargo.lock
 cargo test --locked --manifest-path vendor/object-log/Cargo.toml --target-dir target/object-log-tests --lib --test engine --test manifest --test blob --test sequencer_conformance --test perf_budget
 ```
 

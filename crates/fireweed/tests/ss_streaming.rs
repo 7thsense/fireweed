@@ -90,18 +90,12 @@ impl StageReport {
 
 /// Continuous bounded replenishment: completing any future immediately admits
 /// the next item. This is the streaming admission mechanism; `join_all` is not.
-fn track<R, Fut>(
-    index: usize,
-    admitted_at: Instant,
-    fut: Fut,
-) -> impl Future<Output = (usize, Instant, Instant, R)>
+async fn track<R, Fut>(index: usize, admitted_at: Instant, fut: Fut) -> (usize, Instant, Instant, R)
 where
     Fut: Future<Output = R>,
 {
-    async move {
-        let result = fut.await;
-        (index, admitted_at, Instant::now(), result)
-    }
+    let result = fut.await;
+    (index, admitted_at, Instant::now(), result)
 }
 
 async fn replenish_items<T, R, F, Fut>(
@@ -724,6 +718,8 @@ async fn complete_stage(cfg: &PipelineConfig, rx: mpsc::Receiver<Vec<ItemId>>) -
     }
 }
 
+// Keep the independent run measurements explicit at this evidence boundary.
+#[allow(clippy::too_many_arguments)]
 fn write_streaming_evidence(
     cell: &Cell,
     stages: &[StageReport],
@@ -740,7 +736,7 @@ fn write_streaming_evidence(
     }
     let utc = chrono_like_utc();
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/ss-phased")
+        .join("../../target/ss-phased")
         .join(&utc);
     let _ = std::fs::create_dir_all(&dir);
     let command = format!(

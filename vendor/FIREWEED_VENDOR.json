@@ -9,11 +9,17 @@
       "path_in_vcs": "core"
     },
     "modified_upstream_files": [
+      "Cargo.toml",
       "connection.rs",
       "storage/page_cache.rs",
       "storage/pager.rs",
+      "storage/shared_wal_coordination.rs",
       "storage/wal.rs",
-      "translate/pragma.rs"
+      "translate/emitter/update.rs",
+      "translate/pragma.rs",
+      "types.rs",
+      "vdbe/execute.rs",
+      "vdbe/mod.rs"
     ]
   },
   "turso": {
@@ -26,7 +32,9 @@
       "path_in_vcs": "bindings/rust"
     },
     "modified_upstream_files": [
-      "Cargo.toml"
+      "Cargo.toml",
+      "src/connection.rs",
+      "src/rows.rs"
     ]
   },
   "turso_sdk_kit": {

@@ -75,30 +75,3 @@ fn transaction_evidence_rejects_bogus_structured_na() {
         );
     }
 }
-
-#[test]
-fn exact_pair_local_gate_requires_fresh_nonempty_evidence() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source =
-        std::fs::read_to_string(repo.join("scripts/ci/record-postgres-transaction-evidence.sh"))
-            .unwrap();
-    assert!(!source.contains("docs/perf/evidence"));
-    assert!(!source.contains("rm -f"));
-    let external = source
-        .find("TP-003 evidence directory must be outside the repository")
-        .unwrap();
-    let matrix_test = source
-        .find("postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs -- --exact --nocapture")
-        .unwrap();
-    let promoted_parity = source
-        .find("TP-003 parity evidence must be promoted outside the repository")
-        .unwrap();
-    let matrix_nonempty = source.find("test -s \"$matrix_evidence\"").unwrap();
-    let verify = source
-        .find("--bin fireweed-verify-transaction-evidence")
-        .unwrap();
-    assert!(external < matrix_test);
-    assert!(promoted_parity < matrix_test);
-    assert!(matrix_test < matrix_nonempty);
-    assert!(matrix_nonempty < verify);
-}

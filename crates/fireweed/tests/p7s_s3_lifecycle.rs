@@ -4,7 +4,7 @@
 //! assertions on all three S3 cells with native-CAS failover and P1s provenance;
 //! consume the provider-neutral verifier without editing its shared logic.
 //!
-//! - `s3×memory` / `s3×sqlite`: full `public_interface::run`
+//! - `s3×memory` / `s3×turso`: full `public_interface::run`
 //! - `s3×postgres`: P7 method family only (append/claim/finalize). Shared
 //!   verifier also hits P6/P8 stubs (`Unavailable` on upsert/update_fields/
 //!   current_position) outside P7 ownership — follow-on scope.
@@ -560,17 +560,17 @@ async fn s3_memory_strict_public_interface_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_sqlite_strict_public_interface_lifecycle() {
+async fn s3_turso_strict_public_interface_lifecycle() {
     let _s3 = require_s3_env();
     let fixture = FixtureRoot::new("s3-sqlite");
     let ns = unique_ns("s3-sqlite");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_full_verifier("s3--sqlite--strict", config, true).await;
+    run_full_verifier("s3--turso--strict", config, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

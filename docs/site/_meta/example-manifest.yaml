@@ -98,19 +98,15 @@ examples:
         symbol: bounded_selection_is_stable_dispersed_and_preserves_source_order
 
   - slug: durable-open
-    title: Open SQLite and object-log backends
+    title: Open Turso and object-log backends
     summary: >
-      Public constructors for durable profiles and a role-named object-log
-      runtime configuration that validates construction axes.
+      Public constructors for filesystem-log durability with native Turso
+      or memory projections.
     tags: [durable, construction]
     category: construction
     sources:
-      - path: crates/fireweed/tests/concrete_fireweed.rs
-        symbol: role_named_object_log_configuration_validates
       - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
-        symbol: lifecycle_over_shapes_sqlite_log
-      - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
-        symbol: lifecycle_over_shapes_sqlite_relational
+        symbol: lifecycle_over_shapes_turso
       - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
         symbol: lifecycle_over_shapes_objectlog
 

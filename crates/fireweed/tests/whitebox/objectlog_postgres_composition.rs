@@ -260,7 +260,7 @@ fn objectlog_postgres_item_mutation_reopens_and_replays_resolved_response() {
         "a rejected request must not partially apply its accepted item patch"
     );
     let committed = block_on(fireweed.mutate_items(&queue, request.clone())).unwrap();
-    assert_eq!(committed.summary.changed, 1);
+    assert_eq!(committed.summary.changed, 1, "{committed:?}");
     assert_eq!(committed.results[0].item_id, item_id);
     let reindexed = block_on(fireweed.range_scan(
         &queue,
@@ -720,35 +720,70 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         assert!(block_on(control.verify()).unwrap().compatible);
     }
 
-    #[cfg(feature = "sqlite")]
+    #[cfg(feature = "turso")]
     {
-        let (_, sqlite_projection) = unique_fixture("s3_sqlite_capability_parity");
-        let mut sqlite_durability = durability;
-        sqlite_durability.projection = ProjectionConfig::Sqlite {
-            path: std::env::temp_dir().join(format!("{sqlite_projection}.sqlite")),
+        let (_, turso_projection) = unique_fixture("s3_turso_capability_parity");
+        let mut turso_durability = fireweed::StorageConfig::from_object_log_runtime(durability);
+        turso_durability.projection = fireweed::ProjectionStoreConfig::Turso {
+            path: std::env::temp_dir().join(format!("{turso_projection}.db")),
         };
-        let fireweed = fireweed::open_objectlog_sqlite(sqlite_durability, clock).unwrap();
-        let sqlite_caps = fireweed.commit_capabilities(&queue()).unwrap();
-        // Projection-specific consistency prose differs (Postgres vs sqlite apply path);
+        let fireweed = fireweed::open(turso_durability, clock).unwrap();
+        let turso_caps = fireweed.commit_capabilities(&queue()).unwrap();
+        // Projection-specific consistency prose differs (Postgres vs Turso apply path);
         // authority flags and durability class must still match.
         assert_eq!(
             postgres_caps.atomic_transition_commit,
-            sqlite_caps.atomic_transition_commit
+            turso_caps.atomic_transition_commit
         );
         assert_eq!(
             postgres_caps.vectorized_commit,
-            sqlite_caps.vectorized_commit
+            turso_caps.vectorized_commit
         );
-        assert_eq!(postgres_caps.lease_validation, sqlite_caps.lease_validation);
+        assert_eq!(postgres_caps.lease_validation, turso_caps.lease_validation);
         assert_eq!(
             postgres_caps.retained_commit_idempotency,
-            sqlite_caps.retained_commit_idempotency
+            turso_caps.retained_commit_idempotency
         );
+        assert!(postgres_caps.authoritative_recovery_reads);
+        assert!(turso_caps.authoritative_recovery_reads);
+        let key = queue();
+        let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap().remove(0);
+        let request_id = RequestId::new("turso-capability-recovery").unwrap();
+        let outcomes = block_on(fireweed.commit(
+            &key,
+            CommitRequest {
+                request_id: Some(request_id.clone()),
+                entries: vec![CommitEntry {
+                    claim_ref: ClaimRef {
+                        item_id: claimed.item_id,
+                        lease_token: claimed.lease_token.expect("claimed lease token"),
+                        lease_expires_at: claimed.lease_expires_at,
+                        item_version: claimed.item_version,
+                    },
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+        ))
+        .unwrap();
+        assert!(matches!(
+            outcomes.as_slice(),
+            [EntryOutcome::Committed { .. }]
+        ));
+        let recovered = block_on(fireweed.explain_commit(&key, request_id.clone()))
+            .unwrap()
+            .expect("Turso reconstructs the committed transition from the authoritative log");
+        assert_eq!(recovered.request_id, request_id);
+        assert_eq!(recovered.entries.len(), 1);
+        assert_eq!(recovered.entries[0].consumed_input_id, claimed.item_id);
         assert_eq!(
-            postgres_caps.authoritative_recovery_reads,
-            sqlite_caps.authoritative_recovery_reads
+            recovered.entries[0].status,
+            fireweed::CommitEntryStatus::Committed
         );
-        assert_eq!(postgres_caps.durability_class, sqlite_caps.durability_class);
+        assert_eq!(postgres_caps.durability_class, DurabilityClass::Atomic);
+        assert_eq!(turso_caps.durability_class, DurabilityClass::EventualApply);
     }
 
     drop_schema(&pg_url, &namespace);

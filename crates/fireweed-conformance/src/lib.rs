@@ -7,13 +7,13 @@
 //!
 //! Usage from an adapter's tests (one line, full per-scenario granularity):
 //!
-//! ```ignore
+//! ```text
 //! fireweed_conformance::conformance_suite!(MyBackend::new);
 //! ```
 //!
 //! or a single aggregate test:
 //!
-//! ```ignore
+//! ```text
 //! #[tokio::test]
 //! async fn conformance() { fireweed_conformance::run_conformance(MyBackend::new).await; }
 //! ```
@@ -40,28 +40,24 @@
 //! | Backend | Projection family | Durability | Class wiring | Where |
 //! |---|---|---|---|---|
 //! | `fireweed_memory::composed_memory_backend` | in-memory log-replay | atomic | `conformance_suite!` = core@atomic + log-replay | `fireweed-memory/src/tests.rs` |
-//! | `fireweed_sqlite::composed_sqlite_backend` (log) | in-memory log-replay | atomic | `conformance_suite!` + `relational_reconnect_suite!` | `fireweed-sqlite/tests/{conformance,reconnect_smoke}.rs` |
 //! | `fireweed_postgres::PostgresBackend` (log) | in-memory log-replay | atomic | core@atomic + log (env-gated `pg_conformance!`) | `fireweed-postgres/tests/conformance.rs` |
 //! | `fireweed_objectlog::composed_objectlog_backend` | log-bearing, in-memory projection | atomic | `conformance_suite!` = core@atomic + log-replay | `fireweed-objectlog/tests/conformance.rs` |
-//! | `fireweed_sqlite::SqliteRelationalBackend` | relational (DB-authoritative) | atomic | `core_suite!(@atomic)` + `relational_reconnect_suite!` | `fireweed-sqlite/tests/relational_{conformance,reconnect}.rs` |
 //! | `fireweed_postgres::PostgresRelationalBackend` | relational (DB-authoritative) | atomic | core@atomic + relational-reconnect (env-gated) | `fireweed-postgres/tests/relational_conformance.rs` |
 //!
-//! Relational-only features (`fireweed_group_summary`, `fireweed_item_key_retention`) are deliberately OUT of
-//! the shared CORE class so the families stay identical on it. The two families are additionally held
-//! identical HEAD-TO-HEAD by [`scenarios::cross_family_core_parity`] (run sqlite-relational vs in-memory in
-//! `fireweed-sqlite/tests/cross_family_parity.rs`). PARITY EVIDENCE STATUS: sqlite-relational-vs-in-memory is
-//! validated locally; the postgres-relational half runs the identical class wiring but its live-DB
-//! evidence is env-gated on `FIREWEED_PG_TEST_URL` and deferred-with-reason where no database is present
-//! (convergence-review I3).
+//! Relational-only features (`fireweed_group_summary`, `fireweed_item_key_retention`)
+//! are exercised by adapter-specific tests. Native Turso runs the shared projection
+//! conformance scenarios in `fireweed-turso/tests/qualification.rs`; public workflow
+//! and recovery tests run through the Fireweed facade. Live PostgreSQL tests require
+//! `FIREWEED_PG_TEST_URL`.
 //!
 //! ## Product durability classes (Class A / Class B)
 //!
-//! The public 5×4 log × projection matrix (matrix brief) uses a separate product
+//! The public 4×3 log × projection matrix (matrix brief) uses a separate product
 //! **durability class** axis from engine `DurabilityClass` (Atomic / EventualApply):
 //!
 //! | Product class | Logs | Durable log-replay after process death? |
 //! |---|---|---|
-//! | **Class A** | `sqlite`, `postgres`, `filesystem`, `s3` | Yes — log is system of record |
+//! | **Class A** | `postgres`, `filesystem`, `s3` | Yes — log is system of record |
 //! | **Class B** | `memory` | **No** — projection-only reopen when projection is durable |
 //!
 //! See [`matrix_classes`] for the per-cell claim table (unit-tested: Class B never
@@ -90,10 +86,6 @@ pub mod async_projection;
 pub mod fault;
 pub mod matrix_classes;
 pub mod scenarios;
-
-#[cfg(test)]
-#[path = "async_projection_compat/mod.rs"]
-pub mod async_projection_compat;
 
 /// The **core** conformance bound: the engine ports the substrate-independent scenarios exercise. Every
 /// projection family implements these — ordering, eligibility, claim atomicity, idempotency, lease/epoch
@@ -138,7 +130,7 @@ impl<T> ConformanceCore for T where
 
 /// A **log-bearing** conformance backend: [`ConformanceCore`] plus the durable-log ports the log-replay
 /// class exercises — `LogRead` (replay reconstruction) and `SnapshotStore` (snapshots). The committed
-/// log-bearing backends (memory, sqlite, objectlog, and any log-bearing relational backend) run the
+/// log-bearing backends (memory, objectlog, and any log-bearing relational backend) run the
 /// `log_replay_suite!`; a truly log-less relational backend implements only `ConformanceCore`.
 pub trait ConformanceBackend: ConformanceCore + SnapshotStore + LogRead {}
 

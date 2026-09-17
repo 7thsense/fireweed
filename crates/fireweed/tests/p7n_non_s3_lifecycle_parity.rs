@@ -1,9 +1,9 @@
-//! P7N — claim / append / finalize / lifecycle / races / recurrence on the 12 non-S3 cells.
+//! P7N — claim / append / finalize / lifecycle / races / recurrence on the 9 non-S3 cells.
 //!
 //! The public 5×3 matrix without S3 is:
-//!   log ∈ {memory, sqlite, postgres, filesystem}
-//!   × projection ∈ {memory, sqlite, postgres}
-//! = 12 cells.
+//!   log ∈ {memory, postgres, filesystem}
+//!   × projection ∈ {memory, turso, postgres}
+//! = 9 cells.
 //!
 //! This suite is intentionally **P7-method focused** (push/claim/complete/fail/release/retry/
 //! rearm + claim race + recurrence cycle). Discovery / projection-control / rich-claim capability
@@ -293,40 +293,14 @@ async fn p7n_memory_memory_lifecycle() {
 }
 
 #[tokio::test]
-async fn p7n_memory_sqlite_lifecycle() {
-    let root = FixtureRoot::new("memory_sqlite");
-    run_cell("memory--sqlite", || {
+async fn p7n_memory_turso_lifecycle() {
+    let root = FixtureRoot::new("memory_turso");
+    run_cell("memory--turso", || {
         let mut cfg = StorageConfig::memory();
-        cfg.projection = ProjectionStoreConfig::Sqlite {
-            path: root.path().join("projection.sqlite"),
+        cfg.projection = ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
         };
-        open(cfg, Arc::new(SystemClock)).expect("open memory×sqlite")
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn p7n_sqlite_memory_lifecycle() {
-    let root = FixtureRoot::new("sqlite_memory");
-    run_cell("sqlite--memory", || {
-        fireweed::open_sqlite(
-            root.path().join("log.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .expect("open sqlite×memory")
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn p7n_sqlite_sqlite_lifecycle() {
-    let root = FixtureRoot::new("sqlite_sqlite");
-    run_cell("sqlite--sqlite", || {
-        fireweed::open_sqlite_relational(
-            root.path().join("relational.sqlite").to_str().unwrap(),
-            Arc::new(SystemClock),
-        )
-        .expect("open sqlite×sqlite")
+        open(cfg, Arc::new(SystemClock)).expect("open memory×turso")
     })
     .await;
 }
@@ -342,23 +316,26 @@ async fn p7n_filesystem_memory_lifecycle() {
 }
 
 #[tokio::test]
-async fn p7n_filesystem_sqlite_lifecycle() {
-    let root = FixtureRoot::new("filesystem_sqlite");
-    run_cell("filesystem--sqlite", || {
-        let cfg = fireweed::ObjectLogRuntimeConfig {
-            object_log: fireweed::ObjectLogStorage::Local {
+async fn p7n_filesystem_turso_lifecycle() {
+    let root = FixtureRoot::new("filesystem_turso");
+    run_cell("filesystem--turso", || {
+        let cfg = StorageConfig {
+            log: fireweed::LogConfig::Filesystem {
                 root: root.path().join("object-log"),
             },
-            authority: fireweed::ObjectLogAuthority::NativeConditionalWrite,
-            projection: fireweed::ProjectionConfig::Sqlite {
-                path: root.path().join("projection.sqlite"),
+            authority: Some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
+            control_plane: None,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+            projection: ProjectionStoreConfig::Turso {
+                path: root.path().join("projection.db"),
             },
             response_barrier: ResponseBarrier::Strict,
             segments: segments(),
             namespace: "p7n-filesystem-sqlite".into(),
             recovery: fireweed::RecoveryPolicy::default(),
         };
-        fireweed::open_objectlog_sqlite(cfg, Arc::new(SystemClock)).expect("open filesystem×sqlite")
+        fireweed::open(cfg, Arc::new(SystemClock)).expect("open filesystem×turso")
     })
     .await;
 }
@@ -390,28 +367,6 @@ mod postgres_cells {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn p7n_sqlite_postgres_lifecycle() {
-        let Some(url) = pg_url() else {
-            panic!("p7n_sqlite_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-        };
-        let root = FixtureRoot::new("sqlite_postgres");
-        let mut cfg = StorageConfig::memory();
-        cfg.log = LogConfig::Sqlite {
-            path: root.path().join("log.sqlite"),
-        };
-        cfg.projection = ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(url),
-        };
-        cfg.namespace = format!("p7n_sqlite_pg_{}", std::process::id());
-        run_cell_async("sqlite--postgres", async {
-            fireweed::open_async(cfg, Arc::new(SystemClock))
-                .await
-                .expect("open sqlite×postgres")
-        })
-        .await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn p7n_postgres_memory_lifecycle() {
         let Some(url) = pg_url() else {
             panic!("p7n_postgres_memory_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
@@ -425,12 +380,12 @@ mod postgres_cells {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn p7n_postgres_sqlite_lifecycle() {
+    async fn p7n_postgres_turso_lifecycle() {
         let Some(url) = pg_url() else {
-            panic!("p7n_postgres_sqlite_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
+            panic!("p7n_postgres_turso_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
-        let root = FixtureRoot::new("postgres_sqlite");
-        let schema = format!("p7n_pg_sqlite_{}", std::process::id());
+        let root = FixtureRoot::new("postgres_turso");
+        let schema = format!("p7n_pg_turso_{}", std::process::id());
         let mut cfg = StorageConfig::memory();
         cfg.log = LogConfig::Postgres {
             url: ConfigSecret::new(url),
@@ -439,14 +394,14 @@ mod postgres_cells {
             node_id: None,
             coordination: None,
         };
-        cfg.projection = ProjectionStoreConfig::Sqlite {
-            path: root.path().join("projection.sqlite"),
+        cfg.projection = ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
         };
         cfg.namespace = schema;
-        run_cell_async("postgres--sqlite", async {
+        run_cell_async("postgres--turso", async {
             fireweed::open_async(cfg, Arc::new(SystemClock))
                 .await
-                .expect("open postgres×sqlite")
+                .expect("open postgres×turso")
         })
         .await;
     }
@@ -482,12 +437,15 @@ mod postgres_cells {
             panic!("p7n_filesystem_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         let root = FixtureRoot::new("filesystem_postgres");
-        let cfg = fireweed::ObjectLogRuntimeConfig {
-            object_log: fireweed::ObjectLogStorage::Local {
+        let cfg = StorageConfig {
+            log: fireweed::LogConfig::Filesystem {
                 root: root.path().join("object-log"),
             },
-            authority: fireweed::ObjectLogAuthority::NativeConditionalWrite,
-            projection: fireweed::ProjectionConfig::Postgres {
+            authority: Some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
+            control_plane: None,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+            projection: ProjectionStoreConfig::Postgres {
                 url: ConfigSecret::new(url),
             },
             response_barrier: ResponseBarrier::Strict,
@@ -496,7 +454,7 @@ mod postgres_cells {
             recovery: fireweed::RecoveryPolicy::default(),
         };
         run_cell_async("filesystem--postgres", async {
-            fireweed::open_objectlog_postgres_async(cfg, Arc::new(SystemClock))
+            fireweed::open_async(cfg, Arc::new(SystemClock))
                 .await
                 .expect("open filesystem×postgres")
         })

@@ -702,6 +702,10 @@ impl fmt::Debug for ObjectLogConfig {
 /// (crate-private; the public projection axis is [`ProjectionStoreConfig`]).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ComposedProjectionConfig {
+    Turso {
+        path: PathBuf,
+    },
+    /// Preserved only to reject the retired public convenience selector.
     Sqlite {
         path: PathBuf,
     },
@@ -714,6 +718,7 @@ pub(crate) enum ComposedProjectionConfig {
 impl fmt::Debug for ComposedProjectionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Turso { path } => f.debug_struct("Turso").field("path", path).finish(),
             Self::Sqlite { path } => f.debug_struct("Sqlite").field("path", path).finish(),
             Self::Postgres { .. } => f
                 .debug_struct("Postgres")
@@ -868,15 +873,15 @@ pub enum ProjectionConfig {
 ///
 /// # Object-log (LogEngine) cells
 ///
-/// - [`ResponseBarrier::Strict`] (default): **atomic response-after-apply**. Success is returned
-///   only after the authoritative object-log append and the projection apply both complete.
-///   `commit_capabilities` report [`DurabilityClass::Atomic`] and `atomic_transition_commit: true`
-///   (Snorri CONTRACT-003). The composition still uses separate append then apply for crash recovery
-///   (not one substrate transaction); Strict is a response/visibility barrier, not a single-TX claim.
-/// - [`ResponseBarrier::AsyncProjection`]: eventual-apply visibility. Success may return after
-///   hot-projection update with deferred durable checkpoint; `atomic_transition_commit` is false and
-///   durability is [`DurabilityClass::EventualApply`]. Vectorized transitions remain available through
-///   the authoritative object log; the deferred SQLite checkpoint is outside the response barrier.
+/// - [`ResponseBarrier::Strict`] is the response-after-apply setting for the memory
+///   and PostgreSQL object-log compositions. Their log and projection are separate
+///   recovery steps, even when capabilities report [`DurabilityClass::Atomic`].
+/// - [`ResponseBarrier::AsyncProjection`] allows bounded deferred projection apply.
+///   The authoritative log still determines the durable outcome.
+/// - Native Turso reports [`DurabilityClass::EventualApply`] for either setting:
+///   durable outcomes provide read coverage while the disposable SQL projection
+///   catches up. Inspect `commit_capabilities` for the selected composition rather
+///   than inferring supported transition or recovery APIs from this enum alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrier {
     Strict,
@@ -1056,7 +1061,7 @@ impl PostgresRuntimeConfig {
 pub enum LogConfig {
     /// Class B: in-process command log (no log rebuild after process death).
     Memory,
-    /// Class A: durable SQLite command log.
+    /// Retired compatibility selector; validation rejects SQLite before opening storage.
     Sqlite { path: PathBuf },
     /// Class A: durable PostgreSQL command log.
     Postgres {
@@ -1097,9 +1102,9 @@ impl LogConfig {
     }
 }
 
-/// Public projection axis: four first-class values (orthogonal storage matrix / API-005).
+/// Public projection axis: memory, Turso and PostgreSQL (API-005).
 ///
-/// Object-log convenience constructors still use [`ProjectionConfig`] (sqlite/postgres only);
+/// Legacy object-log convenience constructors use [`ProjectionConfig`]; SQLite is rejected.
 /// full-matrix work uses this type (includes [`Memory`](Self::Memory) and
 /// [`Turso`](Self::Turso)). Turso is the product default projection when a path is selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1131,8 +1136,8 @@ impl ProjectionStoreConfig {
 
 /// Normative composition root for log × projection (+ related axes). API-005 / product brief.
 ///
-/// Every cell of the 5×4 matrix is a valid selection; durability class differs by log axis
-/// ([`LogConfig::is_durable_log`]). Open all 20 pairs via [`open`] / [`open_async`] (cargo features
+/// Every cell of the 4×3 matrix is a valid selection; durability class differs by log axis
+/// ([`LogConfig::is_durable_log`]). Open all 12 pairs via [`open`] / [`open_async`] (cargo features
 /// must enable the chosen adapters; postgres cells require the `postgres` feature; Turso is
 /// default-on via the `turso` feature).
 #[derive(Debug, Clone)]
@@ -1145,7 +1150,7 @@ pub struct StorageConfig {
     pub response_barrier: ResponseBarrier,
     /// Required only when `response_barrier` is [`ResponseBarrier::AsyncProjection`].
     pub async_projection: Option<AsyncProjectionSpec>,
-    /// Optional SQLite projection apply-batch bound. Independent of response-barrier policy.
+    /// Retired compatibility field. Any supplied value is rejected before storage I/O.
     pub sqlite_projection_deferred_flush_chunk: Option<usize>,
     pub segments: SegmentConfig,
     pub namespace: String,
@@ -1178,7 +1183,7 @@ impl StorageConfig {
         config.into_matrix_config()
     }
 
-    /// Structural validation for the 5×3 matrix. Does not open stores.
+    /// Structural validation for the 4×3 matrix. Does not open stores.
     ///
     /// Returns [`EngineError::Invalid`] for malformed fields and
     /// [`EngineError::Unavailable`] for clearly mismatched object-log authority /
@@ -1657,7 +1662,7 @@ mod storage_config_matrix_tests {
         assert_eq!(retired_cells, 8);
     }
 
-    /// AC: Turso default selection, all five log compositions, single-thread heartbeat.
+    /// AC: Turso default selection, all four log compositions, single-thread heartbeat.
     #[cfg(feature = "turso")]
     #[test]
     fn turso_projection_full_facade_matrix() {
@@ -2314,7 +2319,6 @@ mod storage_config_matrix_tests {
             &["fn open_s3_objectlog_postgres_", "blocking("].concat(),
         );
         assert!(!postgres.contains("S3Compatible"));
-
     }
 }
 
@@ -2550,6 +2554,11 @@ impl ComposedStorageConfig {
             )?,
         }
         match &self.projection {
+            ComposedProjectionConfig::Turso { path } if path.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid(
+                    "Turso projection path must not be empty",
+                ));
+            }
             ComposedProjectionConfig::Sqlite { .. } => {
                 return Err(EngineError::Invalid(
                     "sqlite storage is retired; use filesystem log and turso projection",
@@ -2773,25 +2782,6 @@ type ObjectLogPostgresBackend = fireweed_postgres::AsyncObjectLogPostgresBackend
 struct ObjectLogPostgresLifecycle {
     backend: Option<Arc<ObjectLogPostgresBackend>>,
     max_tail_commands: u64,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
-}
-
-#[cfg(feature = "objectlog")]
-fn objectlog_recover_definitions(
-    log: &fireweed_objectlog::ObjectLogEngineStore,
-) -> EngineResult<Vec<QueueDefinition>> {
-    use fireweed_engine::AsyncLogStore;
-    fireweed_objectlog::block_on_objectlog(AsyncLogStore::recover_definitions(log))
-}
-
-#[cfg(feature = "objectlog")]
-fn objectlog_high_water(
-    log: &fireweed_objectlog::ObjectLogEngineStore,
-    key: &QueueKey,
-) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
-    use fireweed_engine::AsyncLogStore;
-    fireweed_objectlog::block_on_objectlog(AsyncLogStore::high_water(log, key.clone()))
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
@@ -2970,10 +2960,6 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
     }
 
     fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(flusher) = self.flusher.lock().expect("flusher poisoned").take() {
-            let _ = flusher.join();
-        }
         if let Some(backend) = self.backend.take() {
             // `postgres::Client::drop` drives its private runtime. Keep the final
             // backend drop off any ambient Tokio runtime just as construction is.
@@ -3659,8 +3645,7 @@ fn apply_owned_renewal_outcomes(
 
 impl<B: LibBackend> RuntimeCore<B> {
     /// Low-level backend-injection constructor for a **sole-owner** handle. Hidden from the published
-    /// surface (ADR-009 §4a / L6): external clients build via [`open_memory`]/[`open_sqlite`]/
-    /// [`open_sqlite_relational`]/
+    /// surface (ADR-009 §4a / L6): external clients build via [`open`], [`open_memory`] or
     /// [`open_objectlog`], which construct the backend internally so a port-bearing handle is never named.
     /// First-party crates/tests that inject a concrete backend use this.
     #[doc(hidden)]
@@ -4148,7 +4133,7 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// Claim with API-001 compatibility options (group_batching / whole_cohort / same_group_key /
     /// group_key / metadata_equals). `ClaimCompatibility::default()` is the item-level claim (see
     /// [`claim`](Self::claim)). Item-unit `group_key` / `metadata_equals` fences are honored on memory
-    /// and sqlite projections (v0.23.3 semantics). Every supported composition implements each declared
+    /// and native Turso projections. Every supported composition implements each declared
     /// claim unit without silently downgrading to item-level delivery.
     pub async fn claim_with(
         &self,
@@ -5322,7 +5307,7 @@ impl<B: LibBackend> RuntimeCore<B> {
 // on an internal crate (strong-by-default, not absolute — OD-6).
 // ---------------------------------------------------------------------------
 
-/// Open a [`Fireweed`] for any cell of the public 5×4 log × projection matrix (API-005).
+/// Open a [`Fireweed`] for any cell of the public 4×3 log × projection matrix (API-005).
 ///
 /// Validates [`StorageConfig`], then dispatches to the composition path for that pair. Missing cargo
 /// features (e.g. requesting postgres without `--features postgres`, or turso without `--features turso`)
@@ -5705,7 +5690,7 @@ fn open_filesystem_log_cell(
                     let config = composed_storage_config(
                         ObjectLogConfig::Local { root: root.clone() },
                         authority,
-                        ComposedProjectionConfig::Sqlite { path: path.clone() },
+                        ComposedProjectionConfig::Turso { path: path.clone() },
                         response_barrier,
                         async_projection,
                         sqlite_projection_deferred_flush_chunk,
@@ -5723,7 +5708,7 @@ fn open_filesystem_log_cell(
                     )?;
                     let async_spec = match response_barrier {
                         ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => config.async_projection.clone(),
+                        ResponseBarrier::AsyncProjection => config.async_projection,
                     };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log, path, async_spec,
@@ -5861,7 +5846,7 @@ fn open_s3_log_cell(
                     let config = composed_storage_config(
                         s3_object_log_config(provider.clone()),
                         authority,
-                        ComposedProjectionConfig::Sqlite { path: path.clone() },
+                        ComposedProjectionConfig::Turso { path: path.clone() },
                         response_barrier,
                         async_projection,
                         sqlite_projection_deferred_flush_chunk,
@@ -5880,7 +5865,7 @@ fn open_s3_log_cell(
                     // Forward the caller's AsyncProjectionSpec; never re-default at the S3 boundary.
                     let async_spec = match response_barrier {
                         ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => config.async_projection.clone(),
+                        ResponseBarrier::AsyncProjection => config.async_projection,
                     };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log, path, async_spec,
@@ -6018,7 +6003,7 @@ fn s3_object_log_config(provider: S3ComposedProvider) -> ObjectLogConfig {
     }
 }
 
-#[cfg(feature = "objectlog")]
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
 fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3ComposedProvider> {
     let ObjectLogConfig::S3Compatible {
         endpoint,
@@ -6262,7 +6247,11 @@ fn open_objectlog_postgres_blocking(
                 &projection_schema,
             ),
         )?,
-        ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
+        ComposedProjectionConfig::Sqlite { .. } | ComposedProjectionConfig::Turso { .. } => {
+            return Err(EngineError::Invalid(
+                "PostgreSQL helper requires a PostgreSQL projection",
+            ));
+        }
     };
     let log = open_composed_object_log_engine(root, &config.namespace, config.segments)?;
     finish_objectlog_postgres(config, clock, log, projection)
@@ -6286,7 +6275,11 @@ fn open_s3_objectlog_postgres_blocking(
                 &projection_schema,
             ),
         )?,
-        ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
+        ComposedProjectionConfig::Sqlite { .. } | ComposedProjectionConfig::Turso { .. } => {
+            return Err(EngineError::Invalid(
+                "PostgreSQL helper requires a PostgreSQL projection",
+            ));
+        }
     };
     let log = open_s3_composed_object_log_engine(&provider, &config.namespace, config.segments)?;
     finish_objectlog_postgres(config, clock, log, projection)
@@ -6327,33 +6320,13 @@ fn finish_objectlog_postgres(
             ),
         )?,
     };
-    let flush_interval = 50_u64;
     let backend = Arc::new(backend);
-    // Both axes now own their async boundaries: LogEngine runs on the object-log runtime and the
-    // synchronous PostgreSQL projection is isolated behind its dedicated bounded actor.
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let weak_backend = Arc::downgrade(&backend);
-    let thread_stop = Arc::clone(&stop);
-    let flusher = std::thread::Builder::new()
-        .name(format!("fireweed-composed-{}", config.namespace))
-        .spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
-                std::thread::sleep(std::time::Duration::from_millis(flush_interval));
-                let Some(_backend) = weak_backend.upgrade() else {
-                    break;
-                };
-                // LogEngine products own flush; dual-stack flush_tick removed.
-            }
-        })
-        .map_err(|error| EngineError::Storage(error.to_string()))?;
     let lifecycle = ProjectionLifecycleHandle {
         inner: Arc::new(ProjectionLifecycleHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogPostgresLifecycle {
                 backend: Some(Arc::clone(&backend)),
                 max_tail_commands: config.recovery.max_tail_commands,
-                stop,
-                flusher: Mutex::new(Some(flusher)),
             }),
         }),
     };
@@ -7147,7 +7120,7 @@ mod tests {
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         fireweed.create_queue(definition).await?;
-        fireweed
+        let pushed = fireweed
             .push(
                 &queue,
                 NewItem {
@@ -7176,14 +7149,17 @@ mod tests {
                     request_id: Some(RequestId::new("rid-cbq-commit").unwrap()),
                 },
             )
-            .await;
-        // Native Turso does not expose declared-index query claims yet. Do not
-        // pretend this API was ported by silently replacing its assertion.
-        assert!(matches!(query_result, Err(EngineError::Unavailable)));
-        assert_eq!(fireweed.metrics(&queue).await?.pending, 1);
-        let claimed = fireweed.claim(&queue, 1, 60_000).await?;
-        assert_eq!(claimed.len(), 1, "priority claim must lease the row");
-        let item = &claimed[0];
+            .await?;
+        assert_eq!(
+            query_result.items.len(),
+            1,
+            "indexed claim must lease the row"
+        );
+        let item = &query_result.items[0];
+        assert_eq!(item.item_id, pushed);
+        let metrics = fireweed.metrics(&queue).await?;
+        assert_eq!((metrics.pending, metrics.leased), (0, 1));
+        assert!(fireweed.claim(&queue, 1, 60_000).await?.is_empty());
         // Snorri calls create_queue again immediately before commit; selected projection must not rehydrate
         // from the projection and drop the process-local lease cleartext.
         fireweed.create_queue(query_definition()).await?;

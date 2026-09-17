@@ -20,9 +20,8 @@ use fireweed::{
     RequestId, UtcTimestamp,
 };
 use fireweed_core::{
-    CohortOnIncomplete, CohortPolicy, EligibilityPolicy, OrderingMode, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueId, RecurrencePolicy, RetryPolicy,
-    TenantId,
+    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::{Clock, QueueKey};
 
@@ -76,16 +75,13 @@ fn plus_ms(base: UtcTimestamp, ms: i64) -> UtcTimestamp {
 // Data-shape model
 // ---------------------------------------------------------------------------
 
-/// How items relate to one another for grouping / cohort selection.
+/// How items relate to one another for grouping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grouping {
     /// No `group_key`.
     Ungrouped,
     /// `group_key` round-robins across `n` groups.
     Grouped(usize),
-    /// Items are partitioned into cohorts of `size` consecutive items sharing a `group_key`; each item
-    /// carries `cohort_size = size` and the queue runs cohort policy.
-    Cohort(usize),
 }
 
 /// The priority distribution stamped on generated items.
@@ -108,13 +104,6 @@ pub struct Shape {
     pub field_bytes: usize,
     pub grouping: Grouping,
     pub priority: PriorityDist,
-}
-
-impl Shape {
-    /// True when this shape requires cohort policy on the queue.
-    pub fn needs_cohort(&self) -> bool {
-        matches!(self.grouping, Grouping::Cohort(_))
-    }
 }
 
 /// The representative SET of shapes (deliberately NOT the full cross-product). See the module/baseline doc.
@@ -154,15 +143,6 @@ pub fn all_shapes() -> Vec<Shape> {
             n_fields: 4,
             field_bytes: 32,
             grouping: Grouping::Grouped(64),
-            priority: PriorityDist::Uniform,
-        },
-        // Cohorted work (cohorts of 8) — only on a cohort-policy queue.
-        Shape {
-            name: "cohort",
-            payload_bytes: 256,
-            n_fields: 4,
-            field_bytes: 32,
-            grouping: Grouping::Cohort(8),
             priority: PriorityDist::Uniform,
         },
         // A skewed priority band (hot-head workload).
@@ -214,11 +194,6 @@ pub fn make_item(shape: &Shape, idx: u64) -> NewItem {
     let group_key = match shape.grouping {
         Grouping::Ungrouped => None,
         Grouping::Grouped(g) => Some(GroupKey::new(format!("g{}", idx % g as u64)).expect("gk")),
-        Grouping::Cohort(sz) => Some(GroupKey::new(format!("c{}", idx / sz as u64)).expect("gk")),
-    };
-    let cohort_size = match shape.grouping {
-        Grouping::Cohort(sz) => Some(sz as u64),
-        _ => None,
     };
     NewItem {
         client_item_key: None,
@@ -228,9 +203,10 @@ pub fn make_item(shape: &Shape, idx: u64) -> NewItem {
         payload,
         fields,
         metadata: Default::default(),
-        cohort_size,
+        cohort_size: None,
         gate_keys: Vec::new(),
         entity: None,
+        index_fields: Default::default(),
     }
 }
 
@@ -243,17 +219,8 @@ pub fn make_batch(shape: &Shape, start: u64, n: usize) -> Vec<NewItem> {
 // Queue definition
 // ---------------------------------------------------------------------------
 
-/// A bench queue definition. Enables cohort policy when `shape` is cohorted; otherwise leaves it off.
-pub fn bench_qdef(tenant: &str, queue: &str, shape: &Shape) -> QueueDefinition {
-    let cohort_policy = match shape.grouping {
-        Grouping::Cohort(sz) => Some(CohortPolicy {
-            enabled: true,
-            completion_bound_ms: Some(30_000),
-            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
-            max_cohort_size: Some(sz as u64),
-        }),
-        _ => None,
-    };
+/// Item-claim benchmark queue. Whole-cohort workflows have dedicated public-facade tests.
+pub fn bench_qdef(tenant: &str, queue: &str, _shape: &Shape) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new(tenant).expect("tenant"),
         queue_id: QueueId::new(queue).expect("queue"),
@@ -266,7 +233,7 @@ pub fn bench_qdef(tenant: &str, queue: &str, shape: &Shape) -> QueueDefinition {
         max_rank_error: 0,
         progress_bound_ms: 60_000,
         eligibility_policy: EligibilityPolicy::default(),
-        cohort_policy,
+        cohort_policy: None,
         recurrence: RecurrencePolicy::default(),
         request_id_retention_ms: 60_000,
         client_item_key_retention_ms: 60_000,
@@ -682,4 +649,21 @@ pub async fn lifecycle(
         },
         update_ran,
     })
+}
+
+/// Open the current local durable profile through the public facade.
+/// The caller owns `root` and removes it after dropping the returned handle.
+pub fn open_log_turso(
+    root: &std::path::Path,
+    clock: std::sync::Arc<dyn Clock>,
+) -> fireweed::EngineResult<Fireweed> {
+    let mut config = fireweed::StorageConfig::memory();
+    config.log = fireweed::LogConfig::Filesystem {
+        root: root.join("log"),
+    };
+    config.projection = fireweed::ProjectionStoreConfig::Turso {
+        path: root.join("projection.db"),
+    };
+    config.authority = Some(fireweed::ObjectLogAuthority::NativeConditionalWrite);
+    fireweed::open(config, clock)
 }

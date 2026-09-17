@@ -1,5 +1,8 @@
 #![allow(dead_code, unused_imports)]
 
+#[path = "support/storage.rs"]
+mod storage;
+
 use std::sync::{Arc, Mutex};
 
 use fireweed::*;
@@ -133,11 +136,11 @@ async fn structural_and_definition_preflight_have_no_claim_effects() {
     assert_eq!(fireweed.metrics(&b).await.unwrap().pending, 1);
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(feature = "turso")]
 #[tokio::test]
 async fn durable_relational_backend_claims_each_target() {
-    let fireweed =
-        fireweed::open_sqlite_relational(":memory:", Arc::new(ManualClock::at(5))).unwrap();
+    let fixture = storage::Fixture::new();
+    let fireweed = storage::open_log_turso(fixture.path(), Arc::new(ManualClock::at(5))).unwrap();
     let a = queue("durable-a");
     let b = queue("durable-b");
     for (key, id) in [(&a, "durable-a"), (&b, "durable-b")] {

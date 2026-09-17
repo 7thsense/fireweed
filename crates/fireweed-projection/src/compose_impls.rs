@@ -939,6 +939,15 @@ impl ProjectionStore for InMemoryProjection {
             .terminal_emission_metrics(now, emit_change_records, emission_cursor))
     }
 
+    fn retained_items(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::RetainedItemView>> {
+        self.get(shard)?.retained_items(after, limit)
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,

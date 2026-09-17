@@ -3,7 +3,7 @@
 // Path-includes the shared fixture source so every integration test can consume
 // the same `base_dir` / `open_async_projection` / `clear_thresholds` / `push` / `drain`
 // / `floor_seq` / `ProjectionMode` / `qdef_short_retention` / etc. without
-// duplicating them or pulling fireweed-objectlog / fireweed-sqlite into the normal
+// duplicating them or pulling fireweed-objectlog / fireweed-turso into the normal
 // library dependency graph.
 //
 // The included module references `super::{qdef, shard, ts}` — the re-exports

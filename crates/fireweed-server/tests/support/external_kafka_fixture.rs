@@ -1,6 +1,7 @@
 //! Hermetic ExternalKafka qualification fixture (plan key P8k / fireweed-9f46444e).
 //!
-//! Starts a single-node Kafka-compatible broker (Redpanda) from a **pinned image digest** on an
+//! Starts a single-node Kafka-compatible broker from a pinned Redpanda image or an explicitly
+//! provisioned Apache Kafka distribution (FIREWEED_KAFKA_HOME), on an
 //! ephemeral loopback port, creates a run-owned single-partition topic, and proves readiness with
 //! the same pure-Rust `rskafka` client path the feature-on `ExternalKafkaChangeRecordSink` uses.
 //!
@@ -17,7 +18,7 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
@@ -63,6 +64,7 @@ impl std::error::Error for FixtureError {}
 /// Run-owned hermetic Kafka-compatible broker + topic for ExternalKafka qualification.
 pub struct ExternalKafkaFixture {
     container_name: String,
+    process: Option<Child>,
     host_port: u16,
     topic: String,
     log_capture: String,
@@ -83,6 +85,9 @@ impl ExternalKafkaFixture {
         start_timeout: Duration,
         rskafka_timeout: Duration,
     ) -> Result<Self, FixtureError> {
+        if let Some(home) = std::env::var_os("FIREWEED_KAFKA_HOME") {
+            return Self::start_process(Path::new(&home), start_timeout, rskafka_timeout);
+        }
         require_docker()?;
         let run_id = unique_run_id();
         let container_name = format!("fireweed-ext-kafka-{run_id}");
@@ -100,6 +105,7 @@ impl ExternalKafkaFixture {
 
         let mut fixture = Self {
             container_name: container_name.clone(),
+            process: None,
             host_port,
             topic: topic.clone(),
             log_capture: String::new(),
@@ -175,6 +181,139 @@ impl ExternalKafkaFixture {
 
         fixture.capture_logs();
         Ok(fixture)
+    }
+
+    /// Optional user-owned Apache Kafka distribution; no shared broker is reused.
+    /// Provision and checksum the distribution outside this fixture, then set
+    /// FIREWEED_KAFKA_HOME. The Docker path remains the default CI topology.
+    fn start_process(
+        home: &Path,
+        start_timeout: Duration,
+        preflight_timeout: Duration,
+    ) -> Result<Self, FixtureError> {
+        let run_id = unique_run_id();
+        let log_dir = std::env::temp_dir().join(format!("fireweed-ext-kafka-logs-{run_id}"));
+        std::fs::create_dir_all(&log_dir).map_err(|e| FixtureError::new(e.to_string()))?;
+        // Hold both reservations until configuration is ready, ensuring distinct ports.
+        let broker =
+            TcpListener::bind("127.0.0.1:0").map_err(|e| FixtureError::new(e.to_string()))?;
+        let controller =
+            TcpListener::bind("127.0.0.1:0").map_err(|e| FixtureError::new(e.to_string()))?;
+        let host_port = broker
+            .local_addr()
+            .map_err(|e| FixtureError::new(e.to_string()))?
+            .port();
+        let controller_port = controller
+            .local_addr()
+            .map_err(|e| FixtureError::new(e.to_string()))?
+            .port();
+        let config = log_dir.join("server.properties");
+        let data = log_dir.join("data");
+        let properties = format!(
+            "process.roles=broker,controller\nnode.id=1\ncontroller.quorum.bootstrap.servers=127.0.0.1:{controller_port}\nlisteners=PLAINTEXT://127.0.0.1:{host_port},CONTROLLER://127.0.0.1:{controller_port}\nadvertised.listeners=PLAINTEXT://127.0.0.1:{host_port}\ncontroller.listener.names=CONTROLLER\nlistener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT\ninter.broker.listener.name=PLAINTEXT\nlog.dirs={}\nnum.partitions=1\noffsets.topic.replication.factor=1\ntransaction.state.log.replication.factor=1\ntransaction.state.log.min.isr=1\ngroup.initial.rebalance.delay.ms=0\n",
+            data.display()
+        );
+        std::fs::write(&config, properties).map_err(|e| FixtureError::new(e.to_string()))?;
+        let output = std::fs::File::create(log_dir.join("broker.log"))
+            .map_err(|e| FixtureError::new(e.to_string()))?;
+        let mut format = Command::new(home.join("bin/kafka-storage.sh"));
+        format
+            .args([
+                "format",
+                "--standalone",
+                "--cluster-id",
+                "fireweedMaintTestAAAAAA",
+                "--config",
+            ])
+            .arg(&config)
+            .env("KAFKA_HEAP_OPTS", "-Xms128m -Xmx256m")
+            .env("LOG_DIR", &log_dir)
+            .stdout(
+                output
+                    .try_clone()
+                    .map_err(|e| FixtureError::new(e.to_string()))?,
+            )
+            .stderr(
+                output
+                    .try_clone()
+                    .map_err(|e| FixtureError::new(e.to_string()))?,
+            );
+        bounded_command(&mut format, start_timeout)?;
+        drop((broker, controller));
+        let process = Command::new(home.join("bin/kafka-server-start.sh"))
+            .arg(&config)
+            .env("KAFKA_HEAP_OPTS", "-Xms256m -Xmx512m")
+            .env("LOG_DIR", &log_dir)
+            .stdout(
+                output
+                    .try_clone()
+                    .map_err(|e| FixtureError::new(e.to_string()))?,
+            )
+            .stderr(output)
+            .spawn()
+            .map_err(|e| FixtureError::new(format!("start Kafka process: {e}")))?;
+        let mut fixture = Self {
+            container_name: format!("process-{run_id}"),
+            process: Some(process),
+            host_port,
+            topic: format!("fireweed-ext-kafka-topic-{run_id}"),
+            log_capture: String::new(),
+            cleaned: false,
+            log_dir,
+        };
+        let deadline = Instant::now() + start_timeout;
+        loop {
+            if let Some(status) = fixture
+                .process
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .map_err(|e| FixtureError::new(e.to_string()))?
+            {
+                fixture.capture_logs();
+                return Err(FixtureError::new(format!(
+                    "Kafka process exited ({status}); logs: {}",
+                    fixture.log_dir.display()
+                )));
+            }
+            if std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{host_port}").parse().unwrap(),
+                Duration::from_millis(100),
+            )
+            .is_ok()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(FixtureError::new("Kafka process readiness timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| FixtureError::new(e.to_string()))?;
+        runtime.block_on(async {
+            tokio::time::timeout(start_timeout, async {
+                let client = ClientBuilder::new(vec![fixture.bootstrap()])
+                    .build()
+                    .await?;
+                client
+                    .controller_client()?
+                    .create_topic(&fixture.topic, 1, 1, 10_000)
+                    .await
+            })
+            .await
+            .map_err(|_| FixtureError::new("Kafka topic creation timed out"))?
+            .map_err(|e| FixtureError::new(format!("Kafka topic creation: {e}")))
+        })?;
+        fixture.preflight_rskafka(preflight_timeout)?;
+        fixture.capture_logs();
+        Ok(fixture)
+    }
+
+    pub fn process_id(&self) -> Option<u32> {
+        self.process.as_ref().map(Child::id)
     }
 
     pub fn bootstrap(&self) -> String {
@@ -354,6 +493,11 @@ impl ExternalKafkaFixture {
     }
 
     fn capture_logs(&mut self) {
+        if self.process.is_some() {
+            self.log_capture =
+                std::fs::read_to_string(self.log_dir.join("broker.log")).unwrap_or_default();
+            return;
+        }
         let output = Command::new("docker")
             .args(["logs", "--tail", "200", &self.container_name])
             .output();
@@ -373,7 +517,13 @@ impl ExternalKafkaFixture {
         if self.cleaned {
             return;
         }
-        let _ = docker_rm_force(&self.container_name);
+        if let Some(mut process) = self.process.take() {
+            let _ = process.kill();
+            let _ = process.wait(); // Reap before the fixture is considered cleaned.
+            let _ = std::fs::remove_dir_all(self.log_dir.join("data"));
+        } else {
+            let _ = docker_rm_force(&self.container_name);
+        }
         self.cleaned = true;
     }
 }
@@ -479,6 +629,29 @@ fn docker_rm_force(name: &str) -> Result<(), FixtureError> {
     // Non-zero is fine if the container never existed.
     let _ = output;
     Ok(())
+}
+
+fn bounded_command(command: &mut Command, timeout: Duration) -> Result<(), FixtureError> {
+    let mut child = command
+        .spawn()
+        .map_err(|e| FixtureError::new(e.to_string()))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(FixtureError::new(format!("fixture setup exited {status}")));
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FixtureError::new(format!(
+                    "fixture setup timed out or failed: {result:?}"
+                )));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

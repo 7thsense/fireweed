@@ -28,8 +28,8 @@ shape (see [container-runtime-contract.md](container-runtime-contract.md)).
 
 | Axis | Helm value | Public values |
 |------|------------|---------------|
-| Log backend | `storage.log.backend` | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
-| Projection | `storage.projection.backend` | `memory`, `sqlite`, `turso` (server default), `postgres` |
+| Log backend | `storage.log.backend` | `memory`, `postgres`, `filesystem`, `s3` |
+| Projection | `storage.projection.backend` | `memory`, `turso` (server default), `postgres` |
 | Control plane | `storage.controlPlane.backend` | `inprocess`, `postgres` |
 
 Stock `fireweed-service` and the Helm chart both default the projection axis to
@@ -41,27 +41,26 @@ Stock `fireweed-service` and the Helm chart both default the projection axis to
 
 | Class | Log backends | Client contract |
 |-------|--------------|-----------------|
-| **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log and visible in the serving projection; recovery via high-water + tail when the log remains; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | Success ⇒ visible in the projection; durable **only if** the projection is durable (`sqlite` / `turso` / `postgres`). After process death only the projection remains. **No** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
+| **A — Durable log** | `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log and visible in the serving projection; recovery via high-water + tail when the log remains; `request_id` resolves ambiguity across crash |
+| **B — Memory log** | `memory` | Success ⇒ visible in the projection; durable **only if** the projection is durable (`turso` / `postgres`). After process death only the projection remains. **No** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
 
 **Class B disclaimer:** a `memory` log is an explicit weaker persistence
 envelope, not a second architecture. Use it for development and evaluation.
 Do not claim Class A recovery or durability for any memory-log combination.
 
-### Full matrix (20 cells)
+### Full matrix (12 cells)
 
 Every cell is a valid, preview-supported selection. Semantics differ only by
 durability class. Open the same pair via library `StorageConfig`, server env
 adapter, or Helm `storage.log` / `storage.projection`. Invalid or demoted names
 fail closed at schema validation / startup.
 
-| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
-|------------------|----------|----------|-------------------|------------|
-| `memory` | Class B | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `turso` (default) | `postgres` |
+|------------------|----------|-------------------|------------|
+| `memory` | Class B | Class B | Class B |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
 
 ### Axis examples (`StorageConfig` ↔ Helm)
 
@@ -70,7 +69,7 @@ minimal axis selection; combine any log row with any projection column. Chart
 CI fixtures under `charts/fireweed-queue/ci/` cover the full matrix (plus
 shared multi-replica S3/control-plane variants).
 
-#### Log axis (five public values)
+#### Log axis (four public values)
 
 **`memory` (Class B).** In-process log; after process death only the projection
 remains. Pair with a durable projection when you need process-restart
@@ -81,21 +80,7 @@ storage:
   log:
     backend: memory
   projection:
-    backend: turso   # or memory | sqlite | postgres
-    turso:
-      path: /var/lib/fireweed/projection/projection.turso
-```
-
-**`sqlite` (Class A).** Durable local log path.
-
-```yaml
-storage:
-  log:
-    backend: sqlite
-    sqlite:
-      path: /var/lib/fireweed/projection/fireweed-log.db
-  projection:
-    backend: turso   # or memory | sqlite | postgres
+    backend: turso   # or memory | postgres
     turso:
       path: /var/lib/fireweed/projection/projection.turso
 ```
@@ -110,7 +95,7 @@ storage:
       existingSecret: fireweed-postgres-log
       databaseUrlKey: database-url
   projection:
-    backend: turso   # or memory | sqlite | postgres
+    backend: turso   # or memory | postgres
     turso:
       path: /var/lib/fireweed/projection/projection.turso
 ```
@@ -124,7 +109,7 @@ storage:
     objectLog:
       root: /var/lib/fireweed/projection/object-log
   projection:
-    backend: turso   # or memory | sqlite | postgres
+    backend: turso   # or memory | postgres
     turso:
       path: /var/lib/fireweed/projection/projection.turso
 ```
@@ -143,18 +128,17 @@ storage:
         credentials:
           existingSecret: fireweed-objectlog-s3
   projection:
-    backend: turso   # or memory | sqlite | postgres
+    backend: turso   # or memory | postgres
     turso:
       path: /var/lib/fireweed/projection/projection.turso
 ```
 
-#### Projection axis (four public values)
+#### Projection axis (three public values)
 
 | Projection | When to use | Structured fields / env |
 |------------|-------------|-------------------------|
 | `turso` (default) | Local durable serving projection (stock default) | `storage.projection.turso.path` → `FIREWEED_TURSO_PROJECTION_PATH` |
 | `memory` | Rebuildable / process-local serving | none |
-| `sqlite` | Local durable serving projection (explicit alternative) | `storage.projection.sqlite.path` |
 | `postgres` | Shared durable serving projection | `storage.projection.postgres.existingSecret` + `databaseUrlKey` |
 
 ```yaml
@@ -169,13 +153,6 @@ storage:
 storage:
   projection:
     backend: memory
-
-# sqlite projection
-storage:
-  projection:
-    backend: sqlite
-    sqlite:
-      path: /var/lib/fireweed/projection/projection.db
 
 # postgres projection (DSN Secret)
 storage:
@@ -210,7 +187,7 @@ deployment is scaled beyond one pod without a shared multi-writer design.
 Use with `storage.controlPlane.backend=postgres` for multi-replica ownership
 and atomic create-only publication authority when the S3 implementation lacks
 that primitive. Pair with a rebuildable local projection
-(`storage.projection.backend=sqlite`, `persistence.enabled=false`) so each pod
+(`storage.projection.backend=turso`, `persistence.enabled=false`) so each pod
 rebuilds from the shared log.
 
 Object-log authority is **`NativeConditionalWrite` only**. The endpoint must
@@ -223,8 +200,7 @@ for multi-writer object-log (it returns 200 on a second conditional put). See
 
 - Filesystem root: `storage.log.objectLog.root` (used when log is `filesystem`)
 - S3 block: `storage.log.objectLog.s3.*` (used when log is `s3`)
-- SQLite log path: `storage.log.sqlite.path` (when log is `sqlite`)
-- Projection SQLite path: `storage.projection.sqlite.path` (when projection is `sqlite`)
+- Projection Turso path: `storage.projection.turso.path` (when projection is `turso`)
 - Postgres DSN Secret refs: `storage.log.postgres.*` / `storage.projection.postgres.*`
 
 ### Public product names only
@@ -269,8 +245,8 @@ helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
   --set image.tag="$VERSION" \
   --set storage.log.backend=filesystem \
   --set storage.log.objectLog.root=/tank/fireweed/object-log \
-  --set storage.projection.backend=sqlite \
-  --set storage.projection.sqlite.path=/var/lib/fireweed/projection/projection.db
+  --set storage.projection.backend=turso \
+  --set storage.projection.turso.path=/var/lib/fireweed/projection/projection.turso
 ```
 
 Ensure the pod can write the `/tank/...` path (hostPath, CSI, or NFS volume).
@@ -292,7 +268,7 @@ helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
   --set storage.log.objectLog.s3.credentials.existingSecret=fireweed-objectlog-s3 \
   --set storage.controlPlane.backend=postgres \
   --set storage.controlPlane.postgres.existingSecret=fireweed-control-plane \
-  --set storage.projection.backend=sqlite \
+  --set storage.projection.backend=turso \
   --set persistence.enabled=false
 ```
 
@@ -313,10 +289,10 @@ chart only renders Secret references.
 
 The deployment spans three failure domains: S3 holds durable log objects,
 Postgres owns atomic object publication plus shared leases and fencing, and each
-pod holds only a rebuildable SQLite projection in `emptyDir`. Losing a pod or
+pod holds only a rebuildable Turso projection in `emptyDir`. Losing a pod or
 its local volume triggers a projection rebuild. Losing access to S3 or Postgres
 is an availability event and must fail closed; neither another pod nor its local
-SQLite file substitutes for those shared authorities. Spread replicas across
+projection file substitutes for those shared authorities. Spread replicas across
 nodes or zones according to the availability policy of the S3 and Postgres
 services.
 
@@ -403,3 +379,13 @@ bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend 
 - [Helm static validation gate](helm-static-validation.md)
 - [kind Helm integration harness](kind-helm-integration.md)
 - [Container runtime contract](container-runtime-contract.md)
+
+## Maintenance release boundary
+
+SQLite log/projection selection and deferred-flush settings are retired. Native
+Turso is the default projection. Strict responses include projection apply;
+AsyncProjection acknowledges the authoritative log and permits serving lag.
+Supported construction does not imply every optional query/transition API is
+implemented: see [the maintenance baseline](../perf/maintenance-release-baseline.md)
+for explicit native Turso limitations and tests. Source-preview releases do not
+claim governed Kubernetes deployment qualification.

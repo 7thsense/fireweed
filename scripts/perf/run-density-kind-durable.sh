@@ -30,7 +30,7 @@ PID_FILE="$RUN_DIR/runner.pid"
 
 export CLUSTER=${CLUSTER:-fireweed-density}
 export EVIDENCE_MODE=${EVIDENCE_MODE:-release}
-export PROJECTION_BACKEND=${PROJECTION_BACKEND:-sqlite}
+export PROJECTION_BACKEND=${PROJECTION_BACKEND:-turso}
 export LEDGER_OUT=${LEDGER_OUT:-$RUN_DIR/tp002-e2-density-kind.jsonl}
 export DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$RUN_DIR/diagnostics}
 

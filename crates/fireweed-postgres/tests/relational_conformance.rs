@@ -529,8 +529,7 @@ fn postgres_relational_truncate_then_recover_exact_state() {
 
 // ---------------------------------------------------------------------------
 // ADR-011 typed secondary index conformance — postgres relational backend
-// These tests mirror fireweed-sqlite/tests/relational_conformance.rs §9 and are
-// env-gated on FIREWEED_PG_TEST_URL exactly like the rest of this file.
+// These tests cover typed index operations and are env-gated on FIREWEED_PG_TEST_URL exactly like the rest of this file.
 // ---------------------------------------------------------------------------
 
 use axon_esf::IndexDef;

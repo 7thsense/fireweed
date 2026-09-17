@@ -10,7 +10,7 @@ ddx:
 # Fireweed public artifact topology
 
 This document defines the target publication boundary for the first Fireweed
-preview, `v0.20.0`. ADR-023 makes these Fireweed coordinates the only supported
+preview and subsequent source releases. ADR-023 makes these Fireweed coordinates the only supported
 coordinates across manifests, release automation, storage, and wire surfaces.
 
 ## Classification rules
@@ -39,29 +39,27 @@ target package names are intentionally identical.
 <!-- workspace-package-inventory:start -->
 | Current package | Target package | Class | Registry | Publish order | Feature policy | Rationale |
 | --- | --- | --- | --- | ---: | --- | --- |
-| fireweed | fireweed | publishable | crates.io | 1 | default = memory, SQLite, object log; minimal = no default features; supported focused builds = sqlite or objectlog; memory is development-only; postgres is deferred | The sole supported Rust facade and constructor surface. |
+| fireweed | fireweed | publishable | crates.io | 1 | default = memory, objectlog, turso; minimal = no default features; postgres opt-in; memory log is volatile | The sole supported Rust facade and constructor surface. |
 | fireweed-core | fireweed-core | repository-only | - | - | no public feature contract | Domain types are exposed only through the facade. |
 | fireweed-engine | fireweed-engine | repository-only | - | - | no public feature contract | Raw ports and coordination internals must not become an external construction surface. |
 | fireweed-projection | fireweed-projection | repository-only | - | - | no public feature contract | Shared projection implementation, supported only through shipped profiles. |
 | fireweed-relational | fireweed-relational | repository-only | - | - | no public feature contract | Driver-neutral relational implementation shared by internal adapters. |
 | fireweed-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Reference adapter used by the facade, tests, and local evaluation. |
-| fireweed-sqlite | fireweed-sqlite | repository-only | - | - | facade feature sqlite | Internal adapter for supported SQLite profiles. |
 | fireweed-objectlog | fireweed-objectlog | repository-only | - | - | facade feature objectlog | Internal adapter for supported object-log profiles. |
-| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; tls implies postgres; both deferred | Wired adapter outside the preview support boundary. |
+| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; server tls opt-in | Optional PostgreSQL log/projection adapter. |
 | fireweed-resp | fireweed-resp | repository-only | - | - | no independent features; shipped through the service | Supported protocol adapter, not a standalone Cargo API. |
-| fireweed-server | fireweed-server | repository-only | - | - | default env-config; postgres, tls, external-kafka, and turso-projection remain opt-in | Composition package for the shipped service binary and container. |
-| fireweed-turso | fireweed-turso | experimental | - | - | local only; no default features | Feature-gated evaluation adapter with no compatibility promise. |
+| fireweed-server | fireweed-server | repository-only | - | - | default env-config, postgres, turso-projection; tls and external-kafka opt-in | Composition package for the shipped service binary and container. |
+| fireweed-turso | fireweed-turso | repository-only | - | - | local enabled by facade default turso feature | Default native projection, supported through the facade. |
 | fireweed-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
 | fireweed-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
 | fireweed-loadgen | fireweed-loadgen | private | - | - | evidence workload only | In-cluster release-evidence generator, not an operator command. |
 | fireweed-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
+| fireweed-workload | fireweed-workload | private | - | - | public API workflow qualification | Original-row campaign, primitive and log-recovery workload runner. |
 <!-- workspace-package-inventory:end -->
 <!-- markdownlint-enable MD013 -->
 
-The independent `fireweed-bench` workspace and the Turso compatibility probe do
-not appear in this table because they are not root workspace members. Their
-target names are `fireweed-bench` and `fireweed-turso-compat-probe`; both are
-private evidence tools and are never registry publications.
+The independent `fireweed-bench` workspace is a private evidence tool, not a
+registry publication. The retired Turso compatibility probe has been removed.
 
 ## Cargo publication order and gate
 
@@ -85,13 +83,11 @@ is not allowed: it would violate ADR-009's encapsulation boundary.
 The facade's minimum feature contract is:
 
 - `--no-default-features` builds the engine-facing facade without an adapter;
-- `--no-default-features --features sqlite` builds the supported embedded
-  SQLite profile without object-log or Postgres dependencies;
-- `--no-default-features --features objectlog` builds the supported object-log
-  profile without SQLite or Postgres dependencies;
-- default features provide memory, SQLite, and object-log constructors;
-- `postgres` and server-only `tls`, `external-kafka`, and `turso-projection`
-  remain outside the preview-supported facade contract.
+- default features provide memory, object-log and native Turso adapters;
+- `postgres` adds PostgreSQL log and projection compositions;
+- SQLite configuration is a migration error and no SQLite Cargo feature remains;
+- advanced API availability depends on composition. The maintenance baseline
+  records native Turso's explicit unsupported-operation boundaries.
 
 ## Non-Cargo release artifacts
 

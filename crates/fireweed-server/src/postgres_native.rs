@@ -1306,16 +1306,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fireweed_core::{
-        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-        PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
-    };
-    use fireweed_engine::{Backend, ComposeFaultHook, ComposeFaultPoint, RawCommitRequest};
+
     use tokio::sync::oneshot;
 
-    fn drive_blocking<F: Future>(future: F) -> F::Output {
-        futures::executor::block_on(future)
-    }
     fn queue(name: &str) -> QueueKey {
         QueueKey::new(
             TenantId::new("tenant").unwrap(),
@@ -1332,50 +1325,6 @@ mod tests {
             queued,
         ))
     }
-    fn definition(name: &str) -> QueueDefinition {
-        QueueDefinition {
-            tenant_id: TenantId::new("tenant").unwrap(),
-            queue_id: QueueId::new(name).unwrap(),
-            priority_model: PriorityModel {
-                kind: PriorityModelKind::Int64,
-                direction: PriorityDirection::Ascending,
-                tie_breaker: PriorityTieBreaker::CreatedSequence,
-            },
-            ordering_mode: OrderingMode::Strict,
-            max_rank_error: 0,
-            progress_bound_ms: 60_000,
-            eligibility_policy: EligibilityPolicy::default(),
-            cohort_policy: None,
-            recurrence: RecurrencePolicy::default(),
-            request_id_retention_ms: 60_000,
-            client_item_key_retention_ms: 60_000,
-            terminal_retention_ms: 60_000,
-            max_lease_duration_ms: 60_000,
-            retry_policy: RetryPolicy { max_attempts: 3 },
-            max_push_batch_size: 100,
-            max_claim_batch_size: 100,
-            max_eligible_group_size: None,
-            secondary_indexes: Vec::new(),
-            entity_schema: None,
-            typed_indexes: Vec::new(),
-            emit_change_records: false,
-        }
-    }
-    fn push_spec() -> PushSpec {
-        PushSpec {
-            client_item_key: None,
-            priority: None,
-            group_key: None,
-            not_before: None,
-            payload: None,
-            fields: BTreeMap::new(),
-            metadata: Metadata::default(),
-            cohort_size: None,
-            gate_keys: Vec::new(),
-            entity: None,
-            index_fields: Default::default(),
-        }
-    }
     #[test]
     fn pooled_reclaim_uses_fixed_cap_concurrency_without_per_queue_tasks() {
         let source = include_str!("postgres_native.rs");
@@ -1389,23 +1338,6 @@ mod tests {
         assert!(tick.contains("buffer_unordered(DEFAULT_BLOCKING_OPERATIONS)"));
         assert!(!tick.contains("tokio::spawn"));
         assert!(!tick.contains("for (index, inner)"));
-    }
-
-    struct BlockingApplyHook {
-        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
-        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl ComposeFaultHook for BlockingApplyHook {
-        fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
-            if cut == ComposeFaultPoint::DuringProjectionApply {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    let _ = entered.send(());
-                }
-                self.release.lock().unwrap().recv().unwrap();
-            }
-            Ok(())
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1474,90 +1406,6 @@ mod tests {
         resume_tx.send(()).unwrap();
         let tail_thread = operation.await.unwrap().unwrap();
         assert_ne!(tail_thread, runtime_thread);
-    }
-    #[cfg(any())]
-    #[tokio::test(flavor = "current_thread")]
-    async fn production_sqlite_pool_allows_queue_b_while_queue_a_apply_is_blocked() {
-        let path = std::env::temp_dir().join(format!(
-            "fireweed-sqlite-pool-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let path = path.to_str().unwrap().to_string();
-        let mut raw = Vec::new();
-        for _ in 0..4 {
-            raw.push(fireweed_sqlite::composed_sqlite_backend(&path).unwrap());
-        }
-        let mut a_name = "a0".to_string();
-        let a_index = loop {
-            let key = QueueKey::new(
-                TenantId::new("tenant").unwrap(),
-                QueueId::new(&a_name).unwrap(),
-            );
-            let index = PostgresWholeOperationAdapter::<
-                fireweed_engine::AsyncLogReplayBackend<
-                    fireweed_sqlite::SqliteLog,
-                    fireweed_sqlite::InMemoryProjection,
-                >,
-            >::pool_index(&key, raw.len());
-            if index == 0 {
-                break index;
-            }
-            a_name.push('a');
-        };
-        let mut b_name = "b0".to_string();
-        loop {
-            let key = QueueKey::new(
-                TenantId::new("tenant").unwrap(),
-                QueueId::new(&b_name).unwrap(),
-            );
-            if PostgresWholeOperationAdapter::<
-                fireweed_engine::AsyncLogReplayBackend<
-                    fireweed_sqlite::SqliteLog,
-                    fireweed_sqlite::InMemoryProjection,
-                >,
-            >::pool_index(&key, raw.len())
-                != a_index
-            {
-                break;
-            }
-            b_name.push('b');
-        }
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        raw[a_index].set_fault_hook(Some(Arc::new(BlockingApplyHook {
-            entered: std::sync::Mutex::new(Some(entered_tx)),
-            release: std::sync::Mutex::new(release_rx),
-        })));
-        let raw: Vec<_> = raw.into_iter().map(Arc::new).collect();
-        let a_backend = Arc::clone(&raw[a_index]);
-        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
-        let a_def = definition(&a_name);
-        let b_def = definition(&b_name);
-        let a_queue = QueueKey::new(a_def.tenant_id.clone(), a_def.queue_id.clone());
-        let b_queue = QueueKey::new(b_def.tenant_id.clone(), b_def.queue_id.clone());
-        adapter.create_queue(a_def).await.unwrap();
-        adapter.create_queue(b_def).await.unwrap();
-        let a_task = tokio::task::spawn_blocking(move || {
-            drive_blocking(a_backend.commit_raw(RawCommitRequest::new(a_queue, Vec::new(), 0)))
-        });
-        entered_rx.await.unwrap();
-        adapter
-            .push(
-                &b_queue,
-                vec![push_spec()],
-                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-        release_tx.send(()).unwrap();
-        a_task.await.unwrap().unwrap();
-        drop(adapter);
-        let _ = std::fs::remove_file(path);
     }
     #[tokio::test(flavor = "current_thread")]
     async fn aborting_caller_after_submit_does_not_cancel_storage_operation() {

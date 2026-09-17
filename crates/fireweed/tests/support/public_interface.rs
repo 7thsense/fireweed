@@ -17,7 +17,7 @@ use fireweed::{
     IndexType, ItemMutationOperation, ItemMutationOutcome, ItemMutationRequest,
     ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
     MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, MultiQueueClaimLimits,
-    MultiQueueClaimTarget, MutationOutcome, Nack, NewItem, OrderField, OrderingMode, PayloadUpdate,
+    MultiQueueClaimTarget, MutationOutcome, Nack, NewItem, OrderField, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
     QueryFilter, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, QueueKey,
     QueueTemplate, RangeScanRequest, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy,
@@ -101,6 +101,11 @@ pub async fn run_p9_surface(cell: &str, fireweed: &Fireweed, expect_atomic_commi
             failures.join("\n")
         );
     }
+}
+
+// Keep support expectations explicit; never infer support from a failing call.
+fn native_turso(cell: &str) -> bool {
+    cell.split("--").nth(1) == Some("turso")
 }
 
 async fn call<T, F>(cell: &str, method: &str, failures: &mut Vec<String>, future: F) -> Option<T>
@@ -1021,11 +1026,19 @@ async fn exercise_claim_and_finalize(cell: &str, fw: &Fireweed, failures: &mut V
     )
     .await;
     let advertises_cbi = fw.hot_projection_capabilities(&by_ids).claim_by_item_ids;
+    check(
+        cell,
+        "claim_by_item_ids.capability",
+        failures,
+        !native_turso(cell) || advertises_cbi,
+        "native Turso must advertise explicit-item claim support",
+    );
     if let Some(ids) = pushed.as_ref() {
         let target = ids[0];
         let other = ids[1];
         let request = ClaimByItemIdsRequest {
-            item_ids: vec![target],
+            // Batch limits count distinct targets, even when raw input exceeds the limit.
+            item_ids: vec![target; 101],
             lease_duration_ms: 60_000,
             worker_id: WorkerId::new("public-interface-cbi").unwrap(),
             request_id: RequestId::new(format!("cbi-{cell}")).unwrap(),
@@ -1773,7 +1786,6 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
             .is_some_and(|items| items.len() == 1 && items[0].gate_keys == ["gate-a".to_owned()]),
         "unblocked gate did not make its member claimable",
     );
-
     let request = BatchUpdateRequest {
         request_id: RequestId::new("batch-update-request").unwrap(),
         updates: vec![BatchUpdateEntry {
@@ -1811,6 +1823,35 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         }) && batch == replay,
         "did not update exactly once and replay the same response",
     );
+    let rescheduled = call(
+        cell,
+        "reschedule",
+        failures,
+        fw.reschedule(
+            &queue,
+            id,
+            ScheduleUpdate::Set(Some(PriorityValue::Int64(99))),
+            ScheduleUpdate::Keep,
+            None,
+        ),
+    )
+    .await;
+    let retained = call(
+        cell,
+        "retained_items",
+        failures,
+        fw.retained_items(&queue, None, 10),
+    )
+    .await;
+    check(
+        cell,
+        "retained_items",
+        failures,
+        retained
+            .as_ref()
+            .is_some_and(|rows| rows.iter().any(|row| row.item_id == id)),
+        "retained page omitted the updated original row",
+    );
     let batch_live = call(
         cell,
         "batch_update.post_state",
@@ -1823,11 +1864,15 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         "batch_update",
         failures,
         batch_live.as_ref().is_some_and(|value| {
-            value
-                .as_ref()
-                .is_some_and(|item| item.payload.as_deref() == Some(b"batch-updated".as_slice()))
+            value.as_ref().is_some_and(|item| {
+                item.payload.as_deref() == Some(b"batch-updated".as_slice())
+                    && item.priority == Some(PriorityValue::Int64(99))
+                    && Some(item.item_version) == rescheduled
+            })
         }),
-        "payload replacement was not observable",
+        &format!(
+            "payload/schedule/version mismatch: row={batch_live:?}, rescheduled={rescheduled:?}"
+        ),
     );
 
     let item_version = batch_live
@@ -1836,7 +1881,7 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         .map(|item| item.item_version);
     let mutation_request = ItemMutationRequest {
         request_id: RequestId::new("selector-mutation-request").unwrap(),
-        evaluated_at: UtcTimestamp::new(1_800_000_000, 0).unwrap(),
+        evaluated_at: fireweed::Clock::now(&fireweed::SystemClock),
         dry_run: false,
         returning: ItemMutationReturning::BeforeSnapshot,
         gate_changes: vec![],
@@ -2226,26 +2271,35 @@ async fn exercise_commit(
     let refs = claimed.iter().filter_map(claim_ref).collect::<Vec<_>>();
     if let Some(first) = refs.first().cloned() {
         let request_id = RequestId::new("commit-request").unwrap();
-        let committed = call(
+        let request = CommitRequest {
+            request_id: Some(request_id.clone()),
+            entries: vec![CommitEntry {
+                claim_ref: first,
+                finalize: FinalizeKind::Complete,
+                side_records: vec![
+                    SideRecord {
+                        key: b"public-side-record".to_vec(),
+                        payload: b"value".to_vec().into(),
+                    },
+                    SideRecord {
+                        key: b"public-side-record-z".to_vec(),
+                        payload: b"last".to_vec().into(),
+                    },
+                    SideRecord {
+                        key: b"other-side-record".to_vec(),
+                        payload: b"excluded".to_vec().into(),
+                    },
+                ],
+                lifecycle_items: vec![item("commit-continuation", 4)],
+                instance_fence: None,
+            }],
+        };
+        let committed = call(cell, "commit", failures, fw.commit(&queue, request.clone())).await;
+        let replayed = call(
             cell,
-            "commit",
+            "commit[idempotent]",
             failures,
-            fw.commit(
-                &queue,
-                CommitRequest {
-                    request_id: Some(request_id.clone()),
-                    entries: vec![CommitEntry {
-                        claim_ref: first,
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![SideRecord {
-                            key: b"public-side-record".to_vec(),
-                            payload: b"value".to_vec().into(),
-                        }],
-                        lifecycle_items: vec![item("commit-continuation", 4)],
-                        instance_fence: None,
-                    }],
-                },
-            ),
+            fw.commit(&queue, request),
         )
         .await;
         check(
@@ -2254,8 +2308,8 @@ async fn exercise_commit(
             failures,
             committed.as_ref().is_some_and(|outcomes| {
                 matches!(outcomes.as_slice(), [fireweed::EntryOutcome::Committed { lifecycle_item_ids }] if lifecycle_item_ids.len() == 1)
-            }),
-            "did not commit the input and create exactly one lifecycle item",
+            }) && committed == replayed,
+            "did not commit the input, create exactly one lifecycle item and replay its outcome",
         );
         let recovery = call(
             cell,
@@ -2265,15 +2319,15 @@ async fn exercise_commit(
         )
         .await;
         check(
-            cell,
-            "explain_commit",
-            failures,
-            recovery.as_ref().is_some_and(|value| value.as_ref().is_some_and(|record| {
-                record.request_id == request_id
-                    && matches!(record.entries.as_slice(), [entry] if entry.status == CommitEntryStatus::Committed)
-            })),
-            "did not reconstruct the committed transition",
-        );
+        cell,
+        "explain_commit",
+        failures,
+        recovery.as_ref().is_some_and(|value| value.as_ref().is_some_and(|record| {
+            record.request_id == request_id
+                && matches!(record.entries.as_slice(), [entry] if entry.status == CommitEntryStatus::Committed)
+        })),
+        "did not reconstruct the committed transition",
+    );
         let side_record = call(
             cell,
             "side_record",
@@ -2311,6 +2365,50 @@ async fn exercise_commit(
             }),
             "batch side-record read did not preserve order and missing keys",
         );
+        let first_page = call(
+            cell,
+            "side_records_by_prefix[first]",
+            failures,
+            fw.side_records_by_prefix(&queue, b"public-", 1, None),
+        )
+        .await;
+        check(
+            cell,
+            "side_records_by_prefix[first]",
+            failures,
+            first_page.as_ref().is_some_and(|page| {
+                page.entries
+                    == [(
+                        b"public-side-record".to_vec(),
+                        bytes::Bytes::from_static(b"value"),
+                    )]
+                    && page.next_cursor.as_deref() == Some(b"public-side-record-z".as_slice())
+            }),
+            "prefix page did not contain the first matching key and the first unreturned cursor",
+        );
+        if let Some(cursor) = first_page.and_then(|page| page.next_cursor) {
+            let last_page = call(
+                cell,
+                "side_records_by_prefix[resume]",
+                failures,
+                fw.side_records_by_prefix(&queue, b"public-", 1, Some(cursor)),
+            )
+            .await;
+            check(
+                cell,
+                "side_records_by_prefix[resume]",
+                failures,
+                last_page.as_ref().is_some_and(|page| {
+                    page.entries
+                        == [(
+                            b"public-side-record-z".to_vec(),
+                            bytes::Bytes::from_static(b"last"),
+                        )]
+                        && page.next_cursor.is_none()
+                }),
+                "prefix resume skipped or repeated a key, or included an unrelated prefix",
+            );
+        }
     } else {
         failures.push(format!("{cell}.commit: no valid claimed item prerequisite"));
     }

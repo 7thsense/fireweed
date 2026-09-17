@@ -63,7 +63,7 @@
     {
       "requirement_id": "AC-TURSO-2",
       "routes": [
-        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::all_five_log_specs_accept_turso"
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::all_four_log_specs_accept_turso"
       ]
     },
     {
@@ -99,18 +99,18 @@
     {
       "requirement_id": "AC-TXN-5",
       "routes": [
-        "p10r::ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
-        "p10r::ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
-        "p10r::ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_6_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_12_manifest_cells",
         "p10r::object_log_async:filesystem--memory"
       ]
     },
     {
       "requirement_id": "AC-TXN-5A",
       "routes": [
-        "p10r::ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
-        "p10r::ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
-        "p10r::ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_6_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_12_manifest_cells",
         "p10r::object_log_async:filesystem--postgres"
       ]
     },
@@ -148,28 +148,20 @@
       ]
     },
     {
-      "requirement_id": "MATRIX-STRICT-20",
+      "requirement_id": "MATRIX-STRICT-12",
       "routes": [
         "p10r::strict:filesystem--memory",
         "p10r::strict:filesystem--postgres",
-        "p10r::strict:filesystem--sqlite",
         "p10r::strict:filesystem--turso",
         "p10r::strict:memory--memory",
         "p10r::strict:memory--postgres",
-        "p10r::strict:memory--sqlite",
         "p10r::strict:memory--turso",
         "p10r::strict:postgres--memory",
         "p10r::strict:postgres--postgres",
-        "p10r::strict:postgres--sqlite",
         "p10r::strict:postgres--turso",
         "p10r::strict:s3--memory",
         "p10r::strict:s3--postgres",
-        "p10r::strict:s3--sqlite",
-        "p10r::strict:s3--turso",
-        "p10r::strict:sqlite--memory",
-        "p10r::strict:sqlite--postgres",
-        "p10r::strict:sqlite--sqlite",
-        "p10r::strict:sqlite--turso"
+        "p10r::strict:s3--turso"
       ]
     },
     {
@@ -220,7 +212,7 @@
     {
       "requirement_id": "SNORRI-PROJECTION-REBUILD",
       "routes": [
-        "Cargo.toml::fireweed::p6s_s3_durability_acceptance::test::snorri_projection_rebuild_s3_sqlite"
+        "Cargo.toml::fireweed::p6s_s3_durability_acceptance::test::snorri_projection_rebuild_s3_turso"
       ]
     },
     {
@@ -261,5 +253,5 @@
     }
   ],
   "schema_version": 1,
-  "semantic_requirements_sha256": "c1a116bc73b74e806fa82587b25f9334ac047925295a9b6236ed1a899567bf0d"
+  "semantic_requirements_sha256": "b207763e30c65245a06ba036a043b3f45d48cf41a955e11ab0a3d3864fda2a1d"
 }

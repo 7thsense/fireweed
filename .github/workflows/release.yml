@@ -28,7 +28,71 @@ permissions:
   packages: write
 
 jobs:
+  channel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.identity.outputs.channel }}
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      evidence_commit: ${{ steps.identity.outputs.evidence_commit }}
+      measured_source: ${{ steps.identity.outputs.measured_source }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve explicit publication channel
+        id: identity
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python3 scripts/release/release-channel.py --tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  source-preview:
+    needs: channel
+    if: needs.channel.outputs.channel == 'source-preview'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ needs.channel.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.channel.outputs.version }}
+      MEASURED_SOURCE: ${{ needs.channel.outputs.measured_source }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: preview-evidence
+          ref: ${{ needs.channel.outputs.evidence_commit }}
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          path: preview-source
+          ref: ${{ needs.channel.outputs.measured_source }}
+          fetch-depth: 0
+      - name: Build and verify source distribution
+        working-directory: preview-source
+        run: |
+          bash scripts/release/build-source-preview-artifacts.sh \
+            --repo . --out "$RUNNER_TEMP/source-preview-dist" \
+            --version "$RELEASE_VERSION" --revision "$MEASURED_SOURCE" \
+            --expected-source "$MEASURED_SOURCE" --expected-remote origin \
+            --expected-ref "$MEASURED_SOURCE" --builder github-source-preview
+      - name: Publish explicitly non-governed prerelease
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/source-preview-dist/"* --clobber
+            gh release edit "$RELEASE_TAG" --prerelease \
+              --notes-file "preview-evidence/docs/releases/$RELEASE_TAG.md"
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP/source-preview-dist/"* \
+              --verify-tag --prerelease --title "Fireweed $RELEASE_TAG (source preview)" \
+              --notes-file "preview-evidence/docs/releases/$RELEASE_TAG.md"
+          fi
+
   release:
+    needs: channel
+    if: needs.channel.outputs.channel == 'governed'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # No hosted service containers. Postgres/kind live on governed-product.yml (P13).

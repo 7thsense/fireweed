@@ -15,25 +15,56 @@ fail() {
     exit 1
 }
 
-# Positive path against the real tree.
-bash "${SCRIPT_DIR}/verify-release-identity.sh" --version 0.31.3
+# A real, isolated repository keeps reservation checks independent of whether
+# the product release has already been tagged.
+fixture="$CASE_ROOT/repo"
+mkdir -p "$fixture"
+python3 - "$REPO_ROOT" "$fixture" <<'PYFIXTURE'
+from pathlib import Path
+import shutil, sys, re
+source, root = map(Path, sys.argv[1:])
+files = ["README.md", "Cargo.toml", "Cargo.lock", "charts/fireweed-queue/Chart.yaml", "crates/fireweed-bench/Cargo.toml",
+         "scripts/ci/public-release-gates.json", "scripts/ci/public-release-gates-ci.json",
+         "scripts/release/verify-release-identity.sh", "scripts/release/list-public-version-sources.sh"]
+for relative in files:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / relative, target)
+for relative in ["Cargo.toml", "Cargo.lock"]:
+    target = root / relative
+    text = target.read_text()
+    if relative.endswith(".toml"):
+        text = re.sub(r'(\[workspace.package\]\nversion = ")[^"]+', r'\g<1>9.9.9', text)
+    else:
+        text = re.sub(r'(name = "fireweed(?:-[a-z0-9-]+)?"\nversion = ")[^"]+', r'\g<1>9.9.9', text)
+    target.write_text(text)
+notes = root / "docs/releases"
+notes.mkdir(parents=True)
+(notes / "v9.9.9.md").write_text("Pre-S reserved identity 9.9.9; not product-ready P20pr. Independent coordinates remain. list-public-version-sources.sh verify-release-identity.sh\n")
+PYFIXTURE
+git -C "$fixture" init -q
+SCRIPT_DIR="$fixture/scripts/release"
+cd "$fixture"
+
+# Positive path against the fixture.
+bash "${SCRIPT_DIR}/verify-release-identity.sh" --version 9.9.9
 
 # Inventory classifies independent coordinates and reports tag reservation.
-inventory="$(bash "${SCRIPT_DIR}/list-public-version-sources.sh" v0.31.3)"
+inventory="$(bash "${SCRIPT_DIR}/list-public-version-sources.sh" v9.9.9)"
 printf '%s\n' "$inventory" | grep -Fq 'crates/fireweed-bench/Cargo.toml: package.version=0.3.1; treatment=independent tool coordinate' ||
     fail "bench independent classification missing"
 printf '%s\n' "$inventory" | grep -Fq 'treatment=independent gate-set identity; owner=P13a' ||
     fail "gate-set independent classification missing"
-printf '%s\n' "$inventory" | grep -Fq 'git tag v0.31.3: state=absent' ||
+printf '%s\n' "$inventory" | grep -Fq 'git tag v9.9.9: state=absent' ||
     fail "tag reservation absent state missing"
-printf '%s\n' "$inventory" | grep -Fq 'Cargo.toml: workspace.package.version=0.31.3; treatment=release-synchronized' ||
+printf '%s\n' "$inventory" | grep -Fq 'Cargo.toml: workspace.package.version=9.9.9; treatment=release-synchronized' ||
     fail "workspace synchronized classification missing"
 
 # Negative: wrong expected version fails.
 if bash "${SCRIPT_DIR}/verify-release-identity.sh" --version 0.30.0 >/dev/null 2>"${CASE_ROOT}/wrong-version.err"; then
     fail "expected version mismatch to fail"
 fi
-grep -Fq 'workspace.package.version=0.31.3 != 0.30.0' "${CASE_ROOT}/wrong-version.err" ||
+grep -Fq 'workspace.package.version=9.9.9 != 0.30.0' "${CASE_ROOT}/wrong-version.err" ||
     fail "wrong-version diagnostic missing"
 
 # Negative: missing usage args fail closed.
@@ -43,6 +74,6 @@ fi
 grep -Fq 'usage:' "${CASE_ROOT}/usage.err" || fail "usage diagnostic missing"
 
 # Independent gate-set identity test remains green and is not package SemVer.
-bash scripts/ci/public-release-gates-identity-test.sh
+bash "$REPO_ROOT/scripts/ci/public-release-gates-identity-test.sh"
 
 echo "verify-release-identity-test: ok"

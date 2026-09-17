@@ -2252,7 +2252,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::task::{Wake, Waker};
+    use std::task::Waker;
 
     use std::collections::HashSet;
     use std::mem::discriminant;
@@ -2279,15 +2279,8 @@ mod tests {
 
     const QUEUE_COMMAND_VARIANT_COUNT: usize = 23;
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        Pin::new(future).poll(&mut Context::from_waker(&waker))
+        Pin::new(future).poll(&mut Context::from_waker(Waker::noop()))
     }
 
     fn assert_error<T>(result: Result<T, CoordinationError>, expected: CoordinationError) {
@@ -3183,7 +3176,7 @@ mod tests {
             .map(|index| Arc::new(vec![index as u8; 1024]))
             .collect::<Vec<_>>();
         let mut tickets = Vec::new();
-        for index in 0..MUTATION_MAX_REQUESTS_PER_QUEUE {
+        for (index, payload) in payloads.iter().enumerate() {
             let ticket = sequencer
                 .admit(
                     "q",
@@ -3193,7 +3186,7 @@ mod tests {
                     } else {
                         MutationIngress::KeyedPermitLive
                     },
-                    Arc::clone(&payloads[index]),
+                    Arc::clone(payload),
                     100,
                     1024,
                 )
@@ -3206,7 +3199,7 @@ mod tests {
                         .map_or(0, |t: &MutationTicket<_, _, _>| t.generation_id())
                 );
             }
-            assert!(Arc::ptr_eq(ticket.request(), &payloads[index]));
+            assert!(Arc::ptr_eq(ticket.request(), payload));
             tickets.push(ticket);
         }
         assert_eq!(sequencer.generation_count(&"q"), 2);

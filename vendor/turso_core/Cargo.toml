@@ -166,9 +166,6 @@ name = "write_perf_benchmark"
 path = "benches/write_perf_benchmark.rs"
 harness = false
 
-[dependencies.aes]
-version = "0.8.4"
-
 [dependencies.aes-gcm]
 version = "0.10.3"
 
@@ -218,9 +215,6 @@ version = "0.8.21"
 [dependencies.either]
 version = "1.15"
 
-[dependencies.fallible-iterator]
-version = "0.3.0"
-
 [dependencies.fastbloom]
 version = "0.14.1"
 default-features = false
@@ -246,9 +240,6 @@ version = "7.6.0"
 [dependencies.num-bigint]
 version = "0.4"
 
-[dependencies.num-traits]
-version = "0.2"
-
 [dependencies.pack1]
 version = "1.0.0"
 features = ["bytemuck"]
@@ -268,11 +259,6 @@ version = "4.1.1"
 
 [dependencies.regex]
 version = "1.11.1"
-
-[dependencies.regex-syntax]
-version = "0.8.5"
-features = ["unicode"]
-default-features = false
 
 [dependencies.roaring]
 version = "0.11.2"
@@ -331,9 +317,6 @@ version = "0.7.2"
 [dependencies.twox-hash]
 version = "2.1.1"
 
-[dependencies.uncased]
-version = "0.9.10"
-
 [dependencies.uuid]
 version = "1.11.0"
 features = [
@@ -362,10 +345,6 @@ features = [
 [dev-dependencies.divan]
 version = "4.2.1"
 package = "codspeed-divan-compat"
-
-[dev-dependencies.env_logger]
-version = "0.11.6"
-default-features = false
 
 [dev-dependencies.memory-stats]
 version = "1.2.0"
@@ -417,9 +396,6 @@ version = "1.0"
 version = "0.9.8"
 features = ["pure-rust"]
 
-[target."cfg(loom)".dependencies.loom]
-version = "0.7"
-
 [target.'cfg(not(any(target_family = "wasm", all(target_os = "windows", target_arch = "aarch64"))))'.dependencies.simsimd]
 version = "6.5.3"
 
@@ -445,9 +421,6 @@ version = "0.8.1"
 
 [target.'cfg(target_family = "unix")'.dependencies.libc]
 version = "0.2.172"
-
-[target.'cfg(target_family = "unix")'.dependencies.polling]
-version = "3.7.4"
 
 [target.'cfg(target_family = "unix")'.dependencies.rustix]
 version = "1.0.5"
@@ -496,3 +469,7 @@ check-cfg = [
     "cfg(antithesis)",
     "cfg(nightly)",
 ]
+
+# turso_macros assertion expansions reference this under cfg(antithesis).
+[package.metadata.cargo-machete]
+ignored = ["antithesis_sdk"]

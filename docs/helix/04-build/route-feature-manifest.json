@@ -1,6 +1,6 @@
 {
-  "authority_manifest_sha256": "2ce5d2d755f036a6111212859c91c4555088f1b7b715ea4db54c9fb2debe7569",
-  "authority_revision": "P1-2026-08-04-turso-default+P4-method-contracts",
+  "authority_manifest_sha256": "2a7c9df1ba7d37025c248b84ee7cddc346b724214381efa46f995e616042a6fb",
+  "authority_revision": "2026-09-17-sqlite-retired",
   "campaign_values": [
     "shared",
     "storage",
@@ -12,7 +12,7 @@
     "omissions": [],
     "repaired": false,
     "schema": "p2a_placement",
-    "source_count": 50
+    "source_count": 48
   },
   "full_execution_claimed": false,
   "generated_by": "scripts/ci/p2r_route_bindings.py",
@@ -23,49 +23,33 @@
   "matrix": {
     "cells": [
       "memory--memory",
-      "memory--sqlite",
       "memory--turso",
       "memory--postgres",
-      "sqlite--memory",
-      "sqlite--sqlite",
-      "sqlite--turso",
-      "sqlite--postgres",
       "postgres--memory",
-      "postgres--sqlite",
       "postgres--turso",
       "postgres--postgres",
       "filesystem--memory",
-      "filesystem--sqlite",
       "filesystem--turso",
       "filesystem--postgres",
       "s3--memory",
-      "s3--sqlite",
       "s3--turso",
       "s3--postgres"
     ],
     "default_projection": "turso",
-    "p10r_leaf_count": 100,
+    "p10r_leaf_count": 68,
     "strict_leaf_ids": [
       "strict:filesystem--memory",
       "strict:filesystem--postgres",
-      "strict:filesystem--sqlite",
       "strict:filesystem--turso",
       "strict:memory--memory",
       "strict:memory--postgres",
-      "strict:memory--sqlite",
       "strict:memory--turso",
       "strict:postgres--memory",
       "strict:postgres--postgres",
-      "strict:postgres--sqlite",
       "strict:postgres--turso",
       "strict:s3--memory",
       "strict:s3--postgres",
-      "strict:s3--sqlite",
-      "strict:s3--turso",
-      "strict:sqlite--memory",
-      "strict:sqlite--postgres",
-      "strict:sqlite--sqlite",
-      "strict:sqlite--turso"
+      "strict:s3--turso"
     ]
   },
   "operator_validation_job": {
@@ -618,7 +602,7 @@
     }
   },
   "overlay_assignment_count": 37,
-  "overlay_sha256": "c5b0cc136294a6e1c95bd0a138f65d48811b448204b546cd63d9e5ffef68ff39",
+  "overlay_sha256": "8a099a5f1c7d6541a6389296e8f473f0ce10ca4b42931a65445c67a7793ebecd",
   "plan_key": "P2r",
   "product_suites": [
     {
@@ -1122,10 +1106,10 @@
     "product_workflow_downstream_pacing_non_goal_e2e",
     "product_workflow_operator_repair_redrive_e2e"
   ],
-  "route_sources_sha256": "7f56bbeefee0666cc3995ed46196773423599ce320153b58f9ce1365d02ae0b7",
+  "route_sources_sha256": "05da764ed3fdf3394fa00433d171f947e56c047aa1935cfbf8dc297d1e78e1c8",
   "schema_version": 1,
   "semantic_requirement_count": 37,
-  "semantic_requirements_sha256": "c1a116bc73b74e806fa82587b25f9334ac047925295a9b6236ed1a899567bf0d",
+  "semantic_requirements_sha256": "b207763e30c65245a06ba036a043b3f45d48cf41a955e11ab0a3d3864fda2a1d",
   "stage_values": [
     "pre_s",
     "S"
@@ -1155,7 +1139,7 @@
             "-p",
             "fireweed",
             "--features",
-            "memory,sqlite,objectlog,postgres,turso",
+            "memory,objectlog,postgres,turso",
             "--test",
             "functional_matrix_route_sources",
             "--",

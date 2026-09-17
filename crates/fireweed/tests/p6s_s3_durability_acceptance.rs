@@ -9,7 +9,7 @@
 //! | --- | --- |
 //! | `SNORRI-REOPEN` | Class A round-trip reopen on `s3×memory|sqlite|postgres` |
 //! | `SNORRI-PROJECTION-REBUILD` | Disposable projection verify/delete/rebuild on
-//! |  | `s3×sqlite` and Postgres-control-plane `s3×postgres` (same item image) |
+//! |  | `s3×turso` and Postgres-control-plane `s3×postgres` (same item image) |
 //! | `SNORRI-RETRY-ONCE` | `push_with_request_id` Fresh → Replayed; changed body
 //! |  | `RequestIdConflict` on every live S3 projection row |
 //!
@@ -21,7 +21,7 @@
 //! export LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/opt/openssl@3/lib:${LD_LIBRARY_PATH:-}"
 //! export FIREWEED_PG_TEST_URL='postgres://fireweed:fireweed@127.0.0.1:55432/fireweed_snorri_p6p'
 //! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
-//! rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres \
+//! rustup run 1.97.1 cargo test -p fireweed --features objectlog,turso,postgres \
 //!   --test p6s_s3_durability_acceptance -- --nocapture
 //! ```
 //!
@@ -404,7 +404,7 @@ async fn run_snorri_projection_rebuild(cell_id: &str, config: StorageConfig) {
     let rid = RequestId::new(format!("p6s-rebuild-{}", cell_id.replace("--", "-"))).unwrap();
     let body = item("rebuild-primary", 5, b"p6s-rebuild-body");
 
-    let fireweed = open_cell(cell_id, config).await;
+    let fireweed = open_cell(cell_id, config.clone()).await;
     assert!(
         fireweed
             .create_queue(definition.clone())
@@ -418,6 +418,39 @@ async fn run_snorri_projection_rebuild(cell_id: &str, config: StorageConfig) {
         .unwrap();
     assert_eq!(disp, PushDisposition::Fresh);
     assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 1);
+
+    if let ProjectionStoreConfig::Turso { path } = &config.projection {
+        // The native maintenance handle is intentionally absent. Prove the
+        // stronger durability boundary by discarding every projection file.
+        assert!(fireweed.projection_control().is_none());
+        drop(fireweed);
+        for file in [
+            path.clone(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+            std::path::PathBuf::from(format!("{}-shm", path.display())),
+        ] {
+            match std::fs::remove_file(file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("delete test projection: {error}"),
+            }
+        }
+        let rebuilt = open_cell(cell_id, config).await;
+        assert_eq!(rebuilt.queue_definition(&queue).await.unwrap(), definition);
+        assert_eq!(rebuilt.metrics(&queue).await.unwrap().pending, 1);
+        let (replayed_id, disposition) = rebuilt
+            .push_with_request_id(&queue, rid, body)
+            .await
+            .unwrap();
+        assert_eq!(replayed_id, item_id);
+        assert_eq!(disposition, PushDisposition::Replayed);
+        let claimed = rebuilt.claim(&queue, 1, 60_000).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].item_id, item_id);
+        rebuilt.complete(&queue, [item_id]).await.unwrap();
+        assert_eq!(rebuilt.metrics(&queue).await.unwrap().complete, 1);
+        return;
+    }
 
     let control = fireweed
         .projection_control()
@@ -503,17 +536,17 @@ async fn snorri_reopen_s3_memory() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snorri_reopen_s3_sqlite() {
+async fn snorri_reopen_s3_turso() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite-reopen");
     let ns = unique_ns("s3-sqlite-reopen");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_snorri_reopen("s3--sqlite", config).await;
+    run_snorri_reopen("s3--turso", config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -541,17 +574,17 @@ async fn snorri_retry_once_s3_memory() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snorri_retry_once_s3_sqlite() {
+async fn snorri_retry_once_s3_turso() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite-retry");
     let ns = unique_ns("s3-sqlite-retry");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_snorri_retry_once("s3--sqlite", config).await;
+    run_snorri_retry_once("s3--turso", config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -571,17 +604,17 @@ async fn snorri_retry_once_s3_postgres() {
 // --- SNORRI-PROJECTION-REBUILD: disposable projections (sqlite + postgres control plane) ---
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snorri_projection_rebuild_s3_sqlite() {
+async fn snorri_projection_rebuild_s3_turso() {
     require_p1s_native_cas_provenance();
     let fixture = FixtureRoot::new("s3-sqlite-rebuild");
     let ns = unique_ns("s3-sqlite-rebuild");
     let config = s3_log_config(
         ns,
-        ProjectionStoreConfig::Sqlite {
+        ProjectionStoreConfig::Turso {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_snorri_projection_rebuild("s3--sqlite", config).await;
+    run_snorri_projection_rebuild("s3--turso", config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

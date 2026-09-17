@@ -6,6 +6,7 @@
     {"id": "artifact-topology", "command": ["bash", "scripts/verify-public-artifact-topology.sh"]},
     {"id": "crate-boundary", "command": ["bash", "scripts/verify-public-crate-boundary.sh"]},
     {"id": "source-package-sbom-provenance", "command": ["bash", "scripts/release/source-preview-artifacts-test.sh"]},
+    {"id": "release-channel", "command": ["python3", "scripts/release/test_release_channel.py"]},
     {"id": "whitespace", "command": ["git", "diff", "--check"]}
   ]
 }
