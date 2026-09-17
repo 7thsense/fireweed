@@ -6214,22 +6214,7 @@
         "status": "discovery_negative"
       }
     ],
-    "public_release_gate_failures": [
-      {
-        "category": "public_identity_gate_failure",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead",
-        "id": "388ba1e48e1acaf3be29",
-        "identity": "retired lowercase identifier: pqueue-class: | Queue projection (pqueue-class) | Opaque command bytes; ownership/fencing in your control plane or `Meta` | Produce/fetch by offset |",
-        "line": 120,
-        "owner": "P3-P9/P15",
-        "path": "vendor/object-log/README.md",
-        "status": "debt"
-      }
-    ],
+    "public_release_gate_failures": [],
     "quarantine": [],
     "release_repeat_contract": [],
     "rustdoc_unlisted_or_compile_only": [

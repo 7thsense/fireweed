@@ -117,7 +117,7 @@ object-log is a **storage engine**, not a Kafka broker or WAL codec.
 |---------------|--------------------|---------------------------|
 | Broker (e.g. fjord) | `Sequencer` with your producer/`Meta` fields; map external acks → `Durability`; record framing in a protocol crate | `LogEngine` group-commit + `BlobStore` |
 | Cold-tier WAL (e.g. Niflheim) | Your hot tier + codecs/checksums; optional `Sequencer` or raw `BlobStore` | Durable put, `get_range`, list |
-| Queue projection (pqueue-class) | Opaque command bytes; ownership/fencing in your control plane or `Meta` | Produce/fetch by offset |
+| Queue projection | Opaque command bytes; ownership/fencing in your control plane or `Meta` | Produce/fetch by offset |
 
 See `docs/helix/02-design/technical-designs/TD-003-conformance-kafka-backend-and-extraction.md` for conformance cases and binding sketches. Sequencer implementors can mirror `tests/sequencer_conformance.rs`.
 
