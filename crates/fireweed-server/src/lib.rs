@@ -1444,6 +1444,10 @@ where
     }
 
     pub async fn acquire_queue(&self, queue: &QueueKey, now: UtcTimestamp) -> EngineResult<()> {
+        // The ownership control plane resolves arbitrary queue keys, and an absent object-log
+        // partition has epoch zero. Neither establishes that this backend has a provisioned queue.
+        // Reject unknown queues before creating a lease or advancing their durable fence.
+        self.backend.queue_definition(queue).await?;
         // Read prior active owner before acquire (for restart-reconciliation with ephemeral CP).
         let prior_owner = if self.control_plane.is_ephemeral() {
             self.cp_lease(queue.clone())

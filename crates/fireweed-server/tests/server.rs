@@ -1106,6 +1106,73 @@ async fn memory_turso_server_push_claim_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn objectlog_turso_rejects_unprovisioned_queue_before_ownership_acquisition() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
+    for barrier in [
+        ResponseBarrierSpec::Strict,
+        ResponseBarrierSpec::AsyncProjection,
+    ] {
+        let (object_root, projection_path) = tmp_runtime_paths("unknown-owner-queue");
+        let mut config = Config::new(
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        );
+        config.backend.response_barrier = barrier;
+        if barrier == ResponseBarrierSpec::AsyncProjection {
+            config.backend.async_projection =
+                Some(AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5).unwrap());
+        }
+        let server = start(config).await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
+        let empty: i64 = redis::cmd("XLEN")
+            .arg("t1:q1")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(empty, 0, "an owned empty queue remains readable");
+        for args in [
+            &["XLEN", "t1:other-owner-queue"][..],
+            &["XADD", "t1:other-owner-queue", "*", "priority", "1"][..],
+            &["XLEN", "t1:other-owner-queue"][..],
+        ] {
+            let error = redis::cmd(args[0])
+                .arg(&args[1..])
+                .query_async::<redis::Value>(&mut con)
+                .await
+                .expect_err("an unprovisioned queue must never become an owned empty queue");
+            assert_eq!(error.code(), Some("ERR"), "{barrier:?}: {error}");
+            assert!(
+                error.to_string().contains("no such queue"),
+                "{barrier:?}: {error}"
+            );
+        }
+        let _: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(7)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let count: i64 = redis::cmd("XLEN")
+            .arg("t1:q1")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "unknown-queue probes must not disrupt the owned queue"
+        );
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&object_root);
+        let _ = std::fs::remove_file(&projection_path);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_objectlog_turso_push_claim_finalize_and_recovers_on_reopen() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed
