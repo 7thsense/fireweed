@@ -4172,6 +4172,62 @@
           "P2f"
         ],
         "detail": "early_success=false",
+        "id": "94bf964f96d4ad46c1e4",
+        "identity": "require(workflow.count(marker) == 1, \"missing/duplicate fixture step: \" + name)",
+        "line": 35,
+        "owner": "P10px",
+        "path": "scripts/ci/turso_workflow_fixtures.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "51a86da6b0926e8849db",
+        "identity": "\"missing S3 provision/CAS\": (\"s3-qualification-endpoint.sh provision\", \"s3-qualification-endpoint.sh status\"),",
+        "line": 78,
+        "owner": "P10px",
+        "path": "scripts/ci/turso_workflow_fixtures.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "b8740c410a989b43d3e7",
+        "identity": "\"missing PG environment\": (\"FIREWEED_PG_TEST_URL=%s\", \"IGNORED_PG_URL=%s\"),",
+        "line": 81,
+        "owner": "P10px",
+        "path": "scripts/ci/turso_workflow_fixtures.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "4fd9aca461d81a91f6ab",
+        "identity": "\"missing cleanup\": (\"s3-qualification-endpoint.sh teardown\", \"s3-qualification-endpoint.sh status\"),",
+        "line": 86,
+        "owner": "P10px",
+        "path": "scripts/ci/turso_workflow_fixtures.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
         "id": "3df09292bec8dbc28b3d",
         "identity": "echo \"missing governed services authorization: scripts/ci/governed-product-services.json\" >&2",
         "line": 112,
@@ -4348,6 +4404,34 @@
         "line": 275,
         "owner": "P10px",
         "path": "examples/python-resp/run_insert_matrix.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "opt_in",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "8f60cda35ba5768f30bc",
+        "identity": "\"missing S3 provision/CAS\": (\"s3-qualification-endpoint.sh provision\", \"s3-qualification-endpoint.sh status\"),",
+        "line": 78,
+        "owner": "P10px",
+        "path": "scripts/ci/turso_workflow_fixtures.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "opt_in",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "e9d1ae2e96f563bce0a2",
+        "identity": "\"missing PG environment\": (\"FIREWEED_PG_TEST_URL=%s\", \"IGNORED_PG_URL=%s\"),",
+        "line": 81,
+        "owner": "P10px",
+        "path": "scripts/ci/turso_workflow_fixtures.py",
         "status": "discovery_negative"
       }
     ],
@@ -87061,7 +87145,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "df8f3778e96a9a168eaba21babb5ca1ecaa187adc80c3c89c8d709be1cd9f79e",
+  "source_inventory_sha256": "b4414582189579df42f686dfaca5b1a16d271deb7b06e09413ac35b3f0d3d892",
   "workspaces": [
     {
       "listing_error_sha256": "",

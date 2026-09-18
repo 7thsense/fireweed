@@ -75,6 +75,28 @@ fn turso_workflow_qualifies_the_public_default_projection() {
         "must run fireweed-turso local adapter suite"
     );
 
+    // The all-feature matrix must receive live fixtures; it fails on missing cells.
+    assert!(
+        wf.contains("FIREWEED_PG_TEST_URL"),
+        "matrix requires PostgreSQL"
+    );
+    assert!(
+        wf.contains("pg_isready -U fireweed -d fireweed"),
+        "PostgreSQL fixture must have bounded readiness checks"
+    );
+    assert!(
+        wf.contains("s3-qualification-endpoint.sh provision"),
+        "matrix requires the bucket-creating native CAS preflight"
+    );
+    assert!(
+        wf.contains("s3-qualification-endpoint.sh verify-isolation"),
+        "S3 fixture credentials must remain outside the repository"
+    );
+    assert!(
+        wf.contains("if: always()") && wf.contains("s3-qualification-endpoint.sh teardown"),
+        "owned S3 fixture must be cleaned up even after a failed test"
+    );
+
     // Server default + all-features clippy.
     assert!(
         wf.contains("clippy -p fireweed-server"),

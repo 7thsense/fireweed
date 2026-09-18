@@ -2425,10 +2425,15 @@
         73,
         79,
         83,
-        94,
-        98,
-        102,
-        109
+        87,
+        91,
+        95,
+        101,
+        105,
+        116,
+        120,
+        124,
+        131
       ],
       "path": "crates/fireweed-server/tests/turso_workflow_shape.rs",
       "symbol": "turso_workflow_qualifies_the_public_default_projection"
@@ -3268,10 +3273,10 @@
         3336,
         3560,
         3672,
-        6003,
-        6059,
-        6101,
-        6241
+        6087,
+        6143,
+        6185,
+        6325
       ],
       "path": "scripts/ci/storage-remediation-inventory.json",
       "symbol": "<module>"
@@ -3790,7 +3795,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "46c3a03d78fc78f5df0c3067f355336f395a33eeb0b563fd6e120dc5ee833699",
+  "scan_sha256": "5216e278fec29471503c7dc455a2319c86cad54f2e2a54d804428ac900e7b78b",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -3838,11 +3843,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 90,
+      "first_match_line": 143,
       "groups": [
         "matrix"
       ],
-      "last_match_line": 90,
+      "last_match_line": 143,
       "line": 1,
       "markers": [
         "matrix"
@@ -14696,7 +14701,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 86597,
+      "last_match_line": 86681,
       "line": 1,
       "markers": [
         "e3",
@@ -14762,7 +14767,7 @@
       "evidence_paths": [
         "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/allowlist.json"
       ],
-      "first_match_line": 33,
+      "first_match_line": 34,
       "groups": [
         "matrix",
         "script"

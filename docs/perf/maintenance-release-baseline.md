@@ -204,9 +204,33 @@ library tests, mutation/recovery tests and source-package verification. The
 retired-constructor regressions in `encapsulation`,
 `facade` and `active_scope_routing` pass all 18 tests in the current all-feature
 run. The independent benchmark tests and corrected live E2 reruns now pass as
-recorded below. Candidate-4 inventory and poststage checks also pass. The two
-upstream stress reruns and fresh capacity qualification still require completion.
+recorded below. Candidate-4 inventory and poststage checks also pass. Both
+upstream shared-code stress reruns now pass with their assertions retained; fresh
+capacity qualification still requires completion.
 This checkpoint is not the final measured source or a completed release.
+
+At clean checkpoint `bb443691fdaad86b62a5461ce28dd6fbcdde2a71`, remote
+[CI passed](https://github.com/7thsense/fireweed/actions/runs/35296298646), including
+the public release gate and storage-remediation policy. The separate
+[Turso workflow](https://github.com/7thsense/fireweed/actions/runs/35296298606)
+passed native Clippy/tests and public workflow correctness/log recovery, then
+failed its 12-cell route test because `FIREWEED_PG_TEST_URL` was unset. The test
+correctly rejected a missing PostgreSQL fixture; later facade/server stages were
+skipped. This is not a passing full Turso matrix. The CI fixture correction passes all six focused local checks (fixture self-test,
+policy, policy tests, formatting, workflow shape and Clippy). New clean source S2
+and its remote verification remain pending.
+
+The canonical attempt on `bb443691` was intentionally stopped with SIGTERM after
+that CI fixture omission was found. Its final observer ledger records runner
+exit -15, observer exit 143, one observed campaign phase, successful monitor and
+summary helpers, and completed process cleanup. A separate cleanup record
+confirms removal of only its benchmark-owned temporary data directory while
+preserving measurement/observer files. No full campaign report or four-phase
+result exists, so this interruption establishes neither workflow throughput nor
+a throughput failure. The partial observations remain diagnostic evidence. All
+four serial C1/P1/C2/P2 phases must run afresh on clean S2 using the separate
+`ci-fixtures` attempt paths. Candidate remeasurement remains pending; the
+v0.31.28 source-preview prerelease has not been published.
 
 The earlier compiled inventory passed, but its subsequent storage-remediation
 closure check failed on vendored dependency declarations, upstream test annotations,
@@ -266,7 +290,7 @@ ignored, in 0.15 seconds: shared owner membership/monotonic epochs and one-hop
 `MOVED` endpoint discovery.
 
 Remote CI also exposed a missing `rg` prerequisite; workflow setup now installs
-`ripgrep` explicitly. Its corrected remote run remains unverified here. The
+`ripgrep` explicitly. The `bb443691` remote outcomes are recorded above. The
 concurrent full-delivery contract now uses its existing transient-backpressure
 retry helper within the original 45-second overall deadline, while retaining
 full-batch and disjoint-ID assertions. All 13 local contract tests pass. The full
@@ -312,7 +336,8 @@ its named inventory snapshot/log, and
 `/tmp/fireweed-maintenance-final-static-candidate-4-poststage-results.json`
 with its named logs. These later records are outside the 67-artifact post-b2
 archive and await the final evidence commit. The two upstream stress reruns
-and fresh canonical C1/P1/C2/P2 measurements remain pending.
+are complete as recorded below; fresh canonical C1/P1/C2/P2 measurements remain
+pending.
 
 The initial full workspace attempt produced 183 completed harness summaries:
 2,019 passes and ten failures, plus a separately interrupted large calibration.
@@ -443,7 +468,7 @@ Turso 0.7.2 CLI at the exact vendored upstream revision; each test starts and
 owns its local sync-server process. The earlier localhost:8081 connection
 failures were missing-fixture results and are superseded by this complete run.
 
-All 18 upstream-ignored tests were then attempted individually and serially:
+The initial attempts of all 18 upstream-ignored tests ran individually and serially:
 **13 passed, three failed, and two reached their external time limits**. The
 runner used `SEED=1729`, a 16-GiB address-space limit per test, and process-group
 cleanup on timeout. It did not remove or weaken the tests. Seven B-tree tests,
@@ -464,11 +489,18 @@ The journal-mode rejection regression passes in the native suite. The three
 failed tests therefore exercise an unsupported journal mode or its bootstrap
 fixture. Their source was byte-compared with the upstream `turso_core` 0.7.2
 registry source and is unchanged; a missing Cargo feature does not explain these
-failures. That distinction does not dismiss the two incomplete tests: B-tree
-and page-cache code also serve ordinary WAL. Longer optimized reruns, with debug
-assertions and overflow checks retained, are planned but remain pending. The
-regular core suite and seven additional B-tree passes
-are positive evidence, but the complete upstream suite is **not all green**.
+failures. B-tree and page-cache code also serve ordinary WAL, so their initial
+timeouts required follow-up. Both full tests subsequently passed in serial
+optimized runs on unchanged source `bb443691fdaad86b62a5461ce28dd6fbcdde2a71`.
+The build retained debug assertions and overflow checks at optimization level 3,
+with 16 codegen units and LTO disabled. Test assertions, iteration counts and
+`SEED=1729` were unchanged; each run had a 900-second watchdog and 16-GiB
+address-space limit. The build took 161.70 seconds. B-tree completed in 3.626
+seconds of runner wall time; page-cache completed in 32.466 seconds (32.43 seconds
+in libtest), with final memory growth of 5,259,264 bytes below its unchanged
+10,000,000-byte limit. These completed attempts resolve the two incomplete stress
+cases without converting the original timeouts into passes. The three unsupported
+MVCC failures remain, so the complete upstream suite is **not all green**.
 The optional sync and MVCC deadlock reproductions passed their bounded attempts;
 they do not expand Fireweed's supported journal or replication modes.
 
@@ -478,4 +510,11 @@ The working-run records are
 records are `fireweed-maintenance-vendor-core-default-final.log`,
 `fireweed-maintenance-vendor-turso-sync-final.log`, and
 `fireweed-maintenance-vendor-log-retry-final.log` in `/tmp`. These completed
-records are preserved in the checkpoint evidence manifest linked above.
+records are preserved in the checkpoint evidence manifest linked above. The
+completed optimized follow-up is recorded separately in
+`/tmp/fireweed-maintenance-upstream-optimized-results.json`,
+`fireweed-maintenance-upstream-optimized-build.log`, and
+`fireweed-maintenance-upstream-optimized-01.log` / `-02.log` in `/tmp`; these four
+records await final evidence archival. The test binary SHA-256 is
+`1431aea46a714b5efdd61256c24ab26e64c28c8c16f6428928939d8f18587dcf`. These are
+correctness/stress results, not canonical workflow capacity qualification.

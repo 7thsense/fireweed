@@ -36,6 +36,9 @@ PY
 echo "--- turso.yml still invokes zero-arg policy verifier ---"
 grep -Fq 'bash scripts/ci/verify-github-actions-policy.sh' .github/workflows/turso.yml
 
+echo "--- focused Turso fixture policy and negative cases ---"
+python3 scripts/ci/turso_workflow_fixtures.py --self-test
+
 echo "--- governed-product framework present ---"
 test -f .github/workflows/governed-product.yml
 test -f scripts/ci/governed-product-allowlist.json

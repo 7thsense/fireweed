@@ -21,6 +21,11 @@ on:
       - crates/fireweed-turso/**
       - crates/fireweed-workload/**
       - .github/workflows/turso.yml
+      - scripts/ci/s3-qualification-endpoint.sh
+      - scripts/ci/s3-native-cas-preflight.py
+      - scripts/ci/turso_workflow_fixtures.py
+      - scripts/ci/verify-github-actions-policy.sh
+      - scripts/ci/github-actions-policy-test.sh
   push:
     branches:
       - main
@@ -37,6 +42,11 @@ on:
       - crates/fireweed-turso/**
       - crates/fireweed-workload/**
       - .github/workflows/turso.yml
+      - scripts/ci/s3-qualification-endpoint.sh
+      - scripts/ci/s3-native-cas-preflight.py
+      - scripts/ci/turso_workflow_fixtures.py
+      - scripts/ci/verify-github-actions-policy.sh
+      - scripts/ci/github-actions-policy-test.sh
   workflow_dispatch:
 
 permissions:
@@ -55,8 +65,28 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       RUST_TEST_THREADS: "1"
+    # Disposable correctness fixture; reuse the PostgreSQL 16 Alpine kind fixture.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fireweed
+          POSTGRES_PASSWORD: fireweed-test-only
+          POSTGRES_DB: fireweed
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fireweed -d fireweed"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install repository check prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ripgrep
 
       - name: Install Rust 1.97.1
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
@@ -82,6 +112,29 @@ jobs:
 
       - name: Public workflow correctness and log recovery
         run: cargo +1.97.1 test -p fireweed-workload
+
+      # The full matrix requires PostgreSQL and native conditional-create S3.
+      # Keep fixture credentials outside the checkout and mask before GITHUB_ENV.
+      - name: Provision matrix PostgreSQL/S3 fixtures
+        timeout-minutes: 5
+        shell: bash
+        env:
+          FIREWEED_S3_SECRET_DIR: ${{ runner.temp }}/fireweed-turso-s3-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker pull quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3
+          bash scripts/ci/s3-qualification-endpoint.sh provision
+          bash scripts/ci/s3-qualification-endpoint.sh verify-isolation
+          set -a
+          source "${FIREWEED_S3_SECRET_DIR}/credentials.env"
+          set +a
+          pg_scheme=postgres
+          pg_password=fireweed-test-only
+          pg_url="${pg_scheme}://fireweed:${pg_password}@127.0.0.1:5432/fireweed"
+          printf '::add-mask::%s\n' "$pg_password" "$pg_url" "$FIREWEED_S3_TEST_ACCESS_KEY" "$FIREWEED_S3_TEST_SECRET_KEY"
+          printf 'FIREWEED_PG_TEST_URL=%s\n' "$pg_url" >> "$GITHUB_ENV"
+          for key in FIREWEED_S3_TEST_ENDPOINT FIREWEED_S3_TEST_BUCKET FIREWEED_S3_TEST_REGION FIREWEED_S3_TEST_ACCESS_KEY FIREWEED_S3_TEST_SECRET_KEY; do
+            printf '%s=%s\n' "$key" "${!key}" >> "$GITHUB_ENV"
+          done
 
       # Fireweed facade: 12-cell register Turso route leaves + composition matrix.
       - name: Fireweed 12-cell Turso route tests
@@ -109,7 +162,8 @@ jobs:
       - name: fireweed-server clippy (all features)
         run: cargo +1.97.1 clippy -p fireweed-server --all-targets --all-features -- -D warnings
 
-      # Live PostgreSQL/S3/Kafka suites run with fixtures in governed-product.
+      # Broad live suites and Kafka remain in governed-product; the focused
+      # storage matrix above owns only its PostgreSQL/S3 correctness fixtures.
       - name: Server configuration unit tests (default features)
         run: cargo +1.97.1 test -p fireweed-server --lib env_config::tests -- --test-threads=1
 
@@ -158,3 +212,10 @@ jobs:
           cargo +1.97.1 test -p fireweed-server --test turso_workflow_shape
           turso_workflow_qualifies_the_public_default_projection
           -- --exact
+
+      - name: Tear down matrix S3 fixture
+        if: always()
+        timeout-minutes: 2
+        env:
+          FIREWEED_S3_SECRET_DIR: ${{ runner.temp }}/fireweed-turso-s3-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/ci/s3-qualification-endpoint.sh teardown

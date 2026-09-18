@@ -7,12 +7,13 @@
 #
 # Context-aware rules:
 #   - Hosted fast lanes (ci.yml, pages.yml): no services/matrix/docker/kind/perf.
-#   - Focused turso.yml (P13t): path-filtered public-default lane; no services.
+#   - Focused turso.yml (P13t): only its fixed PostgreSQL/S3 correctness fixtures.
 #   - nightly.yml: manual extended lib tests; no services/perf.
 #   - release.yml: owned by P17r — no services/kind; Docker publication exception
 #     only (docker/build-push-action + GHCR login).
-#   - governed-product.yml: sole lane authorized for service-backed matrix/kind/S3
-#     and P8k kafka-compatible broker service *slots*. Exact digests/commands are
+#   - governed-product.yml: broader service-backed matrix/kind/S3 qualification
+#     and P8k kafka-compatible broker service *slots*. The focused Turso lane has
+#     only the correctness-fixture exception above. Exact broker digests/commands are
 #     P13-populated in governed-product-services.json / allowlist (not workflow YAML).
 set -euo pipefail
 
@@ -71,10 +72,9 @@ grep -Fq 'objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative
 grep -Fq 'storage_matrix_t0_t2_all_twelve_cells' "${turso}"
 # Zero-argument policy-verifier invocation (exact regression for P13t).
 grep -Fq 'bash scripts/ci/verify-github-actions-policy.sh' "${turso}"
-if rg -n 'services:' "${turso}"; then
-    echo "turso.yml must not declare GitHub Actions services" >&2
-    exit 1
-fi
+# Only the exact PostgreSQL service and owned, CAS-preflighted S3 fixture are
+# permitted here. The validator rejects additional services and missing cleanup.
+python3 "${repo_root}/scripts/ci/turso_workflow_fixtures.py"
 echo "GitHub Actions policy valid: turso.yml is a governed focused public-default lane"
 
 # ---------------------------------------------------------------------------
@@ -233,12 +233,12 @@ print(
 )
 PY
 
-# Hosted lanes other than governed-product.yml must not declare services.
+# Other hosted lanes must not declare services; Turso was checked narrowly above.
 # release.yml (P17r) retains only the Docker publication exception — no services.
 while IFS= read -r -d '' wf; do
     base="$(basename "${wf}")"
     case "${base}" in
-        governed-product.yml) continue ;;
+        governed-product.yml|turso.yml) continue ;;
     esac
     if rg -n 'services:' "${wf}"; then
         echo "hosted workflow ${base} must not declare services (move to governed-product.yml)" >&2

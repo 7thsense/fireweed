@@ -195,9 +195,18 @@ debug workload attempt has 33 passes, one failure and zero ignored tests:
 the debug-only watchdog is now 600 seconds while release remains 120 seconds.
 The exact traced debug rerun passes all three cycles in 417.47 seconds with
 zero pending rows or leases and the expected final dispositions, resolving
-that case without changing the earlier full-run totals. Remote CI setup also
-now installs its missing `ripgrep` prerequisite;
-a corrected remote run is not claimed here.
+that case without changing the earlier full-run totals. Remote CI setup now
+installs its missing `ripgrep` prerequisite. At `bb443691`, the ordinary CI run
+passes; the separate Turso workflow passes native tests and public workflow/log
+recovery, then fails its 12-cell route test because `FIREWEED_PG_TEST_URL` is
+unset. The assertion remains fail-closed; skipped downstream stages are not
+passes. All six focused fixture-correction checks pass locally; clean S2 and
+its remote verification remain pending.
+The partial canonical attempt was intentionally interrupted after this discovery,
+with process and owned temporary-data cleanup recorded. Its preserved observations
+are diagnostic evidence, not a throughput failure or qualification. Candidate
+remeasurement remains pending, and the v0.31.28 source-preview prerelease has not
+been published.
 
 The applied inventory/policy correction retains vendored findings in explicit
 external observations, outside product closure and without declaring them
@@ -218,9 +227,9 @@ storage-policy classifications and negative fixtures: zero product debt, with
 closure failure and upstream limitations remain recorded. Route listing alone
 does not establish execution of every runtime test. The new inventory/poststage
 records await final archival and are not included in the existing 67-artifact
-post-b2 manifest. The two upstream stress reruns and canonical C1/P1/C2/P2
-qualification remain pending. Completed attempt locations and pending
-canonical qualification are recorded in the
+post-b2 manifest. Both upstream stress reruns now pass with their assertions
+retained; canonical C1/P1/C2/P2 qualification remains pending. Completed attempt
+locations and pending canonical qualification are recorded in the
 [maintenance verification baseline](maintenance-release-baseline.md#candidate-verification-status).
 
 ## Retired evidence producers and current entrypoints
@@ -279,10 +288,15 @@ values and release labels select Turso.
 ## Upstream ignored tests remain retained
 
 No upstream ignored test was deleted, reclassified as a pass, or weakened during
-this maintenance cleanup. The separate serial attempts of all 18 ignored Turso
+this maintenance cleanup. The initial serial attempts of all 18 ignored Turso
 core/binding tests produced 13 passes, three MVCC failures and two bounded
-timeouts. Both timeout cases concern shared B-tree/page-cache code and remain
-incomplete stress coverage; ordinary WAL support does not make them irrelevant.
+timeouts; those original outcomes remain recorded. Both shared B-tree/page-cache
+tests subsequently completed and passed on unchanged source `bb443691`. The
+optimized build retained all assertions and iteration counts, debug assertions
+and overflow checks, with 16 codegen units and LTO disabled. Serial execution
+retained `SEED=1729` and a 16-GiB address-space limit, with a 900-second watchdog
+per test. These follow-ups resolve the two incomplete stress cases and await
+final archival; they do not turn the earlier timed-out attempts into passes.
 The failed MVCC bootstrap/concurrency cases do not exercise Fireweed's supported
 journal mode, which rejects MVCC configuration. Exact failures, limits, regular
 suite counts and working evidence locations are recorded in the
