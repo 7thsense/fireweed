@@ -19,3 +19,6 @@
 # Snorri runner attestation: the value is the symbolic mapping name
 # `legacy_runner_s3_access_key`, not an access-key value.
 699b67d3a7b09559a969c0c5f2173d9541fc3c61:docs/evidence/snorri/p6p-runner-attestation.json:generic-api-key:139
+# Vendored Turso test_encryption: a constant key creates a fresh temporary local
+# database and exercises wrong-key rejection; it is not a service credential.
+4625e9f5e2844e43cc47b88eead3eeb20ff83535:vendor/turso/tests/integration_tests.rs:generic-api-key:465
