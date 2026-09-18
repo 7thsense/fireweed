@@ -580,6 +580,121 @@ fn pg_typed_connect(url: &str, schema: &str) -> PostgresRelationalBackend {
 }
 
 #[test]
+fn projection_index_validation_covers_legacy_compact_fields_and_replacements() {
+    use fireweed_engine::{ProjectionStore, PushSpec, build_push_items};
+    use fireweed_postgres::PostgresRelational;
+
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required for projection validation");
+    let schema = fresh_schema();
+    let backend = pg_typed_connect(&url, &schema);
+    let shard = fireweed_conformance::shard();
+    let mut definition = pg_qdef_unique_str_index("by_email", "email");
+    definition.secondary_indexes = vec![fireweed_core::IndexSpec {
+        name: "by_external_id".into(),
+        fields: vec!["external_id".into()],
+        unique: true,
+    }];
+    let spec = |email: &str, external: &str| PushSpec {
+        index_fields: [(
+            "email".into(),
+            fireweed_core::TypedValue::String(email.into()),
+        )]
+        .into_iter()
+        .collect(),
+        fields: [(
+            "external_id".into(),
+            bytes::Bytes::copy_from_slice(external.as_bytes()),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let ids = futures::executor::block_on(async {
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                vec![spec("a@example.com", "A"), spec("b@example.com", "B")],
+                fireweed_conformance::ts(0),
+                None,
+            )
+            .await
+            .unwrap()
+    });
+    let store = PostgresRelational::connect_in_schema(&url, &schema).unwrap();
+    let before = fireweed_engine::LogStore::high_water(&store, &shard).unwrap();
+    let (mut proposed, _) = build_push_items(vec![spec("a@example.com", "C")], 0, 0, 20, 3);
+    let replacement = proposed.remove(0);
+    assert_eq!(
+        ProjectionStore::index_validate_push(&store, &shard, std::slice::from_ref(&replacement)),
+        Err(EngineError::Conflict)
+    );
+    assert_eq!(
+        ProjectionStore::index_validate_replace(&store, &shard, &ids[1], &replacement),
+        Err(EngineError::Conflict)
+    );
+    ProjectionStore::index_validate_replace(&store, &shard, &ids[0], &replacement).unwrap();
+
+    let legacy = [("external_id".into(), bytes::Bytes::from_static(b"A"))]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        ProjectionStore::index_validate(&store, &shard, &replacement.item_id, &legacy, None, None),
+        Err(EngineError::Conflict)
+    );
+    assert_eq!(
+        ProjectionStore::index_validate(
+            &store,
+            &shard,
+            &replacement.item_id,
+            &BTreeMap::new(),
+            Some(&json!({"email": "a@example.com"})),
+            None
+        ),
+        Err(EngineError::Conflict)
+    );
+    let field_ops = [("external_id".into(), Some(bytes::Bytes::from_static(b"A")))]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        ProjectionStore::index_validate_update(&store, &shard, &ids[1], &field_ops, None),
+        Err(EngineError::Conflict)
+    );
+    assert_eq!(
+        ProjectionStore::index_validate_update(
+            &store,
+            &shard,
+            &ids[1],
+            &BTreeMap::new(),
+            Some(&json!({"email": "a@example.com"}))
+        ),
+        Err(EngineError::Conflict)
+    );
+    ProjectionStore::index_validate_update(&store, &shard, &ids[1], &BTreeMap::new(), None)
+        .unwrap();
+
+    let (siblings, _) = build_push_items(
+        vec![
+            spec("fresh@example.com", "fresh-a"),
+            spec("fresh@example.com", "fresh-b"),
+        ],
+        0,
+        0,
+        30,
+        3,
+    );
+    assert_eq!(
+        ProjectionStore::index_validate_push(&store, &shard, &siblings),
+        Err(EngineError::Conflict)
+    );
+    assert_eq!(
+        fireweed_engine::LogStore::high_water(&store, &shard).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn pg_rel_typed_index_push_then_get_unique() {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {

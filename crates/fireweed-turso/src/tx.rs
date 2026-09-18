@@ -65,11 +65,28 @@ impl RelTx for ApplyTursoRel<'_> {
     }
 
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
-        self.execute_values(sql, params.iter().map(to_turso).collect())
+        let started = std::time::Instant::now();
+        let result = self.execute_values(sql, params.iter().map(to_turso).collect());
+        crate::projection::trace_sql(
+            sql,
+            params.len(),
+            result.as_ref().copied().unwrap_or(0),
+            started.elapsed(),
+        );
+        result
     }
 
     fn execute_owned(&self, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
-        self.execute_values(sql, params.into_iter().map(into_turso).collect())
+        let started = std::time::Instant::now();
+        let binds = params.len();
+        let result = self.execute_values(sql, params.into_iter().map(into_turso).collect());
+        crate::projection::trace_sql(
+            sql,
+            binds,
+            result.as_ref().copied().unwrap_or(0),
+            started.elapsed(),
+        );
+        result
     }
 
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
@@ -398,17 +415,36 @@ impl RelTx for TursoRel<'_> {
     }
 
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
-        self.execute_values(sql, params.iter().map(to_turso).collect())
+        let started = std::time::Instant::now();
+        let result = self.execute_values(sql, params.iter().map(to_turso).collect());
+        crate::projection::trace_sql(
+            sql,
+            params.len(),
+            result.as_ref().copied().unwrap_or(0),
+            started.elapsed(),
+        );
+        result
     }
 
     fn execute_owned(&self, sql: &str, params: Vec<RelValue>) -> EngineResult<usize> {
-        self.execute_values(sql, params.into_iter().map(into_turso).collect())
+        let started = std::time::Instant::now();
+        let binds = params.len();
+        let result = self.execute_values(sql, params.into_iter().map(into_turso).collect());
+        crate::projection::trace_sql(
+            sql,
+            binds,
+            result.as_ref().copied().unwrap_or(0),
+            started.elapsed(),
+        );
+        result
     }
 
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
+        let started = std::time::Instant::now();
+        let binds = params.len();
         let params: Vec<Value> = params.iter().map(to_turso).collect();
-        if USE_LOCAL_RT.get() {
-            return block_on_local(async {
+        let result = if USE_LOCAL_RT.get() {
+            block_on_local(async {
                 let mut stmt = self.0.prepare_cached(sql).await.map_err(storage)?;
                 let mut rows = stmt.query(params).await.map_err(storage)?;
                 let mut collected = Vec::new();
@@ -416,19 +452,27 @@ impl RelTx for TursoRel<'_> {
                     collected.push(RelRow(row.into_values().map(from_turso).collect()));
                 }
                 Ok(collected)
-            });
-        }
-        let conn = self.0.clone();
-        let sql = sql.to_string();
-        block_on_turso(async move {
-            let mut stmt = conn.prepare_cached(&sql).await.map_err(storage)?;
-            let mut rows = stmt.query(params).await.map_err(storage)?;
-            let mut collected = Vec::new();
-            while let Some(row) = rows.next().await.map_err(storage)? {
-                collected.push(RelRow(row.into_values().map(from_turso).collect()));
-            }
-            Ok(collected)
-        })
+            })
+        } else {
+            let conn = self.0.clone();
+            let owned_sql = sql.to_string();
+            block_on_turso(async move {
+                let mut stmt = conn.prepare_cached(&owned_sql).await.map_err(storage)?;
+                let mut rows = stmt.query(params).await.map_err(storage)?;
+                let mut collected = Vec::new();
+                while let Some(row) = rows.next().await.map_err(storage)? {
+                    collected.push(RelRow(row.into_values().map(from_turso).collect()));
+                }
+                Ok(collected)
+            })
+        };
+        crate::projection::trace_sql(
+            sql,
+            binds,
+            result.as_ref().map_or(0, Vec::len),
+            started.elapsed(),
+        );
+        result
     }
 }
 

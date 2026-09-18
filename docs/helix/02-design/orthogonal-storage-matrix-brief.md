@@ -27,7 +27,7 @@ ddx:
 
 # Orthogonal Storage Matrix — Product Brief
 
-**Status**: Accepted product intent (2026-07-28)  
+**Status**: Accepted product intent (2026-07-28); matrix revised 2026-09-17 for SQLite retirement
 **Scope**: Public storage model, configuration layering, durability classes, and the
 work sequence that aligns code, contracts, and preview messaging.  
 **Non-scope**: Control-plane redesign, Hybrid as a public projection type,
@@ -38,15 +38,15 @@ implementation beads. Where it conflicts with older public wording (profile SKUs
 `postgres/*` deferred, production ban on memory log), **this brief wins** until
 those documents are updated to match.
 
-## 1. Problem
+## 1. Historical problem
 
-1. Public docs present storage as **profiles** (`objectlog/sqlite`, `postgres/*`),
-   which hides that log and projection are independent axes and implies non-interchangeability.
-2. Collapsing Postgres as `postgres/*` deferred reads as an incomplete backend, not a
+1. Earlier public docs presented storage as **profiles** (`objectlog/sqlite`, `postgres/*`),
+   which hid that log and projection are independent axes and implied non-interchangeability.
+2. Collapsing Postgres as `postgres/*` deferred read as an incomplete backend, not a
    packaging or evidence-scope choice.
-3. Runtime wiring is a **sparse allowlist**, not the full orthogonal product of
+3. Runtime wiring was a **sparse allowlist**, not the full orthogonal product of
    designed axes.
-4. Plan and ops language sometimes centers `FIREWEED_*` env vars, though the library
+4. Plan and ops language sometimes centered `FIREWEED_*` env vars, though the library
    and Helm already have structured configuration.
 
 ## 2. Product model (normative)
@@ -67,20 +67,21 @@ appear only in test IDs and historical evidence filenames.
 |------|---------------|----------------|
 | **Log** | `memory`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
 | **Projection** | `memory`, `turso`, `postgres` | Serving, claim selection, validation, apply; `turso` is the default |
-| **Control plane** | Optional (in-process / postgres, etc.) | Queue definitions, placement, ownership — composed independently and not redefined here |
+| **Control plane** | Optional (in-process / postgres) | Queue definitions, placement, ownership — composed independently and not redefined here |
 
-**Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`,
-`objectlog/*` profile names, `postgres/*` wildcards. Hybrid/async knobs, if
-retained later, are optional implementation details under a durable
-projection—not matrix rows. The public `turso` value is limited to the
-embedded/local Turso 0.7 adapter in ordinary WAL mode; remote, sync, and MVCC
-modes are outside this product boundary.
+**Not public product values:** `sqlite`, `hybrid`, `hybrid-async`, `hybrid-strict`,
+`objectlog/*` profile names, `postgres/*` wildcards. `AsyncProjection` is a
+response barrier, not a projection type. The public `turso` value is the native
+embedded/local Turso 0.7.2 adapter in ordinary WAL mode; remote, sync,
+embedded-replica, and MVCC modes are outside this product boundary.
 
 ### 2.2 Full matrix (12 cells)
 
-Every cell is a valid selection. Semantics differ only by **durability class**.
-The rusqlite `sqlite` log and `sqlite` projection are retired; Turso is the
-sqlite-family serving store.
+Every cell is a valid selection with its required adapters enabled. The matrix
+contains nine **Class A** cells and three **Class B** cells. `Strict` is valid
+for all 12 cells; the async response barrier has the narrower scope below.
+The rusqlite `sqlite` log and `sqlite` projection are retired; native Turso is
+the default serving store.
 
 | Log \ Projection | `memory` | `turso` (default) | `postgres` |
 |------------------|----------|-------------------|------------|
@@ -104,12 +105,15 @@ is not an automatic free multi-writer free-for-all.
 
 | Class | Logs | Authority after restart | Client contract |
 |-------|------|-------------------------|-----------------|
-| **A — Durable log** | `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`turso`/`postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
+| **A — Durable log** | `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log; serving visibility follows the selected response barrier; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
+| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; reopening may reuse a persisted `turso`/`postgres` projection but grants no durable-log guarantee; no log rebuild, branch, read-as-of, or change-record-from-log |
 
-**CQRS is preserved:** every cell remains `LogStore × ProjectionStore` with
-append → apply → acknowledge for that class. Class B is a weaker **persistence
-envelope**, not a second architecture and not “no LogStore.”
+**CQRS is preserved:** every cell remains `LogStore × ProjectionStore`.
+`Strict` acknowledges after append and projection apply. `AsyncProjection`
+acknowledges durable log append while projection apply proceeds within its
+configured bounds. It is valid for the six filesystem/S3 log cells; the six
+memory/Postgres log cells reject it before storage I/O. Class B is a weaker
+**persistence envelope**, not a second architecture and not “no LogStore.”
 
 **ADR-013 amendment required:** replace “production null-log retired / log always
 mandatory” with: Class A requires a durable log (ADR-013 rules stand); Class B is
@@ -158,8 +162,11 @@ StorageConfig
 Retired public spellings (`objectlog`, `inmemory`, Hybrid selectors, and the
 rusqlite `sqlite` log/projection) fail closed. Public examples and help use only
 the four log and three projection names. Turso is the default projection
-selector. Historical evidence may retain old strings as immutable provenance;
-that does not make retired aliases accepted configuration.
+selector. The retired `sqlite_projection_deferred_flush_chunk` setting is
+rejected when supplied; it is not part of `AsyncProjectionSpec` and is not a
+Turso durability or throughput control. Historical evidence may retain old
+strings as immutable provenance; that does not make retired aliases accepted
+configuration.
 
 ## 4. Public messaging
 
@@ -170,7 +177,7 @@ that does not make retired aliases accepted configuration.
 
 ## 5. Non-goals
 
-- Unbounded custom backends outside the 5×4 matrix
+- Unbounded custom backends outside the 4×3 matrix
 - Public Hybrid projection backends as matrix rows
 - Remote, sync, or MVCC Turso operation
 - Env vars as the product vocabulary for storage  
@@ -178,13 +185,13 @@ that does not make retired aliases accepted configuration.
 - Treating filesystem object log as test-only or “fake S3”  
 - Mass-renaming historical perf JSONL filenames (verifiers may alias first)
 
-## 6. Alignment state (2026-08-03)
+## 6. Alignment state (2026-09-17)
 
 | Area | Aligned state | Remaining governed work |
 |------|---------------|---------------------------|
-| Product law | Vision, PRD, and this brief define axes, 20 cells, Turso as the default projection, and Class A/B | Reconcile lower ADR/TD/API copies without changing this authority |
-| Config | Typed `StorageConfig` validates the matrix; server accepts canonical public names | Complete the single facade dispatcher and prove Helm/config bijection in their owning work |
-| Wiring | Existing adapters cover part of the 20-cell matrix | Complete Turso facade/server composition and per-cell evidence in their owning work |
+| Product law | Vision, PRD, and this brief define axes, 12 cells, Turso as the default projection, and Class A/B | Reconcile lower ADR/TD/API copies without changing this authority |
+| Config | Typed `StorageConfig` validates the matrix; server accepts canonical public names | Verify the facade and Helm/config bijection on the release revision |
+| Wiring | Composition routes cover the 12-cell matrix with explicit adapter feature requirements | Qualify each cell on the release revision; route presence alone is not runtime evidence |
 | Execution | Product composition is native async; blocking stores use bounded adapter isolation | Remove residual facade bridges only after every adapter is runtime-safe |
 | Legacy | Retired selectors are not public product values | Remove remaining prose/source residue while preserving immutable history |
 
@@ -198,9 +205,9 @@ earlier product contract.
 |-------|------------------|-----------------|
 | **0 — Product law** | Vision, PRD, and this brief define the axes, classes, and closed public set | Aligned; lower contracts reconcile in authority order |
 | **1 — Config surface** | Typed config, server/file/env adapters, Helm fields, canonical names, and migration errors are isomorphic | Typed/server canonical surface exists; facade/Helm proof remains owned downstream |
-| **2 — Composition** | Every cell opens through the one composition model and implements the complete public method surface | Turso facade/server wiring and per-method closure remain evidence-bearing work |
+| **2 — Composition** | Every cell opens through the one composition model and implements the complete public method surface | Native Turso and other adapter routes exist; per-method closure remains subject to release evidence |
 | **3 — Evidence** | Per-cell conformance, Class A replay, Class B projection-only recovery, and live provider fixtures fail closed | In progress; no support claim may substitute a compile-only or skipped route |
-| **4 — Preview honesty** | Preview, operator, release, and deployment claims name only evidenced behavior and its durability boundary | Normative 20-cell boundary is set; release evidence remains the claim gate |
+| **4 — Preview honesty** | Preview, operator, release, and deployment claims name only evidenced behavior and its durability boundary | Normative 12-cell boundary is set; release evidence remains the claim gate |
 
 The per-cell bar is unchanged: open through typed configuration; push → claim →
 finalize; rejection has no effect; reopen matches the class; Class A proves
@@ -220,7 +227,7 @@ vision + PRD + brief
 ## 9. Success criteria for the program
 
 1. Preview and operator docs describe interchangeable log and projection stores.  
-2. All 20 cells start and satisfy the per-cell bar under their durability class.
+2. All 12 cells start and satisfy the per-cell bar under their durability class.
 3. Typed `StorageConfig` is the composition root; Helm matches; env is adapter-only.  
 4. ADR-013 and preview messaging agree on Class A vs Class B.  
 5. No public profile SKU; no “Postgres incomplete” framing.
@@ -232,7 +239,7 @@ vision + PRD + brief
 | ADR-012 | Composition law (keep; drop profile-centric examples over time) |
 | ADR-013 | Amend for Class B |
 | ADR-001 | Align vocabulary (axes, not deployment profiles) where it still says profiles |
-| TD-001, TD-007 | Capability / durability tables for 5×4 |
+| TD-001, TD-007 | Capability / durability tables for 4×3 |
 | API-005 | Full-matrix construction contract |
 | `public-preview-boundary.md`, `docs/site/preview.html` | Axes + matrix |
 | `DEPLOYMENT-READINESS.md`, container runtime contract | Structured config; matrix wiring status |

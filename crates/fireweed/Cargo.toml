@@ -54,7 +54,7 @@ tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync
 # rusqlite `sqlite` log/projection is retired; use filesystem log and turso projection.
 default = ["memory", "objectlog", "turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
-# objectlog pulls tokio so BlockingLibBackend workers host a reactor for LogEngine I/O.
+# objectlog enables the shared Tokio reactor used by LogEngine I/O.
 objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
 # Local embedded Turso 0.7 ordinary-WAL projection (public default projection axis).

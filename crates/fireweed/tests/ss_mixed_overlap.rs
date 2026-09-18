@@ -42,21 +42,21 @@ use fireweed::turso_compose::open_turso_projection_async;
 use fireweed::*;
 use fireweed_core::{Metadata, MetadataValue};
 use fireweed_engine::{
-    AsyncLogStore, CLAIM_DRIVER_INGRESS_RESOURCE, CLAIM_DRIVER_SLOTS_RESOURCE,
-    CLAIM_GENERATION_MAX_REQUESTS, CLAIM_MAX_DRIVERS, CLAIM_QUEUE_TURN_RESOURCE,
-    CLAIM_TURN_DEFAULT_MAX_WAIT, ClaimCoordinator, ClaimDriverReadAdmission, ClaimQueueTurn,
-    CoordinationError, DEFAULT_KEYED_QUEUE_MAX_PER_KEY, DRIVER_SLOT_DEFAULT_MAX_WAIT,
-    GENERATION_MAX_ITEMS, KeyedQueueGate, MUTATION_MAX_REQUESTS_PER_QUEUE,
-    MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MUTATION_SEQUENCER_RESOURCE,
-    MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationKind, MutationIngress, MutationSequencer,
-    OUTCOME_READ_SLOTS_RESOURCE, OUTCOME_SLOT_DEFAULT_MAX_WAIT, OutcomeReadAdmission,
-    QueueGateError, S3M_DERIVED_CLAIM_SLOT_WAIT, S3M_DERIVED_COVERAGE_OR_WORK_WAIT,
-    S3M_DERIVED_FENCE_ACQUIRE_WAIT, S3M_DERIVED_TURN_WAIT, S3M_DRIVER_POOL_BORROW_CAP,
-    S3M_WAIT_FLOOR, S3S_COVERAGE_OR_WORK_CAP, S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
-    S3S_DERIVED_DRIVER_SLOT_WAIT, S3S_DERIVED_OUTCOME_SLOT_WAIT, S3S_DERIVED_TURN_WAIT,
-    S3S_FENCE_ACQUIRE_CARRIED_CAP, S3S_WAIT_FLOOR, SHARED_DRIVER_SLOTS_RESOURCE, SelectionFence,
-    SelectionFenceAdmission, SharedDriverReadAdmission, abort_unplanned_generation_on_deadline,
-    derive_structural_wait,
+    AsyncLogStore, AsyncProjectionStore, CLAIM_DRIVER_INGRESS_RESOURCE,
+    CLAIM_DRIVER_SLOTS_RESOURCE, CLAIM_GENERATION_MAX_REQUESTS, CLAIM_MAX_DRIVERS,
+    CLAIM_QUEUE_TURN_RESOURCE, CLAIM_TURN_DEFAULT_MAX_WAIT, ClaimCoordinator,
+    ClaimDriverReadAdmission, ClaimQueueTurn, CoordinationError, DEFAULT_KEYED_QUEUE_MAX_PER_KEY,
+    DRIVER_SLOT_DEFAULT_MAX_WAIT, GENERATION_MAX_ITEMS, KeyedQueueGate,
+    MUTATION_MAX_REQUESTS_PER_QUEUE, MUTATION_SEQUENCER_DEFAULT_MAX_WAIT,
+    MUTATION_SEQUENCER_RESOURCE, MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationKind,
+    MutationIngress, MutationSequencer, OUTCOME_READ_SLOTS_RESOURCE, OUTCOME_SLOT_DEFAULT_MAX_WAIT,
+    OutcomeReadAdmission, QueueGateError, S3M_DERIVED_CLAIM_SLOT_WAIT,
+    S3M_DERIVED_COVERAGE_OR_WORK_WAIT, S3M_DERIVED_FENCE_ACQUIRE_WAIT, S3M_DERIVED_TURN_WAIT,
+    S3M_DRIVER_POOL_BORROW_CAP, S3M_WAIT_FLOOR, S3S_COVERAGE_OR_WORK_CAP,
+    S3S_DERIVED_COVERAGE_OR_WORK_WAIT, S3S_DERIVED_DRIVER_SLOT_WAIT, S3S_DERIVED_OUTCOME_SLOT_WAIT,
+    S3S_DERIVED_TURN_WAIT, S3S_FENCE_ACQUIRE_CARRIED_CAP, S3S_WAIT_FLOOR,
+    SHARED_DRIVER_SLOTS_RESOURCE, SelectionFence, SelectionFenceAdmission,
+    SharedDriverReadAdmission, abort_unplanned_generation_on_deadline, derive_structural_wait,
 };
 use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
 use fireweed_turso::{
@@ -292,8 +292,9 @@ fn cohort_evidence(
 }
 
 async fn settle(fireweed: &MixedRuntime, queue: &QueueKey) -> EngineResult<QueueMetrics> {
-    // Metrics describe durable outcomes. Physical projection catch-up is a
-    // separate barrier; the canonical workload qualification verifies both.
+    // A retained read waits for the durable frontier captured on entry. Metrics
+    // alone may fold an unapplied log tail and cannot establish physical drain.
+    fireweed.retained_items(queue, None, 1).await?;
     fireweed.metrics(queue).await
 }
 
@@ -2830,8 +2831,8 @@ async fn shadow_claim_combined_soak_stays_one_below_every_cap() -> EngineResult<
 
 /// Ignored/opt-in S3m harness. Reconstructs Claim-turn/slot and the real
 /// selection fence on isolated shadow queues without activating production
-/// fence dispositions. Uses coordinator-authoritative applied high-water for
-/// drain waits.
+/// fence dispositions. Uses public retained reads for drain waits and verifies
+/// the physical projection high-water against the final durable log position.
 ///
 /// Default N=100k is too expensive for the default lane; override with
 /// `SS_CLAIM_CALIBRATION_N`.
@@ -2910,6 +2911,12 @@ async fn shadow_claim_drain_calibration_uses_exact_high_water() -> EngineResult<
     assert!(original_ids.iter().all(|id| seen.contains(id)));
     assert_eq!(metrics.complete, n as u64);
     assert_eq!(metrics.leased, 0);
+    let durable_position = fireweed.current_position(&queue).await?;
+    let projection_reader = open_turso_projection_async(&projection_path).await?;
+    let applied_position =
+        AsyncProjectionStore::recovery_high_water(&projection_reader, queue.clone()).await?;
+    assert_eq!(applied_position.as_ref(), Some(&durable_position));
+    drop(projection_reader);
     assert!(
         !timings.claim_cycle.samples.is_empty(),
         "S3m T2 measurement harness is missing claim-cycle samples"
@@ -2923,6 +2930,8 @@ async fn shadow_claim_drain_calibration_uses_exact_high_water() -> EngineResult<
         "serving_switched": true,
         "production_fence_activated": false,
         "exact_high_water_drain": true,
+        "durable_position": durable_position,
+        "applied_position": applied_position,
         "derived_bounds": s3m_derived_bounds_evidence(),
         "shadow": counters.evidence(),
         "timings": timings.evidence(),

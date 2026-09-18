@@ -1,0 +1,378 @@
+[
+  {
+    "path": "/tmp/fireweed-maintenance-vendor-core-default-final.log",
+    "role": "regular vendor suite"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-vendor-turso-sync-final.log",
+    "role": "regular vendor suite"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-vendor-log-retry-final.log",
+    "role": "regular vendor suite"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-results.json",
+    "role": "all 18 initial bounded ignored-test outcomes, including failures/timeouts"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-01.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-02.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-03.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-04.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-05.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-06.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-07.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-08.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-09.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-10.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-11.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-12.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-13.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-14.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-15.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-16.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-17.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-ignored-18.log",
+    "role": "initial bounded upstream-ignored test attempt"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-results.json",
+    "role": "script suite exit-code ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-github-actions-policy-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-governed-release-evidence-gate-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-public-release-gate-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-public-release-gates-identity-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-release-failure-notification-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-release-workflow-shape-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-s3-qualification-endpoint-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-github-external-proof-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-governed-release-composite-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-snorri-ladder-record-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-workflow-inline-zero-debt-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-resp_readiness_test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-build-governed-evidence-bundle-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-promote-governed-evidence-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-resolve-release-identity-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-source-preview-artifacts-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-release-artifacts-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-release-identity-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-source-predicate-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-test-public-identity-residue.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-script-final-verify-public-artifact-topology-test.sh.log",
+    "role": "repository script check"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-clippy-parity-8.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-microsite-checkpoint.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-site-browser-final.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-channel-final.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-identity-final.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-public-boundary-final.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-helm.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-python-perf.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-python-release.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-python-resp.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workflow-policy-final.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-vendor-patches-final.log",
+    "role": "completed named check; inspect producer provenance before attributing to final candidate"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-retired-e3-entrypoints.log",
+    "role": "replacement E3 retirement-entrypoint check; legacy producer fixtures are retired"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-policy-followup.log",
+    "role": "follow-up CI policy check after maintenance audit changes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-followup-fmt.log",
+    "role": "follow-up formatting check after maintenance audit changes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workspace-initial-results.json",
+    "role": "initial full workspace attempt totals; includes failures and interrupted calibration, not final qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-tests-parity-final.log",
+    "role": "raw initial workspace attempt despite historical final filename; use accompanying initial-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-calibration-interruption.json",
+    "role": "explicit record of interrupted calibration; not a passing result"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-postgres-followup.log",
+    "role": "completed PostgreSQL follow-up: 111 library + 62 conformance passes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-debug-query-staged.log",
+    "role": "completed native debug query follow-up: 15 passes after staged decoding"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-native-debug-followup.log",
+    "role": "completed full native debug suite: 139 passes, 3 explicit ignored SQL diagnostics, 15 harnesses"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-native-debug-followup-results.json",
+    "role": "completed full native debug result summary"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-clippy-followup-final.log",
+    "role": "completed all-feature all-target workspace Clippy follow-up"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-gated-claim-query-plans.log",
+    "role": "diagnostic old and corrected gated-claim SQL query plans; not capacity qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-debug-gate-plan.log",
+    "role": "completed exact gate membership/blocked-key plan regression"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-debug-membership-plan.log",
+    "role": "completed full identity/client-key membership plan regression; timing is diagnostic"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-debug-aggregate-balanced-gdb.log",
+    "role": "debug stack-overflow GDB backtrace before staged SQL decoder fix; retained failed diagnostic"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-query-translator-frame.log",
+    "role": "static debug translator disassembly and exact stack-frame reservation, not a workload"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workspace-followup.log",
+    "role": "completed full release workspace attempt: 2032 passes, 3 external native peek blocked-gate failures, 0 ignored"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workspace-followup-results.json",
+    "role": "completed full release workspace attempt summary; not a final pass"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-claim-baseline-10000.json",
+    "role": "pre-fix synthetic 10000-item claim diagnostic result; metrics-only settle, no recorded binary hash"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-claim-baseline-10000.log",
+    "role": "pre-fix synthetic claim diagnostic raw traces; not capacity qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-claim-followup-results.json",
+    "role": "completed 10000/100000-item serial synthetic drain diagnostics with physical high-water assertions"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-claim-followup-10000.log",
+    "role": "completed corrected 10000-item diagnostic raw traces; T2 diagnostic budget not met"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-claim-followup-100000.log",
+    "role": "completed corrected 100000-item diagnostic raw traces; T2 diagnostic budget not met"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-claim-timing-analysis.json",
+    "role": "derived exact trace sample counts, median/nearest-rank p95 and input log SHA256 values"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-native-peek-final.log",
+    "role": "completed focused native debug gate/peek regression after correction"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-external-peek-final.log",
+    "role": "completed external release conformance after peek correction: 15 passes, 0 failures, 0 ignored; supersedes three failures without changing prior attempt totals"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-default-clippy-parity.log",
+    "role": "feature check default-clippy, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-none-parity.log",
+    "role": "feature check features-none, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-memory-parity.log",
+    "role": "feature check features-memory, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-objectlog-parity.log",
+    "role": "feature check features-objectlog, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-turso-parity.log",
+    "role": "feature check features-turso, exit 101; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-postgres-parity.log",
+    "role": "feature check features-postgres, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-memory-turso-parity.log",
+    "role": "feature check features-memory-turso, exit 101; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-objectlog-turso-parity.log",
+    "role": "feature check features-objectlog-turso, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-features-postgres-turso-parity.log",
+    "role": "feature check features-postgres-turso, exit 0; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-server-no-default-parity.log",
+    "role": "feature check server-no-default, exit 101; initial attempt, see ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-feature-check-results.json",
+    "role": "initial feature-matrix outcomes, including two Turso-only and one server no-default compile failures"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-property-smoke-final.log",
+    "role": "completed property PR smoke, 10000 cases per real priority property; exit 0"
+  }
+]

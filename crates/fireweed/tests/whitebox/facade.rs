@@ -430,6 +430,7 @@ async fn upsert_dedups_on_client_item_key_over_memory() {
     assert_eq!(peeked, vec![20], "the replacement's priority survives");
 }
 
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn composed_objectlog_supports_atomic_upsert() {
     use fireweed_objectlog::composed_objectlog_backend;
@@ -796,6 +797,7 @@ async fn api001_reservation_policy_is_recorded_or_enforced() {
     assert_eq!(live.payload.as_deref(), Some(&b"payload-1"[..]));
 }
 
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn composed_objectlog_supports_read_your_write_field_mutation() {
     use fireweed_objectlog::composed_objectlog_backend;

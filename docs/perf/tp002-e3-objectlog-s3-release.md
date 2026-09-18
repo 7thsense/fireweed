@@ -1,6 +1,19 @@
 # TP-002 E3 — live object-log projection matrix over S3-compatible storage
 
-**Status:** PARTIAL (exact 10M recovery contracts recorded; full cost/ack E3 ledger still open).
+**Status:** RETIRED. The previous live producer no longer measured the current projection matrix.
+Its replacement counters inferred object PUTs and seal causes from caller batches, and its remaining
+10M memory-only recovery route did not assert the complete-state digest comparison. The old launch
+entrypoints now fail before starting work; they cannot issue new E3 qualification.
+
+Historical schema-v1 evidence and its `fireweed-release` validators remain unchanged. Offline matrix
+regressions live in `fireweed-server/tests/historical_e3_evidence_contract_tests.rs`. Current recovery
+correctness is covered by the public `p5as3_s3_reopen_parity` and `public_interface_external_conformance`
+suites, plus `fireweed-turso/tests/recovery.rs` for exact genesis and snapshot-tail replay. These are
+correctness proofs, not substitutes for the retired E3 performance bar. Current workflow measurements
+use `fireweed-workload`.
+
+Everything below is archived context for the retired producer, including its commands and prior
+observations. It is not an executable release procedure.
 
 ### Long-run plan + progress (required)
 

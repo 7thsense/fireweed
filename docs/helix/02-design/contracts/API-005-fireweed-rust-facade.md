@@ -88,20 +88,16 @@ blocking bridge as architecture.
 | --- | --- |
 | Public root | One concrete `Fireweed` with async methods |
 | Product composition | Native-async / async-only composition (v0.24 product paths) |
-| `BlockingLibBackend` | Residual facade bridge only — **not** the product concurrency model or end-state architecture |
+| `BlockingLibBackend` | Removed private implementation; not a supported public type |
 | Process-wide blocking worker pool | **Not** the product concurrency model; may exist only as a temporary offload for non-native adapters |
 
-**v0.24 reality vs end-state.** As of v0.24, product **composition** is
-async-only (sync dual-stack product backends removed; log × projection cells
-assemble on async products). The public facade **still bridges today** where
-constructors wrap composed backends through `BlockingLibBackend` (or
-equivalent process-wide blocking dispatch) so inherent async methods can call
-legacy / not-yet-runtime-safe seams. That bridge is transitional. Residual
-work is **removing the facade blocking bridge** after adapters are
-runtime-safe under ADR-015 (no reactor stall; whole-transaction offload only
-where the store is inherently blocking) and ADR-017 (owned-task dispatch,
-queue-local gates). Embedders MUST NOT treat `BlockingLibBackend` as a
-supported public type or as the long-term execution architecture.
+**Maintenance state (2026-09-17).** Product composition uses async ports. The
+unused private `BlockingLibBackend` implementation has been removed after its
+remaining meaningful assertions moved to the active composition paths.
+Inherently synchronous PostgreSQL work still uses bounded adapter-local
+whole-operation offload under ADR-015; native Turso and object-log work use
+owned async dispatch under ADR-017. Removing an unused wrapper does not imply
+that every underlying storage operation is nonblocking.
 
 This contract does **not** re-export `fireweed-engine` async modules as the
 embedder surface. Engine composition types remain internal implementation
@@ -149,7 +145,7 @@ Correctness and progress requirements for the facade execution path:
 
 The product storage model is the orthogonal product of log and projection
 stores (see `orthogonal-storage-matrix-brief`). **Typed `StorageConfig` is the
-normative facade construction surface** for the full 5×3 matrix. Embedders
+normative facade construction surface** for the full 4×3 matrix. Embedders
 assemble log × projection (+ optional control-plane, segment, recovery, and
 authority fields) and open one concrete `Fireweed`.
 
@@ -162,14 +158,19 @@ pub struct StorageConfig {
     /// Required for object-log peers; invalid for non-object logs.
     pub authority: Option<ObjectLogAuthority>,
     pub response_barrier: ResponseBarrier,
+    /// Required exactly when response_barrier is AsyncProjection.
+    pub async_projection: Option<AsyncProjectionSpec>,
+    /// Retired compatibility field: every Some value rejects before I/O.
+    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
     pub segments: SegmentConfig,
     pub namespace: String,
     pub recovery: RecoveryPolicy,
 }
 
-/// Public log axis (five first-class values).
+/// Four supported log values plus one rejected compatibility selector.
 pub enum LogConfig {
     Memory,
+    /// Retired; validation rejects this selector before storage I/O.
     Sqlite { path: PathBuf },
     Postgres {
         url: ConfigSecret,
@@ -191,14 +192,12 @@ pub enum LogConfig {
     },
 }
 
-/// Public projection axis (three first-class values).
+/// Three supported projection values plus one rejected compatibility selector.
 pub enum ProjectionStoreConfig {
     Memory,
-    Sqlite {
-        path: PathBuf,
-        /// SQLite apply batching; independent of response-barrier policy.
-        sqlite_projection_deferred_flush_chunk: Option<NonZeroUsize>,
-    },
+    /// Retired; validation rejects this selector before storage I/O.
+    Sqlite { path: PathBuf },
+    Turso { path: PathBuf },
     Postgres { url: ConfigSecret },
 }
 
@@ -214,7 +213,7 @@ pub struct AsyncProjectionSpec {
 
 pub enum ResponseBarrier {
     Strict,
-    AsyncProjection(AsyncProjectionSpec),
+    AsyncProjection,
 }
 
 pub fn open(
@@ -230,13 +229,17 @@ pub async fn open_async(
 
 Every cell of the matrix is a valid selection:
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
+| Log \ Projection | `memory` | `turso` (default) | `postgres` |
 | --- | --- | --- | --- |
 | `memory` | yes | yes | yes |
-| `sqlite` | yes | yes | yes |
 | `postgres` | yes | yes | yes |
 | `filesystem` | yes | yes | yes |
 | `s3` | yes | yes | yes |
+
+SQLite enum variants remain only to return an explicit migration error. They
+are not supported selections, and the removed `open_sqlite`,
+`open_sqlite_relational`, and `open_objectlog_sqlite` functions are not facade
+entrypoints. Use `StorageConfig` with a supported log and Turso projection.
 
 `Filesystem` and `S3` are first-class log backends that share the object-log
 protocol (segments, manifest, conditional write / authority, retention). They
@@ -251,8 +254,8 @@ architecture:
 
 | Class | Logs | Client contract (summary) |
 | --- | --- | --- |
-| **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log and visible in the serving projection; recovery via high-water + tail replay when the log remains |
-| **B — Memory log** | `memory` | Success ⇒ visible in the projection; durable **iff** the projection is durable (`sqlite` / `postgres`); after process death only the projection remains—no log rebuild, branch, or read-as-of from the log |
+| **A — Durable log** | `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log; serving visibility follows the selected response barrier; recovery via high-water + tail replay when the log remains |
+| **B — Memory log** | `memory` | Success ⇒ visible in the projection; persistent projection state may survive for `turso` / `postgres`; after process death only the projection remains—no log rebuild, branch, or read-as-of from the log |
 
 Class B is a weaker persistence envelope, not “no LogStore.” Callers that need
 Class A guarantees MUST NOT select `LogConfig::Memory`.
@@ -290,15 +293,15 @@ fallback, and projection selection never supplies publication authority.
 `authority` on a non-object log is a tuple-coherence error rather than an
 ignored field.
 
-`Strict` and `AsyncProjection(AsyncProjectionSpec)` are provider-neutral
-response policies, not projection variants or public product profiles. All
-five limits in `AsyncProjectionSpec` MUST be positive. The separate
-`sqlite_projection_deferred_flush_chunk` is an optional positive SQLite apply
-batching capability; it is valid with either `Strict` or `AsyncProjection` and
-is a tuple-coherence error for non-SQLite projections. A barrier/cell whose
-durability or runtime capabilities cannot satisfy the external transaction
-contract is rejected at the final durability/capability step; constructors do
-not silently substitute a projection, authority, or barrier.
+`Strict` and `AsyncProjection` are provider-neutral response policies, not
+projection variants or public product profiles. `StorageConfig::async_projection`
+must be `Some(AsyncProjectionSpec)` exactly for `AsyncProjection`, and all five
+bounds MUST be positive. Strict has 12 supported cells; AsyncProjection has six
+filesystem/S3 positive cells and six memory/PostgreSQL-log pre-I/O rejections.
+The retained `sqlite_projection_deferred_flush_chunk` field is retired: every
+supplied value, including a positive value, rejects before storage I/O for every
+projection and barrier. Constructors do not silently substitute a projection,
+authority, or barrier.
 
 Unsupported or mismatched configurations return a structured
 `EngineError::Invalid` or `EngineError::Unavailable` before storage I/O; no
@@ -323,9 +326,6 @@ separate product model.
 ```rust
 /// Class B: memory log × memory projection.
 pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed;
-/// Class A: sqlite log × sqlite projection (shared path).
-pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
-pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
 /// Class A: filesystem object log with a default local composition.
 pub fn open_objectlog(root: impl Into<PathBuf>, clock: Arc<dyn Clock>)
     -> EngineResult<Fireweed>;
@@ -353,10 +353,6 @@ pub fn open_objectlog_postgres(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed>;
 pub async fn open_objectlog_postgres_async(
-    config: ObjectLogRuntimeConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed>;
-pub fn open_objectlog_sqlite(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed>;
@@ -427,6 +423,7 @@ pub enum ObjectLogStorage {
 /// Full matrix projection selection is `ProjectionStoreConfig` (includes
 /// `Memory`).
 pub enum ProjectionConfig {
+    /// Retired; construction rejects this selector before I/O.
     Sqlite { path: PathBuf },
     Postgres { url: ConfigSecret },
 }
@@ -450,10 +447,10 @@ publication. No PostgreSQL authority selector or fallback is public. The
 selected authority remains private after construction.
 
 `ObjectLogRuntimeConfig::validate` preserves the corresponding current
-validation behavior. `open_objectlog_sqlite` requires
-`ProjectionConfig::Sqlite`; the Postgres constructors require
-`ProjectionConfig::Postgres`; a mismatched variant returns
-`EngineError::Unavailable` before opening either store. Convenience
+validation behavior. The retained object-log/PostgreSQL constructors require
+`ProjectionConfig::Postgres`; the retired `ProjectionConfig::Sqlite` selection
+rejects before opening either store. New object-log/Turso callers use
+`StorageConfig` with `ProjectionStoreConfig::Turso`. Convenience
 constructors use the same validation precedence and barrier semantics as
 `StorageConfig`; they do not impose a provider-specific `Strict` rule or bypass
 tuple, feature, and durability checks.
@@ -760,16 +757,17 @@ implementation strategy. It is not part of this contract.
       architecture.
 - [ ] Concurrency semantics document per-queue serialization vs cross-queue
       progress; process-wide blocking worker pool is not the product model.
-- [ ] v0.24 async-only composition vs residual facade bridge is stated; residual
-      work is bridge removal after adapters are runtime-safe.
+- [ ] The removed private facade bridge is distinguished from supported
+      adapter-local PostgreSQL offload; no private wrapper is exposed.
 - [ ] Non-goals exclude dual public types and re-exporting `fireweed-engine`
       async modules as the embedder surface.
 - [ ] `StorageConfig` / `LogConfig` / `ProjectionStoreConfig` document the full
-      5×3 matrix; filesystem and s3 are first-class logs; no profile SKU model.
+      4×3 matrix; filesystem and s3 are first-class logs; retired SQLite values
+      reject before I/O and are not matrix cells.
 - [ ] Durability Class A vs Class B is documented (memory log = Class B).
 - [ ] Environment variables are not the facade construction surface.
-- [ ] `AsyncProjectionSpec` is provider-neutral; SQLite deferred-flush chunking
-      is a separate projection option valid under both barriers.
+- [ ] `AsyncProjectionSpec` is provider-neutral; every supplied retired SQLite
+      deferred-flush value rejects before I/O under both barriers.
 - [ ] Configuration validation follows endpoint → barrier → tuple coherence →
       feature → durability precedence and performs no storage I/O.
 - [ ] Startup-only configuration errors cannot escape the commit path even when

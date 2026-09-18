@@ -115,8 +115,8 @@ name = "p14_change_record_nonblocking_modes"
 path = "tests/p14_change_record_nonblocking_modes.rs"
 
 [[test]]
-name = "performance_object_log_e3_live_tests"
-path = "tests/performance_object_log_e3_live_tests.rs"
+name = "historical_e3_evidence_contract_tests"
+path = "tests/historical_e3_evidence_contract_tests.rs"
 
 [[test]]
 name = "performance_single_deployment_baseline_tests"

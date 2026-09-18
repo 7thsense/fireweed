@@ -1606,6 +1606,18 @@ fn plan_item_mutation_sql<C: GenericClient>(
     request: &ItemMutationRequest,
     lock_rows: bool,
 ) -> EngineResult<ItemMutationPlan> {
+    queue_projection_sql(client, queues, live_tokens, shard, lock_rows, None)?
+        .plan_item_mutation(request)
+}
+
+fn queue_projection_sql<C: GenericClient>(
+    client: &mut C,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+    shard: &QueueKey,
+    lock_rows: bool,
+    exclude: Option<&ItemId>,
+) -> EngineResult<ProjectionData> {
     let definition = queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
     let (tenant, queue) = parts(shard);
     let queue_sql = if lock_rows {
@@ -1736,7 +1748,10 @@ fn plan_item_mutation_sql<C: GenericClient>(
     let high_water = next_seq
         .checked_sub(1)
         .map(|sequence| CommandPosition::new(shard.clone(), assignment_epoch, sequence));
-    let projection = ProjectionData::from_image(
+    if let Some(exclude) = exclude {
+        items.retain(|item| item.item_id != *exclude);
+    }
+    ProjectionData::from_image(
         &definition,
         ProjectionImage {
             high_water,
@@ -1749,8 +1764,7 @@ fn plan_item_mutation_sql<C: GenericClient>(
             instance_fences: BTreeMap::new(),
             metrics: QueueMetrics::default(),
         },
-    )?;
-    projection.plan_item_mutation(request)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -10064,6 +10078,35 @@ impl PostgresRelational {
             .expect("postgres relational store poisoned")
     }
 
+    /// Pre-append index checks need every retained holder, including terminal rows.
+    /// One repeatable-read snapshot also keeps compact fields and entity values
+    /// consistent. Unindexed queues retain their allocation-free validation path.
+    fn index_validation_projection(
+        &self,
+        shard: &QueueKey,
+        exclude: Option<&ItemId>,
+    ) -> EngineResult<Option<ProjectionData>> {
+        let mut guard = self.lock();
+        let definition = guard.queues.get(shard).ok_or(EngineError::NotFound)?;
+        if definition.secondary_indexes.is_empty() && definition.typed_indexes.is_empty() {
+            return Ok(None);
+        }
+        let Inner {
+            client,
+            queues,
+            live_tokens,
+            ..
+        } = &mut *guard;
+        let mut tx = st(client
+            .build_transaction()
+            .isolation_level(postgres::IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start())?;
+        let projection = queue_projection_sql(&mut tx, queues, live_tokens, shard, false, exclude)?;
+        st(tx.commit())?;
+        Ok(Some(projection))
+    }
+
     /// Delete only the rebuildable projection. The authoritative object/Postgres log in a supported
     /// composition is external to this projection store and replays it after truncation.
     pub fn delete_projection(&self) -> EngineResult<()> {
@@ -11216,38 +11259,51 @@ impl ProjectionStore for PostgresRelational {
         update_fields_validate_sql(&mut self.lock().client, shard, id, expected_item_version)
     }
 
-    // Secondary indexes are deferred (the family stubs them): validation is a no-op, queries `Unavailable`.
     fn index_validate(
         &self,
-        _shard: &QueueKey,
-        _item_id: &ItemId,
-        _fields: &BTreeMap<String, Bytes>,
-        _entity: Option<&serde_json::Value>,
-        _exclude: Option<&ItemId>,
+        shard: &QueueKey,
+        item_id: &ItemId,
+        fields: &BTreeMap<String, Bytes>,
+        entity: Option<&serde_json::Value>,
+        exclude: Option<&ItemId>,
     ) -> EngineResult<()> {
+        if let Some(projection) = self.index_validation_projection(shard, None)? {
+            projection.index_validate_with_entity(item_id, fields, entity, exclude)?;
+        }
         Ok(())
     }
 
-    fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
+    fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()> {
+        if let Some(projection) = self.index_validation_projection(shard, None)? {
+            projection.index_validate_push(items)?;
+        }
         Ok(())
     }
 
     fn index_validate_replace(
         &self,
-        _shard: &QueueKey,
-        _existing_id: &ItemId,
-        _item: &PushItem,
+        shard: &QueueKey,
+        existing_id: &ItemId,
+        item: &PushItem,
     ) -> EngineResult<()> {
+        // Removing only the predecessor permits key reuse while still checking
+        // outside holders and explicit compact index_fields on the replacement.
+        if let Some(projection) = self.index_validation_projection(shard, Some(existing_id))? {
+            projection.index_validate_push(std::slice::from_ref(item))?;
+        }
         Ok(())
     }
 
     fn index_validate_update(
         &self,
-        _shard: &QueueKey,
-        _id: &ItemId,
-        _field_ops: &BTreeMap<String, Option<Bytes>>,
-        _entity: Option<&serde_json::Value>,
+        shard: &QueueKey,
+        id: &ItemId,
+        field_ops: &BTreeMap<String, Option<Bytes>>,
+        entity: Option<&serde_json::Value>,
     ) -> EngineResult<()> {
+        if let Some(projection) = self.index_validation_projection(shard, None)? {
+            projection.index_validate_update_with_entity(id, field_ops, entity)?;
+        }
         Ok(())
     }
 
@@ -13478,7 +13534,7 @@ mod gated_group_summary_tests {
                  INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
                    priority_sort,not_before,eligible_since,group_key,fields,metadata,retry_count, \
                    item_version,last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
-                 SELECT 't1','q1','hot-'||g,'key-'||g,'Pending',decode('00','hex'),10000000000, \
+                 SELECT 't1','q1',g::text,'key-'||g,'Pending',decode('00','hex'),10000000000, \
                    10000000000,'hot','{{}}','{{}}',0,1,0,0,0,false,false,3,g \
                  FROM generate_series(1,1000000) g; \
                  ALTER TABLE fireweed_items ENABLE TRIGGER fireweed_items_metrics_delta; \

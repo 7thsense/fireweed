@@ -125,7 +125,6 @@ FORBIDDEN_GARAGE = re.compile(r"\bgarage\b", re.IGNORECASE)
 GARAGE_ALLOW_PATHS = {
     # P15 weak-credential denylist residual is outside this suite.
     "crates/fireweed-bench/src/performance_matrix_services.rs",
-    "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
     "crates/fireweed-server/tests/production_s3_object_log_config.rs",
 }
 

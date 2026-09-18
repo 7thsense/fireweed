@@ -52,12 +52,14 @@ identity_path = "scripts/public-identity-allowlist.json"
 generator_path = "scripts/ci/inventory-evidence-source-io.sh"
 baseline_path = "docs/helix/04-build/evidence-source-io-baseline.json"
 identity = json.loads(read_text(identity_path))
-historical = next(
+historical = sorted((
     entry
     for entry in identity["entries"]
-    if entry["id"] == "pre-fireweed-performance-evidence"
-)
-historical_paths = sorted(historical["paths"])
+    if entry["id"].startswith("historical-performance-evidence-")
+), key=lambda entry: entry["id"])
+if not historical:
+    raise ValueError("historical performance identity entries missing")
+historical_paths = sorted({path for entry in historical for path in entry["paths"]})
 tracked_evidence_paths = sorted(
     path for path in tracked if path.startswith("docs/perf/evidence/")
 )
@@ -366,17 +368,17 @@ for surface in surfaces:
     )
 
 inventory = {
-    "schema_version": 1,
+    "schema_version": 2,
     "generated_by": "scripts/ci/inventory-evidence-source-io.sh",
     "governing_spec": "storage-matrix-completion-brief",
     "scan_sha256": hashlib.sha256(scan_digest_material).hexdigest(),
     "route_assignments": [],
     "public_identity_classification": {
         "source": identity_path,
-        "id": historical["id"],
-        "class": historical["class"],
-        "owner_surface": historical["owner_surface"],
-        "reason": historical["reason"],
+        "entries": [
+            {key: entry[key] for key in ("id", "class", "owner_surface", "reason", "paths")}
+            for entry in historical
+        ],
     },
     "historical_allowlist_paths": historical_paths,
     "tracked_evidence_paths": tracked_evidence_paths,

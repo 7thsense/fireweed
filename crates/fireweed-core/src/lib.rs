@@ -3,14 +3,6 @@
 mod domain;
 mod query;
 
-pub mod scaffold {
-    pub const NAME: &str = "fireweed-core";
-
-    pub fn name() -> &'static str {
-        NAME
-    }
-}
-
 pub use domain::{
     ApiError, ApiErrorCode, ApiResult, BodyHash, ClientItemKey, CohortId, CohortOnIncomplete,
     CohortPolicy, CompoundIndexDef, CompoundIndexField, CreateQueue, CreateQueueError,

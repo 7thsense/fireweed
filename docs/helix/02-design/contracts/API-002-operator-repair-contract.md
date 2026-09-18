@@ -28,6 +28,29 @@ ddx:
 
 # Contract
 
+## Storage retirement amendment (2026-09-17)
+
+This amendment supersedes older storage-selector, matrix-count, differential-reference,
+and deferred-flush statements below. The supported product is four logs
+(`memory`, `postgres`, `filesystem`, `s3`) × three projections
+(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
+ordinary-WAL as the default projection. Nine cells have durable Class A logs;
+the three memory-log cells are Class B. Reopen may reuse persisted Class B
+projection state, but that grants no durable-log guarantee or log-derived history.
+Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
+six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+
+SQLite log/projection selectors and every supplied retired
+`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
+Disabled adapter features never cause silent fallback. The retired SQLite adapter
+is not a current differential reference: native replay pairs compare Turso
+instances, with independent expected-state/public-conformance assertions required
+in addition. See [the current Rust interface](API-005-fireweed-rust-facade.md) and
+[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
+artifact names and original measurements retain their identity; older SQLite
+recipes and matrix counts below do not define current selectors or qualify the
+12-cell product.
+
 **Contract ID**: API-002
 **Type**: operator / HTTP API / SDK
 **Version**: v1

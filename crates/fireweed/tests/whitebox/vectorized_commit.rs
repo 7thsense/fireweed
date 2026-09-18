@@ -523,6 +523,7 @@ async fn commit_request_id_replays_conflicts_and_expires() {
 
 /// The filesystem log is the authoritative atomic transition boundary;
 /// completion must be visible through the public projection reads.
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn direct_objectlog_commit_is_available_and_observable() {
     let dir = std::env::temp_dir().join(format!(
@@ -706,25 +707,29 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
     assert!(caps.non_work_side_records);
     assert!(caps.authoritative_recovery_reads);
 
-    // The direct object-log composition uses the same atomic command envelope and
-    // must expose the full commit surface.
-    let dir = std::env::temp_dir().join(format!(
-        "fireweed-caps-objlog-{}-{:?}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let objectlog_fireweed = fireweed::open_objectlog(&dir, Arc::new(ManualClock::at(0))).unwrap();
-    objectlog_fireweed.create_queue(qdef(60_000)).await.unwrap();
-    let ocaps = objectlog_fireweed.commit_capabilities(&q).unwrap();
-    assert!(ocaps.atomic_transition_commit);
-    assert!(ocaps.vectorized_commit);
-    assert!(ocaps.lease_validation);
-    assert!(ocaps.retained_commit_idempotency);
-    assert!(ocaps.non_work_side_records);
-    assert!(ocaps.authoritative_recovery_reads);
+    #[cfg(feature = "objectlog")]
+    {
+        // The direct object-log composition uses the same atomic command envelope and
+        // must expose the full commit surface.
+        let dir = std::env::temp_dir().join(format!(
+            "fireweed-caps-objlog-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let objectlog_fireweed =
+            fireweed::open_objectlog(&dir, Arc::new(ManualClock::at(0))).unwrap();
+        objectlog_fireweed.create_queue(qdef(60_000)).await.unwrap();
+        let ocaps = objectlog_fireweed.commit_capabilities(&q).unwrap();
+        assert!(ocaps.atomic_transition_commit);
+        assert!(ocaps.vectorized_commit);
+        assert!(ocaps.lease_validation);
+        assert!(ocaps.retained_commit_idempotency);
+        assert!(ocaps.non_work_side_records);
+        assert!(ocaps.authoritative_recovery_reads);
+    }
 }
 
 /// Recovery (C8): after a successful commit (finalize input + write side record + advance a fence),

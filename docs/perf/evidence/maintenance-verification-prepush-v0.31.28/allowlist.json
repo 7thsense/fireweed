@@ -1,0 +1,222 @@
+[
+  {
+    "path": "/tmp/fireweed-maintenance-turso-feature-final.log",
+    "role": "turso-only library; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-memory-turso-tests-final.log",
+    "role": "memory/turso test-target compilation; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-retired-flush-final.log",
+    "role": "retired-flush rejection regression; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-partial-feature-memory-workflow.log",
+    "role": "memory workflow with objectlog disabled; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-allfeature-clippy-final.log",
+    "role": "final all-feature all-target Clippy; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-server-no-default-fixed.log",
+    "role": "server without default features; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-server-postgres-only-final.log",
+    "role": "server PostgreSQL-only; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-server-turso-only-clean.log",
+    "role": "server Turso-only final; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-authority-final-fixed.log",
+    "role": "authority validation and negative fixtures; completed exit 0, see focused-results ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-followup-checks-results.json",
+    "role": "focused completed follow-up outcomes; not a full workspace rerun"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-prepush-checks-results.json",
+    "role": "prepush Clippy, consumer library feature checks and six-stage public CI gate outcomes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-prepush-public-ci-evidence.json",
+    "role": "public CI gate evidence; working checkout execution, not final measured source"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-prepush-public-ci-gate.log",
+    "role": "six-stage public CI gate completed; includes 152 facade library passes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-prepush-allfeature-clippy.log",
+    "role": "earlier successful prepush all-feature Clippy before additional feature guards"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-prepush-features-turso.log",
+    "role": "successful Turso-only compile after unused wrapper removal, before import guard cleanup"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-prepush-features-memory-turso.log",
+    "role": "successful memory/Turso library compile after unused wrapper removal"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-authority-hash-refresh.json",
+    "role": "raw-byte governed document digest refresh following semantic retirement amendments"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-authority-final.log",
+    "role": "failed authority verifier due to retired aggregate identity entry; corrected by final-fixed log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-memory-turso-feature-final.log",
+    "role": "initial partial-feature test compile failure from missing object-log guards; corrected later"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-memory-turso-tests-fixed.log",
+    "role": "intermediate partial-feature compile failure from renamed test helper call; corrected later"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-1-prestage-root-fmt.log",
+    "role": "prestage root-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-1-prestage-bench-fmt.log",
+    "role": "prestage bench-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-1-prestage-diff-check.log",
+    "role": "prestage diff-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-1-prestage-api005.log",
+    "role": "prestage api005; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-1-prestage-routes.log",
+    "role": "prestage routes; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-1-prestage-results.json",
+    "role": "serial static-driver outcomes, including incomplete or failed steps"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-root-fmt.log",
+    "role": "prestage root-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-bench-fmt.log",
+    "role": "prestage bench-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-diff-check.log",
+    "role": "prestage diff-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-api005.log",
+    "role": "prestage api005; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-routes.log",
+    "role": "prestage routes; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-bindings.log",
+    "role": "prestage bindings; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-governed-allowlist.log",
+    "role": "prestage governed-allowlist; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-workflow-policy.log",
+    "role": "prestage workflow-policy; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-workflow-policy-fixtures.log",
+    "role": "prestage workflow-policy-fixtures; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-retired-e3.log",
+    "role": "prestage retired-e3; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-storage-authority.log",
+    "role": "prestage storage-authority; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-2-prestage-results.json",
+    "role": "serial static-driver outcomes, including incomplete or failed steps"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-root-fmt.log",
+    "role": "prestage root-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-bench-fmt.log",
+    "role": "prestage bench-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-diff-check.log",
+    "role": "prestage diff-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-api005.log",
+    "role": "prestage api005; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-routes.log",
+    "role": "prestage routes; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-bindings.log",
+    "role": "prestage bindings; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-governed-allowlist.log",
+    "role": "prestage governed-allowlist; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-workflow-policy.log",
+    "role": "prestage workflow-policy; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-workflow-policy-fixtures.log",
+    "role": "prestage workflow-policy-fixtures; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-retired-e3.log",
+    "role": "prestage retired-e3; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-storage-authority.log",
+    "role": "prestage storage-authority; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-release-version-sources.log",
+    "role": "prestage release-version-sources; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-release-identity.log",
+    "role": "prestage release-identity; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-prestage-results.json",
+    "role": "serial static-driver outcomes, including incomplete or failed steps"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-inventory-compiled-inventory.log",
+    "role": "inventory compiled-inventory; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-inventory-inventory-snapshot.json",
+    "role": "generated compiled source/harness inventory snapshot"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-3-inventory-results.json",
+    "role": "serial static-driver outcomes, including incomplete or failed steps"
+  }
+]

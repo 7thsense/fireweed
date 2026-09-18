@@ -134,6 +134,7 @@ async fn memory_turso_public_interface() {
     .await;
 }
 
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn filesystem_memory_public_interface() {
     assert_cell("filesystem--memory", false, true, |root| {

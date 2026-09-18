@@ -196,15 +196,18 @@ def walk_for_routes(value: object, label: str = "manifest") -> None:
 
 def expected_historical_paths() -> set[str]:
     identity = json.loads(Path("scripts/public-identity-allowlist.json").read_text())
-    historical = next(
+    historical = [
         entry
         for entry in identity["entries"]
-        if entry["id"] == "pre-fireweed-performance-evidence"
-    )
+        if entry["id"].startswith("historical-performance-evidence-")
+    ]
+    require(historical, "historical performance identity entries missing")
     baseline = json.loads(
         Path("docs/helix/04-build/evidence-source-io-baseline.json").read_text()
     )
-    return set(historical["paths"]) | set(baseline["tracked_tp003_paths"])
+    return {path for entry in historical for path in entry["paths"]} | set(
+        baseline["tracked_tp003_paths"]
+    )
 
 
 def validate_document(document: object, *, check_repository: bool) -> None:
@@ -346,7 +349,7 @@ def validate_document(document: object, *, check_repository: bool) -> None:
         turso["unsupported_modes"] == ["remote", "sync", "embedded_replica", "mvcc"],
         "Turso unsupported mode drift",
     )
-    require(turso["sqlite_is_differential_reference"] is True, "SQLite reference drift")
+    require(turso["sqlite_is_differential_reference"] is False, "retired SQLite reference revived")
     require(
         len(unique_strings(config["async_projection_environment_keys"], "async env keys")) == 5,
         "five async environment keys required",

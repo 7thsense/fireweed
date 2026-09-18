@@ -631,6 +631,53 @@ async fn native_query_claims_and_discovery_respect_time_gates_pause_and_cohort_b
             .unwrap();
     }
     let order_by = order("due", SortDirection::Ascending);
+    // Check the actual declared-index query shape, including its item-table correlation.
+    // Seeing an index name alone is insufficient: both gate probes must bind the full key.
+    {
+        let definition = definition();
+        let spec = index_spec(&definition, Some("by_kind_due")).unwrap();
+        let filters = [eq_kind("send")];
+        let mut query = IndexedSql::new(&shard, spec, &filters).unwrap();
+        let direction = query
+            .native_order(spec, &filters, std::slice::from_ref(&order_by))
+            .unwrap()
+            .unwrap();
+        let now_bind = query.bind(ts_nanos(ts(10)));
+        query.predicates.extend([
+            "i.lifecycle_state='Pending'".into(),
+            "i.fenced=0".into(),
+            "i.cohort_size IS NULL".into(),
+            "i.retry_count<i.max_attempts".into(),
+            format!("(i.not_before IS NULL OR i.not_before<={now_bind})"),
+            UNBLOCKED.into(),
+        ]);
+        let limit = query.bind(100_i64);
+        let sql = query.select(
+            "i.item_id",
+            &format!("ORDER BY {} LIMIT {limit}", native_order_sql(direction)),
+        );
+        let connection = store.reader.lock().await;
+        let plan = rows_on(
+            &connection,
+            &format!("EXPLAIN QUERY PLAN {sql}"),
+            query.params,
+        )
+        .await
+        .unwrap();
+        let details = plan
+            .iter()
+            .map(|row| text(&row[3]).unwrap())
+            .collect::<Vec<_>>();
+        for (table, key) in [("ig", "item_id"), ("gs", "gate_key")] {
+            assert!(
+                details.iter().any(|line| {
+                    line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
+                }),
+                "query eligibility must seek each full gate key: {details:?}"
+            );
+        }
+    }
     let selected = store
         .server_select_claim_by_query(
             &shard,
@@ -718,6 +765,52 @@ async fn native_query_claims_and_discovery_respect_time_gates_pause_and_cohort_b
         .await
         .unwrap();
     assert_eq!(selected, vec![ItemId::from_u64(2), ItemId::from_u64(1)]);
+    apply(
+        &store,
+        &shard,
+        &mut sequence,
+        QueueCommand::SetGates(SetGatesCommand {
+            gate_keys: vec!["blocked".into()],
+            blocked: false,
+        }),
+        Vec::new(),
+        5,
+    )
+    .await;
+    let selected = store
+        .server_select_claim_by_query(
+            &shard,
+            Some("by_kind_due"),
+            &[eq_kind("send")],
+            &order_by,
+            100,
+            ts(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        selected,
+        vec![
+            ItemId::from_u64(2),
+            ItemId::from_u64(3),
+            ItemId::from_u64(1)
+        ]
+    );
+    assert_eq!(
+        store
+            .server_classify_claim_by_item_ids(&shard, &[ItemId::from_u64(3)], ts(30))
+            .await
+            .unwrap(),
+        vec![(ItemId::from_u64(3), ClaimByItemIdClass::Claimable)]
+    );
+    let reopened = store
+        .server_discover_active_scopes(&shard, DiscoveryGranularity::Queue, ts(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened[0].eligible_count.unwrap(),
+        later[0].eligible_count.unwrap() + 1
+    );
 }
 
 #[tokio::test]
@@ -1704,6 +1797,17 @@ async fn native_ordinary_claim_filters_gates_before_limit_and_unblocks_after_hin
         2,
     )
     .await;
+    assert_eq!(
+        store
+            .server_peek(&shard, 1)
+            .await
+            .unwrap()
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<Vec<_>>(),
+        vec![ItemId::from_u64(2)],
+        "peek filters blocked gates before LIMIT and exposes the next open row"
+    );
     let token = LeaseToken::new("ordinary-gates").unwrap();
     {
         let connection = store.reader.lock().await;
@@ -1774,6 +1878,17 @@ async fn native_ordinary_claim_filters_gates_before_limit_and_unblocks_after_hin
     .await;
     assert!(!store.claim_scan_is_fifo(&shard));
     assert_eq!(store.claim_scan_hint(&shard), None);
+    assert_eq!(
+        store
+            .server_peek(&shard, 1)
+            .await
+            .unwrap()
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<Vec<_>>(),
+        vec![ItemId::from_u64(1)],
+        "unblocking restores the original peek head without rewriting the item"
+    );
     let batches = store
         .item_claim_microbatch_on_serving_reader(&shard, &[(ts(10), 1, token, ts(30))], &[])
         .await
@@ -1904,4 +2019,84 @@ async fn native_retained_pages_follow_numeric_ids_with_bounded_index_seeks() {
             "numeric pagination must not sort the full retained queue: {details}"
         );
     }
+}
+
+#[tokio::test]
+async fn native_compound_strings_stream_variable_length_headers_without_deep_expressions() {
+    let mut definition = definition();
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_recipient".into(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: ["kind", "label", "email"]
+                .into_iter()
+                .map(|field| CompoundIndexField {
+                    field: field.into(),
+                    index_type: IndexType::String,
+                })
+                .collect(),
+            unique: false,
+        }),
+    }];
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let store = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+    // 256 UTF-8 bytes crosses a frame-length byte boundary. Empty strings and
+    // multiple unconstrained components require exact dynamic offsets too.
+    let long_kind = "é".repeat(128);
+    let items = vec![
+        recipient(1, "z", "", None, 0),
+        recipient(2, &long_kind, "b", None, 0),
+        recipient(3, &long_kind, "a", None, 0),
+    ];
+    let ids = items.iter().map(|item| item.item_id).collect();
+    let mut sequence = 0;
+    apply(
+        &store,
+        &shard,
+        &mut sequence,
+        QueueCommand::Push(PushCommand { items }),
+        ids,
+        1,
+    )
+    .await;
+    let page = store
+        .server_range_scan(
+            &shard,
+            RangeScanRequest {
+                index: Some("by_recipient".into()),
+                filters: Vec::new(),
+                order_by: ["kind", "label", "email"]
+                    .into_iter()
+                    .map(|field| order(field, SortDirection::Ascending))
+                    .collect(),
+                page_size: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.item_id.as_u64())
+            .collect::<Vec<_>>(),
+        vec![1, 3, 2]
+    );
+    let metrics = store
+        .server_metrics_by_query(
+            &shard,
+            MetricsByQueryRequest {
+                index: Some("by_recipient".into()),
+                filters: vec![QueryFilter {
+                    field: "label".into(),
+                    op: FilterOp::Gte,
+                    value: TypedValue::String("a".into()),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(metrics.pending, 2);
 }

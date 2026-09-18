@@ -33,14 +33,15 @@ use fireweed::{
 };
 use fireweed_core::RequestId;
 use fireweed_core::{
-    CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId,
-    UtcTimestamp,
+    CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GateKeyPolicy, GroupKey, ItemId,
+    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    PriorityValue, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+    TenantId, UtcTimestamp,
 };
 use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_engine::QueueKey;
 use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
+#[cfg(feature = "objectlog")]
 use fireweed_objectlog::composed_objectlog_backend;
 
 // ---------------------------------------------------------------------------
@@ -182,7 +183,7 @@ fn emit_ac_with_context(
     );
     let row = fireweed_release::LedgerRow {
         suite: "product_validation_tests".into(),
-        command: "cargo test -p fireweed --test product_validation_tests".into(),
+        command: "cargo test -p fireweed --lib test_product_validation::".into(),
         backend_profile: backend_profile.into(),
         scale: "smoke".into(),
         seed: 0,
@@ -587,13 +588,14 @@ fn ts(seconds: i64) -> UtcTimestamp {
 /// leakage); metrics match the terminal state.
 /// ASSERTED (BQ pqueue-7a96f929): BatchUpdate reschedule via `fireweed.update` — re-pricing re-keys the
 /// eligibility order and rescheduling `not_before` re-gates eligibility; and SetGates close+reopen via
-/// `fireweed.set_gates` on the gate-capable relational backend — no gated item is claimed while its gate is
-/// blocked, eligibility restored on reopen.
+/// the public facade on memory and filesystem profiles (including both Turso barriers when enabled) —
+/// no gated item is claimed while blocked, and reopening restores eligibility.
 /// DEFERRED: cross-tenant AUTHZ denial lives in the auth layer (ADR-002), not this trusted library facade.
 ///
 /// P7N: product profile uses a recurring queue so rearm is valid on every composition (object-log
 /// included). Memory/sqlite previously skipped `validate_rearm`, which let a non-recurring profile
 /// pass only on those legs.
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn scheduled_action_delivery_e2e() {
     let (fireweed, clock) = deployment();
@@ -927,17 +929,16 @@ async fn scheduled_action_delivery_e2e() {
     );
     let reschedule_priority_rekeys = order[0].item_id == b;
 
-    // Gate/relational smoke is intentionally elided in this harness: the sqlite backend used here is the
-    // composed log-backed facade, which does not advertise the gate-specific surface exercised by the
-    // heavier relational suites. Keep the evidence row shape stable with a deterministic placeholder.
-    let gate_close_reopen = true;
+    let gate_profiles = scheduled_gate_profiles().await;
+    let gate_close_reopen =
+        !gate_profiles.is_empty() && gate_profiles.values().all(|passed| *passed);
 
     emit_ac_with_context(
         "AC-E2E-1",
         &["INV-4"],
-        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory/sqlite/object-log smoke profiles; BatchUpdate reschedule (fireweed.update) re-keys priority order and re-gates not_before eligibility; SetGates close+reopen (fireweed.set_gates) keeps a gated item unclaimable while blocked then restores it on the gate-capable relational backend [cross-tenant AUTHZ denial is the auth layer]",
-        "memory+sqlite+object_log_sqlite_projection+relational_gates",
-        "in-process lib facade over memory, SQLite, composed object-log, and SQLite relational storage (gates); release shape is the provisioned run",
+        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory and filesystem-log/memory smoke profiles; BatchUpdate reschedule (fireweed.update) re-keys priority order and re-gates not_before eligibility; SetGates close+reopen (fireweed.set_gates) keeps a gated item unclaimable while blocked then restores it on each measured gate profile [cross-tenant AUTHZ denial is the auth layer]",
+        "memory--memory+filesystem--memory",
+        "in-process library workflows over memory and filesystem-log/memory; separate public gate checks report their actual storage profiles; release shape is the provisioned run",
         BTreeMap::from([
             (
                 "scheduled_actions".into(),
@@ -992,8 +993,160 @@ async fn scheduled_action_delivery_e2e() {
                 "gate_close_blocks_then_reopen_restores".into(),
                 serde_json::json!(gate_close_reopen),
             ),
+            (
+                "gate_backend_profiles".into(),
+                serde_json::json!(gate_profiles),
+            ),
         ]),
     );
+}
+
+// The combined smoke row requires filesystem evidence. Partial memory builds still run
+// scheduled delivery, keyed upserts, and public gates without claiming that combined row.
+#[cfg(not(feature = "objectlog"))]
+#[tokio::test]
+async fn scheduled_action_delivery_memory_e2e() {
+    let (fireweed, clock) = deployment();
+    let memory = scheduled_batch_delivery_profile(&fireweed, clock, "sched-mem").await;
+    assert!(memory.delivered_in_schedule_order);
+    assert!(memory.max_items_pacing_observed);
+    assert!(memory.stable_client_keys_observed);
+    assert!(assert_keyed_upsert_converges(&fireweed, "sched-mem-idempotent").await);
+    let handle = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    assert!(scheduled_gate_close_reopen(&handle).await);
+}
+
+/// Gate evidence comes from public operations on each reported storage profile.
+#[cfg(feature = "objectlog")]
+async fn scheduled_gate_profiles() -> BTreeMap<String, bool> {
+    let clock = Arc::new(ManualClock::at(0));
+    let mut profiles = BTreeMap::new();
+    let memory = fireweed::open_memory(clock.clone());
+    profiles.insert(
+        "memory--memory".into(),
+        scheduled_gate_close_reopen(&memory).await,
+    );
+    drop(memory);
+
+    let root = unique_temp_path("scheduled-gates");
+    let object = fireweed::open_objectlog(root.join("memory-log"), clock.clone()).unwrap();
+    profiles.insert(
+        "filesystem--memory".into(),
+        scheduled_gate_close_reopen(&object).await,
+    );
+    drop(object);
+
+    #[cfg(feature = "turso")]
+    for (profile, barrier) in [
+        (
+            "filesystem--turso--strict",
+            fireweed::ResponseBarrier::Strict,
+        ),
+        (
+            "filesystem--turso--async",
+            fireweed::ResponseBarrier::AsyncProjection,
+        ),
+    ] {
+        let mut config = fireweed::StorageConfig::memory();
+        config.log = fireweed::LogConfig::Filesystem {
+            root: root.join(profile).join("log"),
+        };
+        config.projection = fireweed::ProjectionStoreConfig::Turso {
+            path: root.join(profile).join("projection.db"),
+        };
+        config.authority = Some(fireweed::ObjectLogAuthority::NativeConditionalWrite);
+        config.namespace = profile.into();
+        config.response_barrier = barrier;
+        if barrier == fireweed::ResponseBarrier::AsyncProjection {
+            config.async_projection = Some(fireweed::AsyncProjectionSpec::default());
+        }
+        let fireweed = fireweed::open_async(config, clock.clone()).await.unwrap();
+        profiles.insert(profile.into(), scheduled_gate_close_reopen(&fireweed).await);
+        drop(fireweed);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    profiles
+}
+
+async fn scheduled_gate_close_reopen(fireweed: &fireweed::Fireweed) -> bool {
+    let queue = qk("scheduled-gates", "campaign");
+    let mut definition = qdef(
+        "scheduled-gates",
+        "campaign",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    definition.eligibility_policy.max_gate_keys_per_item = Some(1);
+    fireweed.create_queue(definition).await.unwrap();
+    let gated = fireweed
+        .push(
+            &queue,
+            NewItem {
+                priority: Some(PriorityValue::Int64(0)),
+                gate_keys: vec!["delivery-hold".into()],
+                payload: Some(Bytes::from_static(b"scheduled-gated-delivery")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ready = fireweed
+        .push(
+            &queue,
+            NewItem {
+                priority: Some(PriorityValue::Int64(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    fireweed
+        .set_gates(&queue, vec!["delivery-hold".into()], true)
+        .await
+        .unwrap();
+    let first = fireweed.claim(&queue, 1, 60_000).await.unwrap();
+    assert_eq!(
+        first.len(),
+        1,
+        "a blocked priority head must not hide ready work"
+    );
+    assert_eq!(
+        first[0].item_id, ready,
+        "only the ungated delivery is eligible"
+    );
+    fireweed.ack(&queue, [ready]).await.unwrap();
+    let blocked = fireweed.claim(&queue, 1, 60_000).await.unwrap();
+    assert!(
+        blocked.is_empty(),
+        "the held delivery must remain unclaimable"
+    );
+
+    fireweed
+        .set_gates(&queue, vec!["delivery-hold".into()], false)
+        .await
+        .unwrap();
+    let reopened = fireweed.claim(&queue, 1, 60_000).await.unwrap();
+    assert_eq!(reopened.len(), 1, "reopening restores the held delivery");
+    assert_eq!(reopened[0].item_id, gated);
+    assert_eq!(reopened[0].gate_keys, ["delivery-hold"]);
+    assert_eq!(
+        reopened[0].payload.as_deref(),
+        Some(&b"scheduled-gated-delivery"[..])
+    );
+    fireweed.ack(&queue, [gated]).await.unwrap();
+    let metrics = fireweed.metrics(&queue).await.unwrap();
+    assert_eq!(
+        (
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ),
+        (0, 0, 2, 0)
+    );
+    blocked.is_empty() && reopened[0].item_id == gated && metrics.complete == 2
 }
 
 struct ScheduledProfileEvidence {
@@ -2353,6 +2506,7 @@ async fn noisy_neighbor_scale_e2e() {
 ///     data-plane port; all envelopes are request_id:None today (-> BQ-11e / pqueue-e1b21208);
 ///   - live multi-PROCESS service injection + owner reassignment/epoch-advance under load (TD-003 control
 ///     plane) (-> pqueue-c33c367e server runtime). NOT asserted, NOT claimed in the row.
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn worker_crash_recovery_e2e() {
     let dir = std::env::temp_dir().join(format!("fireweed-pv-e2e5-{}", std::process::id()));

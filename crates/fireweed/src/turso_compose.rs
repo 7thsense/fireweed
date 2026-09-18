@@ -3,7 +3,7 @@
 //! Composes each log axis with [`fireweed_turso::TursoRelational`] through the same
 //! engine planners / commit strategies used by other derived projections:
 //! - Atomic logs (memory / postgres): [`UnifiedAtomicCommit`] (log-replay product shape)
-//! - Object logs (filesystem / s3): [`SeparateReplayCommit`] (provider-neutral LogEngine constructors)
+//! - Object logs (filesystem / s3): [`fireweed_engine::SeparateReplayCommit`] (provider-neutral LogEngine constructors)
 //!
 //! This module deliberately avoids an `ObjectLogTursoBackend` public alias.
 
@@ -12,11 +12,19 @@
 #[path = "turso_parity.rs"]
 mod parity;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "objectlog")]
+use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(feature = "objectlog")]
+use std::sync::Mutex;
+#[cfg(feature = "objectlog")]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+#[cfg(feature = "objectlog")]
+use std::time::Duration;
+#[cfg(feature = "objectlog")]
+use std::time::Instant;
 
 use bytes::Bytes;
 use fireweed_core::{
@@ -27,37 +35,46 @@ use fireweed_engine::commit_surface::{CommitIdempotency, new_commit_idempotency}
 use fireweed_engine::{
     AppendAdmissionClass, AsyncClaimError, AsyncCommitStrategy, AsyncCommitSubmitError,
     AsyncComposedBackend, AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecycleError,
-    AsyncLogStore, AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort,
-    CLAIM_GENERATION_MAX_REQUESTS, ClaimCommand, ClaimCompatibility, ClaimDriverReadAdmission,
-    ClaimPort, ClaimQueueTurn, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
-    CommandPosition, ControlPlane, ControlPlaneStore, CoordinationError, CreateQueueOutcome,
-    DispatchError, DurabilityClass, EngineError, EngineResult, ExpiredLeaseCursor,
-    ExpiredLeasePage, FinalizeKind, FinalizeOutcome, FinalizePort, FinalizeTarget,
-    GENERATION_MAX_ITEMS, HistoricalProjectionRead, HotProjectionQueryPort, IdGen,
-    IdempotencyDecision, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
+    AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
+    AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand, ClaimPort,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore,
+    CoordinationError, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
+    FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
+    HotProjectionQueryPort, IdGen, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
     InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
-    ItemView, LeaseView, LiveItemView, LogStore, MUTATION_SEQUENCER_DEFAULT_MAX_WAIT,
-    MutationDriverSnapshot, MutationGenerationMemberOutcome, MutationGenerationWork,
-    MutationIngress, MutationSequencer, MutationSequencerKey, OutcomeReadAdmission, OwnedTask,
-    OwnedTaskDispatcher, OwnedTaskFactory, PendingPage, PendingSummary, PreparedClaim,
-    PreparedClaimedResult, PreparedFinalize, PreparedMutationGeneration, PreparedPush,
-    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
-    ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushCommand, PushFingerprint,
-    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError, QueueKey,
-    QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
-    ReplacePendingCommand, RequestOutcome, S3S_DERIVED_COVERAGE_OR_WORK_WAIT, SelectionFence,
-    SelectionFenceAdmission, SelectionFenceDisposition, SeparateReplayCommit,
-    SeparateReplayCommitter, SeqIdGen, SetGatesPort, SharedDriverReadAdmission, SnapshotRef,
-    SnapshotStore, TaskOutcome, TaskOutcomeError, TaskOutcomeSender, TerminalEmissionMetrics,
-    TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, allocate_push_epoch_blob_and_counters,
-    retain_sequencer_after_slot_release, selection_fence_disposition_for_commands,
-    task_outcome_channel, validate_inert_mutation_generation_folding,
+    ItemView, LeaseView, LiveItemView, LogStore, OutcomeReadAdmission, OwnedTask, PendingPage,
+    PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
+    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushCommand, PushItem,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError, QueueKey, QueueMetrics,
+    RawCommitFault, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget, ReplacePendingCommand, RequestOutcome,
+    SeqIdGen, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort,
+};
+#[cfg(feature = "objectlog")]
+use fireweed_engine::{
+    AsyncProjectionSpec, CLAIM_GENERATION_MAX_REQUESTS, ClaimDriverReadAdmission, ClaimQueueTurn,
+    ControlPlane, DispatchError, ExpiredLeaseCursor, ExpiredLeasePage, FinalizeKind,
+    IdempotencyDecision, MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationGenerationMemberOutcome,
+    MutationGenerationWork, MutationIngress, MutationSequencer, MutationSequencerKey,
+    OwnedTaskDispatcher, OwnedTaskFactory, PreparedClaim, PreparedClaimedResult, PreparedFinalize,
+    PushFingerprint, S3S_DERIVED_COVERAGE_OR_WORK_WAIT, SelectionFence, SelectionFenceAdmission,
+    SelectionFenceDisposition, SeparateReplayCommit, SeparateReplayCommitter,
+    SharedDriverReadAdmission, TaskOutcome, TaskOutcomeError, TaskOutcomeSender,
+    allocate_push_epoch_blob_and_counters, retain_sequencer_after_slot_release,
+    selection_fence_disposition_for_commands, task_outcome_channel,
+    validate_inert_mutation_generation_folding,
+};
+#[cfg(any(feature = "objectlog", test))]
+use fireweed_engine::{
+    ClaimCompatibility, GENERATION_MAX_ITEMS, MutationDriverSnapshot, PreparedMutationGeneration,
+    PreparedPush,
 };
 use fireweed_projection::InMemoryProjection;
-use fireweed_turso::{TursoConfig, TursoRelational, materialize_grouped_cohort_claimed_on};
+#[cfg(feature = "objectlog")]
+use fireweed_turso::materialize_grouped_cohort_claimed_on;
+use fireweed_turso::{TursoConfig, TursoRelational};
 
 #[cfg(feature = "objectlog")]
 use fireweed_objectlog::{
@@ -170,17 +187,20 @@ fn map_coord(error: CoordinationError) -> EngineError {
 }
 
 #[derive(Clone, Default)]
+#[cfg(feature = "objectlog")]
 struct QueueFrontiers {
     last_claim: Option<CommandPosition>,
     last_candidate_mutation: Option<CommandPosition>,
 }
 
+#[cfg(feature = "objectlog")]
 struct GenerationJoin {
     requests: Mutex<Vec<Arc<MutationGenerationWork>>>,
     notify: tokio::sync::Notify,
     outcome: Mutex<Option<EngineResult<Vec<fireweed_engine::MutationGenerationMember>>>>,
 }
 
+#[cfg(feature = "objectlog")]
 impl GenerationJoin {
     fn member(
         &self,
@@ -208,11 +228,13 @@ impl GenerationJoin {
 }
 
 /// Post-apply send of a pre-materialized grouped/cohort envelope.
+#[cfg(any(feature = "objectlog", test))]
 fn finish_retained_grouped_cohort_response(claimed: Claimed) -> EngineResult<Claimed> {
     Ok(claimed)
 }
 
 /// Co-seal after the shared slot/connection is released. Sequencer remains held by the caller.
+#[cfg(any(feature = "objectlog", test))]
 fn finish_inert_mutation_generation_append(
     generation: &mut PreparedMutationGeneration<
         QueueKey,
@@ -249,6 +271,7 @@ fn finish_inert_mutation_generation_append(
 // Peer handlers may need several milliseconds to materialize a full request.
 // Full generations start immediately; a bounded linger also amortizes log syncs
 // for partially filled batches without changing FIFO admission.
+#[cfg(feature = "objectlog")]
 const MICROBATCH_LINGER: Duration = Duration::from_millis(10);
 
 /// Reference size for the configured generation budget. Live reservations
@@ -257,11 +280,13 @@ const MICROBATCH_LINGER: Duration = Duration::from_millis(10);
 const CLAIM_SELECT_EXCLUDE_CAP: usize =
     GENERATION_MAX_ITEMS.saturating_mul(fireweed_engine::MUTATION_MAX_GENERATIONS_PER_QUEUE);
 
+#[cfg(any(feature = "objectlog", test))]
 struct UnpublishedMutation {
     through: CommandPosition,
     snapshot: MutationDriverSnapshot,
 }
 
+#[cfg(any(feature = "objectlog", test))]
 fn overlay_claim_exclude(snapshot: &MutationDriverSnapshot) -> Vec<ItemId> {
     let mut ids: Vec<ItemId> = snapshot
         .leased_ids
@@ -274,6 +299,7 @@ fn overlay_claim_exclude(snapshot: &MutationDriverSnapshot) -> Vec<ItemId> {
     ids
 }
 
+#[cfg(feature = "objectlog")]
 fn identity_base(definition: QueueDefinition) -> MutationDriverSnapshot {
     MutationDriverSnapshot {
         definition,
@@ -290,6 +316,7 @@ fn identity_base(definition: QueueDefinition) -> MutationDriverSnapshot {
 
 /// Keys / indexes / pause only. Do not fold leases or item bodies — Claim exclude
 /// stays unpublished-overlay sized, not O(N).
+#[cfg(feature = "objectlog")]
 fn merge_applied_identity_facts(
     snapshot: &mut MutationDriverSnapshot,
     incoming: &MutationDriverSnapshot,
@@ -310,6 +337,7 @@ fn merge_applied_identity_facts(
     snapshot.paused_drain_intake |= incoming.paused_drain_intake;
 }
 
+#[cfg(any(feature = "objectlog", test))]
 fn merge_unpublished_into_snapshot(
     snapshot: &mut MutationDriverSnapshot,
     unpublished: &MutationDriverSnapshot,
@@ -359,6 +387,7 @@ fn merge_unpublished_into_snapshot(
 /// Copy only identity facts a generation can consult. The authoritative cache may
 /// contain millions of keys; per-request validation must remain proportional to
 /// this generation's input, not the retained queue history.
+#[cfg(feature = "objectlog")]
 fn identity_for_generation(
     existing: &MutationDriverSnapshot,
     definition: QueueDefinition,
@@ -405,6 +434,7 @@ fn identity_for_generation(
     snapshot
 }
 
+#[cfg(feature = "objectlog")]
 fn overlay_delta(
     before: &MutationDriverSnapshot,
     after: &MutationDriverSnapshot,
@@ -459,6 +489,7 @@ fn overlay_delta(
     }
 }
 
+#[cfg(feature = "objectlog")]
 fn unpublished_has_identity(snapshot: &MutationDriverSnapshot) -> bool {
     !snapshot.client_keys.is_empty()
         || !snapshot.request_fingerprints.is_empty()
@@ -477,6 +508,7 @@ fn prune_unpublished_gens(gens: &mut Vec<UnpublishedMutation>, applied: Option<&
     gens.retain(|entry| !position_covers(Some(applied), &entry.through));
 }
 
+#[cfg(feature = "objectlog")]
 fn coalesce_generation_commits(
     commits: Vec<RawCommitRequest>,
 ) -> EngineResult<Vec<RawCommitRequest>> {
@@ -2831,6 +2863,7 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
     }
 }
 
+#[cfg(any(feature = "objectlog", test))]
 fn position_covers(have: Option<&CommandPosition>, target: &CommandPosition) -> bool {
     have.is_some_and(|have| {
         have.backend_epoch > target.backend_epoch

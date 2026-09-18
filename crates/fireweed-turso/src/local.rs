@@ -1862,7 +1862,6 @@ mod committed_reader_tests {
 
     const CANDIDATE_READER_COUNT: usize = 24;
     const CANDIDATE_READER_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
-    const FIRST_SELECT_TIMEOUT: Duration = Duration::from_millis(90);
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     const PROBE_ROW_COUNT: i64 = 800;
     const PROBE_PAYLOAD_BYTES: i64 = 6_144;
@@ -2110,8 +2109,11 @@ mod committed_reader_tests {
 
                 wait_for_phase(&mut phase_rx, 1).await?;
                 let first_started = Instant::now();
+                // The writer cannot commit until every reader reports this SELECT.
+                // Completion proves it did not wait for that commit; the timeout
+                // only bounds a deadlock, independently of hosted runner speed.
                 let first_version =
-                    tokio::time::timeout(FIRST_SELECT_TIMEOUT, probe_version(&first_snapshot))
+                    tokio::time::timeout(PROBE_TIMEOUT, probe_version(&first_snapshot))
                         .await
                         .map_err(|_| {
                             probe_error(format!("reader {reader} first SELECT blocked"))
@@ -2303,11 +2305,6 @@ mod committed_reader_tests {
             .map(|reader| reader.control_select_us)
             .max()
             .unwrap_or_default();
-        assert!(
-            max_live_us <= FIRST_SELECT_TIMEOUT.as_micros(),
-            "first SELECT under a live writer took {max_live_us}us, exceeding the {}us deadline",
-            FIRST_SELECT_TIMEOUT.as_micros()
-        );
         for observation in &evidence.readers {
             assert_eq!(
                 observation.first_version, 0,

@@ -106,8 +106,20 @@ pub fn validate(row: &FailoverEvidence) -> Result<(), Vec<String>> {
     if row.scale != "release" {
         errors.push("scale must be release".into());
     }
-    if row.backend_profile != "object_log_sqlite_projection" {
-        errors.push("backend_profile must be object_log_sqlite_projection".into());
+    // Schema v1 remains readable for immutable historical SQLite evidence. Current
+    // schema v2 producers exercise the native Turso projection exclusively.
+    let expected_profile = match row.schema_version {
+        1 => Some("object_log_sqlite_projection"),
+        2 => Some("object_log_turso_projection"),
+        _ => None,
+    };
+    if let Some(expected) = expected_profile
+        && row.backend_profile != expected
+    {
+        errors.push(format!(
+            "backend_profile must be {expected} for schema v{}",
+            row.schema_version
+        ));
     }
     if !row.bars_met {
         errors.push("bars_met must be true".into());

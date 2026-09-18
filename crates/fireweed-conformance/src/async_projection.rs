@@ -2,13 +2,13 @@
 
 use fireweed_core::{ItemId, ItemState, LeaseToken, RequestId};
 use fireweed_engine::{
-    AsyncProjectionStore, ClaimCommand, CommandPosition, EngineError, FinalizeCommand,
-    FinalizeKind, FinalizeOutcome, PushCommand, QueueCommand, RenewLeaseCommand, RenewTarget,
+    AsyncProjectionStore, ClaimCommand, CommandPosition, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, PushCommand, QueueCommand, RenewLeaseCommand, RenewTarget,
 };
 
 use crate::{envelope, item, qdef, ts};
 
-/// Exercise the common supported lifecycle and the reference adapter's explicit capability declines.
+/// Exercise the common lifecycle, validation, and recovery-read contracts.
 /// Adapter-specific suites remain responsible for rich relational queries and white-box persistence.
 pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(store: &S) {
     let definition = qdef();
@@ -132,7 +132,7 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
 
     // Retained replay, side-record and fence reads are backed by projection
     // storage; empty keys are absent. Public tests separately require populated
-    // values and log-only rebuild. The richer commit-recovery read is not wired.
+    // values and log-only rebuild.
     let request_id = RequestId::new("async-projection-conformance-request").unwrap();
     assert_eq!(
         AsyncProjectionStore::replay_durable_commit(
@@ -147,7 +147,7 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
     );
     assert_eq!(
         AsyncProjectionStore::read_durable_commit(store, shard.clone(), request_id).await,
-        Err(EngineError::Unavailable)
+        Ok(None)
     );
     assert_eq!(
         AsyncProjectionStore::instance_fence(store, shard.clone(), b"fence".to_vec()).await,
@@ -157,28 +157,24 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
         AsyncProjectionStore::side_record(store, shard, b"side".to_vec()).await,
         Ok(None)
     );
-    // index_validate_push / commit_validate may be Unavailable (async SQLite reference) or
-    // implemented with a vacuous Ok(()) on empty batches (Turso / relational projections).
-    // Both are acceptable; other outcomes indicate a silent no-op or wrong error class.
-    let empty_push = AsyncProjectionStore::index_validate_push(
-        store,
-        fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
-        Vec::new(),
-    )
-    .await;
-    assert!(
-        matches!(empty_push, Ok(()) | Err(EngineError::Unavailable)),
-        "index_validate_push empty batch: expected Ok or Unavailable, got {empty_push:?}"
+    // Empty validation batches are valid operations on this existing queue.
+    assert_eq!(
+        AsyncProjectionStore::index_validate_push(
+            store,
+            fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
+            Vec::new(),
+        )
+        .await,
+        Ok(())
     );
-    let empty_commit = AsyncProjectionStore::commit_validate(
-        store,
-        fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
-        Vec::new(),
-        ts(0),
-    )
-    .await;
-    assert!(
-        matches!(empty_commit, Ok(()) | Err(EngineError::Unavailable)),
-        "commit_validate empty batch: expected Ok or Unavailable, got {empty_commit:?}"
+    assert_eq!(
+        AsyncProjectionStore::commit_validate(
+            store,
+            fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
+            Vec::new(),
+            ts(0),
+        )
+        .await,
+        Ok(())
     );
 }

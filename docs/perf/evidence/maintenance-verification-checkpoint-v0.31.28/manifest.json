@@ -1,0 +1,949 @@
+{
+  "schema": "fireweed-maintenance-verification-archive/v1",
+  "archive_checkout_head": "0f9c96016f19c220897245e9104749c0db8ea431",
+  "provenance_note": "Logs may describe earlier checkouts; archiving does not assign the current HEAD to their executions or turn failures/timeouts into passes.",
+  "allowlist_sha256": "99961cd0ad5c0ae0deefe2b6193af96d61687f0af131e647f4aaba747c542a00",
+  "archiver_sha256": "e11bc03a8117d5558bff373423cb6bf479887e1315bb9c99a4f784d249d58c79",
+  "files": [
+    {
+      "path": "fireweed-maintenance-vendor-core-default-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-vendor-core-default-final.log",
+      "role": "regular vendor suite",
+      "source_mtime_ns": 1789668865730872923,
+      "decompressed_bytes": 173215,
+      "decompressed_sha256": "45da87f6aa8672cf30f3af5bb07f4f34388e826b800acce42528544137ecf2bd",
+      "bytes": 25874,
+      "sha256": "42c75ea00efb8f05cc71607e0048bcf81859d89315e5c3cd7185c609a0bfa879"
+    },
+    {
+      "path": "fireweed-maintenance-vendor-turso-sync-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-vendor-turso-sync-final.log",
+      "role": "regular vendor suite",
+      "source_mtime_ns": 1789680272667591279,
+      "decompressed_bytes": 10679,
+      "decompressed_sha256": "df6271f693dfffda7b10f1f26fa6add225bd9204048d48e0995e7c88cdfabba7",
+      "bytes": 2642,
+      "sha256": "4b363170ef60286672a29e9b8fd2f66ca85321dbcf2765552d3120dbf0c23b22"
+    },
+    {
+      "path": "fireweed-maintenance-vendor-log-retry-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-vendor-log-retry-final.log",
+      "role": "regular vendor suite",
+      "source_mtime_ns": 1789668965150080521,
+      "decompressed_bytes": 12883,
+      "decompressed_sha256": "2bdb61b662472c395f8597deedf1298e76af107eff0b2160fc06afc7cb03d677",
+      "bytes": 3673,
+      "sha256": "863fc1a31610d427f37e8351ec1e587c189d36156c527d33b3e22c3db4f4e466"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-results.json",
+      "role": "all 18 initial bounded ignored-test outcomes, including failures/timeouts",
+      "source_mtime_ns": 1789680768565097299,
+      "decompressed_bytes": 5279,
+      "decompressed_sha256": "9f82d6bb950f44c22660a3567663cc9e3290594f1b00a2f1125d3ab3be42f8bf",
+      "bytes": 816,
+      "sha256": "ade49472bc1485354c879d604690180dab0cd74708e7e874211f0027a3401f92"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-01.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-01.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680412035435151,
+      "decompressed_bytes": 770,
+      "decompressed_sha256": "ea9724440992e90be8274a4c65864e8ce911305b849d1a301372fe5a67e6b2e2",
+      "bytes": 434,
+      "sha256": "f97e8b8426bb30031a8f2f7e213cd9aeda747efff63cb759ce470244d3480683"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-02.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-02.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680434240476713,
+      "decompressed_bytes": 6709642,
+      "decompressed_sha256": "936ab20ad1e697001fa846c94e8b749c63c531221cfab5e2b1ab35cc253875bf",
+      "bytes": 247287,
+      "sha256": "4682a7ba1bc9576253313a82718b7eca8d8dac0e0df86e292896f393b4e75f58"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-03.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-03.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680444679201017,
+      "decompressed_bytes": 378968,
+      "decompressed_sha256": "7978d19ae695403e124d2f00fae63e8ab63ab79313ce33b0ef0b4484988f8d01",
+      "bytes": 40363,
+      "sha256": "55bc6b2903096f834819072dbe22584a613d1a9a2dc434da9f1883020f552d5d"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-04.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-04.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680467099678754,
+      "decompressed_bytes": 378931,
+      "decompressed_sha256": "883f58b41de41f7c49b4265a758662778e32850b302cf50919e17cf888ad9720",
+      "bytes": 40329,
+      "sha256": "5366ae8771321f4d7c263800c02242202baafe9ae0a9c3421e96893276ed3f06"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-05.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-05.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680467163677392,
+      "decompressed_bytes": 223,
+      "decompressed_sha256": "1ab7adbaf379280011e6b9e158abcb11aaa05502e8cbc400aedd80053d5f8491",
+      "bytes": 180,
+      "sha256": "cff3cfb3032c0ff578f165cf2c41300dc8cef98bd05b991a381716f665bdb324"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-06.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-06.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680468026659035,
+      "decompressed_bytes": 180,
+      "decompressed_sha256": "89dd565edb01ac4370b73d0a0bfe7d54b5fe6418567ecac08b272183da5f70fa",
+      "bytes": 145,
+      "sha256": "8e21d5dc4cd11311f3bbe1cacb1383c3ee918544614ccc1d8f3e175f71c47223"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-07.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-07.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680469823621227,
+      "decompressed_bytes": 869,
+      "decompressed_sha256": "6383217d988036970480f0f77be8e1f1d7eea78df3a516f1616a38b461482401",
+      "bytes": 391,
+      "sha256": "71e54f6247ef3fa39624d9080342a7f61c1faebdf74fc08f9465886e6516fc96"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-08.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-08.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680469892619781,
+      "decompressed_bytes": 23261,
+      "decompressed_sha256": "278991e903cccb53d48e7ca266a9d972127ff60ed6bc65c3b43ac1adb6deea7c",
+      "bytes": 1407,
+      "sha256": "4bcf13a1dd9ffe8bda5551e4d4f9655452a782487a4b446efcf372d18996e28c"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-09.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-09.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680477324468889,
+      "decompressed_bytes": 1573079,
+      "decompressed_sha256": "cca7c029f9ed10f96b2cc4b1636e2c6e14cb4e73a4af95fc389aff0053c4bf9e",
+      "bytes": 81193,
+      "sha256": "a53d3aaea4d3a7480607e1a935d948c1337dd14b6e72feb3af5b0921dd4b88ee"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-10.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-10.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680485563311356,
+      "decompressed_bytes": 12153310,
+      "decompressed_sha256": "cc1291d16473a2604d8a86e8a715ba85c0679ac3778a9f469e8d671bee8c4908",
+      "bytes": 3662221,
+      "sha256": "071aaaf5abc5fc5ddbde09749cc87dc2cec5b9f759979bae76f4cc8952b9d8f2"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-11.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-11.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680520705740473,
+      "decompressed_bytes": 5272246,
+      "decompressed_sha256": "1a40cc4c0dfabcc0a1253e5568e05ec1e198849388994bce73f4278afaa85693",
+      "bytes": 735670,
+      "sha256": "b104184a7be6a38f200bebccae1ee15574b7022cadcf2b947b7fee45fe0a83e3"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-12.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-12.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680580736056978,
+      "decompressed_bytes": 22223679,
+      "decompressed_sha256": "c150aed0ebd6466b37816cc4c0a66b04adc6efb6ea15ca884e8148012bb4a84f",
+      "bytes": 2290768,
+      "sha256": "76003b9be9627251f9e571f8eebf6b3b664deeed532d26802256342112e07381"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-13.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-13.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680594029942948,
+      "decompressed_bytes": 2339746,
+      "decompressed_sha256": "b48891c54ce76b280cdc3c52ed3bf01d1dbe0c326d3e77dc9b4c1af3489c094f",
+      "bytes": 304242,
+      "sha256": "b87052b5426b51f57909315f5748ed211e6cfb6445e136f0137a98782a88a1dd"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-14.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-14.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680618425760816,
+      "decompressed_bytes": 4773917,
+      "decompressed_sha256": "6b5b007f2bbd3fbb48759d454b0af04cb7a0ebbe7d44860d6e2e52f2dbba0161",
+      "bytes": 682509,
+      "sha256": "38ece5039d6d9683ba42b016416dc2ba95707bca20f6e2b8d7c9a505e2b7b7d8"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-15.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-15.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680625627713011,
+      "decompressed_bytes": 3692784,
+      "decompressed_sha256": "254e18cce1c6ea52c95d28a69f5379099c93042368172b8e041955f3e221cbfd",
+      "bytes": 461253,
+      "sha256": "965d264c0cac44319959c736ea13fa11e8697d6e9c604179f635586d3dec78b5"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-16.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-16.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680625672712720,
+      "decompressed_bytes": 81,
+      "decompressed_sha256": "72f40a011d94de9c50e55f9a4de91a1b678c9ab7ca8fc0c6202eda79e83de3b2",
+      "bytes": 89,
+      "sha256": "b95d349f5947f187568ca7a852ea9191bbd72b290d22fc5f5480872fc2da399a"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-17.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-17.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680748852183164,
+      "decompressed_bytes": 158,
+      "decompressed_sha256": "b647ab778b11a606e48d8c448f09602f437c2c3354de54904ad92ea8d07fddd8",
+      "bytes": 134,
+      "sha256": "b25fec33d03706623c99f6488e6034c55ff84e68e3e471b2952617888648437a"
+    },
+    {
+      "path": "fireweed-maintenance-upstream-ignored-18.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-upstream-ignored-18.log",
+      "role": "initial bounded upstream-ignored test attempt",
+      "source_mtime_ns": 1789680768425133045,
+      "decompressed_bytes": 684,
+      "decompressed_sha256": "b016e493920d709080dac74ca5603ff37b7b51aaaa3b783ba7e6a60acded4f1a",
+      "bytes": 303,
+      "sha256": "65a597e6f4e9bbde7f0c9b8c20ef6b30cb9e87d1e463dcdb63d6d1a712bb8a24"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-results.json",
+      "role": "script suite exit-code ledger",
+      "source_mtime_ns": 1789680245931208829,
+      "decompressed_bytes": 3915,
+      "decompressed_sha256": "89ea8373885f7b34558cf0cd1fb0fc7442adf5da024c874a5f6a5245808006c4",
+      "bytes": 582,
+      "sha256": "038611a6880a6af41b5ec1f4642fe59a72efe37fdcc228bcf4e48f22d50a5888"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-github-actions-policy-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-github-actions-policy-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680013337440042,
+      "decompressed_bytes": 2651,
+      "decompressed_sha256": "c6cc78c691c426c19ba80d755b504004ec1a9a3f5885b3d2fb78ddd251c599a2",
+      "bytes": 776,
+      "sha256": "5f73b86cce3dd1eb8a135d68bf57016dcef395e660468db212adfc4f6bf2e23a"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-governed-release-evidence-gate-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-governed-release-evidence-gate-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680015230442038,
+      "decompressed_bytes": 2094,
+      "decompressed_sha256": "ae187909007f4aa069351fdca890f558584964602933e863c1ee1bdbfbb7fe54",
+      "bytes": 547,
+      "sha256": "42b6503d83a161d76eb46a2306805fb681a68f59db8d20946112d8b1f8d7587c"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-public-release-gate-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-public-release-gate-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680015724442577,
+      "decompressed_bytes": 313,
+      "decompressed_sha256": "ee5f4984d1e22a085297f7a28b5d4f82a1dbe49ae852b38ca9702aac534c964d",
+      "bytes": 155,
+      "sha256": "22812b6811b1b47cac3fc0b6a4f62963803a89c71df3986dcda3ced74184e098"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-public-release-gates-identity-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-public-release-gates-identity-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680015756442612,
+      "decompressed_bytes": 100,
+      "decompressed_sha256": "22ed49dbfd4b3d1e93f302ed5d0fabe8c77e5cb58ca36a106930ee5a95c59bae",
+      "bytes": 99,
+      "sha256": "0c968a7ad82baefc17e27294930da5c6a643479db1f1c4568d356ddb75d1444b"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-release-failure-notification-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-release-failure-notification-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680015781442639,
+      "decompressed_bytes": 41,
+      "decompressed_sha256": "a595a8b2042a6373a02722315b68bc117d11542edf02be83422730e1a88d6171",
+      "bytes": 61,
+      "sha256": "a86a7ac6e69604bb0abf04bcc894e88d28ed333946636a0c499f76c07fbdea9e"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-release-workflow-shape-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-release-workflow-shape-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680015873442740,
+      "decompressed_bytes": 512,
+      "decompressed_sha256": "fac12177d78e78442256dc365b4174a368642d483f59498595729da9c1410a34",
+      "bytes": 326,
+      "sha256": "0d3e28ac47e2fcb189e7aa78636b5550780c97491bf1e044396a726e62091d27"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-s3-qualification-endpoint-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-s3-qualification-endpoint-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680182332798774,
+      "decompressed_bytes": 2798,
+      "decompressed_sha256": "2f2b8507a2c696e68424138174caa48b04cd52d7628839df1c8f91542192984c",
+      "bytes": 902,
+      "sha256": "7d8390dc9b763b93125365d2d2263d3d0fc74c1a8080de41f5d847eb7d17b843"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-github-external-proof-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-github-external-proof-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680016331443249,
+      "decompressed_bytes": 295,
+      "decompressed_sha256": "36952b1330862ce2becc9b0d965efbcd080ba38dfce7c70875a86ff484329fc1",
+      "bytes": 170,
+      "sha256": "79aed25c26bd6f3c6d033d4c53e6156d61af0852ab425036c80e9a2c4cc69f79"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-governed-release-composite-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-governed-release-composite-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680017178444202,
+      "decompressed_bytes": 123,
+      "decompressed_sha256": "22b0e5288cab2027aeeab98a52e0a032c99911a64799ab3ba4b21a8ef73666c8",
+      "bytes": 103,
+      "sha256": "67253ba50cfae34f6dbc02a532a0d642e0beaabf5f5b3c3c79496d891c95d378"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-snorri-ladder-record-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-snorri-ladder-record-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680017399444455,
+      "decompressed_bytes": 360,
+      "decompressed_sha256": "a5ed99644029ffd8e3bda34fd09f96525bd666e7975a3dafffe338639f981e52",
+      "bytes": 239,
+      "sha256": "d5bcfd7c3974d740009c2ba09b18bbb08471ec64d49d29b3c1e537ace22cc201"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-workflow-inline-zero-debt-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-workflow-inline-zero-debt-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680028765458766,
+      "decompressed_bytes": 203,
+      "decompressed_sha256": "047c016e8bb463fbb3c470a2fc1d98a97a745fdb828e226b0444d720c65178a4",
+      "bytes": 144,
+      "sha256": "48938490af12a59146b52c4c44f740b68b59e44f1bb51db8fb224d618b882ae6"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-resp_readiness_test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-resp_readiness_test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680028767731503,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-build-governed-evidence-bundle-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-build-governed-evidence-bundle-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680035036467444,
+      "decompressed_bytes": 3657,
+      "decompressed_sha256": "f1e6581ab29ec8d7ec3fac35b47067a005dc6fe246233b6d4d0da98bc54fae73",
+      "bytes": 836,
+      "sha256": "2fec09801cac33951edbce371c2ca1236b5c29a4f06f074e87b7c654fd239faf"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-promote-governed-evidence-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-promote-governed-evidence-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680036977470203,
+      "decompressed_bytes": 80,
+      "decompressed_sha256": "faf467f005ce36d5ac88db356b3bd2e0d5de0f846dcea2dc3fb9149b2fbfd262",
+      "bytes": 100,
+      "sha256": "97a8a23e064629c704b46f59b0f11051dfb784fbdce7a01b789ea68adfb69a7c"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-resolve-release-identity-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-resolve-release-identity-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680037798471379,
+      "decompressed_bytes": 742,
+      "decompressed_sha256": "c078bb429f969e9459b177cb23c8eab31487fd6d0d60dbd9887f2c45762e015d",
+      "bytes": 368,
+      "sha256": "dcf5cd2632620c57ea34363cfc097a900f8774d79fd336a8f939707d9e62d2b4"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-source-preview-artifacts-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-source-preview-artifacts-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680038822472851,
+      "decompressed_bytes": 1955,
+      "decompressed_sha256": "98f2ad3c6b86d383c4735488cd73b74895a9a9a9f12355aebdd7f794a40c2562",
+      "bytes": 494,
+      "sha256": "da5990c67587838a576c66e2e4b43f1cea058999fefd3a20b4680f5cadd22bb4"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-release-artifacts-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-release-artifacts-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680039014473127,
+      "decompressed_bytes": 954,
+      "decompressed_sha256": "d8762b0bd90f4f400ff39635b8ff0d061b81b0529bd32bdd94c93760951b7046",
+      "bytes": 308,
+      "sha256": "a6788bb2f77c1280a4564e95fb5d1615804770f32b1b14244d7b335ddcedb6e3"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-release-identity-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-release-identity-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680039431473730,
+      "decompressed_bytes": 322,
+      "decompressed_sha256": "7b8ca365f26418dea30004937fd8245219baee7b5e9e5ac32f25ee35fb4b7513",
+      "bytes": 218,
+      "sha256": "ef2d3a1bfe9d75ae7107c1677ee1c53f3315a04e012a486e8d3db19fcc1a6865"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-source-predicate-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-source-predicate-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680040508041150,
+      "decompressed_bytes": 1145,
+      "decompressed_sha256": "e19795fc56e68baf0c720e28e5d8665ba615686c3e5e77d3a4926edff5f59d6b",
+      "bytes": 448,
+      "sha256": "d6554c5e529e1d7d282bdcfc39d2a48d7ad22c4b9a56d5a66e44e4df44869be0"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-test-public-identity-residue.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-test-public-identity-residue.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680041632476925,
+      "decompressed_bytes": 54,
+      "decompressed_sha256": "216406b773b5a2199645649b593f39fe523804517379c9f99769cbafcb29edc4",
+      "bytes": 70,
+      "sha256": "5a5a90693d5664720a561233f29e64c0816941dd03d1e1623b2e9152679b6b13"
+    },
+    {
+      "path": "fireweed-maintenance-script-final-verify-public-artifact-topology-test.sh.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-script-final-verify-public-artifact-topology-test.sh.log",
+      "role": "repository script check",
+      "source_mtime_ns": 1789680041877477282,
+      "decompressed_bytes": 130,
+      "decompressed_sha256": "9195f198e9645b78d40b8e7c27bd7ec46461164902332504efeb990107b4bb07",
+      "bytes": 110,
+      "sha256": "204f05f6a20665fd9d56084823fc3171f52cee82777d76be88812b6a876245fc"
+    },
+    {
+      "path": "fireweed-maintenance-clippy-parity-8.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-clippy-parity-8.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789681387622578560,
+      "decompressed_bytes": 4541,
+      "decompressed_sha256": "499902ec50885e50c8443a416e4fae0a33e916a4e690eb56db1b225e7fbffa44",
+      "bytes": 1140,
+      "sha256": "c85100fd9bc4cd9876bd5063bbd4810e2472d88ffa20579816e0f0eead91daec"
+    },
+    {
+      "path": "fireweed-maintenance-microsite-checkpoint.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-microsite-checkpoint.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789682615121735400,
+      "decompressed_bytes": 299,
+      "decompressed_sha256": "41aa0ca0b2d3026d38f70191432be212aaaee571610c299b3f77fb3e4f2834d1",
+      "bytes": 198,
+      "sha256": "f83d95c5ed63c9f63368ac87944a7cbf3bf5ef313a64414eba035bb7b6cd29e3"
+    },
+    {
+      "path": "fireweed-maintenance-site-browser-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-site-browser-final.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789670068189909276,
+      "decompressed_bytes": 228,
+      "decompressed_sha256": "5cc13f49f11f9300b99ef2996d7c714d850e75be47f83c745d886cf5dd835a59",
+      "bytes": 161,
+      "sha256": "f1b6475d5f80691268c0bfc3071dead711dd252321d9eaef6b9ec0d9f8f929ce"
+    },
+    {
+      "path": "fireweed-maintenance-channel-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-channel-final.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789664986975755880,
+      "decompressed_bytes": 176,
+      "decompressed_sha256": "fb052028742b263c1f8facdd39fcb3ee4f82e3931261966ef780c9772c5234dd",
+      "bytes": 90,
+      "sha256": "f0318a308c6a14c8dac5bd7247b6ecabb30e19a6450b99183712c3cdab29a500"
+    },
+    {
+      "path": "fireweed-maintenance-identity-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-identity-final.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789664987535757488,
+      "decompressed_bytes": 322,
+      "decompressed_sha256": "7b8ca365f26418dea30004937fd8245219baee7b5e9e5ac32f25ee35fb4b7513",
+      "bytes": 218,
+      "sha256": "ef2d3a1bfe9d75ae7107c1677ee1c53f3315a04e012a486e8d3db19fcc1a6865"
+    },
+    {
+      "path": "fireweed-maintenance-public-boundary-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-public-boundary-final.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789668262100994695,
+      "decompressed_bytes": 4467,
+      "decompressed_sha256": "2a88ef6b68bcb55fb21ca8bc7e82ae38bce82421f5a87aa8a7b960c3e0986522",
+      "bytes": 1062,
+      "sha256": "7c56da6e79f1db75b968864531d99ce4c3134dc4d90fef3fe7c66ca2e7ed146d"
+    },
+    {
+      "path": "fireweed-maintenance-helm.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-helm.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789661623782201293,
+      "decompressed_bytes": 7368,
+      "decompressed_sha256": "b8a94def3553bf0ffbfea3c322aaed1239cfeed8b3644297a9d2470c21736fe1",
+      "bytes": 1012,
+      "sha256": "7bac6ce95dd3878868b079d5c9aef7a7fae73767b8a6dae74e437092abf38621"
+    },
+    {
+      "path": "fireweed-maintenance-python-perf.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-python-perf.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789661163327661671,
+      "decompressed_bytes": 118,
+      "decompressed_sha256": "8801df63b615a8a3240c3fc35b9f73032d33c51c477823e24c6c5df628d01b0c",
+      "bytes": 55,
+      "sha256": "60059ad3c9808b1e0ba1d9146635c7291bb51785cc74debc156790ec0f9296c6"
+    },
+    {
+      "path": "fireweed-maintenance-python-release.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-python-release.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789661163757159076,
+      "decompressed_bytes": 176,
+      "decompressed_sha256": "3f8ca4e5e3b4a0989231c02a10de81abadb86fceacdd6f16cb5acb7336e4eeb0",
+      "bytes": 90,
+      "sha256": "df0bdfe02a2394a3d65d26c3dcb544f0ab9db81406b201d44db4463f81ce13ba"
+    },
+    {
+      "path": "fireweed-maintenance-python-resp.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-python-resp.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789661165209162578,
+      "decompressed_bytes": 106,
+      "decompressed_sha256": "e1a2808eb692f71f9fce7f8ba9eef5162b99a669d6b42d8480b4d80b0d0f87c0",
+      "bytes": 54,
+      "sha256": "cc9097a4345828c5b35a9465e6d4692aba4b0a332e5fed453765897011751163"
+    },
+    {
+      "path": "fireweed-maintenance-workflow-policy-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-workflow-policy-final.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789661457415837249,
+      "decompressed_bytes": 2651,
+      "decompressed_sha256": "c6cc78c691c426c19ba80d755b504004ec1a9a3f5885b3d2fb78ddd251c599a2",
+      "bytes": 776,
+      "sha256": "5f73b86cce3dd1eb8a135d68bf57016dcef395e660468db212adfc4f6bf2e23a"
+    },
+    {
+      "path": "fireweed-maintenance-vendor-patches-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-vendor-patches-final.log",
+      "role": "completed named check; inspect producer provenance before attributing to final candidate",
+      "source_mtime_ns": 1789665021242096547,
+      "decompressed_bytes": 397,
+      "decompressed_sha256": "aa573c3184fbaa4f203de35360cc79dbb389cec66f6f2c8aaf92e2847bb09f51",
+      "bytes": 187,
+      "sha256": "080f175100358990b525a671cdb8c42a9cf2a4ae4a89f0ad3aa480e3fd6477e6"
+    },
+    {
+      "path": "fireweed-maintenance-retired-e3-entrypoints.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-retired-e3-entrypoints.log",
+      "role": "replacement E3 retirement-entrypoint check; legacy producer fixtures are retired",
+      "source_mtime_ns": 1789684110695573682,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-ci-policy-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-ci-policy-followup.log",
+      "role": "follow-up CI policy check after maintenance audit changes",
+      "source_mtime_ns": 1789683816477362784,
+      "decompressed_bytes": 497,
+      "decompressed_sha256": "e42c1d0d34cd34f3c05a0354c138d1ab09f94b3f1ff6a615fe6f996826ee2d48",
+      "bytes": 274,
+      "sha256": "60740ce9a237b56728c04397eedb9bb897fa5e5fa3498889d9000267b465ef80"
+    },
+    {
+      "path": "fireweed-maintenance-followup-fmt.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-followup-fmt.log",
+      "role": "follow-up formatting check after maintenance audit changes",
+      "source_mtime_ns": 1789684034575845039,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-workspace-initial-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-workspace-initial-results.json",
+      "role": "initial full workspace attempt totals; includes failures and interrupted calibration, not final qualification",
+      "source_mtime_ns": 1789684254993976632,
+      "decompressed_bytes": 391,
+      "decompressed_sha256": "f5e29b83b351db7867a636e659d68cfdfb233c204926506e9c227b2f7c27b4af",
+      "bytes": 265,
+      "sha256": "90e603e3e280f365489cba4742c218f2827673ba4652c7ac740590cbe5ed49bd"
+    },
+    {
+      "path": "fireweed-maintenance-tests-parity-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-tests-parity-final.log",
+      "role": "raw initial workspace attempt despite historical final filename; use accompanying initial-results ledger",
+      "source_mtime_ns": 1789684230526571476,
+      "decompressed_bytes": 202821,
+      "decompressed_sha256": "6b023e7bc7508008641a71a3ba7bb2f912645c138f58438d900826956be28f75",
+      "bytes": 42218,
+      "sha256": "c6bc3632200b3f4d48bc2fece93870594839a80b5ee890d4632381c4959f3530"
+    },
+    {
+      "path": "fireweed-maintenance-calibration-interruption.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-calibration-interruption.json",
+      "role": "explicit record of interrupted calibration; not a passing result",
+      "source_mtime_ns": 1789683426430761831,
+      "decompressed_bytes": 430,
+      "decompressed_sha256": "5d171a0a61f3a4d3a60b9c576891d138432e556ae54be34b2339f4d28c93f6e8",
+      "bytes": 316,
+      "sha256": "4d98192e2ad746e34588f8e8a8b316f6015cfc1916dea0fdb8cb8a9b061f2c06"
+    },
+    {
+      "path": "fireweed-maintenance-postgres-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-postgres-followup.log",
+      "role": "completed PostgreSQL follow-up: 111 library + 62 conformance passes",
+      "source_mtime_ns": 1789685083528791626,
+      "decompressed_bytes": 18584,
+      "decompressed_sha256": "b14ca7183b6135bd6145191fdc595b796940742ec0d658971f73ef9f2ca44d24",
+      "bytes": 5047,
+      "sha256": "707ce79b36ce1631778d95b63fd741d94ce901287828e99cad9fa8580480994b"
+    },
+    {
+      "path": "fireweed-maintenance-debug-query-staged.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-debug-query-staged.log",
+      "role": "completed native debug query follow-up: 15 passes after staged decoding",
+      "source_mtime_ns": 1789685165542062275,
+      "decompressed_bytes": 6182,
+      "decompressed_sha256": "ae5e1a1523fcb10960cb4342e41ea26d2f4f1c40b4a99c93204412aacfa2590c",
+      "bytes": 1799,
+      "sha256": "e82da7e526afd29698afc1f2963762a22702984124d754cdfe6415604118032e"
+    },
+    {
+      "path": "fireweed-maintenance-native-debug-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-native-debug-followup.log",
+      "role": "completed full native debug suite: 139 passes, 3 explicit ignored SQL diagnostics, 15 harnesses",
+      "source_mtime_ns": 1789685413925820334,
+      "decompressed_bytes": 30190,
+      "decompressed_sha256": "aa3262aa83c58dba1d01bb1a4aae50e31eab1b8a6fbfd464889a7aca31e54730",
+      "bytes": 7821,
+      "sha256": "30d1374bf59943a442df98412b8085675d39136424729f6cbf63c350492d4a3e"
+    },
+    {
+      "path": "fireweed-maintenance-native-debug-followup-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-native-debug-followup-results.json",
+      "role": "completed full native debug result summary",
+      "source_mtime_ns": 1789685440559617761,
+      "decompressed_bytes": 270,
+      "decompressed_sha256": "f3b350b2450da3ae774e8e8fa6033e782eb5f12e2b7590cc4c4f2c81c4660c9b",
+      "bytes": 207,
+      "sha256": "de092e89286efdb257ae60a0b04b3c82844d9e4f174f3cab44e2fdad19158676"
+    },
+    {
+      "path": "fireweed-maintenance-clippy-followup-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-clippy-followup-final.log",
+      "role": "completed all-feature all-target workspace Clippy follow-up",
+      "source_mtime_ns": 1789685448069918838,
+      "decompressed_bytes": 4823,
+      "decompressed_sha256": "fe24679fb6a53aa62117d903dce5580d8a62441d125bb75d00486d73db4f68a7",
+      "bytes": 1176,
+      "sha256": "0d598368f646bfc052edc4514d6b796966292c6c97779856067b20fef52e509b"
+    },
+    {
+      "path": "fireweed-maintenance-gated-claim-query-plans.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-gated-claim-query-plans.log",
+      "role": "diagnostic old and corrected gated-claim SQL query plans; not capacity qualification",
+      "source_mtime_ns": 1789684515708403861,
+      "decompressed_bytes": 151397,
+      "decompressed_sha256": "9757e76f38c6af65b410d0a3856596b36e3f7d31a4c7c5663f35a4128ff861ec",
+      "bytes": 11220,
+      "sha256": "a7455603313ee04c5acef9c9eeb1e3be344c26a4b4bcdabede0c8fed89320609"
+    },
+    {
+      "path": "fireweed-maintenance-debug-gate-plan.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-debug-gate-plan.log",
+      "role": "completed exact gate membership/blocked-key plan regression",
+      "source_mtime_ns": 1789684535615510241,
+      "decompressed_bytes": 217,
+      "decompressed_sha256": "55ae49af2a0e112fac9f3a2b6dc1c965e19c9a5e9e34863751f9a28bd0f7f795",
+      "bytes": 170,
+      "sha256": "258cd24d8b603bc7ea22b600eaea1a84010369e97c980a48b6061db604569af0"
+    },
+    {
+      "path": "fireweed-maintenance-debug-membership-plan.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-debug-membership-plan.log",
+      "role": "completed full identity/client-key membership plan regression; timing is diagnostic",
+      "source_mtime_ns": 1789684569503686200,
+      "decompressed_bytes": 693,
+      "decompressed_sha256": "d01d1c468cdb1840d4b50882cedc28ae29c58ed4ca0b5eb1553f85b4416ed020",
+      "bytes": 382,
+      "sha256": "7a9659ab6d345f479d54acf07ad3e5ceb2a4bccebe8376ca057df0fa6ffd347f"
+    },
+    {
+      "path": "fireweed-maintenance-debug-aggregate-balanced-gdb.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-debug-aggregate-balanced-gdb.log",
+      "role": "debug stack-overflow GDB backtrace before staged SQL decoder fix; retained failed diagnostic",
+      "source_mtime_ns": 1789684927131237228,
+      "decompressed_bytes": 25792,
+      "decompressed_sha256": "44c569358dfe1b8a7bd435f881941033838b69ec2085a064af8cad403f126890",
+      "bytes": 3602,
+      "sha256": "6c51c7c4f1a2f3aa56568f9a57215342df7149f058d91f491da2dc65c7a3eda5"
+    },
+    {
+      "path": "fireweed-maintenance-query-translator-frame.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-query-translator-frame.log",
+      "role": "static debug translator disassembly and exact stack-frame reservation, not a workload",
+      "source_mtime_ns": 1789685659622304319,
+      "decompressed_bytes": 2594,
+      "decompressed_sha256": "1f17645f6341a1b3eea93097a1373fe3420d07043333551a543be4b4eab26bd8",
+      "bytes": 1102,
+      "sha256": "2b7fbc5e2f5bdb15f43791381bd3ac289bcd022fab618667895c124e6937c2e1"
+    },
+    {
+      "path": "fireweed-maintenance-workspace-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-workspace-followup.log",
+      "role": "completed full release workspace attempt: 2032 passes, 3 external native peek blocked-gate failures, 0 ignored",
+      "source_mtime_ns": 1789686979625442136,
+      "decompressed_bytes": 197451,
+      "decompressed_sha256": "ce6b9452517b5e564ad0024674a3772e9b8c66b382f2065350672f50334df704",
+      "bytes": 40709,
+      "sha256": "7549b3bcda122811dcde445e8ddad7b56e53f9a566fc74d5daed51959c5e2471"
+    },
+    {
+      "path": "fireweed-maintenance-workspace-followup-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-workspace-followup-results.json",
+      "role": "completed full release workspace attempt summary; not a final pass",
+      "source_mtime_ns": 1789686979666268136,
+      "decompressed_bytes": 508,
+      "decompressed_sha256": "3ff60926be3ff35b9716f78f6401cf7b853d97f257bcc8ef2c2f42b86fcc04cc",
+      "bytes": 315,
+      "sha256": "4ce1566dda88618b78274d01cbba57eeae76beaac008b9296564a1bff3fcc412"
+    },
+    {
+      "path": "fireweed-maintenance-claim-baseline-10000.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-claim-baseline-10000.json",
+      "role": "pre-fix synthetic 10000-item claim diagnostic result; metrics-only settle, no recorded binary hash",
+      "source_mtime_ns": 1789684285425889896,
+      "decompressed_bytes": 541,
+      "decompressed_sha256": "a90d39f15241cc89259ae9f06eac77ae231eb3909a555c0f16fe8831957a0a28",
+      "bytes": 369,
+      "sha256": "947a6d78ba66f229cffd6c15c263df4a7dda3ca41cc0a4ca5cf020123e7d8525"
+    },
+    {
+      "path": "fireweed-maintenance-claim-baseline-10000.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-claim-baseline-10000.log",
+      "role": "pre-fix synthetic claim diagnostic raw traces; not capacity qualification",
+      "source_mtime_ns": 1789684285349976309,
+      "decompressed_bytes": 187033,
+      "decompressed_sha256": "75737c3e99a97cf14530f246529c6ae110e9a876abae87c8285520776b971237",
+      "bytes": 9891,
+      "sha256": "ec9490f392742c0c7a3c356455f1b8633ecf9e00daf390c60a266d391c3079a0"
+    },
+    {
+      "path": "fireweed-maintenance-claim-followup-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-claim-followup-results.json",
+      "role": "completed 10000/100000-item serial synthetic drain diagnostics with physical high-water assertions",
+      "source_mtime_ns": 1789687066720533970,
+      "decompressed_bytes": 1462,
+      "decompressed_sha256": "439de4bdd5e56aaea62693e451903e1c968bec493b27d13487bf68a5e025d161",
+      "bytes": 516,
+      "sha256": "85c34bb1fb7ce96567d2ac3a6744735f67bb9a9366e82fa17ed29be66d001a74"
+    },
+    {
+      "path": "fireweed-maintenance-claim-followup-10000.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-claim-followup-10000.log",
+      "role": "completed corrected 10000-item diagnostic raw traces; T2 diagnostic budget not met",
+      "source_mtime_ns": 1789687000742466426,
+      "decompressed_bytes": 345699,
+      "decompressed_sha256": "ece9ebb9258162956b95ebfa500801f9a99fd30e696d47c2cb63e9b28fe7203a",
+      "bytes": 12339,
+      "sha256": "ba771e859ab0eac037f26338253b6543338b360f98893d6cf07ccb21395cd10e"
+    },
+    {
+      "path": "fireweed-maintenance-claim-followup-100000.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-claim-followup-100000.log",
+      "role": "completed corrected 100000-item diagnostic raw traces; T2 diagnostic budget not met",
+      "source_mtime_ns": 1789687066601545905,
+      "decompressed_bytes": 3719699,
+      "decompressed_sha256": "07780e3649a79b7c8c6b448bc2c2b18823d6c9963ac1101c3f7fe8f48e125b22",
+      "bytes": 97951,
+      "sha256": "8e01a5e5e15a936b76b316043fc430b06727b8cb0cfe54e0f0abe78f2b866abd"
+    },
+    {
+      "path": "fireweed-maintenance-claim-timing-analysis.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-claim-timing-analysis.json",
+      "role": "derived exact trace sample counts, median/nearest-rank p95 and input log SHA256 values",
+      "source_mtime_ns": 1789687327700607594,
+      "decompressed_bytes": 8934,
+      "decompressed_sha256": "9b376613229a54bb4e9c22a95a88a7db81045b4fb8c48ae2e880aa95e552622f",
+      "bytes": 1880,
+      "sha256": "0ec00367d482916d840a047f06efa614b1312a1a6fd12a5ef44d10a6465cf98d"
+    },
+    {
+      "path": "fireweed-maintenance-native-peek-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-native-peek-final.log",
+      "role": "completed focused native debug gate/peek regression after correction",
+      "source_mtime_ns": 1789687110688602002,
+      "decompressed_bytes": 4742,
+      "decompressed_sha256": "eff079e91a6c96bcfd0fb7eddd7fac5fde3fea01d10e0bf7a39ae796a01056fe",
+      "bytes": 1295,
+      "sha256": "6d835b6d9e2f0e48dc4d51ed52cbd9a4101070d9fb6827547a3129c11300f2e8"
+    },
+    {
+      "path": "fireweed-maintenance-external-peek-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-external-peek-final.log",
+      "role": "completed external release conformance after peek correction: 15 passes, 0 failures, 0 ignored; supersedes three failures without changing prior attempt totals",
+      "source_mtime_ns": 1789687234547770283,
+      "decompressed_bytes": 5637,
+      "decompressed_sha256": "e75d98f6f3a754433291aa5a4df24949aced3d11d6f1cca4d702d38dbb7e48b1",
+      "bytes": 1435,
+      "sha256": "23e45773029b7c6faca7ebd5505445d59e1915e5f7677d0b4af8a8a8e4581722"
+    },
+    {
+      "path": "fireweed-maintenance-default-clippy-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-default-clippy-parity.log",
+      "role": "feature check default-clippy, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687532982224079,
+      "decompressed_bytes": 4824,
+      "decompressed_sha256": "7993e89ddb9c931e70f37d162568a9c98ae098a721ef0e5cd6ac2731230546cc",
+      "bytes": 1176,
+      "sha256": "ba0497051e986d7f199939231b54a7c490c8903f8ed71d56353180750a85820b"
+    },
+    {
+      "path": "fireweed-maintenance-features-none-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-none-parity.log",
+      "role": "feature check features-none, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687542004238597,
+      "decompressed_bytes": 2835,
+      "decompressed_sha256": "11c56b76142d003329ff34b3ce95cb2db0f50c583185738b0a7d1544276d8c01",
+      "bytes": 1053,
+      "sha256": "b4b1be41afb94925fce088bf19607a0e068284cb3d58885dac7a9b12520974bf"
+    },
+    {
+      "path": "fireweed-maintenance-features-memory-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-memory-parity.log",
+      "role": "feature check features-memory, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687543730241379,
+      "decompressed_bytes": 342,
+      "decompressed_sha256": "13e28ffd5d771a59841527897e2032689d73dbc5f7bd92d61d01ae68932514a9",
+      "bytes": 169,
+      "sha256": "0c72347ca5a3a07402bf2f1b8f7623ffa965859da1766aa46009a1c4da6e1534"
+    },
+    {
+      "path": "fireweed-maintenance-features-objectlog-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-objectlog-parity.log",
+      "role": "feature check features-objectlog, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687564745275358,
+      "decompressed_bytes": 2871,
+      "decompressed_sha256": "36b92d972b9443f2e305fb9a5e0ef41bdca5cb6723e6a6bbe6175d916e8cd9f7",
+      "bytes": 989,
+      "sha256": "60af37c0e3089c3a18b0283bc7e71116f3a2a62c34dd9449e2eaa1c44295c71f"
+    },
+    {
+      "path": "fireweed-maintenance-features-turso-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-turso-parity.log",
+      "role": "feature check features-turso, exit 101; initial attempt, see ledger",
+      "source_mtime_ns": 1789687588091313335,
+      "decompressed_bytes": 13637,
+      "decompressed_sha256": "a6dcb4ac0c15c74923c1a798dd34706e897efd375ec0810fe592b3b53c7c0b23",
+      "bytes": 3480,
+      "sha256": "34fe0e7707924a85f57c6b387c2791ebd0f510454a898aba9c2da08be8a594f6"
+    },
+    {
+      "path": "fireweed-maintenance-features-postgres-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-postgres-parity.log",
+      "role": "feature check features-postgres, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687593339321904,
+      "decompressed_bytes": 409,
+      "decompressed_sha256": "21c2d3bd07e0a3775ef3102827202240790e8dfa78c0e0387726ad3777133976",
+      "bytes": 209,
+      "sha256": "8f388b779c38e9868779e32830db5ed40405abd54e5d226e243b7970cb142f9d"
+    },
+    {
+      "path": "fireweed-maintenance-features-memory-turso-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-memory-turso-parity.log",
+      "role": "feature check features-memory-turso, exit 101; initial attempt, see ledger",
+      "source_mtime_ns": 1789687595765325870,
+      "decompressed_bytes": 11523,
+      "decompressed_sha256": "8aa6a441dd528e40eee023a18c3d246c5fee8a393247c9b8d6bc6ee6c2cb2734",
+      "bytes": 2934,
+      "sha256": "2bdd91274eaaea4156432c20787a26548a6ca77c7568b872be7f0505c96cfa43"
+    },
+    {
+      "path": "fireweed-maintenance-features-objectlog-turso-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-objectlog-turso-parity.log",
+      "role": "feature check features-objectlog-turso, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687620314366131,
+      "decompressed_bytes": 6734,
+      "decompressed_sha256": "f0edec2a542178abcf10c090595c0fd91a542e3dd8a785eee830e49a5cd449bd",
+      "bytes": 1695,
+      "sha256": "6976d51758680296cde72bd4179500649f611c3288ddc6959c70ee812ffcb553"
+    },
+    {
+      "path": "fireweed-maintenance-features-postgres-turso-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-features-postgres-turso-parity.log",
+      "role": "feature check features-postgres-turso, exit 0; initial attempt, see ledger",
+      "source_mtime_ns": 1789687641876401692,
+      "decompressed_bytes": 14458,
+      "decompressed_sha256": "a7aa0cbbc909ec5c163fa1f2c51d4c7ac4941ad5d980887596001cfbf96ce99d",
+      "bytes": 3313,
+      "sha256": "c6b036d836c795e1d786796d4092de9fbbde3255f8121e9612d44daa1786fb57"
+    },
+    {
+      "path": "fireweed-maintenance-server-no-default-parity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-server-no-default-parity.log",
+      "role": "feature check server-no-default, exit 101; initial attempt, see ledger",
+      "source_mtime_ns": 1789687665845441430,
+      "decompressed_bytes": 4073,
+      "decompressed_sha256": "cb61b0e71d0a925a69d13827d05f5520b5c04d52196ec3877e7ef8ebba0f75fc",
+      "bytes": 1315,
+      "sha256": "400970ab1ee49af4ba129eb7c56c03a21a766f2800f9787225394b6afe552342"
+    },
+    {
+      "path": "fireweed-maintenance-feature-check-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-feature-check-results.json",
+      "role": "initial feature-matrix outcomes, including two Turso-only and one server no-default compile failures",
+      "source_mtime_ns": 1789687665912271127,
+      "decompressed_bytes": 3535,
+      "decompressed_sha256": "d8fff44fe174b0be6886d67ea565599c9c74014ec66311ad82b9354124398f9b",
+      "bytes": 533,
+      "sha256": "de9bf4fcb6222304219237aa6c27289ea8ca44c936f2fbbbffba629f206ffc09"
+    },
+    {
+      "path": "fireweed-maintenance-property-smoke-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-property-smoke-final.log",
+      "role": "completed property PR smoke, 10000 cases per real priority property; exit 0",
+      "source_mtime_ns": 1789687719770531585,
+      "decompressed_bytes": 1220,
+      "decompressed_sha256": "cf3a5cbdd150797718683c8645aebe581feeb4240e9c2749c2499466bd334a35",
+      "bytes": 469,
+      "sha256": "6b56eab35cb10f158fa969afc30cd6d1593634f1836ff89b609c20abc1e31cc1"
+    }
+  ]
+}

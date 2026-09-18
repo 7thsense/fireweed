@@ -246,7 +246,7 @@
   ],
   "plan_key": "P13",
   "product_release_readiness_claimed": false,
-  "route_sources_authority_manifest_sha256": "2a7c9df1ba7d37025c248b84ee7cddc346b724214381efa46f995e616042a6fb",
+  "route_sources_authority_manifest_sha256": "1325d2c5ee65cf15d92423e34935e8f5f175880cb66609c4851bccd2ef35584a",
   "route_sources_sha256_field": "authority_manifest_sha256",
   "schema_version": 1,
   "workflow": ".github/workflows/governed-product.yml"

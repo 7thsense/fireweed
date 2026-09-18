@@ -46,8 +46,8 @@ explicit final state.
 The public storage product is exactly four log backends (`memory`, `postgres`,
 `filesystem`, `s3`) crossed with three projections (`memory`, `turso`,
 `postgres`): 12 supported cells assembled through one typed composition model.
-Turso is the default serving projection. The rusqlite `sqlite` log and
-`sqlite` projection are retired; local durable serving is object-log × Turso
+Native embedded Turso is the default serving projection. The rusqlite `sqlite`
+log and `sqlite` projection are retired; local durable serving is object-log × Turso
 (or postgres). The control plane is a separate optional topology choice,
 not a mandatory PostgreSQL tier or a bundled storage product. Public product paths
 use native-async composition; a blocking store may be isolated behind a bounded
@@ -60,7 +60,12 @@ Class B: after process death only a durable projection can remain, so the
 product makes no log-rebuild, branch, read-as-of, or log-derived change-record
 claim for those three cells. Filesystem and S3 are peer implementations of the
 same object-log protocol; Postgres remains first-class as a log and as a
-projection.
+projection. The matrix contains nine Class A cells and three Class B cells.
+
+`Strict` is valid across all 12 cells. `AsyncProjection` is valid for the six
+filesystem/S3 log cells; the six memory/Postgres log cells reject that barrier
+before storage I/O. The retired `sqlite_projection_deferred_flush_chunk`
+setting is rejected when supplied; it is not an async-projection tuning option.
 
 ## User Experience
 
@@ -84,9 +89,9 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 | Bounded progress guarantees | Relaxed priority ordering can scale without starving eligible work |
 | Durable execution lifecycle | Work remains recoverable across worker and process failures |
 | Batch and group-aware claims | Workers can efficiently satisfy downstream API batch constraints |
-| Composition-independent transaction integrity | All 15 cells preserve commit, visibility, rejection, and idempotency semantics; restart recovery follows the cell's explicit Class A or Class B boundary |
-| Tunable durability economics | Operators can choose a minimum/maximum commit latency bound that trades mutation latency against object-log request cost and batch density |
-| Independent serving and durability choices | Operators select log durability independently from memory, SQLite, or Postgres serving projections without adopting a separate product profile |
+| Composition-independent transaction integrity | All 12 cells preserve commit, visibility, rejection, and idempotency semantics; restart recovery follows the cell's explicit Class A or Class B boundary |
+| Tunable durability economics | Operators can configure the object-log segment size target and maximum flush latency to trade batching delay against request cost and batch density |
+| Independent serving and durability choices | Operators select log durability independently from memory, Turso, or Postgres serving projections without adopting a separate product profile |
 
 ## Success Definition
 

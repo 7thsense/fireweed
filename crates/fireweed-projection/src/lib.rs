@@ -4564,7 +4564,7 @@ impl ProjectionData {
         self.index_validate_with_entity(item_id, fields, None, exclude)
     }
 
-    fn index_validate_with_entity(
+    pub fn index_validate_with_entity(
         &self,
         item_id: &ItemId,
         fields: &BTreeMap<String, Bytes>,

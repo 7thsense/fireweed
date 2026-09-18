@@ -54,6 +54,9 @@ This audit records SQLite retirement, duplicate removal, and restoration of posi
 
 ## Other diagnostic cleanup
 
+- Removed the unused 1,072-line private `blocking_backend` module and its two uncalled construction/path helpers. The stale helper caused Turso-only builds to reference a feature-disabled module. Its three worker-only tests are retired with the implementation. The two concurrent queue-creation tests now use shared public `open_memory` handles; the two owned-control-plane tests retain their real executor and assertions using the memory backend directly. Public current-thread storage tests remain.
+- Restored the server's filesystem/memory composition in builds without PostgreSQL: its match arm had an unrelated PostgreSQL feature guard. No-default, PostgreSQL-only and Turso-only server library builds verify the corrected feature boundary.
+- The functional-matrix self-test now removes a cell from the current 12-cell set and checks missing cells, duplicate leaf IDs and duplicate cells separately. Its old `[:19]` negative fixture left the smaller matrix intact.
 - Removed three fault-injection aliases that invoked the same filesystem backend under SQLite names. Current-thread and multithreaded lost-response tests remain.
 - Removed the old P3i migration ledger and non-S3 barrier duplicates; current matrix validation, filesystem barrier and restart tests exercise the supported paths.
 - Removed `turso_indexed_schedule_rewrite_profile`: it attributed costs to `fireweed_items_group_due_idx` and `fireweed_items_active_scope_idx`, both already dropped by the current schema. Its machine-specific historical timing threshold is replaced by the unchanged canonical campaign and primitive gates. Native batch-update correctness, version and statement-shape tests remain.
@@ -62,6 +65,49 @@ This audit records SQLite retirement, duplicate removal, and restoration of posi
 - Every external reopen fixture, including S3/Turso and PostgreSQL/Turso, requires selector dry-run, first-match mutation, exact retained batch/selector replay, changed-body conflicts, unchanged row identity and payload, persisted fields and gate state. Native selector calls no longer branch to an `Unavailable` assertion.
 
 ## Added regression coverage
+
+The follow-up core-test audit removed four stubs and their unused
+`fireweed_core::scaffold` module. None exercised a Fireweed codec, selector or
+priority implementation:
+
+| Removed core test file | What it actually checked | Retained behavioral coverage |
+| --- | --- | --- |
+| `property_scaffolding.rs` | Fixed strings were nonempty after trimming. | Eight generated comparisons of `priority_sort` against timestamp, integer, decimal and text ordering in both directions. |
+| `priority_decode_fuzz.rs` | Standard-library `u64::parse`. | Core identifier/timestamp/metadata validation and engine payload/priority round trips. |
+| `command_decode_fuzz.rs` | Number of non-whitespace bytes. | Native push/claim/finalize codec round trips, rejection of legacy JSON by the native decoder, and every command variant's JSON round trip. |
+| `selector_fuzz.rs` | Number of nonempty comma-separated fragments. | Public selector first-match, lease invalidation, terminal purge and precondition ownership tests, plus query DTO validation. |
+
+The real priority properties retain their 250,000-case default, or two million
+generated pairs across eight properties. `PROPTEST_CASES` can explicitly select
+another budget. `property-fuzz-smoke.sh` now invokes that exact test target with
+10,000 cases per property and serial execution, rather than relying on a name
+filter that could select no tests. No cargo-fuzz project is registered, so the
+script reports fuzz smoke as not applicable; the deleted stub names were not
+evidence of fuzzing.
+
+Scheduled-action acceptance previously assigned `gate_close_reopen = true`.
+Its replacement performs public gate operations on memory/memory,
+filesystem/memory, and filesystem/Turso Strict and AsyncProjection. It checks
+that blocking the priority head leaves unrelated work claimable, the held item
+stays unavailable until reopening, and the exact item, payload, gate keys and
+terminal metrics are preserved. Profile labels now identify the operations
+actually exercised.
+
+The 100,000-item claim/drain calibration retains its workload and now waits
+through a public retained read, then compares the physical projection recovery
+high-water with the durable log position. Metrics that fold an unapplied tail
+cannot substitute for that drain assertion. PostgreSQL projection validation
+also checks typed and legacy unique indexes before log append, including
+replacement self-exclusion and compact fields; its regression verifies rejected
+operations leave log high-water unchanged. The PostgreSQL follow-up completed
+with 111 library and 62 conformance passes. The corrected 100,000-item drain
+calibration passed in the full release follow-up; separate traced 10,000- and
+100,000-item reruns also passed with equal physical and durable high-water
+positions. The full release follow-up has 2,032 passes and three external native
+Turso `peek` failures for blocked gates after reopen. Those assertions remain
+required. After the correction, the focused native debug regression passes and
+the external release conformance rerun passes all 15 tests with zero failures or
+ignored tests. The initial full-run failure counts remain recorded separately.
 
 The local public-interface matrix now includes memory log × native Turso. It
 exercises whole-cohort claims without an external database. PostgreSQL-log/Turso
@@ -77,7 +123,24 @@ continuations, prefix pages and authoritative recovery reads on native Turso.
 The explicit-item test submits 101 duplicate IDs against a 100-item batch limit
 and requires one claimed item/outcome, checking that the limit counts distinct
 IDs. P6, P7, P8 and P9 matrices inherit these positive assertions. Native query
-and mutation planner suites add direct SQL/validation regressions.
+and mutation planner suites add direct SQL/validation regressions. All 15 native
+query tests pass in the ordinary debug profile, including the new multi-string
+compound-key regression. The subsequent complete native debug run finished with
+139 passes across 15 harnesses, zero failures and three explicitly ignored SQL
+timing diagnostics. Separate plan regressions require exact item gate
+membership and active client-key membership seeks, preventing the tenant-prefix
+and queue-prefix scans observed during triage. Variable-length decoding uses
+shallow, ordinary single-reference CTE stages after GDB exposed excessive
+recursive translator stack use. The fix adds neither `MATERIALIZED` hints nor
+a larger test-thread stack.
+The [maintenance verification baseline](maintenance-release-baseline.md#candidate-verification-status)
+records working evidence locations and the completed synthetic drain comparison.
+The 10,000-item diagnostic improved from 42.383 to 9.700 seconds, with selection
+median/p95 falling from 325.022/358.512 to 4.200/4.425 ms per 100-item sample.
+That traced tmpfs comparison includes stronger drain assertions and other gate
+selection changes; it is not canonical on-disk workflow qualification. The
+reported T2 diagnostic remains above its latency budget, and fresh capacity
+measurements remain pending.
 
 PostgreSQL-log/Turso embedded delivery now uses the log's durable emission cursor.
 The server residual delivery fixture appends through the public Redis interface,
@@ -102,11 +165,30 @@ script for command strings and could not establish that its producer existed,
 so it was removed too. Historical JSONL evidence remains unchanged.
 
 Actual transaction coverage remains in `p9n_non_s3_transaction_parity`,
-`p9s3_s3_transaction_parity`, `e3_governed_transaction_evidence_matrix`, native
+`p9s3_s3_transaction_parity`, `local_objectlog_transaction_recovery`, native
 Turso `local_relational`/`differential`, PostgreSQL `composed_log_reconnect`
 (including cross-chunk rollback), and the transaction-evidence verifier's
 positive and negative semantic fixtures. These tests do not substitute for a
 new promoted TP-003 deployment attestation.
+
+The obsolete E3 live producer and `e3_governed_transaction_evidence_matrix`
+emitter are retired. The producer inferred object PUT and seal-cause counters
+from caller batches, while its remaining memory-only recovery route did not
+assert complete-state digest equality. Its synthetic counters cannot establish
+current Turso or remote-S3 performance. Twelve offline schema-v1 contract tests
+remain in `historical_e3_evidence_contract_tests.rs`; they validate historical
+evidence shapes and rejection rules, not a live deployment. Two actual
+filesystem-log recovery tests remain in `local_objectlog_transaction_recovery.rs`:
+`append_before_apply_fault_retains_log_and_recovers_exact_item` and
+`local_push_and_claim_survive_reopen`.
+
+The three old entrypoints, `run-e3-minio-durable.sh`, `tp002-e3-minio.sh`, and
+`tp002-e3-s3.sh`, now fail with an explicit retirement message before starting
+builds, provider access or evidence generation. Their fabricated producer
+fixtures were replaced by `retired-e3-entrypoints-test.sh`, which passed its
+fail-closed checks. Historical E3 artifacts and validators remain retained.
+Current public S3 correctness tests and canonical on-disk workflow measurements
+do not qualify the historical E3 performance contract.
 
 The storage-matrix and Snorri S3 entrypoints now select the current Turso feature
 and 12-cell matrix. The live kind harness and deployment gate no longer select

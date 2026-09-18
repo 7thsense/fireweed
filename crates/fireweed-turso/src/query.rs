@@ -30,10 +30,13 @@ use crate::TursoRelational;
 mod tests;
 
 const MAX_PAGE: usize = 1_000;
+// Every caller binds the addressed tenant and queue as ?1/?2 and aliases its item as i.
+// Pin both correlated seeks: a queue-prefix scan here repeats for every candidate row.
 const UNBLOCKED: &str = "NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
-    JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-    AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id \
-    AND ig.item_id=i.item_id)";
+    INDEXED BY sqlite_autoindex_fireweed_item_gates_1 \
+    CROSS JOIN fireweed_gate_state gs INDEXED BY sqlite_autoindex_fireweed_gate_state_1 \
+    ON gs.tenant_id=?1 AND gs.queue_id=?2 AND gs.gate_key=ig.gate_key \
+    WHERE ig.tenant_id=?1 AND ig.queue_id=?2 AND ig.item_id=i.item_id)";
 
 fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
@@ -159,15 +162,26 @@ fn frame(bytes: &[u8]) -> Vec<u8> {
     result
 }
 
-/// SQL has no unsigned big-endian integer cast. Decode the four framing bytes via their eight hex
-/// digits. Fixed-width components avoid this expression altogether. No caller text enters SQL.
+/// Decode a frame length from eight already-decoded hex digits. Keeping the digits in a
+/// preceding streaming stage bounds expression depth in Turso's recursive SQL translator.
 fn component_length_sql(kind: &IndexType) -> String {
     match kind {
         IndexType::Boolean => "1".into(),
         IndexType::Integer | IndexType::Float | IndexType::Datetime => "8".into(),
-        IndexType::String => (1..=8).map(|digit| format!(
-            "((instr('0123456789ABCDEF',substr(hex(substr(index_key,pos,4)),{digit},1))-1)*{})", 16_u64.pow(8 - digit)
-        )).collect::<Vec<_>>().join("+"),
+        IndexType::String => {
+            let mut terms = (1..=8)
+                .map(|digit| format!("n{digit}*{}", 16_u64.pow(8 - digit)))
+                .collect::<Vec<_>>();
+            // Eight terms form three binary levels. A left-associated sum adds
+            // seven levels to Turso's recursive expression translator instead.
+            while terms.len() > 1 {
+                terms = terms
+                    .chunks_exact(2)
+                    .map(|pair| format!("({}+{})", pair[0], pair[1]))
+                    .collect();
+            }
+            terms.pop().expect("eight framing nibbles")
+        }
     }
 }
 
@@ -187,6 +201,7 @@ impl IndexedSql {
         params.push(spec.name.clone().into());
         let mut bounds = String::new();
         let mut prefix = Vec::new();
+        let mut prefix_lengths = Vec::new();
         let mut equality_fields = 0;
         for (name, kind) in &fields {
             let equalities = filters
@@ -196,7 +211,9 @@ impl IndexedSql {
             if equalities.len() != 1 {
                 break;
             }
-            prefix.extend(frame(&encode(&equalities[0].value, kind)?));
+            let encoded = encode(&equalities[0].value, kind)?;
+            prefix_lengths.push(encoded.len());
+            prefix.extend(frame(&encoded));
             equality_fields += 1;
         }
         if !prefix.is_empty() {
@@ -238,9 +255,34 @@ impl IndexedSql {
              WHERE tenant_id=?1 AND queue_id=?2 AND index_name=?3{bounds})"
         )];
         for (number, (_, kind)) in fields.iter().enumerate() {
-            let length = component_length_sql(kind);
+            // The covering-index prefix bound already fixes these framed bytes.
+            // Reuse their known length instead of decoding the same prefix in SQL.
+            let length = prefix_lengths
+                .get(number)
+                .map_or_else(|| component_length_sql(kind), usize::to_string);
             let previous = (0..number).map(|at| format!(",c{at}")).collect::<String>();
-            stages.push(format!("k{} AS (SELECT item_id,index_key{previous},substr(index_key,pos+4,({length})) AS c{number},pos+4+({length}) AS pos FROM k{number})", number + 1));
+            let (source, length) = if matches!(kind, IndexType::String)
+                && prefix_lengths.get(number).is_none()
+            {
+                // Ordinary single-reference CTEs stream through coroutines. Separate
+                // nibble decoding and arithmetic so neither the parser nor translator
+                // recursively expands an eight-term decoder inside substr/position.
+                let nibbles = (1..=8)
+                    .map(|digit| format!(
+                        ",instr('0123456789ABCDEF',substr(hex(substr(index_key,pos,4)),{digit},1))-1 AS n{digit}"
+                    ))
+                    .collect::<String>();
+                stages.push(format!(
+                    "k{number}_digits AS (SELECT item_id,index_key{previous},pos{nibbles} FROM k{number})"
+                ));
+                stages.push(format!(
+                    "k{number}_length AS (SELECT item_id,index_key{previous},pos,{length} AS component_length FROM k{number}_digits)"
+                ));
+                (format!("k{number}_length"), "component_length".to_owned())
+            } else {
+                (format!("k{number}"), length)
+            };
+            stages.push(format!("k{} AS (SELECT item_id,index_key{previous},substr(index_key,pos+4,({length})) AS c{number},pos+4+({length}) AS pos FROM {source})", number + 1));
         }
         let from = format!(
             "k{} k CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \

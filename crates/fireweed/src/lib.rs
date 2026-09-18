@@ -38,8 +38,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(feature = "objectlog", feature = "postgres", test))]
-mod blocking_backend;
 mod facade;
 mod operator;
 #[cfg(feature = "turso")]
@@ -702,22 +700,18 @@ impl fmt::Debug for ObjectLogConfig {
 /// (crate-private; the public projection axis is [`ProjectionStoreConfig`]).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ComposedProjectionConfig {
-    Turso {
-        path: PathBuf,
-    },
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
+    Turso { path: PathBuf },
     /// Preserved only to reject the retired public convenience selector.
-    Sqlite {
-        path: PathBuf,
-    },
+    Sqlite { path: PathBuf },
     /// The URL may contain credentials and is therefore redacted from diagnostics.
-    Postgres {
-        url: SecretValue,
-    },
+    Postgres { url: SecretValue },
 }
 
 impl fmt::Debug for ComposedProjectionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(all(feature = "objectlog", feature = "turso"))]
             Self::Turso { path } => f.debug_struct("Turso").field("path", path).finish(),
             Self::Sqlite { path } => f.debug_struct("Sqlite").field("path", path).finish(),
             Self::Postgres { .. } => f
@@ -1605,7 +1599,39 @@ mod storage_config_matrix_tests {
     }
 
     #[test]
-    fn constructs_and_validates_all_five_logs_and_four_projections() {
+    fn retired_deferred_flush_settings_fail_closed_at_both_config_boundaries() {
+        let mut public = StorageConfig::memory();
+        let mut normalized = ObjectLogRuntimeConfig {
+            object_log: ObjectLogStorage::Local {
+                root: "unused-log".into(),
+            },
+            authority: ObjectLogAuthority::NativeConditionalWrite,
+            projection: ProjectionConfig::Postgres {
+                url: ConfigSecret::new("postgres://localhost/unused"),
+            },
+            response_barrier: ResponseBarrier::Strict,
+            segments: segments(),
+            namespace: "retired-flush".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        }
+        .into_storage_config();
+        public.validate().unwrap();
+        normalized.validate().unwrap();
+        for chunk in [0, 1, 1024, usize::MAX] {
+            public.sqlite_projection_deferred_flush_chunk = Some(chunk);
+            normalized.sqlite_projection_deferred_flush_chunk = Some(chunk);
+            for result in [public.validate(), normalized.validate()] {
+                assert!(
+                    matches!(result, Err(EngineError::Invalid(message))
+                    if message.contains("sqlite storage is retired")),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_selector_enumeration_rejects_retired_cells() {
         let logs = all_logs();
         assert_eq!(logs.len(), 5);
         let projections = all_projections();
@@ -1666,7 +1692,7 @@ mod storage_config_matrix_tests {
     #[cfg(feature = "turso")]
     #[test]
     fn turso_projection_full_facade_matrix() {
-        constructs_and_validates_all_five_logs_and_four_projections();
+        legacy_selector_enumeration_rejects_retired_cells();
 
         // Turso is the documented default projection axis value.
         assert_eq!(
@@ -2554,6 +2580,7 @@ impl ComposedStorageConfig {
             )?,
         }
         match &self.projection {
+            #[cfg(all(feature = "objectlog", feature = "turso"))]
             ComposedProjectionConfig::Turso { path } if path.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
                     "Turso projection path must not be empty",
@@ -2578,9 +2605,9 @@ impl ComposedStorageConfig {
             },
             self.async_projection,
         )?;
-        if self.sqlite_projection_deferred_flush_chunk == Some(0) {
+        if self.sqlite_projection_deferred_flush_chunk.is_some() {
             return Err(EngineError::Invalid(
-                "sqlite projection deferred flush chunk must be > 0",
+                "sqlite storage is retired; use filesystem log and turso projection",
             ));
         }
         if self.recovery.max_tail_commands == 0 {
@@ -5419,25 +5446,6 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
     }
 }
 
-#[cfg(any(feature = "objectlog", feature = "postgres", feature = "turso"))]
-#[allow(dead_code)] // Feature combinations compile this helper without every caller.
-fn path_utf8(path: &std::path::Path) -> EngineResult<&str> {
-    path.to_str()
-        .ok_or(EngineError::Invalid("storage path must be valid UTF-8"))
-}
-
-#[cfg(any(feature = "objectlog", feature = "postgres", feature = "turso"))]
-#[allow(dead_code)] // Feature combinations compile this helper without every caller.
-fn wrap_blocking_backend<B>(backend: Arc<B>, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>
-where
-    B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static,
-{
-    Ok(Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
-        clock,
-    )))
-}
-
 /// Postgres product open: adapter-private offload (not process-wide BlockingLibBackend).
 /// See fireweed-postgres::RuntimeSafeBackend residual notes (fireweed-ca319318).
 #[cfg(feature = "postgres")]
@@ -6247,7 +6255,7 @@ fn open_objectlog_postgres_blocking(
                 &projection_schema,
             ),
         )?,
-        ComposedProjectionConfig::Sqlite { .. } | ComposedProjectionConfig::Turso { .. } => {
+        _ => {
             return Err(EngineError::Invalid(
                 "PostgreSQL helper requires a PostgreSQL projection",
             ));
@@ -6275,7 +6283,7 @@ fn open_s3_objectlog_postgres_blocking(
                 &projection_schema,
             ),
         )?,
-        ComposedProjectionConfig::Sqlite { .. } | ComposedProjectionConfig::Turso { .. } => {
+        _ => {
             return Err(EngineError::Invalid(
                 "PostgreSQL helper requires a PostgreSQL projection",
             ));
@@ -7306,11 +7314,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn owned_control_plane_boundary_builds_a_working_coordinated_owner() -> EngineResult<()> {
         let raw = Arc::new(fireweed_memory::composed_memory_backend());
-        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
         let executor = fireweed_engine::BoundedBlockingExecutor::new(8)?;
         let control_plane = Arc::new(InMemoryControlPlane::default());
         let fireweed = RuntimeCore::with_owned_control_plane_executor(
-            bounded,
+            raw,
             Arc::new(SystemClock),
             OwnerId::new("coordinated-owner").unwrap(),
             control_plane,
@@ -7332,16 +7339,14 @@ mod tests {
 
     #[cfg(feature = "memory")]
     #[test]
-    fn blocking_lib_backend_concurrent_creates_are_create_or_read() -> EngineResult<()> {
-        let raw = Arc::new(fireweed_memory::composed_memory_backend());
-        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
+    fn public_memory_concurrent_creates_are_create_or_read() -> EngineResult<()> {
+        let fireweed = Arc::new(super::open_memory(Arc::new(SystemClock)));
         let barrier = Arc::new(Barrier::new(8));
         let mut handles = Vec::new();
         for _ in 0..8 {
-            let backend = Arc::clone(&bounded);
+            let fireweed = Arc::clone(&fireweed);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
                 barrier.wait();
                 futures::executor::block_on(fireweed.create_queue(query_definition()))
             }));
@@ -7361,21 +7366,16 @@ mod tests {
 
     #[cfg(feature = "memory")]
     #[test]
-    fn blocking_lib_backend_concurrent_incompatible_losers_conflict() -> EngineResult<()> {
-        let raw = Arc::new(fireweed_memory::composed_memory_backend());
-        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
-        futures::executor::block_on(
-            RuntimeCore::new(Arc::clone(&bounded), Arc::new(SystemClock))
-                .create_queue(query_definition()),
-        )?;
+    fn public_memory_concurrent_incompatible_losers_conflict() -> EngineResult<()> {
+        let fireweed = Arc::new(super::open_memory(Arc::new(SystemClock)));
+        futures::executor::block_on(fireweed.create_queue(query_definition()))?;
 
         let barrier = Arc::new(Barrier::new(8));
         let mut handles = Vec::new();
         for _ in 0..8 {
-            let backend = Arc::clone(&bounded);
+            let fireweed = Arc::clone(&fireweed);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
                 let mut definition = query_definition();
                 definition.ordering_mode = OrderingMode::BoundedRelaxed;
                 barrier.wait();
@@ -7401,7 +7401,6 @@ mod tests {
         // BoundedBlockingExecutor (adapter-private offload used by postgres coordinated
         // opens) must not force Fireweed drop to join an in-flight blocking job.
         let raw = Arc::new(fireweed_memory::composed_memory_backend());
-        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
         let executor = fireweed_engine::BoundedBlockingExecutor::new(1)?;
         let blocker_executor = executor.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -7418,7 +7417,7 @@ mod tests {
 
         let control_plane = Arc::new(InMemoryControlPlane::default());
         let fireweed = RuntimeCore::with_owned_control_plane_executor(
-            bounded,
+            raw,
             Arc::new(SystemClock),
             OwnerId::new("cancelled-waiter-owner").unwrap(),
             control_plane,

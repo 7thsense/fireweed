@@ -16,10 +16,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fireweed_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
+#[cfg(feature = "postgres")]
+use fireweed_engine::assemble_async_log_replay;
 use fireweed_engine::{
     AcquireOutcome, AsyncProjectionSpec, AuthContext, BufferedByteBudget, BufferedByteBudgetConfig,
     Clock, ControlPlaneConfig, ControlPlaneStore, EngineError, EngineResult, InMemoryControlPlane,
-    LeaseState, OwnedSession, QueueControlPlane, QueueKey, assemble_async_log_replay,
+    LeaseState, OwnedSession, QueueControlPlane, QueueKey,
 };
 use fireweed_memory::composed_memory_backend;
 use fireweed_resp::{
@@ -2312,6 +2314,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let advertise_addr = config.advertise_addr.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();
+    #[cfg(any(feature = "postgres", feature = "turso-projection"))]
     let recovery_max_tail = config.recovery_max_tail;
     let debug_segments = config.debug_segments;
     let config_objectlog_queue_limit = config.objectlog_byte_limits.queue_waiting;
@@ -2402,7 +2405,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        #[cfg(feature = "postgres")]
         (
             LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
                 root,
@@ -3229,7 +3231,8 @@ where
     Ok(server)
 }
 
-/// Blocking whole-operation finalizer with change-record delivery (sqlite/postgres log Class A arms).
+/// Blocking whole-operation finalizer with change-record delivery for PostgreSQL product cells.
+#[cfg(feature = "postgres")]
 #[allow(clippy::too_many_arguments)]
 async fn finalize_blocking_with_change_record_delivery<B>(
     backend: Arc<B>,
@@ -3307,6 +3310,7 @@ fn blocking_backend<B: RespBackend>(
     (Arc::new(adapter), lifecycle)
 }
 
+#[cfg(feature = "postgres")]
 fn blocking_backend_pool<B: RespBackend>(
     inner: Vec<Arc<B>>,
 ) -> (

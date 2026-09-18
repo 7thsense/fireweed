@@ -216,6 +216,7 @@ fn temporary_path(tag: &str) -> PathBuf {
     ))
 }
 
+#[cfg(feature = "objectlog")]
 #[tokio::test]
 async fn durable_public_constructors_reopen_idempotently() {
     let queue = key("tenant", "durable");
@@ -228,24 +229,28 @@ async fn durable_public_constructors_reopen_idempotently() {
     assert_ensure(&handle, &queue, false).await;
     drop(handle);
 
-    let turso_root = temporary_path("filesystem-turso");
-    std::fs::create_dir_all(turso_root.join("log")).unwrap();
-    let mut cfg = StorageConfig::memory();
-    cfg.log = LogConfig::Filesystem {
-        root: turso_root.join("log"),
-    };
-    cfg.projection = ProjectionStoreConfig::Turso {
-        path: turso_root.join("projection.turso"),
-    };
-    let handle = open(cfg.clone(), Arc::new(ManualClock::at(10))).unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle = open(cfg, Arc::new(ManualClock::at(20))).unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
+    #[cfg(feature = "turso")]
+    {
+        let turso_root = temporary_path("filesystem-turso");
+        std::fs::create_dir_all(turso_root.join("log")).unwrap();
+        let mut cfg = StorageConfig::memory();
+        cfg.log = LogConfig::Filesystem {
+            root: turso_root.join("log"),
+        };
+        cfg.projection = ProjectionStoreConfig::Turso {
+            path: turso_root.join("projection.turso"),
+        };
+        let handle = open(cfg.clone(), Arc::new(ManualClock::at(10))).unwrap();
+        assert_ensure(&handle, &queue, true).await;
+        drop(handle);
+        let handle = open(cfg, Arc::new(ManualClock::at(20))).unwrap();
+        assert_ensure(&handle, &queue, false).await;
+        drop(handle);
+
+        std::fs::remove_dir_all(turso_root).unwrap();
+    }
 
     std::fs::remove_dir_all(objectlog).unwrap();
-    std::fs::remove_dir_all(turso_root).unwrap();
 }
 
 #[cfg(feature = "postgres")]
@@ -278,35 +283,41 @@ fn postgres_public_constructors_and_composed_reopen_idempotently() {
     futures::executor::block_on(assert_ensure(&handle, &coordinated_queue, false));
     drop(handle);
 
-    let composed_root = temporary_path("composed-postgres-root");
-    let composed_config = ComposedStorageConfig {
-        object_log: ObjectLogConfig::Local {
-            root: composed_root.clone(),
-        },
-        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ComposedProjectionConfig::Postgres {
-            url: fireweed::SecretValue::new(url),
-        },
-        response_barrier: CommitResponseBarrier::Strict,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
-        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
-        namespace: format!("queue-template-{nonce}"),
-        recovery: ProjectionRecoveryPolicy::default(),
-    };
-    let composed_queue = key("template-live", &format!("composed-{nonce}"));
-    let composed_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build object-log PostgreSQL operation runtime");
-    let handle =
-        fireweed::open_composed_postgres(composed_config.clone(), Arc::new(ManualClock::at(10)))
-            .unwrap();
-    composed_runtime.block_on(assert_ensure(&handle, &composed_queue, true));
-    drop(handle);
-    let handle =
-        fireweed::open_composed_postgres(composed_config, Arc::new(ManualClock::at(20))).unwrap();
-    composed_runtime.block_on(assert_ensure(&handle, &composed_queue, false));
-    drop(handle);
-    std::fs::remove_dir_all(composed_root).unwrap();
+    #[cfg(feature = "objectlog")]
+    {
+        let composed_root = temporary_path("composed-postgres-root");
+        let composed_config = ComposedStorageConfig {
+            object_log: ObjectLogConfig::Local {
+                root: composed_root.clone(),
+            },
+            object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
+            projection: ComposedProjectionConfig::Postgres {
+                url: fireweed::SecretValue::new(url),
+            },
+            response_barrier: CommitResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+            segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
+            namespace: format!("queue-template-{nonce}"),
+            recovery: ProjectionRecoveryPolicy::default(),
+        };
+        let composed_queue = key("template-live", &format!("composed-{nonce}"));
+        let composed_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build object-log PostgreSQL operation runtime");
+        let handle = fireweed::open_composed_postgres(
+            composed_config.clone(),
+            Arc::new(ManualClock::at(10)),
+        )
+        .unwrap();
+        composed_runtime.block_on(assert_ensure(&handle, &composed_queue, true));
+        drop(handle);
+        let handle =
+            fireweed::open_composed_postgres(composed_config, Arc::new(ManualClock::at(20)))
+                .unwrap();
+        composed_runtime.block_on(assert_ensure(&handle, &composed_queue, false));
+        drop(handle);
+        std::fs::remove_dir_all(composed_root).unwrap();
+    }
 }

@@ -1,5 +1,5 @@
 {
-  "authority_manifest_sha256": "2a7c9df1ba7d37025c248b84ee7cddc346b724214381efa46f995e616042a6fb",
+  "authority_manifest_sha256": "1325d2c5ee65cf15d92423e34935e8f5f175880cb66609c4851bccd2ef35584a",
   "authority_revision": "2026-09-17-sqlite-retired",
   "campaign_values": [
     "shared",
@@ -12,7 +12,7 @@
     "omissions": [],
     "repaired": false,
     "schema": "p2a_placement",
-    "source_count": 48
+    "source_count": 49
   },
   "full_execution_claimed": false,
   "generated_by": "scripts/ci/p2r_route_bindings.py",
@@ -1106,7 +1106,7 @@
     "product_workflow_downstream_pacing_non_goal_e2e",
     "product_workflow_operator_repair_redrive_e2e"
   ],
-  "route_sources_sha256": "05da764ed3fdf3394fa00433d171f947e56c047aa1935cfbf8dc297d1e78e1c8",
+  "route_sources_sha256": "4c741f7c03b684c38da268f56f3df614fe56b1b8add276c8441ce786c111d676",
   "schema_version": 1,
   "semantic_requirement_count": 37,
   "semantic_requirements_sha256": "b207763e30c65245a06ba036a043b3f45d48cf41a955e11ab0a3d3864fda2a1d",

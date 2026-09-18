@@ -2,7 +2,7 @@
 #
 # Destination for service-backed storage-matrix, Helm/kind, supported S3, and
 # deterministic reduced-count functional/schema checks that must not run on the
-# three-minute hosted ci.yml lane.
+# bounded hosted ci.yml lane.
 #
 # Product-release readiness is NOT claimed by this lane alone:
 #   - P13 populates scripts/ci/governed-product-allowlist.json commands and

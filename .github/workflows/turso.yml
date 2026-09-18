@@ -54,6 +54,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v5
 
@@ -76,7 +77,8 @@ jobs:
         run: cargo +1.97.1 clippy -p fireweed-turso --all-targets --features local -- -D warnings
 
       - name: fireweed-turso tests (local)
-        run: cargo +1.97.1 test -p fireweed-turso --features local
+        # Preserve the first panic if a later test aborts the process.
+        run: cargo +1.97.1 test -p fireweed-turso --features local -- --nocapture
 
       - name: Public workflow correctness and log recovery
         run: cargo +1.97.1 test -p fireweed-workload

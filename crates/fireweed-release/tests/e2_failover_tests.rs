@@ -4,12 +4,12 @@ use fireweed_release::{EvidenceOperation, Fixture};
 fn valid() -> FailoverEvidence {
     FailoverEvidence {
         schema_version: 2,
-        suite: "tp002_e2_objectlog_sqlite_failover_kind".into(),
-        command: "bash scripts/perf/tp002-e2-failover-kind.sh --release".into(),
+        suite: "tp002_e2_live_owner_failover".into(),
+        command: "bash scripts/perf/tp002-e2-failover-kind.sh".into(),
         evidence_id: "E2_FAILOVER".into(),
         evidence_tier: "release".into(),
         scale: "release".into(),
-        backend_profile: "object_log_sqlite_projection".into(),
+        backend_profile: "object_log_turso_projection".into(),
         bars_met: true,
         replicas: 3,
         image: "fireweed:e2-failover".into(),
@@ -49,6 +49,20 @@ fn e2_failover_validator_accepts_release_row() {
 }
 
 #[test]
+fn e2_failover_validator_rejects_wrong_projection_profile_for_schema() {
+    for profile in ["object_log_sqlite_projection", "memory", ""] {
+        let mut row = valid();
+        row.backend_profile = profile.into();
+        let errors = validate(&row).unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("backend_profile")));
+    }
+    let mut historical = valid();
+    historical.schema_version = 1;
+    let errors = validate(&historical).unwrap_err();
+    assert!(errors.iter().any(|error| error.contains("backend_profile")));
+}
+
+#[test]
 fn e2_failover_validator_keeps_historical_v1_readable() {
     let fixture = Fixture::new(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/e2-failover-v1.json"),
@@ -62,6 +76,7 @@ fn e2_failover_validator_keeps_historical_v1_readable() {
     .unwrap();
     let row: FailoverEvidence = serde_json::from_str(&body).unwrap();
     assert_eq!(row.schema_version, 1);
+    assert_eq!(row.backend_profile, "object_log_sqlite_projection");
     assert!(row.handoff_object_store_profile.is_none());
     validate(&row).unwrap();
 }

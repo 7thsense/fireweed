@@ -2,7 +2,8 @@
 //
 // Verifies that `priority_sort` produces a byte sequence whose lexicographic
 // order matches the declared total order for all four priority models in both
-// directions, over ≥ 1,000,000 generated pairs.
+// directions. The default is 250,000 cases per property (2,000,000 pairs);
+// PROPTEST_CASES selects an explicit budget, including the 10,000-case PR smoke.
 
 use fireweed_core::{
     DecimalValue, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
@@ -154,7 +155,11 @@ fn assert_order_preserved(a: &PriorityValue, b: &PriorityValue, model: &Priority
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 250_000,
+        cases: std::env::var("PROPTEST_CASES").map_or(250_000, |cases| {
+            let cases = cases.parse().expect("PROPTEST_CASES must be an unsigned integer");
+            assert!(cases > 0, "PROPTEST_CASES must exercise at least one case");
+            cases
+        }),
         ..ProptestConfig::default()
     })]
 

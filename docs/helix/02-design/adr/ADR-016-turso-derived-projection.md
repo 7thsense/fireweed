@@ -22,7 +22,7 @@ ddx:
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-08-04 | Accepted; supersedes the 2026-08-03 internal-only disposition | Project owner | ADR-006, ADR-012, ADR-015, TD-010 | High |
+| 2026-09-17 | Accepted; SQLite log/projection retired by the project owner | Project owner | ADR-006, ADR-012, ADR-015, TD-010 | High |
 
 ## Context
 
@@ -46,8 +46,11 @@ Turso operating mode.
 Turso Database in `fireweed-turso` is a supported public relational projection
 adapter and the default projection selected when an embedder, service, or
 deployment does not specify another projection. The canonical projection axis
-is `memory | sqlite | turso | postgres`; all four projections compose with all
-five public logs.
+is `memory | turso | postgres`; all three projections compose with the four
+public logs `memory | postgres | filesystem | s3`, giving 12 supported cells.
+The rusqlite SQLite log and projection are retired. Retained compatibility
+selectors and any supplied `sqlite_projection_deferred_flush_chunk` value are
+rejected before storage I/O; they are not additional supported matrix cells.
 
 Turso is derived and rebuildable. It is never the authoritative command log,
 retention authority, or control plane. Durability and replay capability are
@@ -63,13 +66,16 @@ result consumption and readback; it never retries the rusqlite `execute_batch`
 sequence that the probe proved can fail after partially applying
 `journal_mode=wal`.
 
-Public enablement requires the full command/read differential corpus against
-the SQLite relational reference, projection conformance, reopen/rebuild,
-cancellation, concurrency, non-blocking heartbeat, batch-shape, and performance
-evidence. A build that omits Turso support must reject a requested `turso`
+Public enablement requires command/read behavioral conformance, native replay
+and in-memory/file parity, reopen/rebuild, cancellation, concurrency,
+non-blocking heartbeat, batch-shape, and performance evidence. The retained
+native replay pairs use the same Turso implementation on both sides; they do
+not constitute an independent SQLite differential oracle. Expected-state
+assertions and the shared public conformance suite remain necessary. A build that omits Turso support must reject a requested `turso`
 projection as feature-unavailable before storage I/O; a qualifying default
-distribution includes the feature. SQLite remains supported explicitly and is
-the differential reference, not the default.
+distribution includes the feature. SQLite is no longer a supported adapter or
+the current differential reference. Historical compatibility-probe results
+retain their original SQLite/Turso identities.
 
 ## Alternatives
 
@@ -78,7 +84,7 @@ the differential reference, not the default.
 | redb | Stable Rust-native KV engine; synchronous fit | Reimplements SQL schema, indexes, joins, and every command arm | Rejected for first adapter |
 | Fjall | Rust-native LSM; strong write profile | Similar port cost; explicit durability and compaction tuning | Retained as fallback, not selected |
 | libSQL | High SQLite compatibility | C engine and async wrapper; does not meet Rust-native objective | Rejected |
-| Keep bundled SQLite only | Proven and lowest risk | Does not meet Rust-native goal | Retained as explicit reference projection, not the default |
+| Keep bundled SQLite only | Proven during the original evaluation | Does not meet Rust-native goal | Retired; original probe results remain historical evidence |
 | **Turso 0.7 local WAL projection** | Rust-native async SQL; probe preserves current schema/query approach | Pre-1.0 compatibility and cold-build cost | **Selected as the supported default projection** |
 
 ## Consequences
@@ -88,14 +94,14 @@ the differential reference, not the default.
 | Positive | Fireweed's default relational projection is genuinely native async and implements the common projection contract. |
 | Positive | The public matrix remains orthogonal: selecting Turso does not select or redefine the log. |
 | Negative | Turso is pre-1.0 and its compatibility surface must be re-probed on every upgrade. |
-| Negative | Cold builds are materially larger; focused Turso qualification remains useful even though all 20 cells require release evidence. |
-| Neutral | Bundled SQLite remains a supported explicit projection and the differential relational reference. |
+| Negative | Cold builds are materially larger; focused Turso qualification remains useful even though all 12 cells require release evidence. |
+| Neutral | Retained native replay tests compare Turso instances; independent behavioral assertions prevent treating same-engine agreement as an independent differential proof. |
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Unprobed SQL diverges in one of the full command arms | M | H | Differential `ProjectionImage` and read-surface suite across the complete command corpus. |
+| Unprobed SQL diverges in one of the full command arms | M | H | Exact expected-state/public conformance assertions plus `ProjectionImage` and read-surface replay comparisons across the command corpus. |
 | Cursor advances ahead of materialized state | L | H | One immediate transaction; injected rollback and reopen checks. |
 | Upgrade changes file or SQL behavior | M | H | Exact version pin and mandatory compatibility-probe rerun before upgrades. |
 | Compile cost grows CI disproportionately | H | M | Cache the pinned dependency and retain a focused adapter job in addition to manifest-driven matrix qualification. |
@@ -105,9 +111,9 @@ the differential reference, not the default.
 
 | Success Metric | Review Trigger |
 |----------------|----------------|
-| SQLite and Turso projections are equal after every supported command and reopen | Any image, query, cursor, lease, or index divergence. |
-| Turso passes the common projection suite and all five log compositions | Any backend-specific semantic repair or skipped matrix cell. |
-| Default public configuration resolves to `turso`; explicit SQLite remains selectable | Default drift, alias-based selection, or feature-dependent silent fallback. |
+| Supported commands satisfy expected state and native replay/reopen parity | Any image, query, cursor, lease, or index divergence; same-engine equality alone is insufficient. |
+| Turso passes the common projection suite and all four log compositions | Any backend-specific semantic repair or skipped supported matrix cell. |
+| Default public configuration resolves to `turso`; retired SQLite selections and deferred-flush values reject before I/O | Default drift, accepted retired selection, or feature-dependent silent fallback. |
 | No reactor blocking under Turso load | Single-thread heartbeat stalls. |
 | Turso version remains exactly the probed version | Dependency update or feature expansion. |
 
@@ -115,8 +121,10 @@ the differential reference, not the default.
 
 - **Supersedes**: ADR-006's statement that Rust-native replacement evaluation is
   out of scope for the derived projection, and ADR-016's own 2026-08-03
-  internal-only disposition. ADR-006's SQLite design remains the relational
-  reference and an explicit supported projection.
+  internal-only disposition. The 2026-09-17 retirement also supersedes the
+  earlier explicit-SQLite-support and SQLite-differential-reference decisions.
+  ADR-006 and the original probe artifacts retain their historical identities;
+  they do not reinstate retired selectors or implementations.
 - **Aligned with**: ADR-012's orthogonal public storage-product contract and
   ADR-015's native-async storage boundary.
 

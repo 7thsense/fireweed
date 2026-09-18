@@ -1,5 +1,5 @@
 {
-  "authority_manifest_sha256": "2a7c9df1ba7d37025c248b84ee7cddc346b724214381efa46f995e616042a6fb",
+  "authority_manifest_sha256": "1325d2c5ee65cf15d92423e34935e8f5f175880cb66609c4851bccd2ef35584a",
   "authority_revision": "2026-09-17-sqlite-retired",
   "broad_substring_filters_forbidden": true,
   "cell_id_separator": "--",

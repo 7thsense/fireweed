@@ -16,11 +16,14 @@ concurrency:
 jobs:
   functional:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # Run 35280488084 exhausted the former 3-minute cap while compiling
+    # dependencies for the final RESP test. Keep a bounded cold-build budget.
+    timeout-minutes: 10
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v5
 

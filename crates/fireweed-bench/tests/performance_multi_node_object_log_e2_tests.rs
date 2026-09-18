@@ -355,7 +355,10 @@ fn spawn_cluster(
 ) -> Cluster {
     let svc = tuning.bin.to_string_lossy().into_owned();
     let mount = format!("{svc}:/svc:ro");
-    let mut nodes = Vec::with_capacity(owner_count);
+    // Arm cleanup before the first launch: startup/inspection can panic midway through the cluster.
+    let mut cluster = Cluster {
+        nodes: Vec::with_capacity(owner_count),
+    };
     for idx in 0..owner_count {
         let name = format!("fireweed-e2-{tag}-o{owner_count}-n{idx}");
         // Best-effort remove a leftover with the same name from an aborted prior run.
@@ -364,6 +367,13 @@ fn spawn_cluster(
             .map(|j| format!("t1:o{owner_count}n{idx}q{j}"))
             .collect();
         let bootstrap = owned.join(",");
+        // Docker can create a named container even when starting it fails. Register it first so
+        // unwinding removes both that container and every owner already started in this attempt.
+        cluster.nodes.push(Node {
+            name: name.clone(),
+            addr: String::new(),
+            owned,
+        });
         let status = Command::new("docker")
             .args([
                 "run", "-d", "--name", &name, "--tmpfs", "/data", "-v", &mount,
@@ -402,17 +412,12 @@ fn spawn_cluster(
             "docker run for {name} failed: {}",
             String::from_utf8_lossy(&status.stderr)
         );
-        nodes.push(Node {
-            name: name.clone(),
-            addr: String::new(),
-            owned,
-        });
         // Resolve the bridge IP now (the driver connects to IP:8080).
         let ip = container_ip(&name)
             .unwrap_or_else(|| panic!("could not read bridge IP for container {name}"));
-        nodes.last_mut().unwrap().addr = format!("{ip}:{NODE_PORT}");
+        cluster.nodes.last_mut().unwrap().addr = format!("{ip}:{NODE_PORT}");
     }
-    Cluster { nodes }
+    cluster
 }
 
 /// Block until every node answers an `XLEN` of its first owned queue with an integer (bootstrap complete), or

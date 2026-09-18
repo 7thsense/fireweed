@@ -1350,9 +1350,12 @@ pub(crate) async fn server_peek_on(
     let limit = i64::try_from(limit).map_err(storage)?;
     let rows = query_value_rows(
         connection,
-        "SELECT item_id,client_item_key,priority,item_version FROM fireweed_items \
+        format!(
+            "SELECT item_id,client_item_key,priority,item_version FROM fireweed_items \
+             INDEXED BY fireweed_items_pending_eligible_order_idx \
              WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-             ORDER BY priority_sort,created_seq LIMIT ?3",
+             {ITEM_CLAIM_GATE_FILTER} ORDER BY priority_sort,created_seq LIMIT ?3"
+        ),
         vec![
             shard.tenant_id.as_str().to_string().into(),
             shard.queue_id.as_str().to_string().into(),
@@ -1553,6 +1556,14 @@ pub(crate) async fn server_retained_items_on(
         .collect()
 }
 
+const LIVE_ITEMS_SQL: &str = "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.group_key,i.not_before,i.retry_count,\
+         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.fields \
+         FROM fireweed_items i INDEXED BY fireweed_items_active_key \
+         LEFT JOIN fireweed_item_payloads p \
+           ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.client_item_key=?3 \
+         AND i.lifecycle_state IN ('Pending','Leased') AND i.superseded=0 LIMIT 1";
+
 pub(crate) async fn server_live_items_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -1562,13 +1573,7 @@ pub(crate) async fn server_live_items_on(
     for key in keys {
         let rows = query_value_rows(
             connection,
-            "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.group_key,i.not_before,i.retry_count,\
-                 CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.fields \
-                 FROM fireweed_items i \
-                 LEFT JOIN fireweed_item_payloads p \
-                   ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
-                 WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.client_item_key=?3 \
-                 AND i.lifecycle_state IN ('Pending','Leased') AND i.superseded=0 LIMIT 1",
+            LIVE_ITEMS_SQL,
             vec![
                 shard.tenant_id.as_str().to_string().into(),
                 shard.queue_id.as_str().to_string().into(),
@@ -1675,7 +1680,8 @@ const METRICS_MEMBERSHIP_SQL: &str = "SELECT q.resident_pending,q.resident_lease
          LEFT JOIN json_each(?3) incoming ON 1=1 \
          LEFT JOIN fireweed_items i ON i.tenant_id=q.tenant AND i.queue_id=q.queue \
          AND i.item_id=json_extract(incoming.value,'$[0]') \
-         LEFT JOIN fireweed_items k ON k.tenant_id=q.tenant AND k.queue_id=q.queue \
+         LEFT JOIN fireweed_items k INDEXED BY fireweed_items_active_key \
+         ON k.tenant_id=q.tenant AND k.queue_id=q.queue \
          AND k.client_item_key=json_extract(incoming.value,'$[1]') AND k.superseded=0 \
          WHERE q.tenant=?1 AND q.queue=?2";
 
@@ -1795,12 +1801,6 @@ pub(crate) async fn push_idempotency_on(
     Ok(IdempotencyDecision::Replay(ids))
 }
 
-/// Post-publication response continuation. Retained results only; no pool borrow.
-#[allow(dead_code)]
-pub fn finish_retained_claimed(items: Vec<ClaimedItem>) -> EngineResult<Vec<ClaimedItem>> {
-    Ok(items)
-}
-
 async fn query_driver_value_rows(
     connection: &Connection,
     query: impl AsRef<str>,
@@ -1868,9 +1868,23 @@ const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WH
        ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=t.item_id ORDER BY t.priority_sort,t.created_seq";
 
 const ITEM_CLAIM_GATE_FILTER: &str = "AND NOT EXISTS (\
-    SELECT 1 FROM fireweed_item_gates g JOIN fireweed_gate_state b \
-    ON b.tenant_id=g.tenant_id AND b.queue_id=g.queue_id AND b.gate_key=g.gate_key \
+    SELECT 1 FROM fireweed_item_gates g INDEXED BY sqlite_autoindex_fireweed_item_gates_1 \
+    CROSS JOIN fireweed_gate_state b INDEXED BY sqlite_autoindex_fireweed_gate_state_1 \
+    ON b.tenant_id=?1 AND b.queue_id=?2 AND b.gate_key=g.gate_key \
     WHERE g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=fireweed_items.item_id)";
+
+fn claimed_gate_memberships_sql(count: usize) -> String {
+    let values = (0..count)
+        .map(|index| format!("(?{})", index + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH incoming(item_id) AS (VALUES {values}) \
+         SELECT g.item_id,g.gate_key FROM incoming CROSS JOIN fireweed_item_gates g \
+         INDEXED BY sqlite_autoindex_fireweed_item_gates_1 \
+         ON g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=incoming.item_id"
+    )
+}
 
 /// Scan hints from the queue definition and the serving-reader cursor.
 #[derive(Default)]
@@ -1914,7 +1928,22 @@ pub async fn select_and_materialize_item_claims_on(
         )
         .await?
         .is_empty();
-    let gate_filter = if gated { ITEM_CLAIM_GATE_FILTER } else { "" };
+    // Membership metadata is returned even when all gates are open. Filtering
+    // depends only on blocked keys; an open dynamic gate does not require a
+    // correlated anti-join for every candidate in the priority index.
+    let gates_blocked = gated
+        && !query_driver_value_rows(
+            connection,
+            "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+            vec![tenant.to_string().into(), queue.to_string().into()],
+        )
+        .await?
+        .is_empty();
+    let gate_filter = if gates_blocked {
+        ITEM_CLAIM_GATE_FILTER
+    } else {
+        ""
+    };
     let exclude_set: HashSet<ItemId> = exclude.iter().copied().collect();
     let expires = ts_nanos(lease_expires_at);
     let now_n = ts_nanos(now);
@@ -1950,6 +1979,7 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Integer(i64::try_from(fetch).map_err(storage)?),
                 Value::Integer(floor.max(1)),
             ];
+            let query_started = Instant::now();
             let mut rows = connection
                 .query(&fifo_sql, params)
                 .await
@@ -1973,6 +2003,7 @@ pub async fn select_and_materialize_item_claims_on(
                     break;
                 }
             }
+            trace_sql(&fifo_sql, 4, page, query_started.elapsed());
             if page == 0 {
                 break;
             }
@@ -2004,6 +2035,7 @@ pub async fn select_and_materialize_item_claims_on(
                 Value::Integer(after_sequence),
                 Value::Integer(now_n),
             ];
+            let query_started = Instant::now();
             let mut rows = connection
                 .query(&ordered_sql, params)
                 .await
@@ -2028,6 +2060,7 @@ pub async fn select_and_materialize_item_claims_on(
                     break;
                 }
             }
+            trace_sql(&ordered_sql, 6, page, query_started.elapsed());
             if page == 0 {
                 break;
             }
@@ -2044,19 +2077,11 @@ pub async fn select_and_materialize_item_claims_on(
     if gated && !ids.is_empty() {
         let mut memberships = HashMap::<ItemId, Vec<String>>::new();
         for chunk in ids.chunks(SQLITE_BIND_CAP - 2) {
-            let values = (0..chunk.len())
-                .map(|index| format!("(?{})", index + 3))
-                .collect::<Vec<_>>()
-                .join(",");
             let mut params = vec![tenant.to_string().into(), queue.to_string().into()];
             params.extend(chunk.iter().map(|id| Value::Text(id.to_string())));
             // Each selected ID seeks its membership prefix; this never hydrates
             // gates for the rest of the queue.
-            let sql = format!(
-                "WITH incoming(item_id) AS (VALUES {values}) \
-                 SELECT g.item_id,g.gate_key FROM incoming CROSS JOIN fireweed_item_gates g \
-                 ON g.tenant_id=?1 AND g.queue_id=?2 AND g.item_id=incoming.item_id"
-            );
+            let sql = claimed_gate_memberships_sql(chunk.len());
             for row in query_driver_value_rows(connection, sql, params).await? {
                 let id = ItemId::new(text(&row[0])?).map_err(storage)?;
                 memberships.entry(id).or_default().push(text(&row[1])?);
@@ -4426,14 +4451,14 @@ mod committed_pool_helper_tests {
         TypedValue, UtcTimestamp, WorkerId,
     };
     use fireweed_engine::{
-        ClaimCompatibility, ClaimRequest, ClaimedItem, PreparedClaimedResult, QueueKey,
+        ClaimCompatibility, ClaimRequest, PreparedClaimedResult, QueueKey,
         finish_retained_grouped_cohort_claim,
     };
     use fireweed_relational::nanos_ts;
     use turso::Value;
 
     use super::{
-        TursoRelational, finish_retained_claimed, materialize_grouped_cohort_claimed_on,
+        TursoRelational, materialize_grouped_cohort_claimed_on,
         select_and_materialize_item_claims_on,
     };
 
@@ -4469,21 +4494,6 @@ mod committed_pool_helper_tests {
         let projection = include_str!("projection.rs");
         let local = include_str!("local.rs");
         let compose = include_str!("../../fireweed/src/turso_compose.rs");
-
-        let retained = between(
-            projection,
-            "pub fn finish_retained_claimed(",
-            "async fn query_driver_value_rows(",
-        );
-        assert!(
-            retained.contains("Ok(items)"),
-            "post-publication continuation must accept retained results"
-        );
-        asserts_no_pool_borrow(retained, "finish_retained_claimed");
-        assert!(
-            !retained.contains("Connection"),
-            "finish_retained_claimed must have no connection parameter"
-        );
 
         let render = between(projection, "fn render_claimed(", "fn item_state(");
         asserts_no_pool_borrow(render, "render_claimed");
@@ -4574,9 +4584,6 @@ mod committed_pool_helper_tests {
                 && serving_claim.contains("advance_claim_scan_hint"),
             "serving Claim must advance the FIFO rowid floor under the reader mutex"
         );
-
-        let items = finish_retained_claimed(Vec::<ClaimedItem>::new()).expect("retained");
-        assert!(items.is_empty());
     }
 
     #[tokio::test]
@@ -6816,12 +6823,89 @@ mod addressed_query_tests {
                 "{details:?}"
             );
         }
+
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {LIVE_ITEMS_SQL}"),
+                vec!["tenant".into(), "queue".into(), "client-key".into()],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        for (table, key) in [("i", "client_item_key"), ("p", "item_id")] {
+            assert!(
+                details.iter().any(
+                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
+                ),
+                "live-item key lookup: {details:?}"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod ordered_claim_query_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gated_claim_filter_seeks_membership_and_blocked_keys() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let sql = ORDERED_ITEM_CLAIM_SQL.replace("/* gate eligibility */", ITEM_CLAIM_GATE_FILTER);
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {sql}"),
+                vec![
+                    "tenant".into(),
+                    "queue".into(),
+                    100_i64.into(),
+                    Value::Blob(Vec::new()),
+                    i64::MIN.into(),
+                    1000_i64.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        for (table, key) in [("g", "item_id"), ("b", "gate_key")] {
+            assert!(
+                details.iter().any(
+                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
+                ),
+                "gate eligibility must seek the candidate's full key, never scan queue membership: {details:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_membership_hydration_seeks_each_selected_item() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        let rows = store
+            .query(
+                format!("EXPLAIN QUERY PLAN {}", claimed_gate_memberships_sql(2)),
+                vec!["tenant".into(), "queue".into(), "1".into(), "2".into()],
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = rows
+            .iter()
+            .map(|row| text(&row.values[3]).unwrap())
+            .collect();
+        assert!(
+            details
+                .iter()
+                .any(|line| line.starts_with("SEARCH g USING INDEX")
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
+            "claim metadata must seek selected IDs regardless of completed membership population: {details:?}"
+        );
+    }
 
     #[tokio::test]
     async fn eligibility_is_covered_before_full_key_materialization() {

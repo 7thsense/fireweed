@@ -746,19 +746,30 @@ def self_test(document: dict, authority: dict) -> None:
     else:
         raise RouteSourceError("broad filter negative did not fail")
 
-    # Negative: wrong strict count.
-    broken2 = json.loads(json.dumps(document))
-    broken2["leaves"] = [row for row in broken2["leaves"] if row["kind"] != "strict"][:19]
-    # re-add non-strict
-    broken2["leaves"] = [row for row in document["leaves"] if row["kind"] != "strict"] + [
-        row for row in document["leaves"] if row["kind"] == "strict"
-    ][:19]
-    try:
-        validate_leaves(broken2["leaves"], authority)
-    except RouteSourceError:
-        pass
-    else:
-        raise RouteSourceError("strict cardinality negative did not fail")
+    def expect_rejected(candidate: list[dict], reason: str) -> None:
+        try:
+            validate_leaves(candidate, authority)
+        except RouteSourceError as error:
+            require(str(error).startswith(reason), f"expected {reason!r}, got {error!s}")
+        else:
+            raise RouteSourceError(f"negative did not fail: {reason}")
+
+    # Derive negatives from the current manifest-backed cells; a historical
+    # fixed slice can leave every cell intact when the matrix becomes smaller.
+    strict = [row for row in leaves if row["kind"] == "strict"]
+    expect_rejected(
+        [row for row in leaves if row["leaf_id"] != strict[0]["leaf_id"]],
+        "strict leaves",
+    )
+    expect_rejected(leaves + [dict(strict[0])], "duplicate leaf_id")
+
+    # Keep cardinality and leaf IDs valid so the exact cell-set guard must reject
+    # a duplicated cell that displaces another required cell.
+    duplicate_cell = [dict(row) for row in leaves]
+    for row in duplicate_cell:
+        if row["leaf_id"] == strict[-1]["leaf_id"]:
+            row["cell_id"] = strict[0]["cell_id"]
+    expect_rejected(duplicate_cell, "strict cell set mismatch")
 
 
 def write_registry(document: dict) -> None:

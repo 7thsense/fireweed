@@ -19,7 +19,7 @@ use fireweed::{
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
     QueueDefinition, QueueId, QueueKey, RecoveryAction, RecoveryPolicy, RecurrencePolicy,
     RequestId, ResponseBarrier, RetryPolicy, SegmentConfig, SelectedMutation, SystemClock,
-    TenantId, UtcTimestamp,
+    TenantId,
 };
 use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
 use postgres::{Client, NoTls};
@@ -498,6 +498,15 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
         .set_gates(&queue, vec!["reopen-hold".into()], true)
         .await
         .unwrap();
+    let visible = fireweed.peek(&queue, 1).await.unwrap();
+    assert_eq!(
+        visible
+            .iter()
+            .map(|item| item.client_item_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["reopen-witness"],
+        "the blocked priority head must not consume the peek limit before reopen"
+    );
     ReopenProbe {
         queue,
         definition,
@@ -580,14 +589,14 @@ async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
         item.fields.get("mutation-proof").map(bytes::Bytes::as_ref),
         Some(b"durable".as_slice())
     );
-    assert!(
-        fireweed
-            .peek(&probe.queue, 10)
-            .await
-            .unwrap()
+    let visible = fireweed.peek(&probe.queue, 1).await.unwrap();
+    assert_eq!(
+        visible
             .iter()
-            .all(|item| item.item_id != probe.item_id),
-        "blocked gate survives close/reopen"
+            .map(|item| item.client_item_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["reopen-witness"],
+        "blocked gate survives close/reopen and does not consume the peek limit"
     );
     assert!(
         !fireweed
@@ -869,11 +878,102 @@ async fn memory_postgres_public_interface() {
             )
         });
     public_interface::run("memory--postgres", &fireweed, false).await;
+    postgres_projection_unique_conflicts_do_not_append(&fireweed).await;
     // An in-memory authoritative log has no process-restart durability contract.
     drop(fireweed);
     schema
         .cleanup()
         .unwrap_or_else(|_| panic!("failed to clean memory--postgres schema"));
+}
+
+async fn postgres_projection_unique_conflicts_do_not_append(fireweed: &Fireweed) {
+    let mut definition = reopen_definition("preappend-index-validation");
+    definition.typed_indexes = vec![fireweed::QueueIndex {
+        name: "by_email".into(),
+        declaration: fireweed::IndexDeclaration::Single(fireweed::IndexDef {
+            field: "email".into(),
+            index_type: fireweed::IndexType::String,
+            unique: true,
+        }),
+    }];
+    definition.secondary_indexes = vec![fireweed::IndexSpec {
+        name: "by_external_id".into(),
+        fields: vec!["external_id".into()],
+        unique: true,
+    }];
+    let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    fireweed.create_queue(definition).await.unwrap();
+    let item = |key: &str, email: &str, external: &str| NewItem {
+        client_item_key: Some(ClientItemKey::new(key).unwrap()),
+        entity: Some(serde_json::json!({"email": email})),
+        fields: [(
+            "external_id".into(),
+            bytes::Bytes::copy_from_slice(external.as_bytes()),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    fireweed
+        .push_batch(
+            &queue,
+            vec![
+                item("first", "a@example.com", "A"),
+                item("second", "b@example.com", "B"),
+            ],
+        )
+        .await
+        .unwrap();
+    let before = fireweed.current_position(&queue).await.unwrap();
+    for duplicate in [
+        item("typed-conflict", "a@example.com", "fresh"),
+        item("legacy-conflict", "fresh@example.com", "A"),
+    ] {
+        assert_eq!(
+            fireweed.push(&queue, duplicate).await.unwrap_err(),
+            EngineError::Conflict
+        );
+        assert_eq!(fireweed.current_position(&queue).await.unwrap(), before);
+    }
+    assert_eq!(
+        fireweed
+            .push_batch(
+                &queue,
+                vec![
+                    item("sibling-a", "c@example.com", "C"),
+                    item("sibling-b", "c@example.com", "D")
+                ]
+            )
+            .await
+            .unwrap_err(),
+        EngineError::Conflict
+    );
+    assert_eq!(fireweed.current_position(&queue).await.unwrap(), before);
+    for key in ["new-upsert", "first"] {
+        assert_eq!(
+            fireweed
+                .upsert(
+                    &queue,
+                    ClientItemKey::new(key).unwrap(),
+                    item(key, "b@example.com", "unused")
+                )
+                .await
+                .unwrap_err(),
+            EngineError::Conflict
+        );
+        assert_eq!(fireweed.current_position(&queue).await.unwrap(), before);
+    }
+    // The rejected commands must not poison the queue, and replacing a row may
+    // reuse that row's own keys without treating it as an outside holder.
+    fireweed
+        .upsert(
+            &queue,
+            ClientItemKey::new("first").unwrap(),
+            item("first", "a@example.com", "A"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 2);
 }
 
 /// P7N non-S3 cell: postgres log × Turso projection.
