@@ -422,6 +422,52 @@ enum DefinitionAuthority {
     ConditionalCreateUnavailable,
 }
 
+fn diagnostic_unix_us() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+}
+
+/// Join identifier for opt-in produce/publication traces.
+///
+/// Workload stores live at `shard-N/{log,projection.db}`. Queue ids are shared
+/// across those physical stores, so traces must not use queue identity alone.
+fn diagnostic_store_tag(path: &Path) -> String {
+    let mut fallback = None;
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy();
+        if let Some(rest) = name.strip_prefix("shard-")
+            && !rest.is_empty()
+            && rest.bytes().all(|b| b.is_ascii_digit())
+        {
+            return name.into_owned();
+        }
+        if !matches!(
+            name.as_ref(),
+            "log" | "fwlog" | "fwmeta" | "manifest" | "projection.db" | "/" | "."
+        ) {
+            fallback = Some(name.into_owned());
+        }
+    }
+    fallback
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn store_tag_for_authority(authority: &DefinitionAuthority) -> String {
+    match authority {
+        DefinitionAuthority::Local { root } => diagnostic_store_tag(root),
+        DefinitionAuthority::ProcessLocal => "memory".into(),
+        DefinitionAuthority::S3CreateOnly { .. } => "s3".into(),
+        DefinitionAuthority::ConditionalCreateUnavailable => "remote".into(),
+    }
+}
+
+fn log_trace_enabled() -> bool {
+    std::env::var_os("FIREWEED_LOG_TRACE").is_some()
+}
+
 fn partition_component(shard: &QueueKey) -> String {
     let partition = partition_key(shard);
     let mut encoded = String::with_capacity(partition.0.len() * 2);
@@ -468,6 +514,8 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     post_position_timeout_ms: AtomicU64,
     fail_high_water_puts: AtomicU32,
     pre_position_stall_ms: AtomicU64,
+    /// Physical store join id for opt-in traces and post-position timeout errors.
+    store_tag: String,
 }
 
 impl ObjectLogEngineStore<ManifestSequencer> {
@@ -477,7 +525,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         std::fs::create_dir_all(root).map_err(store_err)?;
         let root = std::fs::canonicalize(root).map_err(store_err)?;
         let blob: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(&root));
-        let blob = crate::traced_blob_store::maybe_trace(blob);
+        let blob = crate::traced_blob_store::maybe_trace(blob, diagnostic_store_tag(&root));
         crate::storage_generation::reject_incompatible_storage_generation(
             &blob, "fwlog/", "fwmeta/",
         )
@@ -539,6 +587,8 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             }
         };
         let blob = Arc::clone(engine.blob_store());
+        let definition_authority = DefinitionAuthority::Local { root };
+        let store_tag = store_tag_for_authority(&definition_authority);
         let store = Self {
             engine,
             blob,
@@ -550,7 +600,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             metadata_permits,
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix: "fwmeta/".to_string(),
-            definition_authority: DefinitionAuthority::Local { root },
+            definition_authority,
             definition_permit: tokio::sync::Mutex::new(()),
             pre_position_timeout_ms: AtomicU64::new(
                 OBJECT_LOG_PRE_POSITION_TIMEOUT.as_millis() as u64
@@ -560,6 +610,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ),
             fail_high_water_puts: AtomicU32::new(0),
             pre_position_stall_ms: AtomicU64::new(0),
+            store_tag,
         };
         store.load_meta().await?;
         Ok(store)
@@ -713,6 +764,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             flush,
             data_prefix,
         ));
+        let store_tag = store_tag_for_authority(&definition_authority);
         let store = Self {
             engine,
             blob,
@@ -734,6 +786,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ),
             fail_high_water_puts: AtomicU32::new(0),
             pre_position_stall_ms: AtomicU64::new(0),
+            store_tag,
         };
         store.load_meta().await?;
         Ok(store)
@@ -1555,6 +1608,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         }
         let pre_us = trace_started.elapsed().as_micros();
         let bytes = payload.len();
+        let started_unix_us = diagnostic_unix_us();
         let mut post_phase = "produce";
         let produced = async {
             let produce_started = Instant::now();
@@ -1581,10 +1635,11 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             if let Some(last) = positions.last() {
                 self.advance_high_water_held(shard, last).await?;
             }
-            if std::env::var_os("FIREWEED_LOG_TRACE").is_some() {
+            if log_trace_enabled() {
                 eprintln!(
-                    "log_pre_us={pre_us} produce_us={produce_us} metadata_us={} bytes={bytes} commands={record_count} seq={base}",
-                    metadata_started.elapsed().as_micros()
+                    "log_pre_us={pre_us} produce_us={produce_us} metadata_us={} bytes={bytes} commands={record_count} seq={base} store={} started_unix_us={started_unix_us}",
+                    metadata_started.elapsed().as_micros(),
+                    self.store_tag,
                 );
             }
             EngineResult::Ok(positions)
@@ -1593,12 +1648,24 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             Ok(Ok(positions)) => Ok(positions),
             Ok(Err(error)) => Err(PackedAppendError::PostPositionAmbiguous {
                 shard: shard.clone(),
-                reason: error.to_string(),
+                reason: format!("{error}; store={}", self.store_tag),
             }),
-            Err(_) => Err(PackedAppendError::PostPositionAmbiguous {
-                shard: shard.clone(),
-                reason: format!("object-log post-position {post_phase} timed out"),
-            }),
+            Err(_) => {
+                if log_trace_enabled() {
+                    let post_us = trace_started.elapsed().as_micros().saturating_sub(pre_us);
+                    eprintln!(
+                        "log_pre_us={pre_us} produce_us={post_us} metadata_us=0 bytes={bytes} commands={record_count} store={} started_unix_us={started_unix_us} timed_out_phase={post_phase}",
+                        self.store_tag,
+                    );
+                }
+                Err(PackedAppendError::PostPositionAmbiguous {
+                    shard: shard.clone(),
+                    reason: format!(
+                        "object-log post-position {post_phase} timed out store={}",
+                        self.store_tag
+                    ),
+                })
+            }
         }
     }
 
@@ -3184,6 +3251,47 @@ mod tests {
             AsyncProjectionSpec::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn diagnostic_store_tag_joins_workload_shard_directories() {
+        assert_eq!(
+            super::diagnostic_store_tag(std::path::Path::new(
+                "/tmp/run/shard-12/log/fwlog/00000000000000000001"
+            )),
+            "shard-12"
+        );
+        assert_eq!(
+            super::diagnostic_store_tag(std::path::Path::new("/data/shard-0/projection.db")),
+            "shard-0"
+        );
+        assert_eq!(
+            super::store_tag_for_authority(&super::DefinitionAuthority::ProcessLocal),
+            "memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_open_store_tag_uses_shard_directory() {
+        let root = temp_root("store-tag").join("shard-7").join("log");
+        std::fs::create_dir_all(&root).unwrap();
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        assert_eq!(log.store_tag, "shard-7");
+        let production = production_source();
+        assert!(
+            production.contains("started_unix_us={started_unix_us}"),
+            "produce traces must include an absolute timestamp"
+        );
+        assert!(
+            production.contains("store={}"),
+            "produce traces must include a physical store join id"
+        );
+        assert!(
+            production.contains("timed out store={}"),
+            "post-position timeouts must name the physical store"
+        );
     }
 
     #[test]

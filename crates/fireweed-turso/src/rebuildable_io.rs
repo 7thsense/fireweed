@@ -76,8 +76,31 @@ struct IoTotals {
 
 struct IoTrace {
     class: &'static str,
+    store: String,
     totals: Mutex<IoTotals>,
     read_totals: Mutex<IoTotals>,
+}
+
+fn diagnostic_store_tag(path: &str) -> String {
+    let mut fallback = None;
+    for component in std::path::Path::new(path).components() {
+        let name = component.as_os_str().to_string_lossy();
+        if let Some(rest) = name.strip_prefix("shard-")
+            && !rest.is_empty()
+            && rest.bytes().all(|b| b.is_ascii_digit())
+        {
+            return name.into_owned();
+        }
+        if !matches!(
+            name.as_ref(),
+            "log" | "fwlog" | "fwmeta" | "manifest" | "projection.db" | "/" | "."
+        ) {
+            fallback = Some(name.into_owned());
+        }
+    }
+    fallback
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 struct RebuildableFile(Arc<dyn File>, Option<IoTrace>);
@@ -93,6 +116,7 @@ impl RebuildableFile {
             } else {
                 "main_or_other"
             },
+            store: diagnostic_store_tag(path),
             totals: Mutex::default(),
             read_totals: Mutex::default(),
         });
@@ -149,8 +173,9 @@ impl Drop for RebuildableFile {
                 .lock()
                 .expect("projection write trace poisoned");
             eprintln!(
-                "projection_io class={} calls={} requested_bytes={} elapsed_us={} max_us={} over_1ms={} over_10ms={} over_100ms={} errors={}",
+                "projection_io class={} store={} calls={} requested_bytes={} elapsed_us={} max_us={} over_1ms={} over_10ms={} over_100ms={} errors={}",
                 trace.class,
+                trace.store,
                 t.calls,
                 t.requested_bytes,
                 t.elapsed_us,
@@ -165,8 +190,9 @@ impl Drop for RebuildableFile {
                 .lock()
                 .expect("projection I/O trace poisoned");
             eprintln!(
-                "projection_read class={} calls={} requested_bytes={} elapsed_us={} max_us={} over_1ms={} over_10ms={} over_100ms={} errors={}",
+                "projection_read class={} store={} calls={} requested_bytes={} elapsed_us={} max_us={} over_1ms={} over_10ms={} over_100ms={} errors={}",
                 trace.class,
+                trace.store,
                 reads.calls,
                 reads.requested_bytes,
                 reads.elapsed_us,
@@ -290,6 +316,7 @@ mod tests {
             }),
             Some(IoTrace {
                 class: "wal",
+                store: "shard-0".into(),
                 totals: Mutex::default(),
                 read_totals: Mutex::default(),
             }),
@@ -324,6 +351,7 @@ mod tests {
         let io = PlatformIO::new().unwrap();
         let trace = || IoTrace {
             class: "main_or_other",
+            store: "shard-0".into(),
             totals: Mutex::default(),
             read_totals: Mutex::default(),
         };
@@ -368,6 +396,18 @@ mod tests {
         assert_eq!(
             (totals.calls, totals.requested_bytes, totals.errors),
             (1, 16, 1)
+        );
+    }
+
+    #[test]
+    fn diagnostic_store_tag_joins_workload_shard_directories() {
+        assert_eq!(
+            diagnostic_store_tag("/tmp/run/shard-12/projection.db"),
+            "shard-12"
+        );
+        assert_eq!(
+            diagnostic_store_tag("/tmp/run/shard-12/projection.db-wal"),
+            "shard-12"
         );
     }
 

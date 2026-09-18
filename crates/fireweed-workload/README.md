@@ -74,6 +74,11 @@ projection I/O, and label RAM-filesystem results separately from disk projection
 `FIREWEED_SQL_TRACE=1` optionally records slow SQL timings without bound values.
 `FIREWEED_WORKLOAD_TIMING=1` records public API wait times and backpressure resources;
 `FIREWEED_LOG_TRACE=1` separates log preparation, durable produce, and metadata time.
+Successful and timed-out produce records include `store=` (the physical `shard-N`
+directory) and `started_unix_us` so they can be joined to checkpoint events.
+`OBJECT_LOG_LOCAL_PUBLISH_TRACE=1` records per-publication file/directory sync
+phases with the same `store=` / `started_unix_us` join fields; it does not emit
+paths or payloads.
 `FIREWEED_PROJECTION_IO_TRACE=1` records per-file WAL, temporary-file and main/other
 write counts, requested bytes and time inside the projection VFS write calls.
 Totals are emitted on handle close; abnormal termination can omit them. These

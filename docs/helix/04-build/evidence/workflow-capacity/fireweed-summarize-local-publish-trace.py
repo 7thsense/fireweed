@@ -14,7 +14,7 @@ for line in report.get('stderr','').splitlines():
   if ends[c]==128:cycle=c+1
   continue
  if line.startswith('projection_io '):
-  values=dict(re.findall(r'(\w+)=(\S+)',line));group=values.pop('class');b=io.setdefault(group,{'handles':0});b['handles']+=1
+  values=dict(re.findall(r'(\w+)=(\S+)',line));group=values.pop('class');values.pop('store',None);b=io.setdefault(group,{'handles':0});b['handles']+=1
   for k,v in values.items():b[k]=max(b.get(k,0),int(v)) if k=='max_us' else b.get(k,0)+int(v)
   continue
  if line.startswith('local_publish '):group='local_publish'
@@ -26,6 +26,7 @@ for line in report.get('stderr','').splitlines():
  values=dict(re.findall(r'(\w+)=(\S+)',line));counts[('overall',group)]+=1;counts[(f'cycle_{cycle}' if cycle<8 else 'after_cycles',group)]+=1
  for k,v in values.items():
   if v.isdigit():
+   if k=='started_unix_us':continue
    if k.endswith('_us') or k=='us':add(group,k,int(v))
    else:total(group,k,int(v))
   elif k=='ok' and v!='true':total(group,'errors',1)
