@@ -113,7 +113,9 @@ async fn full_batches_recycle_original_rows_without_orphaned_leases() {
         workers: 4,
         recycle: true,
         cycles: 3,
-        deadline: std::time::Duration::from_secs(120),
+        // This guards completion and lease accounting, not host throughput.
+        // Unoptimized projection execution needs a separate bounded watchdog.
+        deadline: std::time::Duration::from_secs(if cfg!(debug_assertions) { 600 } else { 120 }),
         ..Default::default()
     };
     let report = fireweed_workload::run(config, root.path()).await.unwrap();

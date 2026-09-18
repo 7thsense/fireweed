@@ -525,6 +525,7 @@ async fn concurrent_addressed_updates_have_one_version_winner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_full_delivery_batches_remain_disjoint() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
     tokio::time::timeout(Duration::from_secs(45), async {
         let root = tempfile::tempdir().unwrap();
         let fw = open_store(root.path(), false, TestClock::at(200)).unwrap();
@@ -542,9 +543,13 @@ async fn concurrent_full_delivery_batches_remain_disjoint() {
                 .unwrap(),
             );
         }
-        let claimed = futures::future::try_join_all((0..8).map(|_| fw.claim(&q, 1000, 1000)))
-            .await
-            .unwrap();
+        // Async pushes acknowledge the log before projection coverage. Delivery
+        // retries transient backpressure within the same overall test deadline.
+        let claimed = futures::future::try_join_all(
+            (0..8).map(|_| retry(deadline, || fw.claim(&q, 1000, 1000))),
+        )
+        .await
+        .unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for rows in claimed {
             assert_eq!(rows.len(), 1000);

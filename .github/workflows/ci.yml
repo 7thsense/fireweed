@@ -27,6 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install repository check prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
       - name: Install Rust 1.97.1
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
 
