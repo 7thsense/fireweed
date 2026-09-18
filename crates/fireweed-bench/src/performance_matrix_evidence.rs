@@ -93,8 +93,8 @@ pub fn build_schedule(tier: &str) -> Result<Vec<ScheduleEntry>, String> {
                 }
             }
         }
-        // Maintenance: disposable projection rebuild for filesystem|s3 × postgres.
-        // Turso has no rebuild control plane; memory projection is not durable to rebuild.
+        // Maintenance: disposable projection rebuild for filesystem|s3 × turso|postgres.
+        // Memory projection is not durable to rebuild.
         for (cell, _) in FULL_CELLS
             .iter()
             .filter(|(cell, _)| is_maintenance_cell(cell))

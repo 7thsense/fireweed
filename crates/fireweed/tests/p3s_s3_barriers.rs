@@ -346,7 +346,15 @@ fn all_six_s3_barrier_cells_open_with_caller_tuning() {
         );
         let handle =
             fireweed::open(config, Arc::new(SystemClock)).expect("s3×Turso barrier must open");
-        assert!(handle.projection_control().is_none());
+        let control = handle
+            .projection_control()
+            .expect("s3×Turso projection control");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build verification runtime")
+            .block_on(control.verify())
+            .expect("empty Turso projection verifies");
         drop(handle);
         eprintln!("P3s PASS s3×turso barrier={barrier:?}");
     }
@@ -470,7 +478,10 @@ fn s3_cells_reopen_with_namespace_segments_and_recovery_fields() {
 
     let reopened = fireweed::open(config, Arc::new(SystemClock))
         .expect("reopen must preserve namespace/segments/recovery wiring");
-    assert!(reopened.projection_control().is_none());
+    assert!(
+        reopened.projection_control().is_some(),
+        "s3×turso reopen must keep projection maintenance"
+    );
     drop(reopened);
     eprintln!("P3s PASS s3×turso reopen namespace={namespace} segments+recovery");
 }

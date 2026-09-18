@@ -3005,24 +3005,45 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 struct ObjectLogTursoLifecycle {
     backend: Option<Arc<turso_compose::DerivedObjectLogTursoBackend>>,
+    max_tail_commands: u64,
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 impl ProjectionLifecycle for ObjectLogTursoLifecycle {
     fn capabilities(&self) -> ProjectionLifecycleCapabilities {
-        ProjectionLifecycleCapabilities::default()
+        ProjectionLifecycleCapabilities {
+            verify_projection: true,
+            delete_projection: true,
+            rebuild_projection: true,
+        }
     }
 
     fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
-        Box::pin(async { Err(EngineError::Unavailable) })
+        let backend = Arc::clone(
+            self.backend
+                .as_ref()
+                .expect("object-log turso lifecycle is active"),
+        );
+        Box::pin(async move { backend.verify_projection().await })
     }
 
     fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
-        Box::pin(async { Err(EngineError::Unavailable) })
+        let backend = Arc::clone(
+            self.backend
+                .as_ref()
+                .expect("object-log turso lifecycle is active"),
+        );
+        Box::pin(async move { backend.delete_projection().await })
     }
 
     fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
-        Box::pin(async { Err(EngineError::Unavailable) })
+        let backend = Arc::clone(
+            self.backend
+                .as_ref()
+                .expect("object-log turso lifecycle is active"),
+        );
+        let max_tail_commands = self.max_tail_commands;
+        Box::pin(async move { backend.rebuild_projection(max_tail_commands).await })
     }
 
     fn shutdown(&mut self) {
@@ -5988,11 +6009,13 @@ fn finish_objectlog_turso(
     clock: Arc<dyn Clock>,
     backend: Arc<turso_compose::DerivedObjectLogTursoBackend>,
 ) -> Fireweed {
+    let max_tail_commands = config.recovery.max_tail_commands;
     let lifecycle = ProjectionLifecycleHandle {
         inner: Arc::new(ProjectionLifecycleHandleInner {
             _config: config,
             lifecycle: Box::new(ObjectLogTursoLifecycle {
                 backend: Some(Arc::clone(&backend)),
+                max_tail_commands,
             }),
         }),
     };

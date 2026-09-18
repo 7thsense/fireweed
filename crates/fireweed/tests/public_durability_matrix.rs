@@ -950,36 +950,53 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
                 .as_deref(),
             Some(b"batched".as_slice())
         );
-        drop(fireweed);
-        if recovery_mode == "rebuild" {
-            std::fs::remove_file(fixture.path().join("projection.turso")).unwrap();
-            for suffix in ["-wal", "-shm"] {
-                let path = fixture.path().join(format!("projection.turso{suffix}"));
-                match std::fs::remove_file(path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => panic!("remove test projection sidecar: {error}"),
-                }
-            }
-        }
-        if recovery_mode == "legacy-receipt" {
-            let projection = fireweed_turso::TursoRelational::open(
-                fireweed_turso::TursoConfig::local(fixture.path().join("projection.turso")),
-            )
-            .await
-            .unwrap();
-            // The former projection stored a 32-byte hash of transformed items.
-            // Startup must recover the caller's identity from its logged envelope.
-            assert_eq!(projection.execute(
+        let recovered = if recovery_mode == "rebuild" {
+            let control = fireweed.projection_control().expect(
+                "object-log × Turso must expose ProjectionLifecycle; do not unlink projection files",
+            );
+            let caps = control.capabilities();
+            assert!(
+                caps.verify && caps.delete && caps.rebuild,
+                "ProjectionLifecycle must advertise verify/delete/rebuild, got {caps:?}"
+            );
+            let before = control.verify().await.unwrap();
+            assert!(
+                before.compatible,
+                "projection must match the log before delete"
+            );
+            control.delete().await.unwrap();
+            let rebuilt = control.rebuild().await.unwrap();
+            assert!(
+                rebuilt.projection_sequence > 0 || rebuilt.tail_commands_replayed > 0,
+                "rebuild must replay from the authoritative log: {rebuilt:?}"
+            );
+            let after = control.verify().await.unwrap();
+            assert!(after.compatible, "rebuilt projection must match the log");
+            fireweed
+        } else {
+            drop(fireweed);
+            if recovery_mode == "legacy-receipt" {
+                let projection = fireweed_turso::TursoRelational::open(
+                    fireweed_turso::TursoConfig::local(fixture.path().join("projection.turso")),
+                )
+                .await
+                .unwrap();
+                // The former projection stored a 32-byte hash of transformed items.
+                // Startup must recover the caller's identity from its logged envelope.
+                assert_eq!(projection.execute(
                 "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 WHERE operation='push'",
                 vec![vec![0x55u8; 32].into()],
             ).await.unwrap(), 1);
-            drop(projection);
-        }
-        let reopened = objectlog_turso(fixture.path(), barrier, cell);
-        assert_eq!(reopened.queue_definition(&queue).await.unwrap(), definition);
+                drop(projection);
+            }
+            objectlog_turso(fixture.path(), barrier, cell)
+        };
         assert_eq!(
-            reopened
+            recovered.queue_definition(&queue).await.unwrap(),
+            definition
+        );
+        assert_eq!(
+            recovered
                 .push_with_request_id(&queue, request_id.clone(), primary_item())
                 .await
                 .unwrap(),
@@ -988,7 +1005,7 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
         let mut changed = primary_item();
         changed.payload = Some(Bytes::from_static(b"conflicting-body"));
         assert_eq!(
-            reopened
+            recovered
                 .push_with_request_id(&queue, request_id.clone(), changed)
                 .await
                 .unwrap_err(),
@@ -997,7 +1014,7 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
         let mut changed_entity = primary_item();
         changed_entity.entity = Some(serde_json::json!({"kind": "effect", "suppressed": true}));
         assert_eq!(
-            reopened
+            recovered
                 .push_with_request_id(&queue, request_id, changed_entity)
                 .await
                 .unwrap_err(),
@@ -1005,10 +1022,10 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
             "fully indexed entity changes must not alias after admission"
         );
         assert_eq!(
-            reopened.batch_update(&queue, update).await.unwrap(),
+            recovered.batch_update(&queue, update).await.unwrap(),
             updated
         );
-        let row = reopened
+        let row = recovered
             .live_item(&queue, ClientItemKey::new("primary").unwrap())
             .await
             .unwrap()
@@ -1017,9 +1034,9 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
         assert_eq!(row.payload.as_deref(), Some(b"batched".as_slice()));
         assert_eq!(row.fields["customer"].as_ref(), b"acme");
         assert_eq!(row.fields["region"].as_ref(), b"east");
-        let metrics = reopened.metrics(&queue).await.unwrap();
+        let metrics = recovered.metrics(&queue).await.unwrap();
         assert_eq!(metrics.pending, 1);
-        drop(reopened);
+        drop(recovered);
     }
 }
 

@@ -146,7 +146,7 @@ async fn filesystem_memory_public_interface() {
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
 async fn filesystem_turso_strict_public_interface() {
-    assert_cell("filesystem--turso--strict", false, true, |root| {
+    assert_cell("filesystem--turso--strict", true, true, |root| {
         filesystem_turso(root, ResponseBarrier::Strict, "filesystem-turso-strict")
     })
     .await;
@@ -155,7 +155,7 @@ async fn filesystem_turso_strict_public_interface() {
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
 async fn filesystem_turso_async_public_interface() {
-    assert_cell("filesystem--turso--async", false, true, |root| {
+    assert_cell("filesystem--turso--async", true, true, |root| {
         filesystem_turso(
             root,
             ResponseBarrier::AsyncProjection,
@@ -163,6 +163,83 @@ async fn filesystem_turso_async_public_interface() {
         )
     })
     .await;
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+#[tokio::test]
+async fn filesystem_turso_projection_control_rebuilds_from_log() {
+    let root = FixtureRoot::new("filesystem--turso--rebuild");
+    let fireweed = filesystem_turso(
+        root.path(),
+        ResponseBarrier::Strict,
+        "filesystem-turso-rebuild",
+    );
+    let definition = fireweed::QueueDefinition {
+        tenant_id: fireweed::TenantId::new("rebuild").unwrap(),
+        queue_id: fireweed::QueueId::new("work").unwrap(),
+        priority_model: fireweed::PriorityModel {
+            kind: fireweed::PriorityModelKind::Int64,
+            direction: fireweed::PriorityDirection::Ascending,
+            tie_breaker: fireweed::PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: fireweed::OrderingMode::Strict,
+        max_rank_error: 0,
+        progress_bound_ms: 60_000,
+        eligibility_policy: fireweed::EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: fireweed::RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: fireweed::RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
+        emit_change_records: false,
+    };
+    let queue = fireweed::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert!(fireweed.create_queue(definition).await.unwrap().created);
+    let item_id = fireweed
+        .push(
+            &queue,
+            fireweed::NewItem {
+                client_item_key: Some(fireweed::ClientItemKey::new("rebuild-item").unwrap()),
+                priority: Some(fireweed::PriorityValue::Int64(1)),
+                ..fireweed::NewItem::default()
+            },
+        )
+        .await
+        .unwrap();
+    let control = fireweed
+        .projection_control()
+        .expect("filesystem×turso projection control");
+    let before = control.verify().await.unwrap();
+    assert!(
+        before.compatible,
+        "projection must match the log before delete"
+    );
+    control.delete().await.unwrap();
+    let rebuilt = control.rebuild().await.unwrap();
+    assert!(
+        rebuilt.projection_sequence > 0 || rebuilt.tail_commands_replayed > 0,
+        "rebuild must replay log commands: {rebuilt:?}"
+    );
+    let after = control.verify().await.unwrap();
+    assert!(after.compatible, "rebuilt projection must match the log");
+    assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 1);
+    let live = fireweed
+        .live_item(
+            &queue,
+            fireweed::ClientItemKey::new("rebuild-item").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("item survives projection rebuild");
+    assert_eq!(live.item_id, item_id);
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]

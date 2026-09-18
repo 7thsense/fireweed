@@ -2310,3 +2310,76 @@ async fn new_requests_collect_expired_unique_receipts_with_bounded_queue_scope()
         "other queue is untouched"
     );
 }
+
+#[tokio::test]
+async fn delete_projection_clears_writer_cursor_and_allows_log_replay() {
+    let def = definition();
+    let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    let dir = tempdir().unwrap();
+    let turso = TursoRelational::open(TursoConfig::local(dir.path().join("projection.db")))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, def.clone())
+        .await
+        .unwrap();
+    let id = ItemId::mint(1, 1, 1);
+    let item = indexed_item(id, "rebuild-key", "rebuild@example.com");
+    let push = envelope(
+        "rebuild-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![item.clone()],
+        }),
+        vec![id],
+        1,
+    );
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 1, 0)],
+        vec![push.clone()],
+    )
+    .await
+    .unwrap();
+    assert!(
+        turso
+            .writer_recovery_high_water(&shard)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    turso.delete_projection().await.unwrap();
+    assert!(
+        turso
+            .writer_recovery_high_water(&shard)
+            .await
+            .unwrap()
+            .is_none(),
+        "writer cursor must be empty after delete_projection"
+    );
+    let items = turso
+        .query("SELECT COUNT(*) FROM fireweed_items", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        items[0].values[0],
+        Value::Integer(0),
+        "serving reader must observe an empty item table after delete"
+    );
+    AsyncProjectionStore::ensure_shard(&turso, def)
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 1, 0)],
+        vec![push],
+    )
+    .await
+    .expect("wiped projection must accept the original log replay");
+    assert_eq!(
+        turso
+            .writer_recovery_high_water(&shard)
+            .await
+            .unwrap()
+            .map(|position| position.sequence),
+        Some(0)
+    );
+}

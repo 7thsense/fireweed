@@ -111,7 +111,15 @@ fn all_six_filesystem_barrier_cells_open_with_caller_tuning() {
         );
         let handle = fireweed::open(config, Arc::new(SystemClock))
             .expect("filesystem×Turso barrier must open");
-        assert!(handle.projection_control().is_none());
+        let control = handle
+            .projection_control()
+            .expect("filesystem×Turso projection control");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build verification runtime")
+            .block_on(control.verify())
+            .expect("empty Turso projection verifies");
         drop(handle);
     }
 

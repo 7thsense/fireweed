@@ -520,8 +520,7 @@ async fn s3_postgres_native_cas_failover_reopen() {
     run_native_cas_failover("s3--postgres--strict", config).await;
 }
 
-/// Disposable-projection rebuild: wipe local sqlite projection, reopen same S3
-/// namespace, Class A log rebuilds exact pending + request_id retention.
+/// Disposable-projection rebuild through live ProjectionLifecycle, not file unlinking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_turso_projection_loss_rebuilds_from_durable_log() {
     require_p1s_native_cas_provenance();
@@ -554,32 +553,46 @@ async fn s3_turso_projection_loss_rebuilds_from_durable_log() {
         .unwrap();
     assert_eq!(disp, PushDisposition::Fresh);
     assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 1);
-    drop(fireweed);
 
-    // Destroy projection only — durable S3 log remains system of record.
-    std::fs::remove_file(&proj_path).expect("delete disposable sqlite projection");
+    let control = fireweed
+        .projection_control()
+        .expect("s3 × Turso must expose ProjectionLifecycle; do not unlink projection files");
+    let caps = control.capabilities();
     assert!(
-        !proj_path.exists(),
-        "projection must be gone before rebuild open"
+        caps.verify && caps.delete && caps.rebuild,
+        "{cell_id} projection_control capabilities: verify/delete/rebuild required, got {caps:?}"
+    );
+    assert!(
+        control.verify().await.unwrap().compatible,
+        "{cell_id} projection must match the log before delete"
+    );
+    control.delete().await.unwrap();
+    let rebuilt = control.rebuild().await.unwrap();
+    assert!(
+        rebuilt.projection_sequence > 0 || rebuilt.tail_commands_replayed > 0,
+        "{cell_id} rebuild must replay from the durable log: {rebuilt:?}"
+    );
+    assert!(
+        control.verify().await.unwrap().compatible,
+        "{cell_id} rebuilt projection must match the log"
     );
 
-    let rebuilt = open_cell(cell_id, config).await;
     assert_eq!(
-        rebuilt.queue_definition(&queue).await.unwrap(),
+        fireweed.queue_definition(&queue).await.unwrap(),
         definition,
         "definition rebuilt from durable S3 log"
     );
     assert_eq!(
-        rebuilt.metrics(&queue).await.unwrap().pending,
+        fireweed.metrics(&queue).await.unwrap().pending,
         1,
-        "pending rebuilt from durable S3 log after projection loss"
+        "pending rebuilt from durable S3 log after projection delete"
     );
-    let (replay_id, replay_disp) = rebuilt
+    let (replay_id, replay_disp) = fireweed
         .push_with_request_id(&queue, rid, body)
         .await
         .unwrap();
     assert_eq!(replay_disp, PushDisposition::Replayed);
     assert_eq!(replay_id, item_id);
-    drop(rebuilt);
-    eprintln!("P5aS3 PASS {cell_id} projection-loss rebuild from durable log");
+    drop(fireweed);
+    eprintln!("P5aS3 PASS {cell_id} ProjectionLifecycle rebuild from durable log");
 }

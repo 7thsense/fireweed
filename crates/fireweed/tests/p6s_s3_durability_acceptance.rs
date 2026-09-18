@@ -419,39 +419,6 @@ async fn run_snorri_projection_rebuild(cell_id: &str, config: StorageConfig) {
     assert_eq!(disp, PushDisposition::Fresh);
     assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 1);
 
-    if let ProjectionStoreConfig::Turso { path } = &config.projection {
-        // The native maintenance handle is intentionally absent. Prove the
-        // stronger durability boundary by discarding every projection file.
-        assert!(fireweed.projection_control().is_none());
-        drop(fireweed);
-        for file in [
-            path.clone(),
-            std::path::PathBuf::from(format!("{}-wal", path.display())),
-            std::path::PathBuf::from(format!("{}-shm", path.display())),
-        ] {
-            match std::fs::remove_file(file) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => panic!("delete test projection: {error}"),
-            }
-        }
-        let rebuilt = open_cell(cell_id, config).await;
-        assert_eq!(rebuilt.queue_definition(&queue).await.unwrap(), definition);
-        assert_eq!(rebuilt.metrics(&queue).await.unwrap().pending, 1);
-        let (replayed_id, disposition) = rebuilt
-            .push_with_request_id(&queue, rid, body)
-            .await
-            .unwrap();
-        assert_eq!(replayed_id, item_id);
-        assert_eq!(disposition, PushDisposition::Replayed);
-        let claimed = rebuilt.claim(&queue, 1, 60_000).await.unwrap();
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].item_id, item_id);
-        rebuilt.complete(&queue, [item_id]).await.unwrap();
-        assert_eq!(rebuilt.metrics(&queue).await.unwrap().complete, 1);
-        return;
-    }
-
     let control = fireweed
         .projection_control()
         .unwrap_or_else(|| panic!("{cell_id} must expose projection_control for rebuild proof"));
@@ -601,7 +568,7 @@ async fn snorri_retry_once_s3_postgres() {
     run_snorri_retry_once("s3--postgres", config).await;
 }
 
-// --- SNORRI-PROJECTION-REBUILD: disposable projections (sqlite + postgres control plane) ---
+// --- SNORRI-PROJECTION-REBUILD: disposable projections (turso + postgres control plane) ---
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_projection_rebuild_s3_turso() {

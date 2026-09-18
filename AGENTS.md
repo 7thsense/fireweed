@@ -72,6 +72,14 @@ Forbidden on execute-bead branches: `gh pr merge --squash`,
 any commit already in the trail.
 <!-- DDX-AGENTS:END -->
 
+## Projection lifecycle tests
+
+Tests that exercise projection verify, delete, or rebuild MUST call
+`Fireweed::projection_control()`. Unlinking `.db` / `.turso` / WAL files and
+reopening is not a substitute for that API. Crash-loss and
+`RecoveryAction::RebuildProjection` on open belong in server or workload
+recovery suites; they do not implement ProjectionLifecycle.
+
 ## Microsite gate (agents)
 
 The public product microsite (`docs/site/`) deploys via `.github/workflows/pages.yml`

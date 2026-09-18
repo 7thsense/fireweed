@@ -23,6 +23,29 @@ use fireweed_server::{
     SegmentConfig, emit_change_record_tick, start, start_with,
 };
 /// Object-log (LogEngine) × Turso projection — public default composition cell.
+async fn rebuild_objectlog_turso_projection(
+    object_root: std::path::PathBuf,
+    projection_path: std::path::PathBuf,
+    target_bytes: usize,
+    max_latency_ms: u64,
+    async_spec: Option<AsyncProjectionSpec>,
+) {
+    let rebuilt = fireweed::turso_compose::rebuild_filesystem_turso_projection(
+        object_root,
+        projection_path,
+        target_bytes,
+        max_latency_ms,
+        async_spec,
+        1_000_000,
+    )
+    .await
+    .expect("ProjectionLifecycle rebuild from authoritative object log");
+    assert!(
+        rebuilt.projection_sequence > 0 || rebuilt.tail_commands_replayed > 0,
+        "rebuild must replay log commands: {rebuilt:?}"
+    );
+}
+
 fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
     BackendSpec {
         log: LogSpec::ObjectLog(ObjectLogSpec::local(
@@ -858,14 +881,16 @@ async fn objectlog_turso_runtime_reopens_rebuilds_and_keeps_item_ids_advancing()
         produced
     };
 
-    // Reopen against a distinct absent projection path. This is the exact logical-loss condition without
-    // unlinking SQLite files that an asynchronously terminating OS handle may still be closing.
-    let rebuilt_projection_path = projection_path.with_extension("rebuilt.db");
-    let _ = std::fs::remove_file(&rebuilt_projection_path);
-    let _ = std::fs::remove_file(format!("{}-wal", rebuilt_projection_path.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", rebuilt_projection_path.display()));
+    rebuild_objectlog_turso_projection(
+        object_root.clone(),
+        projection_path.clone(),
+        262_144,
+        20,
+        None,
+    )
+    .await;
     let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), rebuilt_projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -903,11 +928,9 @@ async fn objectlog_turso_runtime_reopens_rebuilds_and_keeps_item_ids_advancing()
     server.shutdown_and_drain(Duration::from_secs(5)).await;
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
-    let _ = std::fs::remove_file(&rebuilt_projection_path);
 }
 
-/// Delete-rebuild: after the Turso projection file is removed, reopen against a fresh path
-/// rebuilds complete state from the authoritative object log (LogEngine composition).
+/// Delete-rebuild: ProjectionLifecycle wipes and rebuilds the Turso projection from the object log.
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log() {
@@ -955,13 +978,16 @@ async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_
         produced
     };
 
-    // Rebuild from the authoritative object log into a distinct empty Turso path (logical loss).
-    let rebuilt_projection_path = projection_path.with_extension("rebuilt.turso");
-    let _ = std::fs::remove_file(&rebuilt_projection_path);
-    let _ = std::fs::remove_file(format!("{}-wal", rebuilt_projection_path.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", rebuilt_projection_path.display()));
+    rebuild_objectlog_turso_projection(
+        object_root.clone(),
+        projection_path.clone(),
+        262_144,
+        20,
+        None,
+    )
+    .await;
     let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), rebuilt_projection_path.clone()),
+        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -999,7 +1025,6 @@ async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_
     server.shutdown_and_drain(Duration::from_secs(5)).await;
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
-    let _ = std::fs::remove_file(&rebuilt_projection_path);
 }
 
 /// AC-TURSO-5: empty path fails closed before any Turso/database I/O.
@@ -1579,10 +1604,9 @@ async fn objectlog_turso_async_chaos_crash_mid_lease_neither_redelivers_nor_lose
     let _ = std::fs::remove_file(&projection_path);
 }
 
-/// CHAOS — disk-loss of the SQLite projection image on the `objectlog/turso async` profile: after two pushes
-/// the server is dropped and the projection db is DELETED. Because the object log is the source of truth, a
-/// restart replays the retained log from genesis and both items are delivered exactly once (nothing lost,
-/// nothing duplicated).
+/// CHAOS — after two async-profile pushes, wipe the Turso projection through
+/// ProjectionLifecycle and restart. The object log is the source of truth, so
+/// both items are delivered exactly once (nothing lost, nothing duplicated).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_async_chaos_disk_loss_replays_retained_object_log() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
@@ -1616,8 +1640,17 @@ async fn objectlog_turso_async_chaos_disk_loss_replays_retained_object_log() {
         server.shutdown_and_drain(Duration::from_secs(5)).await;
     }
 
-    // DISK LOSS: the async SQLite projection image is gone; only the durable object log remains.
-    std::fs::remove_file(&projection_path).unwrap();
+    rebuild_objectlog_turso_projection(
+        object_root.clone(),
+        projection_path.clone(),
+        1024 * 1024,
+        5,
+        Some(
+            AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
+                .expect("valid async projection bounds"),
+        ),
+    )
+    .await;
 
     let server = start(objectlog_turso_async_config(
         object_root.clone(),
@@ -1686,16 +1719,26 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
         server.shutdown_and_drain(Duration::from_secs(5)).await;
     }
 
-    std::fs::remove_file(&projection_path).unwrap();
-    let server = start(Config::new(
+    rebuild_objectlog_turso_projection(
+        object_root.clone(),
+        projection_path.clone(),
+        1024 * 1024,
+        5,
+        None,
+    )
+    .await;
+    let mut config = Config::new(
         objectlog_turso_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
         vec![qdef()],
-    ))
-    .await
-    .unwrap();
+    );
+    set_segment_config(
+        &mut config,
+        SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
+    );
+    let server = start(config).await.unwrap();
     let mut con = redis_test_connection(server.addr()).await;
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
         .arg("GROUP")

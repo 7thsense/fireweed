@@ -570,7 +570,7 @@ async fn s3_turso_strict_public_interface_lifecycle() {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_full_verifier("s3--turso--strict", config, false).await;
+    run_full_verifier("s3--turso--strict", config, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

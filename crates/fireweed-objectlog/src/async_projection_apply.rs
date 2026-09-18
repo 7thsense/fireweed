@@ -515,6 +515,10 @@ where
         self.kick();
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.inner.paused.load(Ordering::Acquire)
+    }
+
     pub async fn has_ready(&self, shard: &QueueKey) -> bool {
         let state = self.inner.state.lock().await;
         state

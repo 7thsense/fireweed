@@ -96,6 +96,9 @@ async fn acknowledged_log_rebuild_preserves_ids_payloads_leases_and_receipts() {
                 .unwrap();
         let expected: Vec<ItemId> = serde_json::from_value(oracle["ids"].clone()).unwrap();
         let original_claim: ClaimRef = serde_json::from_value(oracle["claim"].clone()).unwrap();
+        // Crash-loss: the child exited without dropping Fireweed, and only the
+        // log is copied. This is RecoveryAction-on-open, not a live
+        // ProjectionLifecycle substitute.
         let rebuilt = tempfile::tempdir().unwrap();
         copy_tree(&original.path().join("log"), &rebuilt.path().join("log"));
         let clock = TestClock::at(200);

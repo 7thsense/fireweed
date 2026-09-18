@@ -115,6 +115,10 @@ python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --check --self-test
 echo "--- assert-no-legacy-storage-product-names ---"
 bash "${SCRIPT_DIR}/assert-no-legacy-storage-product-names.sh"
 
+echo "--- forbid-fake-projection-lifecycle ---"
+bash "${SCRIPT_DIR}/forbid-fake-projection-lifecycle.sh" --self-test
+bash "${SCRIPT_DIR}/forbid-fake-projection-lifecycle.sh"
+
 # ---------------------------------------------------------------------------
 # 2. Exact cargo source leaves (no substring filters)
 # ---------------------------------------------------------------------------

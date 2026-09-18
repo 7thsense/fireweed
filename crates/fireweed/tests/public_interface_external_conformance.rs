@@ -1191,7 +1191,7 @@ async fn run_s3_turso(cell: &str, barrier: ResponseBarrier) {
     };
     let fireweed = fireweed::open(runtime.clone(), Arc::new(SystemClock))
         .unwrap_or_else(|_| panic!("failed to open {cell} without exposing connection details"));
-    public_interface::run(cell, &fireweed, false).await;
+    public_interface::run(cell, &fireweed, true).await;
     let probe = seed_reopen_probe(cell, &fireweed).await;
     drop(fireweed);
     let reopened = fireweed::open(runtime, Arc::new(SystemClock))

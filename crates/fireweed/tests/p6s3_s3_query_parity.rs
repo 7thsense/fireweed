@@ -229,7 +229,7 @@ async fn s3_turso_strict_p6_query_parity() {
             path: fixture.path().join("projection.sqlite"),
         },
     );
-    run_p6("s3--turso--strict", config, false).await;
+    run_p6("s3--turso--strict", config, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

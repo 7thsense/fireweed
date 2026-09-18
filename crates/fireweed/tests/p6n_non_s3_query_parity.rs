@@ -118,7 +118,7 @@ async fn p6n_filesystem_memory_query_parity() {
 #[tokio::test]
 async fn p6n_filesystem_turso_query_parity() {
     let root = FixtureRoot::new("filesystem_turso");
-    run_cell("filesystem--turso", false, || {
+    run_cell("filesystem--turso", true, || {
         let mut cfg = StorageConfig::memory();
         cfg.log = fireweed::LogConfig::Filesystem {
             root: root.path().join("object-log"),

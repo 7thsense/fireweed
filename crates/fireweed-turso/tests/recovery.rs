@@ -149,6 +149,8 @@ async fn local_file_loss_rebuilds_exactly_from_authoritative_history() {
         .await
         .unwrap();
     drop(store);
+    // Adapter-level file loss before a new TursoRelational open. Public
+    // Fireweed tests must use projection_control(), not this pattern.
     std::fs::remove_file(&path).unwrap();
 
     let rebuilt = TursoRelational::open(TursoConfig::local(&path))

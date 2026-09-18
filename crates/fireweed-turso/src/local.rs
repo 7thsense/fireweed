@@ -21,8 +21,8 @@ use fireweed_engine::{
 };
 use fireweed_relational::{
     ClaimOutboxRow, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
-    delete_claim_outbox, entity_from_json, fields_from_json, metadata_from_json, nanos_ts,
-    parse_priority, select_claim_outbox, ts_nanos,
+    async_projection as sql, delete_claim_outbox, entity_from_json, fields_from_json,
+    metadata_from_json, nanos_ts, parse_priority, select_claim_outbox, ts_nanos,
 };
 use tokio::sync::{Mutex, Semaphore};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -1318,6 +1318,102 @@ impl TursoRelational {
     pub async fn execute(&self, sql: impl AsRef<str>, params: Vec<Value>) -> Result<u64> {
         let connection = self.writer.lock().await;
         Ok(connection.execute(sql, params).await?)
+    }
+
+    /// Delete disposable projection rows while keeping schema and migrations.
+    ///
+    /// The authoritative log is untouched. In-memory lease and scan caches are
+    /// cleared so a subsequent log replay cannot mix leftover process state
+    /// with an empty image.
+    pub async fn delete_projection(&self) -> EngineResult<()> {
+        let statements: Vec<RelationalStatement> = OWNED_PROJECTION_TABLES
+            .iter()
+            .map(|table| RelationalStatement::new(format!("DELETE FROM {table}"), Vec::new()))
+            .collect();
+        self.execute_immediate(&statements)
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        self.live_tokens.lock().await.clear();
+        self.live_tokens_by_consumer.lock().await.clear();
+        self.claim_scan_hints
+            .lock()
+            .expect("claim-scan-hint mutex poisoned")
+            .clear();
+        self.claim_scan_default_fifo
+            .lock()
+            .expect("claim-scan-fifo mutex poisoned")
+            .clear();
+        self.grouped_shards
+            .lock()
+            .expect("grouped-shards mutex poisoned")
+            .clear();
+        self.refresh_serving_reader().await?;
+        Ok(())
+    }
+
+    /// High-water from the writer, not a possibly stale serving snapshot.
+    pub async fn writer_recovery_high_water(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<Option<CommandPosition>> {
+        let connection = self.writer.lock().await;
+        let rows = collect_rows(
+            &connection,
+            sql::SELECT_CURSOR,
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+            ],
+        )
+        .await
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let next = match row.values.first() {
+            Some(Value::Integer(value)) => *value,
+            _ => {
+                return Err(EngineError::Storage(
+                    "relational cursor next_seq is not an integer".into(),
+                ));
+            }
+        };
+        let epoch = match row.values.get(1) {
+            Some(Value::Integer(value)) => *value,
+            _ => {
+                return Err(EngineError::Storage(
+                    "relational cursor assignment_epoch is not an integer".into(),
+                ));
+            }
+        };
+        if next <= 0 {
+            return Ok(None);
+        }
+        Ok(Some(CommandPosition::new(
+            shard.clone(),
+            u64::try_from(epoch).map_err(|error| EngineError::Storage(error.to_string()))?,
+            u64::try_from(next - 1).map_err(|error| EngineError::Storage(error.to_string()))?,
+        )))
+    }
+
+    pub async fn refresh_serving_reader(&self) -> EngineResult<()> {
+        let connection = self
+            .connect()
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        if self.config.path != Path::new(":memory:") {
+            configure_committed_reader(
+                &connection,
+                CommittedReaderSettings {
+                    cache_size_kib: SERVING_READER_CACHE_KIB,
+                    busy_timeout: self.config.busy_timeout,
+                },
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        }
+        *self.reader.lock().await = connection;
+        Ok(())
     }
 
     /// Execute statements atomically in one immediate transaction.

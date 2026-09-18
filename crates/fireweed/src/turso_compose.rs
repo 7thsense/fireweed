@@ -79,7 +79,8 @@ use fireweed_turso::{TursoConfig, TursoRelational};
 #[cfg(feature = "objectlog")]
 use fireweed_objectlog::{
     AsyncProjectionApplyCoordinator, ObjectLogEngineStore, ObjectLogTaskDispatcher,
-    PackedAppendError, PackedAppendOutcome, claim_only_tail, map_submit_error,
+    PackedAppendError, PackedAppendOutcome, claim_only_tail, flush_config_from_segment,
+    map_submit_error,
 };
 
 // ---------------------------------------------------------------------------
@@ -490,6 +491,24 @@ fn overlay_delta(
 }
 
 #[cfg(feature = "objectlog")]
+fn command_kind(command: &QueueCommand) -> &'static str {
+    match command {
+        QueueCommand::CreateQueue(_) => "CreateQueue",
+        QueueCommand::Push(_) => "Push",
+        QueueCommand::Claim(_) => "Claim",
+        QueueCommand::Finalize(_) => "Finalize",
+        QueueCommand::UpdateFields(_) => "UpdateFields",
+        QueueCommand::UpdateFieldsBatch(_) => "UpdateFieldsBatch",
+        QueueCommand::MutateItems(_) => "MutateItems",
+        QueueCommand::ReplacePending(_) => "ReplacePending",
+        QueueCommand::PurgeItems(_) => "PurgeItems",
+        QueueCommand::SetGates(_) => "SetGates",
+        QueueCommand::WriteSideRecords(_) => "WriteSideRecords",
+        QueueCommand::AdvanceInstanceFence(_) => "AdvanceInstanceFence",
+        _ => "Other",
+    }
+}
+
 fn unpublished_has_identity(snapshot: &MutationDriverSnapshot) -> bool {
     !snapshot.client_keys.is_empty()
         || !snapshot.request_fingerprints.is_empty()
@@ -3386,15 +3405,20 @@ impl DerivedObjectLogTursoBackend {
                 AsyncControlPlane::create_queue(self.control.as_ref(), definition.clone()).await;
             AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
                 .await?;
-            let high_water =
-                AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), shard.clone())
-                    .await?;
+            let high_water = self.projection.writer_recovery_high_water(&shard).await?;
             let repair_push_receipts = self.projection.has_legacy_push_fingerprints(&shard).await?;
             let mut from = None;
+            // Full rebuild on a live Turso connection cannot apply mixed
+            // Push/UpdateFields/MutateItems in one recovery transaction.
+            let page_size = if high_water.is_none() { 1 } else { 256 };
             loop {
-                let page =
-                    AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
-                        .await?;
+                let page = AsyncLogStore::read_from(
+                    self.log.as_ref(),
+                    shard.clone(),
+                    from.clone(),
+                    page_size,
+                )
+                .await?;
                 if page.entries.is_empty() {
                     break;
                 }
@@ -3429,7 +3453,25 @@ impl DerivedObjectLogTursoBackend {
                         positions,
                         commands,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        let kinds: Vec<_> = tail
+                            .iter()
+                            .map(|(position, envelope)| {
+                                format!(
+                                    "{}:{:?}",
+                                    position.sequence,
+                                    command_kind(&envelope.command)
+                                )
+                            })
+                            .collect();
+                        EngineError::Storage(format!(
+                            "projection recover apply {}/{} commands [{}]: {error}",
+                            shard.tenant_id.as_str(),
+                            shard.queue_id.as_str(),
+                            kinds.join(", ")
+                        ))
+                    })?;
                 }
                 match page.next {
                     Some(next) => from = Some(next),
@@ -4946,19 +4988,164 @@ impl DerivedObjectLogTursoBackend {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn delete_projection_file(&self) -> EngineResult<()> {
-        let path = self.projection_path.clone();
-        // Drop is composition-owned; remove the durable projection file for rebuild.
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| EngineError::Storage(format!("delete turso projection: {e}")))?;
-            for suffix in ["-wal", "-shm"] {
-                let side = PathBuf::from(format!("{}{suffix}", path.display()));
-                let _ = std::fs::remove_file(side);
+    async fn validate_projection_catalog(&self) -> EngineResult<Vec<QueueDefinition>> {
+        let definitions = AsyncLogStore::recover_definitions(self.log.as_ref()).await?;
+        let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
+            .iter()
+            .cloned()
+            .map(|definition| {
+                (
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                    definition,
+                )
+            })
+            .collect();
+        for projected in AsyncProjectionStore::recover_definitions(self.projection.as_ref()).await?
+        {
+            let key = QueueKey::new(projected.tenant_id.clone(), projected.queue_id.clone());
+            let Some(authoritative) = log_by_key.get(&key) else {
+                return Err(EngineError::Storage(
+                    "projection contains a queue absent from the authoritative object log".into(),
+                ));
+            };
+            if authoritative != &projected {
+                return Err(EngineError::Storage(
+                    "projection queue definition conflicts with the authoritative object log"
+                        .into(),
+                ));
+            }
+            let projected_high_water =
+                AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), key.clone())
+                    .await?;
+            let authoritative_high_water =
+                AsyncLogStore::high_water(self.log.as_ref(), key).await?;
+            match (projected_high_water, authoritative_high_water) {
+                (Some(_), None) => {
+                    return Err(EngineError::Storage(
+                        "projection is non-empty but the authoritative object log is empty".into(),
+                    ));
+                }
+                (Some(projected), Some(authoritative))
+                    if projected.backend_epoch > authoritative.backend_epoch
+                        || (projected.backend_epoch == authoritative.backend_epoch
+                            && projected.sequence > authoritative.sequence) =>
+                {
+                    return Err(EngineError::Storage(
+                        "projection is ahead of the authoritative object log".into(),
+                    ));
+                }
+                _ => {}
             }
         }
+        Ok(definitions)
+    }
+
+    fn pause_async_apply(&self) {
+        if let Some(coordinator) = &self.async_apply {
+            coordinator.pause();
+        }
+    }
+
+    async fn drop_queued_async_apply(&self, definitions: &[QueueDefinition]) {
+        let Some(coordinator) = &self.async_apply else {
+            return;
+        };
+        for definition in definitions {
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            coordinator.reset_after_rebuild(shard, None).await;
+        }
+    }
+
+    pub(crate) async fn verify_projection(
+        &self,
+    ) -> EngineResult<crate::ProjectionVerificationState> {
+        let definitions = self.validate_projection_catalog().await?;
+        if let Some(coordinator) = &self.async_apply
+            && !coordinator.is_paused()
+        {
+            for definition in &definitions {
+                let shard =
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                let _ = self.wait_request_entry_coverage(&shard).await;
+            }
+        }
+        let mut projection_sequence = 0;
+        let mut authoritative_sequence = 0;
+        let mut compatible = true;
+        for definition in definitions {
+            let key = QueueKey::new(definition.tenant_id, definition.queue_id);
+            let projected_position =
+                AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), key.clone())
+                    .await?;
+            let authoritative_position = AsyncLogStore::high_water(self.log.as_ref(), key).await?;
+            compatible &= projected_position == authoritative_position;
+            projection_sequence = projection_sequence.max(
+                projected_position
+                    .as_ref()
+                    .map_or(0, |position| position.sequence),
+            );
+            authoritative_sequence = authoritative_sequence.max(
+                authoritative_position
+                    .as_ref()
+                    .map_or(0, |position| position.sequence),
+            );
+        }
+        Ok(crate::ProjectionVerificationState {
+            compatible,
+            projection_sequence,
+            authoritative_sequence,
+        })
+    }
+
+    pub(crate) async fn delete_projection(&self) -> EngineResult<()> {
+        let definitions = AsyncLogStore::recover_definitions(self.log.as_ref()).await?;
+        self.pause_async_apply();
+        self.drop_queued_async_apply(&definitions).await;
+        self.projection.delete_projection().await?;
+        self.unpublished_mutations.lock().await.clear();
+        self.applied_identity.lock().await.clear();
+        self.frontiers.lock().await.clear();
+        self.last_produce.lock().await.clear();
+        self.produce_caught_up.lock().await.clear();
         Ok(())
+    }
+
+    pub(crate) async fn rebuild_projection(
+        &self,
+        max_tail_commands: u64,
+    ) -> EngineResult<crate::ProjectionRebuildState> {
+        self.pause_async_apply();
+        let definitions = AsyncLogStore::recover_definitions(self.log.as_ref()).await?;
+        self.drop_queued_async_apply(&definitions).await;
+        let mut estimated_tail = 0_u64;
+        for definition in &definitions {
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let page = AsyncLogStore::read_from(self.log.as_ref(), key, None, 1).await?;
+            estimated_tail = estimated_tail.saturating_add(page.entries.len() as u64);
+        }
+        if estimated_tail > max_tail_commands {
+            return Err(EngineError::Storage(format!(
+                "projection rebuild exceeds configured tail bound {max_tail_commands}"
+            )));
+        }
+        self.recover_async().await?;
+        self.projection.refresh_serving_reader().await?;
+        for definition in &definitions {
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let recovered = self.projection.writer_recovery_high_water(&shard).await?;
+            if let Some(coordinator) = &self.async_apply {
+                coordinator.reset_after_rebuild(shard, recovered).await;
+            }
+        }
+        if let Some(coordinator) = &self.async_apply {
+            coordinator.resume();
+        }
+        let verification = self.verify_projection().await?;
+        Ok(crate::ProjectionRebuildState {
+            snapshot_used: false,
+            tail_commands_replayed: verification.projection_sequence.max(estimated_tail),
+            projection_sequence: verification.projection_sequence,
+        })
     }
 }
 
@@ -5346,6 +5533,31 @@ pub fn assemble_objectlog_turso(
     })
 }
 
+/// Rebuild a local filesystem object-log × Turso projection through ProjectionLifecycle.
+///
+/// Tests and operators must call this (or `Fireweed::projection_control`) rather
+/// than unlinking projection files and reopening.
+#[cfg(feature = "objectlog")]
+pub async fn rebuild_filesystem_turso_projection(
+    log_root: PathBuf,
+    projection_path: PathBuf,
+    target_bytes: usize,
+    max_latency_ms: u64,
+    async_spec: Option<AsyncProjectionSpec>,
+    max_tail_commands: u64,
+) -> EngineResult<crate::ProjectionRebuild> {
+    let flush = flush_config_from_segment(target_bytes, max_latency_ms);
+    let log = ObjectLogEngineStore::open_local(log_root, flush).await?;
+    let backend = assemble_objectlog_turso(log, projection_path, async_spec)?;
+    backend.delete_projection().await?;
+    let rebuilt = backend.rebuild_projection(max_tail_commands).await?;
+    Ok(crate::ProjectionRebuild {
+        snapshot_used: rebuilt.snapshot_used,
+        tail_commands_replayed: rebuilt.tail_commands_replayed,
+        projection_sequence: rebuilt.projection_sequence,
+    })
+}
+
 #[cfg(all(test, feature = "objectlog"))]
 mod s3v_after_append {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -5599,6 +5811,7 @@ mod s4b_lifecycle {
 
         let lifecycle = crate::ObjectLogTursoLifecycle {
             backend: Some(Arc::clone(&backend)),
+            max_tail_commands: 1_000_000,
         };
         drop(lifecycle);
 

@@ -55,11 +55,13 @@ pub fn is_durable_log_cell(cell: &str) -> bool {
 
 /// Disposable projection rebuild: durable object log + non-memory projection.
 pub fn is_maintenance_cell(cell: &str) -> bool {
-    // Disposable projection rebuild (verify/delete/rebuild) is only available for
-    // object-log cells with Postgres projections. Memory has no durable
-    // projection to rebuild; Turso does not advertise the maintenance control plane.
+    // Disposable projection rebuild (verify/delete/rebuild) is available for
+    // object-log cells with Turso or Postgres projections. Memory has no durable
+    // projection to rebuild.
     parse_cell(cell)
-        .map(|(log, proj)| matches!(log, "filesystem" | "s3") && matches!(proj, "postgres"))
+        .map(|(log, proj)| {
+            matches!(log, "filesystem" | "s3") && matches!(proj, "turso" | "postgres")
+        })
         .unwrap_or(false)
 }
 
@@ -101,12 +103,12 @@ mod tests {
             .copied()
             .filter(|c| is_maintenance_cell(c))
             .collect();
-        // filesystem|s3 × postgres (turso has no projection rebuild control plane)
-        assert_eq!(cells.len(), 2);
+        // filesystem|s3 × turso|postgres
+        assert_eq!(cells.len(), 4);
         for cell in cells {
             let (log, proj) = parse_cell(cell).unwrap();
             assert!(matches!(log, "filesystem" | "s3"));
-            assert!(matches!(proj, "postgres"));
+            assert!(matches!(proj, "turso" | "postgres"));
         }
     }
 }
