@@ -1,0 +1,679 @@
+{
+  "schema": "fireweed-maintenance-verification-archive/v1",
+  "archive_checkout_head": "b2c43ea3e808e8538b9ea0c338314dc557c3fbf6",
+  "provenance_note": "Logs may describe earlier checkouts; archiving does not assign the current HEAD to their executions or turn failures/timeouts into passes.",
+  "allowlist_sha256": "60a3512d08794e5490c0b254a0acb12735ccb1955fc37dfc23224c0d93da8c60",
+  "archiver_sha256": "e11bc03a8117d5558bff373423cb6bf479887e1315bb9c99a4f784d249d58c79",
+  "files": [
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-root-fmt.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-root-fmt.log",
+      "role": "Candidate-4 completed prestage: prestage root-fmt; result ledger records exit status",
+      "source_mtime_ns": 1789693027343971761,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-bench-fmt.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-bench-fmt.log",
+      "role": "Candidate-4 completed prestage: prestage bench-fmt; result ledger records exit status",
+      "source_mtime_ns": 1789693033324852360,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-diff-check.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-diff-check.log",
+      "role": "Candidate-4 completed prestage: prestage diff-check; result ledger records exit status",
+      "source_mtime_ns": 1789693039504576260,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-api005.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-api005.log",
+      "role": "Candidate-4 completed prestage: prestage api005; result ledger records exit status",
+      "source_mtime_ns": 1789693039635296182,
+      "decompressed_bytes": 78,
+      "decompressed_sha256": "adbb03e1a83c717e3936bbd2005bd500fa7799758a52d6fb6f10050bb393aafe",
+      "bytes": 89,
+      "sha256": "515445f6a3d0b37f545fa6a8ca4d638844be743ac86e2a8e2a76dad647c51382"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-routes.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-routes.log",
+      "role": "Candidate-4 completed prestage: prestage routes; result ledger records exit status",
+      "source_mtime_ns": 1789693039717296395,
+      "decompressed_bytes": 210,
+      "decompressed_sha256": "fac2c0e9bc4c026eb1c91144b4299dd8c7c7099891139e3835d1b521c4bbcf3c",
+      "bytes": 165,
+      "sha256": "32ad58ef26335cbd9214fe324d3462013111c3cc43b90224648c547b7f506799"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-bindings.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-bindings.log",
+      "role": "Candidate-4 completed prestage: prestage bindings; result ledger records exit status",
+      "source_mtime_ns": 1789693039871296794,
+      "decompressed_bytes": 187,
+      "decompressed_sha256": "8901a98e8b232723e09544c8fb21ed14b52760f8f0b7fa510c468a6cd7f010fc",
+      "bytes": 149,
+      "sha256": "6a0d96363e6130b3b60ddca02888a6a058c7b3ab8e2f63d16b7f3dea4979b681"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-governed-allowlist.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-governed-allowlist.log",
+      "role": "Candidate-4 completed prestage: prestage governed-allowlist; result ledger records exit status",
+      "source_mtime_ns": 1789693039923677499,
+      "decompressed_bytes": 209,
+      "decompressed_sha256": "a3dbff01a0902911f9959e431c47cc5f84c9b294eafb8cd6ba11596be709b887",
+      "bytes": 154,
+      "sha256": "f35073154432f7eff1af3cfe3d4d4f8e28bf14b9bd23680feb3331c6e1b14c25"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy.log",
+      "role": "Candidate-4 completed prestage: prestage workflow-policy; result ledger records exit status",
+      "source_mtime_ns": 1789693040211297674,
+      "decompressed_bytes": 497,
+      "decompressed_sha256": "e42c1d0d34cd34f3c05a0354c138d1ab09f94b3f1ff6a615fe6f996826ee2d48",
+      "bytes": 274,
+      "sha256": "60740ce9a237b56728c04397eedb9bb897fa5e5fa3498889d9000267b465ef80"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy-fixtures.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy-fixtures.log",
+      "role": "Candidate-4 completed prestage: prestage workflow-policy-fixtures; result ledger records exit status",
+      "source_mtime_ns": 1789693041222300292,
+      "decompressed_bytes": 2651,
+      "decompressed_sha256": "c6cc78c691c426c19ba80d755b504004ec1a9a3f5885b3d2fb78ddd251c599a2",
+      "bytes": 776,
+      "sha256": "5f73b86cce3dd1eb8a135d68bf57016dcef395e660468db212adfc4f6bf2e23a"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-retired-e3.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-retired-e3.log",
+      "role": "Candidate-4 completed prestage: prestage retired-e3; result ledger records exit status",
+      "source_mtime_ns": 1789693041231133042,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-storage-authority.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-storage-authority.log",
+      "role": "Candidate-4 completed prestage: prestage storage-authority; result ledger records exit status",
+      "source_mtime_ns": 1789693041478300954,
+      "decompressed_bytes": 36,
+      "decompressed_sha256": "619bff1c11d87feb7803731a361a8fd213d59a43c4f22daedb485d08eafd5544",
+      "bytes": 56,
+      "sha256": "1b8fd66408a352a5408f94a4ede49a022d59faea968dd0d59f6d68a401b5b012"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-release-version-sources.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-release-version-sources.log",
+      "role": "Candidate-4 completed prestage: prestage release-version-sources; result ledger records exit status",
+      "source_mtime_ns": 1789693041586301233,
+      "decompressed_bytes": 1813,
+      "decompressed_sha256": "24ab1820a479ef5485dbfa926b1c522a76a754a0840d121eec843fc823372634",
+      "bytes": 652,
+      "sha256": "febcb6c70d82fa76f699613ab7f98d4daba0c190e7443b361d4d87735670c8be"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-release-identity.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-release-identity.log",
+      "role": "Candidate-4 completed prestage: prestage release-identity; result ledger records exit status",
+      "source_mtime_ns": 1789693042089302535,
+      "decompressed_bytes": 197,
+      "decompressed_sha256": "20f53a5cf03432c6b7f6eb9e34d24cc6874b6b536364f4cb7e615851643b62f9",
+      "bytes": 159,
+      "sha256": "38e902fc4511299f4127887fd2190d6b7d889ce9bc597e97e4943790709ea3ea"
+    },
+    {
+      "path": "fireweed-maintenance-final-static-candidate-4-prestage-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-results.json",
+      "role": "Candidate-4 completed prestage: serial static-driver outcomes, including incomplete or failed steps",
+      "source_mtime_ns": 1789693042128146189,
+      "decompressed_bytes": 5831,
+      "decompressed_sha256": "4e214b28070be19cc623f762f707a86fbf3a6bd2bd7eab08f089f29a13149653",
+      "bytes": 1152,
+      "sha256": "4b7b17428b9cf9e0ad1adfdfed7962af3b30dc13195165cef5ae8f546f24a55d"
+    },
+    {
+      "path": "fireweed-maintenance-postpush-runtime-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-postpush-runtime-results.json",
+      "role": "Dirty b2-based runtime attempt ledger: workload 33 passed/1 watchdog failure, server 34 passed; historical pending-rerun text retained verbatim",
+      "source_mtime_ns": 1789692247113196114,
+      "decompressed_bytes": 652,
+      "decompressed_sha256": "c598e37967a9901a9b9bf0c4443d9954f147fd6ea0c1187e963cca9f56e768d6",
+      "bytes": 368,
+      "sha256": "e0c048c1082f8e892f9335744f43f327c875440cefa605f369a8edf7ba67f704"
+    },
+    {
+      "path": "fireweed-maintenance-workload-ci-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-workload-ci-followup.log",
+      "role": "Completed debug workload attempt: 33 passed, 1 failed, zero ignored; original three-cycle watchdog failure preserved",
+      "source_mtime_ns": 1789691881059663769,
+      "decompressed_bytes": 9020,
+      "decompressed_sha256": "98176691028ea4d3352f19bd7980190506f1cf247cc0c39b68c8fc08bd6140a7",
+      "bytes": 2639,
+      "sha256": "cb6102236dae398d70c9a4ed9793554027f24de0b5a8549893ced021c81e4a13"
+    },
+    {
+      "path": "fireweed-maintenance-workflow-debug-deadline-trace-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-workflow-debug-deadline-trace-results.json",
+      "role": "Completed exact debug retry: 1 passed in 417.47s with cycle/accounting/API timing summary; not release capacity qualification",
+      "source_mtime_ns": 1789692520495501110,
+      "decompressed_bytes": 2970,
+      "decompressed_sha256": "06b2457f9904c4b44ffa2cb9ae43e878b10e986fbd407bc52f07672d52405376",
+      "bytes": 880,
+      "sha256": "7bb2c75b141dd240748aa1d185cc902eaa439473b0f506f6e9be19db3e7d62a5"
+    },
+    {
+      "path": "fireweed-maintenance-workflow-debug-deadline-trace.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-workflow-debug-deadline-trace.log",
+      "role": "Complete unabridged 417.47s debug retry trace; 600s debug watchdog, unchanged 120s release watchdog; not capacity qualification",
+      "source_mtime_ns": 1789692481905402708,
+      "decompressed_bytes": 1717443,
+      "decompressed_sha256": "7be3c2e7096011d790611f7f1ae99901f6d245b9e9aa01c471dfddd8dc0f171f",
+      "bytes": 262454,
+      "sha256": "bc93b7d2f85d5e5e2d2d1dff4d783aa0a3b271865bc1ae358229d89c0a1dfff8"
+    },
+    {
+      "path": "fireweed-maintenance-server-ownership-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-server-ownership-followup.log",
+      "role": "Completed server integration follow-up: 34 passed, zero failed/ignored, 20.88s; includes unknown-queue ownership regression",
+      "source_mtime_ns": 1789692003680752135,
+      "decompressed_bytes": 7414,
+      "decompressed_sha256": "9095221fb2f7a903c1bcd897676d5b97fbcb2326793f1dad5eb80acf38577d9a",
+      "bytes": 2109,
+      "sha256": "1a7c05aeb40b2275efbbf7cdeffd63d81eb1b7ba2ce6e139c42ba0ee12dabe37"
+    },
+    {
+      "path": "fireweed-maintenance-postgres-ownership-followup.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-postgres-ownership-followup.log",
+      "role": "Completed PostgreSQL ownership follow-up: 2 passed, zero failed/ignored, 0.15s runtime",
+      "source_mtime_ns": 1789692586212847761,
+      "decompressed_bytes": 5132,
+      "decompressed_sha256": "718382bb7d78efbbb5db200f3546ddb4a98bce033b3c5c5544861665fdb22a8f",
+      "bytes": 1363,
+      "sha256": "3bb76ea11a71e16249255185f05226194e9f122f7bf6450484c13d4b9e8e4cf6"
+    },
+    {
+      "path": "fireweed-maintenance-live-e2-followup-results.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-live-e2-followup-results.json",
+      "role": "Derived raw Docker/kind result rows and raw-log hashes: both reruns passed; fast release profile and dirty b2-based source, below 2778 per-queue ingest target, not canonical qualification",
+      "source_mtime_ns": 1789693028541443811,
+      "decompressed_bytes": 2506,
+      "decompressed_sha256": "613820fb01cffd85be6e769192a3f111ccab5003b9ce511a716c92411f9b47f9",
+      "bytes": 804,
+      "sha256": "86ea67b589c499823a0f9a8ac7e742bfef8271c1abdad9b965de435826bf153f"
+    },
+    {
+      "path": "fireweed-maintenance-clippy-post-b2.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-clippy-post-b2.log",
+      "role": "Completed post-b2 workspace Clippy: root-confirmed exit 0, 12.09s; vendored warnings preserved; not runtime or capacity qualification",
+      "source_mtime_ns": 1789693333465987799,
+      "decompressed_bytes": 5154,
+      "decompressed_sha256": "8259645c7da094514987bf70cf048a0b8d36e77e917f7b96abbe9a75e57ef75d",
+      "bytes": 1223,
+      "sha256": "658ee7802b8eb36ef77e22a619fa984c8f28662d9e13dc38b958a5e5fc378e5b"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-run.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-run.json",
+      "role": "e2-first: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification",
+      "source_mtime_ns": 1789693618288602399,
+      "decompressed_bytes": 1118,
+      "decompressed_sha256": "fbb2f3b6bd130201be95bb25f40eeb02f1e1c6a1df74fa3437aa332da7ab7d51",
+      "bytes": 517,
+      "sha256": "7b7f450546bde281972e75c054e58912024c619aa87f2d4fbf6ee633356ce0be"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-summary.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-summary.json",
+      "role": "e2-first: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification",
+      "source_mtime_ns": 1789693618289710237,
+      "decompressed_bytes": 10743,
+      "decompressed_sha256": "a5ccf6d1e880ee4e5a1f8dd9458ae25d0569d8620104043ee176f1442e92cc48",
+      "bytes": 1346,
+      "sha256": "bb75cef966ecdb3fe1bc655268fbebb8f42af4b4a6136957ee46d0d80f1a885a"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-exit-ledger.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-exit-ledger.log",
+      "role": "e2-first: complete serial per-step exit ledger, JSON Lines copied byte-for-byte under .log suffix",
+      "source_mtime_ns": 1789693618290479550,
+      "decompressed_bytes": 6961,
+      "decompressed_sha256": "2b6b6c9a71f77d70c51ca900db937301b2652474dfea336dc2325224be49645c",
+      "bytes": 1206,
+      "sha256": "346c87abd3bd6e7fd76fa175b9ef375676b9b0f9ef6e8a11cbfa4235a76a9f60"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-runtime-manifest.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-runtime-manifest.json",
+      "role": "e2-first: service/loadgen binary and runtime ABI hashes; fixture metadata, not production packaging",
+      "source_mtime_ns": 1789693618290838888,
+      "decompressed_bytes": 2640,
+      "decompressed_sha256": "84a5de9626b423ef93c07ccf55bf2d91f0066e5ab8d699dcc88145b177aaa744",
+      "bytes": 899,
+      "sha256": "e2664561ab2c235456d412f982ab90761cd98ac6fa1786db3ac64867bddab8b1"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-source-revision.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-source-revision.log",
+      "role": "e2-first: completed source-revision step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618290934991,
+      "decompressed_bytes": 41,
+      "decompressed_sha256": "1f0c098f6ab006d232e99751450334263dd48a4e7cd7659b28fcba68e6a28e17",
+      "bytes": 59,
+      "sha256": "a095afd2082ee3045d46057aadcd728ffb05f21515785033a4653e71a0601015"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-source-diff-summary.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-source-diff-summary.log",
+      "role": "e2-first: completed source-diff-summary step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618290934991,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-ordinary-tests.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-ordinary-tests.log",
+      "role": "e2-first: completed ordinary-tests step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618293426685,
+      "decompressed_bytes": 23665,
+      "decompressed_sha256": "0b3c14dbba690a18bfc18a10cfbad01d0458350928ebe422c8efd1235ca6a66c",
+      "bytes": 6039,
+      "sha256": "880aab3abb0e95f78f98f9fcdbada4ed5fd39aeecd4d52227936531be8c5dac5"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-ordinary-doctests.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-ordinary-doctests.log",
+      "role": "e2-first: completed ordinary-doctests step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618293972991,
+      "decompressed_bytes": 4652,
+      "decompressed_sha256": "cc1d4e3b231f242420859396d865f567f62630ab090f9a24c03b687637a15bb4",
+      "bytes": 1161,
+      "sha256": "1a2d624b3fd2e5d983e2707d5be693eb23ddb0734e0c06781b5c18003d7d1b51"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-build-service.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-service.log",
+      "role": "e2-first: completed build-service step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618294726939,
+      "decompressed_bytes": 6803,
+      "decompressed_sha256": "115a763143f42b0a27178d6e251cdf856fdb67704b95e5514cb2d4c0ae5d3a9f",
+      "bytes": 1616,
+      "sha256": "86f1f154e167caadb31021b288d5c73649e32f24fb9f76a561e148f5cac21ad9"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-build-loadgen.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-loadgen.log",
+      "role": "e2-first: completed build-loadgen step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618294865366,
+      "decompressed_bytes": 491,
+      "decompressed_sha256": "614a175ad62fba9af207327dc5e4868a333c0d9b6a499e26344d75d74f7d2f9f",
+      "bytes": 233,
+      "sha256": "398d56a31cf534ee334985def6a94734039f0844cf43423285841727b3beaa40"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-prepare-runtime.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-prepare-runtime.log",
+      "role": "e2-first: completed prepare-runtime step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618294959304,
+      "decompressed_bytes": 100,
+      "decompressed_sha256": "af6d45862f02e2c88160ccb77f89f2c73a8272c3df45fa3d8990b8335fe08c2b",
+      "bytes": 114,
+      "sha256": "c2d426c206d49eb84faddb94a6592822b718af6a892c4ef9bbd6f926258eea2d"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-preflight-docker.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-preflight-docker.log",
+      "role": "e2-first: completed preflight-docker step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618295114703,
+      "decompressed_bytes": 729,
+      "decompressed_sha256": "f384aa6c21e84d7c315831f735b01330d4d3995f5eb9958390cb783e072b7ad1",
+      "bytes": 333,
+      "sha256": "17df3724b9225448f6c722e69eb88bac825a8ba03e81624459b9ea819f5d9cae"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-build-raw-image.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-raw-image.log",
+      "role": "e2-first: completed build-raw-image step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618295310681,
+      "decompressed_bytes": 1180,
+      "decompressed_sha256": "6e8682d1fe29a4a84c87b8f309ffc039d2fcd864c7508297300397c0e2410ecd",
+      "bytes": 533,
+      "sha256": "a22ad76c97f1aec10c5c459e2fb33c1e276ff362c738734282fe3c60ae5871a2"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-build-kind-image.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-kind-image.log",
+      "role": "e2-first: completed build-kind-image step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618295515947,
+      "decompressed_bytes": 1139,
+      "decompressed_sha256": "196fd6e9fd846eb1c4b168a076a40aa43fcc2cf7c95a7298b48b2861cbe125b9",
+      "bytes": 524,
+      "sha256": "906ba49ec604493b2c6d727802cc0a026d2357cf4cf5189703aa60f71ff280bc"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-before-live-hook.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-before-live-hook.log",
+      "role": "e2-first: completed before-live-hook step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618295617289,
+      "decompressed_bytes": 168,
+      "decompressed_sha256": "e3780b2e36d2a6271ce6857c714a12f3f008c7125516a5120f1510363e741f9d",
+      "bytes": 140,
+      "sha256": "07965b25e5c0aeec904ce4e889c7ebeee8ad08f2e8faa2ffc228a5e617aacc75"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-raw-docker-e2.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-raw-docker-e2.log",
+      "role": "e2-first: completed raw-docker-e2 step, recorded status=failed exit=101; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618296220866,
+      "decompressed_bytes": 5574,
+      "decompressed_sha256": "403181d76edf81a94be06907b3aa98e53be30b556a7a9080e44761549aa5244b",
+      "bytes": 1579,
+      "sha256": "9902fe8942356dffa4345d69881a5d121814bbc148f05601876a276c0ce0ee56"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-cleanup-after-raw.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-cleanup-after-raw.log",
+      "role": "e2-first: completed cleanup-after-raw step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618296315781,
+      "decompressed_bytes": 86,
+      "decompressed_sha256": "781f280e690885a0791f0bc364ac7da959e3691ccbb113728da9dbddabab5630",
+      "bytes": 99,
+      "sha256": "6501bd9257509df081aa4812795dbe8c62297e63744897ee40758ef716cf1034"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-kind-e2.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-kind-e2.log",
+      "role": "e2-first: completed kind-e2 step, recorded status=failed exit=101; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618297202359,
+      "decompressed_bytes": 8310,
+      "decompressed_sha256": "293287086aa57112fa9fe6efb37f1a981c25c71d876f431d53d221598530ffaf",
+      "bytes": 2493,
+      "sha256": "e923099200a1a8b65598d06a45d7aae171bc2f820c7df052041835947ac9eec6"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-cleanup-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-cleanup-final.log",
+      "role": "e2-first: completed cleanup-final step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618297520980,
+      "decompressed_bytes": 2308,
+      "decompressed_sha256": "20728275fc239c68b2f898ce0022cae2af4efa8947bb33678df23d4e449f5592",
+      "bytes": 799,
+      "sha256": "cd2ecc5c7ceeb7c9db99d7fd695610a3eaedf7a111ae58d08698136892f7f6a8"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-run.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-run.json",
+      "role": "e2-rerun: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification",
+      "source_mtime_ns": 1789693618297839181,
+      "decompressed_bytes": 1544,
+      "decompressed_sha256": "7e81197d66ff480dd59cc8458b17f38df0f04a5162890653c16a9f0e024d8b1d",
+      "bytes": 716,
+      "sha256": "f7c9aa34ff6d0c8ee426c2d54cff2aabba4dede5527849443b7400629c0b4aac"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-summary.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-summary.json",
+      "role": "e2-rerun: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification",
+      "source_mtime_ns": 1789693618298612824,
+      "decompressed_bytes": 7638,
+      "decompressed_sha256": "b0cee5724bacb741602e89417860a532c0c1c7f8951197a6014c549e7e7b09fb",
+      "bytes": 1293,
+      "sha256": "396eaed67b8a5f9c53a51eebf021e4ae0cd6cafc02b1e103ba17b15ce2e5fcad"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-exit-ledger.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-exit-ledger.log",
+      "role": "e2-rerun: complete serial per-step exit ledger, JSON Lines copied byte-for-byte under .log suffix",
+      "source_mtime_ns": 1789693618299223106,
+      "decompressed_bytes": 5678,
+      "decompressed_sha256": "73cc959f070a220d6b849e18e3a3d68bd3533055a9c54fa72a8e42a89ecc438d",
+      "bytes": 1145,
+      "sha256": "b31573340856a3ec782217f6ecdc77b3984a2da52292e2834c11d3fb5cb333d4"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-runtime-manifest.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-runtime-manifest.json",
+      "role": "e2-rerun: service/loadgen binary and runtime ABI hashes; fixture metadata, not production packaging",
+      "source_mtime_ns": 1789693618299559467,
+      "decompressed_bytes": 2640,
+      "decompressed_sha256": "d538d948e4b3db75a72fe718e406a06ddb7f49c80120ac1aee2256e9682096a1",
+      "bytes": 899,
+      "sha256": "c0b74b43af47114d98184cd441ba3a4449bce3ad2b218d8248052c53cf93ffa8"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-source-revision.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-source-revision.log",
+      "role": "e2-rerun: completed source-revision step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618299651728,
+      "decompressed_bytes": 41,
+      "decompressed_sha256": "1f0c098f6ab006d232e99751450334263dd48a4e7cd7659b28fcba68e6a28e17",
+      "bytes": 59,
+      "sha256": "a095afd2082ee3045d46057aadcd728ffb05f21515785033a4653e71a0601015"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-source-diff-summary.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-source-diff-summary.log",
+      "role": "e2-rerun: completed source-diff-summary step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618299787991,
+      "decompressed_bytes": 595,
+      "decompressed_sha256": "48a04479afdd5c4ffa4b2207e7fae50374dfda77a747dad7c07551a78be1c9cd",
+      "bytes": 284,
+      "sha256": "256d8aa9b09e7441f694eb5bc4caa9ec2969f781bcca61f56e0f1cbab640d790"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-build-service.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-service.log",
+      "role": "e2-rerun: completed build-service step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618300287154,
+      "decompressed_bytes": 4430,
+      "decompressed_sha256": "ba93d63243a8f54133eb6e7748bf9cb0d9f97a616327bec35c165c45720dfbfb",
+      "bytes": 1115,
+      "sha256": "99a45cbc175cf3367e22b848c9a35ee2732f23466aa6bf4ebf035586fe2a37cd"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-build-loadgen.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-loadgen.log",
+      "role": "e2-rerun: completed build-loadgen step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618300392406,
+      "decompressed_bytes": 62,
+      "decompressed_sha256": "0b5fe2277fd2b29cc111b76604c482f8ec516047dbc0954657203c5614f4e4db",
+      "bytes": 82,
+      "sha256": "71df4873fdef16067efa62d2f5ccfa03cc2b8976e622bb39935813b645ea1e60"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-prepare-runtime.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-prepare-runtime.log",
+      "role": "e2-rerun: completed prepare-runtime step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618300481106,
+      "decompressed_bytes": 96,
+      "decompressed_sha256": "bc382cf840bc4e20344f9979809581ee7c4f0fc1c844c4fc90bdc1b0cca4a5e4",
+      "bytes": 109,
+      "sha256": "ec3b8150e2ff97fc766a24b9e0b30616d87ec59e780fa43278f16c67b6e4f84a"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-preflight-docker.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-preflight-docker.log",
+      "role": "e2-rerun: completed preflight-docker step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618300636435,
+      "decompressed_bytes": 729,
+      "decompressed_sha256": "f384aa6c21e84d7c315831f735b01330d4d3995f5eb9958390cb783e072b7ad1",
+      "bytes": 333,
+      "sha256": "17df3724b9225448f6c722e69eb88bac825a8ba03e81624459b9ea819f5d9cae"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-build-raw-image.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-raw-image.log",
+      "role": "e2-rerun: completed build-raw-image step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618300838349,
+      "decompressed_bytes": 1254,
+      "decompressed_sha256": "19f62b39bea3cc3c5d561941efad465902d7b9b111e453a3d9f4444ec43b49f3",
+      "bytes": 534,
+      "sha256": "7e790bc6c62a56f3aa1ceaeb3fb7287f9525555c5f9f7d14d934b5b54fa8c1c8"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-build-kind-image.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-kind-image.log",
+      "role": "e2-rerun: completed build-kind-image step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618301036841,
+      "decompressed_bytes": 1216,
+      "decompressed_sha256": "6aea97420251b8ff052722be8235787ec22129d6d56bfb562adada01fc7020ed",
+      "bytes": 532,
+      "sha256": "6279f1bfd2741ba28167611c38b0793019e41fd4cf8060320ee84b3b1640b52a"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-raw-docker-e2.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-raw-docker-e2.log",
+      "role": "e2-rerun: completed raw-docker-e2 step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618301824313,
+      "decompressed_bytes": 5860,
+      "decompressed_sha256": "59a15e88fcf482368345f36b7cebc1560321f980b5221676ad1005b9dfe5761d",
+      "bytes": 1700,
+      "sha256": "19c9f286ca04105953cebd0cb6531faed2d4733f86f4065b88c6b528928f93dd"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-cleanup-after-raw.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-cleanup-after-raw.log",
+      "role": "e2-rerun: completed cleanup-after-raw step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618301931451,
+      "decompressed_bytes": 86,
+      "decompressed_sha256": "25f9704010d6f2dc608118d43e8ebb72ff8bb3d16582844d4497bbbca8c693ab",
+      "bytes": 99,
+      "sha256": "1e439e286af69b09d8de40cadd87b6074205ac1527d7ce7a2f4d1f4443b45d6c"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-kind-e2.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-kind-e2.log",
+      "role": "e2-rerun: completed kind-e2 step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618303133716,
+      "decompressed_bytes": 11583,
+      "decompressed_sha256": "c41c3c8de40449e6cc8a792edd2305b2a65a7ebcf1015255fc23126d477599c6",
+      "bytes": 3031,
+      "sha256": "16d1ca59ea6b602671a9142940efd88276a77dd5fc117607343a93e9bfee66b4"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-cleanup-final.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-cleanup-final.log",
+      "role": "e2-rerun: completed cleanup-final step, recorded status=passed exit=0; see unchanged outcome ledger",
+      "source_mtime_ns": 1789693618303446679,
+      "decompressed_bytes": 2308,
+      "decompressed_sha256": "9ca2b6688fcfa3044823caaa4a30be76410706b2d7e94666939c93f8c6929347",
+      "bytes": 794,
+      "sha256": "48ff7b59830b36fcc39a75dc422382661759a6c81aa3b2a0812708389ff45b8e"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-prior-evidence.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-prior-evidence.json",
+      "role": "E2 rerun reference to the original 30-test ordinary run; explicitly does not claim those tests were rerun",
+      "source_mtime_ns": 1789693618303625266,
+      "decompressed_bytes": 1173,
+      "decompressed_sha256": "a6b374a587e66cc2f0d96ec1609df77e6b66cbfe6f60d7045720ff263b0b1669",
+      "bytes": 491,
+      "sha256": "34fe176c877f7d940003f06cf17c35ece5608f517e301182e5fdfa2ae74d7347"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-kind-matrix.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-kind-matrix.log",
+      "role": "First kind failure matrix: empty original JSON Lines file retained as no successful rows; failure remains in raw log",
+      "source_mtime_ns": 1789693618303625266,
+      "decompressed_bytes": 0,
+      "decompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 20,
+      "sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-queue-density-ledger.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-queue-density-ledger.log",
+      "role": "Original completed ordinary benchmark queue-density record, byte-preserved JSON Lines; portable verification only",
+      "source_mtime_ns": 1789693618303851415,
+      "decompressed_bytes": 956,
+      "decompressed_sha256": "c610616d640d7088b48ba1e599109c03677b567d876b024eab5ec18062145b0a",
+      "bytes": 529,
+      "sha256": "ecaba165b6ca3c378867e58074643d26f62876169ff6d271934794d87528e516"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-first-scale-out-ledger.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-first-scale-out-ledger.log",
+      "role": "Original completed ordinary benchmark scale-out record, byte-preserved JSON Lines; portable verification only",
+      "source_mtime_ns": 1789693618304017361,
+      "decompressed_bytes": 913,
+      "decompressed_sha256": "a6385b914bbfaad18d2778ee9daba9c22f13d3fe7caf3f67b5e7614cab1c79ce",
+      "bytes": 542,
+      "sha256": "245a30012d2f7705dae976edc2b0b580d18301ab93b29f099a7ce6aea77dcbb6"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-e2-rerun-raw-docker-ledger.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-raw-docker-ledger.log",
+      "role": "Completed raw Docker rerun exact result ledger, byte-preserved JSON Lines; fast release verification profile",
+      "source_mtime_ns": 1789693618304268793,
+      "decompressed_bytes": 1886,
+      "decompressed_sha256": "67d6ce48ea595770cd2c1e25b6aa1f923f0603a5cecafec5474e3c9c26d1619a",
+      "bytes": 947,
+      "sha256": "0ca8e48614e3fc60d0a5eebd978e9ad3c6dc9cbfd50f1c45f98c397ff470576f"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-remote-b2-failure-review.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-remote-b2-failure-review.json",
+      "role": "Read-only completed remote b2 CI/Turso failure review with run URLs, times and skipped later steps; no corrected remote success claimed",
+      "source_mtime_ns": 1789693618305000461,
+      "decompressed_bytes": 2489,
+      "decompressed_sha256": "f3eea22655f6dab69df73d8ace9efb90c925e415ecc85f239c6b6add1914d189",
+      "bytes": 1119,
+      "sha256": "98a7a521507b0560f64803996209ed96495a6be42e1e0b7583aeff55240aef9d"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-remote-b2-turso-failed.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-remote-b2-turso-failed.log",
+      "role": "Original remote b2 Turso workflow failure log: concurrent-delivery projection-coverage Backpressure failure; not a passing run",
+      "source_mtime_ns": 1789693618311699384,
+      "decompressed_bytes": 55061,
+      "decompressed_sha256": "c848d5b4fa8f0bb788445580e6f7cc5bd28a5574ff556c3d6587f001d43709d8",
+      "bytes": 7925,
+      "sha256": "0614385675034b18ff0b597e9322986c953992814e37f218b06f42f2e77cd835"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-archive-review.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-archive-review.json",
+      "role": "Archive preparation scope, read-only policy review, exclusions and absent cleaned kind matrix; no execution or qualification claim",
+      "source_mtime_ns": 1789693655119456321,
+      "decompressed_bytes": 2711,
+      "decompressed_sha256": "eaf4d1dcf17d545bbdb5bef7700d7c3edb098de42983a661085d2809e80491ae",
+      "bytes": 1333,
+      "sha256": "c93cf29b84b8c62c7dde3147cbf130c58ee3a067741cb41e1628d708231dbc55"
+    },
+    {
+      "path": "fireweed-maintenance-ci-b2-failed.log.gz",
+      "source_path": "/tmp/fireweed-maintenance-ci-b2-failed.log",
+      "role": "Original completed remote b2 CI missing-rg failure log, run 35290736995; gh failed-log read exited zero, the CI job failed; no corrected remote success claim",
+      "source_mtime_ns": 1789693541806416631,
+      "decompressed_bytes": 172145,
+      "decompressed_sha256": "fd3df4ab8ccf13c66fc33bfa4b88a598c810a69ac371213843243b30b1a4bbcb",
+      "bytes": 23590,
+      "sha256": "e361f622d2fd3e446cc0759a6d0718004ac98df8047ac05d3d32b50db1459c62"
+    },
+    {
+      "path": "fireweed-maintenance-post-b2-source-map.json.gz",
+      "source_path": "/tmp/fireweed-maintenance-post-b2-source-map.json",
+      "role": "Original-to-archive-input source mapping with byte counts and SHA-256 digests; copies preserve all bytes and execution provenance",
+      "source_mtime_ns": 1789693655119704401,
+      "decompressed_bytes": 42113,
+      "decompressed_sha256": "30d460d2188791cbe3c051d955e9e0ee0d1168c7fb579ad3593c3dec8bbc5bbb",
+      "bytes": 6566,
+      "sha256": "dcdf647ad2c87a70342d74f2c87d9f26b7e89a18220b10740c9f4df33f04ffa0"
+    }
+  ]
+}

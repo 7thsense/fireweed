@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
+import tomllib
 
 from fireweed_test_placement import PlacementError
 from fireweed_test_placement import self_test as fireweed_placement_self_test
@@ -31,6 +34,109 @@ class PolicyError(AssertionError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise PolicyError(message)
+
+
+# These two ignores compensate for macro expansion / Cargo feature unification,
+# not unused dependencies. Keep the allowlist independent of vendor debt scope.
+VENDOR_MACHETE_PAIRS = {
+    ("vendor/turso_core/Cargo.toml", "antithesis_sdk"),
+    ("vendor/turso_sdk_kit/Cargo.toml", "parking_lot"),
+}
+
+
+def validate_vendor_dependency_invariants(
+    manifests: dict[str, dict[str, object]], core_source: str, sdk_source: str
+) -> None:
+    pairs = []
+    for path, manifest in manifests.items():
+        ignored = manifest.get("package", {}).get("metadata", {}).get("cargo-machete", {}).get("ignored", [])
+        require(isinstance(ignored, list), f"vendor cargo-machete ignored list: {path}")
+        pairs.extend((path, dependency) for dependency in ignored)
+    require(
+        len(pairs) == len(VENDOR_MACHETE_PAIRS) and set(pairs) == VENDOR_MACHETE_PAIRS,
+        "vendor cargo-machete ignores must be exactly the reviewed macro/feature pairs",
+    )
+    core = manifests["vendor/turso_core/Cargo.toml"]
+    antithesis = core.get("target", {}).get("cfg(antithesis)", {}).get("dependencies", {}).get("antithesis_sdk", {})
+    require(
+        antithesis.get("version") and antithesis.get("features") == ["full"]
+        and antithesis.get("default-features") is False,
+        "antithesis_sdk ignore requires the cfg(antithesis) full-feature dependency",
+    )
+    require(core.get("dependencies", {}).get("turso_macros", {}).get("version"), "assertion macro dependency missing")
+    exports = re.search(r"pub use turso_macros::\{([^}]+)\};", core_source, re.DOTALL)
+    require(
+        exports is not None and {"turso_assert", "turso_assert_sometimes"}.issubset(
+            {name.strip() for name in exports.group(1).split(",")}
+        ),
+        "antithesis_sdk ignore requires Turso assertion macro exports",
+    )
+    sdk = manifests["vendor/turso_sdk_kit/Cargo.toml"]
+    dependencies = sdk.get("dependencies", {})
+    parking_lot = dependencies.get("parking_lot", {})
+    require(
+        parking_lot.get("version") and parking_lot.get("features") == ["send_guard"]
+        and dependencies.get("turso_core", {}).get("path") == "../turso_core",
+        "parking_lot ignore requires send_guard feature unification with vendored core",
+    )
+    require(
+        "assert_send!(TursoDatabase, TursoConnection, TursoStatement);" in sdk_source,
+        "parking_lot ignore requires the SDK's Send assertions",
+    )
+
+
+def vendor_dependency_sources() -> tuple[dict[str, dict[str, object]], str, str]:
+    paths = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", "vendor/"], cwd=ROOT, text=True
+    ).split("\0")
+    manifests = {
+        path: tomllib.loads((ROOT / path).read_text())
+        for path in sorted(paths) if Path(path).name == "Cargo.toml"
+    }
+    return manifests, (ROOT / "vendor/turso_core/lib.rs").read_text(), (ROOT / "vendor/turso_sdk_kit/src/rsapi.rs").read_text()
+
+
+def validate_external_dependencies(
+    observations: object, registries: set[str], product_ids: set[str], *, check_repository: bool
+) -> None:
+    require(isinstance(observations, dict), "external dependency observations must be an object")
+    require(set(observations) == {"scope", "qualification", "findings"}, "external observation schema drift")
+    require(observations["scope"] == "vendor/", "external scope must be vendor/ only")
+    require(
+        observations["qualification"] == "not_qualified_by_product_closure",
+        "external observations must not claim product qualification",
+    )
+    require(isinstance(observations["findings"], list), "external observations findings must be a list")
+    seen = set(product_ids)
+    machete_pairs = []
+    for observation in observations["findings"]:
+        require(isinstance(observation, dict) and set(observation) == {"registry", "finding"}, "external finding schema")
+        registry, row = observation["registry"], observation["finding"]
+        require(registry in registries, "unknown external source registry")
+        require(isinstance(row, dict), "external finding must retain its original debt row")
+        path = row.get("path", "")
+        require(isinstance(path, str), "external finding path must be a string")
+        parts = path.split("/")
+        require(
+            len(parts) > 1 and parts[0] == "vendor" and "\\" not in path
+            and all(part not in {"", ".", ".."} for part in parts),
+            f"external finding is outside normalized vendor scope: {path}",
+        )
+        if check_repository:
+            require((ROOT / path).resolve().is_relative_to((ROOT / "vendor").resolve()), "external path escapes vendor via symlink")
+        require(row["id"] not in seen, f"duplicate product/external finding id {row['id']}")
+        seen.add(row["id"])
+        require(row["owner"] and row["dependency_chain"], "external finding lost original ownership")
+        require(row["status"] in {"debt", "legacy_false_green", "discovery_negative"}, "external observations cannot be labeled passes")
+        if registry == "cargo_machete_exceptions" or row.get("category") == "cargo_machete_exception":
+            require(registry == "cargo_machete_exceptions" and row.get("category") == "cargo_machete_exception", "external machete category mismatch")
+            machete_pairs.append((path, row["identity"]))
+    require(
+        len(machete_pairs) == len(VENDOR_MACHETE_PAIRS) and set(machete_pairs) == VENDOR_MACHETE_PAIRS,
+        "external observations must retain exactly the reviewed vendor macro/feature ignores",
+    )
+    if check_repository:
+        validate_vendor_dependency_invariants(*vendor_dependency_sources())
 
 
 def parse_mode(path: Path) -> str:
@@ -72,6 +178,7 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         "rustdoc_routes",
         "fireweed_test_placement",
         "debt_registries",
+        "external_dependency_observations",
         "release_repeat_quarantine",
         "discovery_negatives",
     }
@@ -116,6 +223,10 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         require(
             document["debt_registries"] == refreshed["debt_registries"],
             "discovered debt changed; regenerate remediation inventory",
+        )
+        require(
+            document["external_dependency_observations"] == refreshed["external_dependency_observations"],
+            "external dependency observations changed; regenerate remediation inventory",
         )
         require(
             document["release_repeat_quarantine"] == refreshed["release_repeat_quarantine"],
@@ -177,6 +288,7 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
     for category, rows in registries.items():
         require(isinstance(rows, list), f"{category} registry")
         for row in rows:
+            require(not str(row["path"]).startswith("vendor/"), "vendor finding must remain visible in external observations")
             require(row["id"] not in debt_ids, f"duplicate debt id {row['id']}")
             debt_ids.add(row["id"])
             require(row["owner"], f"unassigned debt {row['id']}")
@@ -184,6 +296,10 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             require(row["status"] in {"debt", "legacy_false_green", "discovery_negative"}, "debt status")
             if row["status"] != "discovery_negative":
                 debt_count += 1
+    validate_external_dependencies(
+        document["external_dependency_observations"], required_registries, debt_ids,
+        check_repository=check_repository,
+    )
     # P10w: after exclusive workflow owners land, every workflow_inline hit is either
     # an executed policy-positive (discovery_negative) or residual exclusive-owner debt.
     # Residual debt is forbidden in the checked-in inventory; the zero-debt report
@@ -312,14 +428,95 @@ def self_test(document: dict[str, object]) -> None:
         pass
     else:
         raise PolicyError("malformed inventory fixture passed")
-    debt = validate_inventory(document, "remediation", check_repository=False)
-    require(debt > 0, "remediation fixture must report debt")
+    diagnostic_passed = runpy.run_path(str(GENERATOR))["sql_timing_diagnostic_log_passed"]
+    summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+    ordinary = "running 1 test\ntest module::diagnostic ... ok\n\n" + summary
+    interleaved = "running 1 test\ntest module::diagnostic ... measured=1\nmore output\nok\n\n" + summary
+    require(diagnostic_passed(ordinary, "diagnostic"), "ordinary diagnostic success rejected")
+    require(diagnostic_passed(interleaved, "diagnostic"), "interleaved diagnostic success rejected")
+    failed = "running 1 test\ntest module::diagnostic ... FAILED\n\n"
+    for malformed_log in (
+        failed + ordinary.replace("module::diagnostic", "module::unrelated"),
+        failed + summary,
+        ordinary + ordinary,
+        ordinary.replace("... ok", "... FAILED"),
+        interleaved.replace("more output", "FAILED"),
+        ordinary.replace("module::diagnostic", "module::unrelated"),
+    ):
+        require(not diagnostic_passed(malformed_log, "diagnostic"), "failed or concatenated diagnostic fixture passed")
+
+    baseline = validate_inventory(document, "remediation", check_repository=False)
+    product_debt = {
+        "id": "policy-self-test-product-debt", "category": "ignored_test",
+        "path": "crates/fireweed/src/policy_fixture.rs", "line": 1,
+        "identity": '#[ignore = "unresolved product failure"]', "status": "debt",
+        "owner": "P2f", "dependency_chain": ["P2f"], "detail": "negative fixture",
+    }
+    fixture = copy.deepcopy(document)
+    fixture["debt_registries"]["ignored_tests"].append(product_debt)
+    require(
+        validate_inventory(fixture, "remediation", check_repository=False) == baseline + 1,
+        "product ignored-test debt was not counted",
+    )
     try:
-        validate_inventory(document, "closure", check_repository=False)
+        validate_inventory(fixture, "closure", check_repository=False)
     except PolicyError:
         pass
     else:
-        raise PolicyError("closure fixture passed with debt")
+        raise PolicyError("closure fixture passed with product debt")
+
+    def reject_external(label: str, row: dict[str, object]) -> None:
+        fixture = copy.deepcopy(document)
+        fixture["external_dependency_observations"]["findings"].append(
+            {"registry": "ignored_tests", "finding": row}
+        )
+        try:
+            validate_inventory(fixture, "remediation", check_repository=False)
+        except PolicyError:
+            return
+        raise PolicyError(f"external observation fixture passed: {label}")
+
+    reject_external("product debt smuggled into vendor", product_debt)
+    reject_external("vendor traversal", {**product_debt, "path": "vendor/../crates/fireweed/src/policy_fixture.rs"})
+    # Ordinary upstream failures remain visible, unresolved and outside product closure.
+    upstream = {**product_debt, "path": "vendor/turso_core/policy_fixture.rs"}
+    fixture = copy.deepcopy(document)
+    fixture["external_dependency_observations"]["findings"].append({"registry": "ignored_tests", "finding": upstream})
+    require(validate_inventory(fixture, "remediation", check_repository=False) == baseline, "upstream observation changed product debt count")
+    reject_external("upstream finding falsely called a pass", {**upstream, "status": "passed"})
+    fixture = copy.deepcopy(document)
+    fixture["external_dependency_observations"]["findings"].append({
+        "registry": "cargo_machete_exceptions",
+        "finding": {**upstream, "category": "cargo_machete_exception", "identity": "arbitrary_unused_dependency"},
+    })
+    try:
+        validate_inventory(fixture, "remediation", check_repository=False)
+    except PolicyError:
+        pass
+    else:
+        raise PolicyError("arbitrary vendor dependency ignore passed")
+
+    manifests, core_source, sdk_source = vendor_dependency_sources()
+    validate_vendor_dependency_invariants(manifests, core_source, sdk_source)
+    for label in ("extra_ignore", "missing_send_guard", "missing_antithesis_cfg", "missing_assertion_macros", "missing_send_assertions"):
+        changed = copy.deepcopy(manifests)
+        changed_core, changed_sdk = core_source, sdk_source
+        if label == "extra_ignore":
+            changed["vendor/turso_sdk_kit/Cargo.toml"]["package"]["metadata"]["cargo-machete"]["ignored"].append("unused")
+        elif label == "missing_send_guard":
+            changed["vendor/turso_sdk_kit/Cargo.toml"]["dependencies"]["parking_lot"]["features"] = []
+        elif label == "missing_antithesis_cfg":
+            changed["vendor/turso_core/Cargo.toml"]["target"].pop("cfg(antithesis)")
+        elif label == "missing_assertion_macros":
+            changed_core = ""
+        else:
+            changed_sdk = ""
+        try:
+            validate_vendor_dependency_invariants(changed, changed_core, changed_sdk)
+        except PolicyError:
+            pass
+        else:
+            raise PolicyError(f"vendor ignore invariant fixture passed: {label}")
 
 
 def main() -> int:
@@ -339,9 +536,11 @@ def main() -> int:
         validate_shape()
         debt_count = validate_inventory(document, policy, check_repository=True)
         if policy == "remediation":
-            print(f"storage remediation policy: {debt_count} assigned debt rows (report-only; not closure)")
+            print(f"storage remediation policy: {debt_count} assigned product debt rows (report-only; not closure)")
         else:
-            print("storage remediation policy: zero debt; closure enabled")
+            print("storage remediation policy: zero product debt; product closure enabled")
+        count = len(document["external_dependency_observations"]["findings"])
+        print(f"external dependency observations: {count}; not qualified by product closure")
         return 0
     except (PolicyError, PlacementError, json.JSONDecodeError, KeyError, TypeError) as error:
         print(f"storage remediation policy failed: {error}", file=sys.stderr)

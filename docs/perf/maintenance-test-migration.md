@@ -153,6 +153,76 @@ mandatory; they do not claim those online maintenance APIs. General
 `side_record_query` is still a universally deferred API. Ordered prefix reads
 are a supported separate contract and require positive assertions.
 
+## Post-checkpoint test and ownership fixes
+
+The [durable post-b2 verification manifest](evidence/maintenance-verification-post-b2-v0.31.28/manifest.json)
+retains the completed attempts below, including original failures, reruns,
+cleanup records and source hashes. The current all-feature, all-target workspace
+Clippy check passes with warnings denied in 12.09 seconds
+([archived log](evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-clippy-post-b2.log.gz)).
+
+The ordinary independent benchmark run after `b2c43ea3` passed 30 tests with
+zero ignored tests; two live E2 cases were selected separately. Both subsequent
+Docker/kind attempts failed because non-owner `XLEN` incorrectly returned zero
+for an unprovisioned queue. Cleanup succeeded, and the rejection assertions in
+both live tests remain unchanged. `OwnershipRuntime::acquire_queue` now checks
+the queue catalog before lease acquisition or log fencing; a missing log epoch
+is no longer treated as proof that a queue exists. The new black-box
+`objectlog_turso_rejects_unprovisioned_queue_before_ownership_acquisition` checks
+Strict and AsyncProjection: configured empty queues are readable, unknown reads
+and writes return `ERR no such queue`, and configured queues still accept work.
+The complete server integration rerun passes 34 tests in 20.88 seconds with
+zero failures or ignored tests. The subsequent raw Docker and kind reruns each
+pass one test, in 34.37 and 106.78 seconds respectively, with zero failures or
+ignored tests and successful cleanup. Both retain all 56/56 wrong-owner checks
+at eight owners. These RESP push/claim/finalize runs reach roughly 16,600
+aggregate ingest items/s; they do not exercise the complete
+enrichment/retention workflow. The
+approximately 2,778 items/s per-queue ingest target remains unmet and is
+reported separately from portable correctness/progress gates. These single
+runs use the fast release profile and dirty checkpoint-based source; they are
+not canonical or governed qualification. The PostgreSQL ownership follow-up
+passes both shared-membership/monotonic-epoch and one-hop `MOVED` tests, with
+zero failures or ignored tests.
+
+`concurrent_full_delivery_batches_remain_disjoint` retains eight concurrent
+1,000-item claims, exact batch sizes and global ID-disjointness. It now retries
+only the transient backpressure handled by the existing helper within the
+original 45-second overall limit. All 13 local contract tests pass. The full
+debug workload attempt has 33 passes, one failure and zero ignored tests:
+`full_batches_recycle_original_rows_without_orphaned_leases` exceeded its
+120-second watchdog. Its three-cycle workload and accounting assertions remain;
+the debug-only watchdog is now 600 seconds while release remains 120 seconds.
+The exact traced debug rerun passes all three cycles in 417.47 seconds with
+zero pending rows or leases and the expected final dispositions, resolving
+that case without changing the earlier full-run totals. Remote CI setup also
+now installs its missing `ripgrep` prerequisite;
+a corrected remote run is not claimed here.
+
+The applied inventory/policy correction retains vendored findings in explicit
+external observations, outside product closure and without declaring them
+passes. Product findings cannot be moved outside closure by relabeling their
+paths. Only the reviewed `turso_core`/`antithesis_sdk` assertion-macro dependency
+and `turso_sdk_kit`/`parking_lot` `send_guard` feature dependency may remain as
+machete exceptions, with manifest/source invariants checked by the policy.
+Three named SQL timing diagnostics require successful retained historical logs
+and are explicitly neither current execution nor capacity evidence. The exact
+reclamation counter assignment is classified as backpressure accounting, not a
+test skip. All 13 candidate-4 prestage checks pass, including route/binding
+regeneration, workflow-policy fixtures and storage-authority/release-identity
+checks. The candidate-4 compiled inventory then passed in 2,072.307 seconds,
+listing both workspaces and 2,041 harness routes, with five exactly executed
+documentation tests. All eight poststage checks pass, including the corrected
+storage-policy classifications and negative fixtures: zero product debt, with
+148 external observations retained without qualification. The earlier
+closure failure and upstream limitations remain recorded. Route listing alone
+does not establish execution of every runtime test. The new inventory/poststage
+records await final archival and are not included in the existing 67-artifact
+post-b2 manifest. The two upstream stress reruns and canonical C1/P1/C2/P2
+qualification remain pending. Completed attempt locations and pending
+canonical qualification are recorded in the
+[maintenance verification baseline](maintenance-release-baseline.md#candidate-verification-status).
+
 ## Retired evidence producers and current entrypoints
 
 Removed `record-current-tp003-td008-evidence.sh` and

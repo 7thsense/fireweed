@@ -2106,9 +2106,9 @@
         "server"
       ],
       "lines": [
-        5337,
-        5343,
-        5345
+        5341,
+        5347,
+        5349
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "evidence_output"
@@ -2118,10 +2118,10 @@
         "server"
       ],
       "lines": [
-        5567,
         5571,
-        5573,
-        5577
+        5575,
+        5577,
+        5581
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_evidence_axis_names_file_contract"
@@ -3185,93 +3185,93 @@
         "script"
       ],
       "lines": [
-        1153,
-        1195,
-        1209,
-        1223,
-        1237,
-        1279,
-        1293,
-        1307,
-        1321,
-        1335,
-        1349,
-        1363,
-        1377,
-        1391,
-        1405,
-        1419,
-        1433,
-        1447,
-        1461,
-        1475,
-        1489,
-        1503,
-        1517,
-        1531,
-        1545,
-        1559,
-        1573,
-        1601,
-        1615,
-        1629,
-        1643,
-        1657,
-        1699,
-        1727,
-        1741,
-        1755,
-        1769,
-        1783,
-        1797,
-        1951,
-        2007,
-        2021,
-        2049,
-        2063,
-        2091,
-        2175,
-        2189,
-        2203,
-        2217,
-        2245,
-        2315,
-        2329,
-        2357,
-        2385,
-        2413,
-        2441,
-        2455,
-        2469,
-        2483,
-        2497,
-        2525,
-        2539,
-        2567,
-        2805,
-        2819,
-        2833,
-        2861,
-        2959,
-        3001,
-        3043,
-        3057,
-        3071,
-        3127,
-        3155,
-        3169,
-        3183,
-        3197,
-        3253,
-        3379,
-        3393,
-        3673,
-        3897,
-        4009,
-        7978,
-        8034,
-        8076,
-        8216
+        816,
+        858,
+        872,
+        886,
+        900,
+        942,
+        956,
+        970,
+        984,
+        998,
+        1012,
+        1026,
+        1040,
+        1054,
+        1068,
+        1082,
+        1096,
+        1110,
+        1124,
+        1138,
+        1152,
+        1166,
+        1180,
+        1194,
+        1208,
+        1222,
+        1236,
+        1264,
+        1278,
+        1292,
+        1306,
+        1320,
+        1362,
+        1390,
+        1404,
+        1418,
+        1432,
+        1446,
+        1460,
+        1614,
+        1670,
+        1684,
+        1712,
+        1726,
+        1754,
+        1838,
+        1852,
+        1866,
+        1880,
+        1908,
+        1978,
+        1992,
+        2020,
+        2048,
+        2076,
+        2104,
+        2118,
+        2132,
+        2146,
+        2160,
+        2188,
+        2202,
+        2230,
+        2468,
+        2482,
+        2496,
+        2524,
+        2622,
+        2664,
+        2706,
+        2720,
+        2734,
+        2790,
+        2818,
+        2832,
+        2846,
+        2860,
+        2916,
+        3042,
+        3056,
+        3336,
+        3560,
+        3672,
+        6003,
+        6059,
+        6101,
+        6241
       ],
       "path": "scripts/ci/storage-remediation-inventory.json",
       "symbol": "<module>"
@@ -3431,7 +3431,7 @@
       "calls": [
         "run"
       ],
-      "line": 891,
+      "line": 989,
       "path": "scripts/ci/inventory-storage-remediation.py",
       "symbol": "public_release_gate_failures"
     },
@@ -3790,16 +3790,16 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "e6cb5001a1abca460b97d2cb90b89b73cd036b06698144b9226470b440e8b87a",
+  "scan_sha256": "46c3a03d78fc78f5df0c3067f355336f395a33eeb0b563fd6e120dc5ee833699",
   "schema_version": 2,
   "source_surfaces": [
     {
       "evidence_paths": [],
-      "first_match_line": 45,
+      "first_match_line": 50,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 45,
+      "last_match_line": 50,
       "line": 1,
       "markers": [
         "evidence"
@@ -11469,12 +11469,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5291,
+      "first_match_line": 5295,
       "groups": [
         "server"
       ],
-      "last_match_line": 5307,
-      "line": 5272,
+      "last_match_line": 5311,
+      "line": 5276,
       "markers": [
         "evidence",
         "tp003"
@@ -11488,12 +11488,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5333,
+      "first_match_line": 5337,
       "groups": [
         "server"
       ],
-      "last_match_line": 5345,
-      "line": 5332,
+      "last_match_line": 5349,
+      "line": 5336,
       "markers": [
         "evidence",
         "tp003"
@@ -11507,12 +11507,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5528,
+      "first_match_line": 5532,
       "groups": [
         "server"
       ],
-      "last_match_line": 5547,
-      "line": 5526,
+      "last_match_line": 5551,
+      "line": 5530,
       "markers": [
         "evidence"
       ],
@@ -11525,12 +11525,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5562,
+      "first_match_line": 5566,
       "groups": [
         "server"
       ],
-      "last_match_line": 5581,
-      "line": 5562,
+      "last_match_line": 5585,
+      "line": 5566,
       "markers": [
         "evidence",
         "tp003"
@@ -11544,12 +11544,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5669,
+      "first_match_line": 5673,
       "groups": [
         "server"
       ],
-      "last_match_line": 5669,
-      "line": 5667,
+      "last_match_line": 5673,
+      "line": 5671,
       "markers": [
         "evidence"
       ],
@@ -13942,15 +13942,31 @@
       "symbol": "run_cargo"
     },
     {
-      "evidence_paths": [
-        "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/manifest.json"
-      ],
-      "first_match_line": 96,
+      "evidence_paths": [],
+      "first_match_line": 86,
       "groups": [
         "script"
       ],
-      "last_match_line": 104,
-      "line": 1,
+      "last_match_line": 95,
+      "line": 76,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 6,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/inventory-storage-remediation.py",
+      "symbol": "sql_timing_diagnostic_detail"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 180,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 188,
+      "line": 98,
       "markers": [
         "evidence"
       ],
@@ -13959,16 +13975,16 @@
         "reader"
       ],
       "path": "scripts/ci/inventory-storage-remediation.py",
-      "symbol": "<module>"
+      "symbol": "separate_external_dependencies"
     },
     {
       "evidence_paths": [],
-      "first_match_line": 155,
+      "first_match_line": 239,
       "groups": [
         "script"
       ],
-      "last_match_line": 155,
-      "line": 148,
+      "last_match_line": 239,
+      "line": 232,
       "markers": [
         "public_identity"
       ],
@@ -13982,13 +13998,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 184,
+      "first_match_line": 268,
       "groups": [
         "e3",
         "script"
       ],
-      "last_match_line": 185,
-      "line": 182,
+      "last_match_line": 269,
+      "line": 266,
       "markers": [
         "e3"
       ],
@@ -14001,13 +14017,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 223,
+      "first_match_line": 307,
       "groups": [
         "e3",
         "script"
       ],
-      "last_match_line": 227,
-      "line": 214,
+      "last_match_line": 311,
+      "line": 298,
       "markers": [
         "e3"
       ],
@@ -14020,13 +14036,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 611,
+      "first_match_line": 695,
       "groups": [
         "e3",
         "script"
       ],
-      "last_match_line": 691,
-      "line": 575,
+      "last_match_line": 781,
+      "line": 659,
       "markers": [
         "e3",
         "source_guard"
@@ -14041,12 +14057,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 788,
+      "first_match_line": 878,
       "groups": [
         "script"
       ],
-      "last_match_line": 806,
-      "line": 770,
+      "last_match_line": 896,
+      "line": 860,
       "markers": [
         "evidence",
         "public_identity"
@@ -14061,12 +14077,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 895,
+      "first_match_line": 993,
       "groups": [
         "script"
       ],
-      "last_match_line": 933,
-      "line": 891,
+      "last_match_line": 1031,
+      "line": 989,
       "markers": [
         "public_identity"
       ],
@@ -14674,13 +14690,13 @@
         "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/manifest.json",
         "docs/perf/evidence/tp005/controlled-env/attestation.json"
       ],
-      "first_match_line": 88,
+      "first_match_line": 59,
       "groups": [
         "e3",
         "matrix",
         "script"
       ],
-      "last_match_line": 86119,
+      "last_match_line": 86597,
       "line": 1,
       "markers": [
         "e3",
@@ -14691,7 +14707,7 @@
         "td008",
         "tp003"
       ],
-      "match_count": 1127,
+      "match_count": 1130,
       "operations": [
         "constant",
         "public_identity",
@@ -16260,6 +16276,75 @@
     "docs/perf/evidence/maintenance-verification-checkpoint-v0.31.28/fireweed-maintenance-workspace-followup.log.gz",
     "docs/perf/evidence/maintenance-verification-checkpoint-v0.31.28/fireweed-maintenance-workspace-initial-results.json.gz",
     "docs/perf/evidence/maintenance-verification-checkpoint-v0.31.28/manifest.json",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/allowlist.json",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-ci-b2-failed.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-clippy-post-b2.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-api005.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-bench-fmt.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-bindings.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-diff-check.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-governed-allowlist.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-release-identity.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-release-version-sources.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-results.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-retired-e3.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-root-fmt.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-routes.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-storage-authority.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy-fixtures.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-live-e2-followup-results.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-archive-review.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-before-live-hook.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-build-kind-image.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-build-loadgen.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-build-raw-image.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-build-service.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-cleanup-after-raw.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-cleanup-final.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-exit-ledger.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-kind-e2.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-kind-matrix.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-ordinary-doctests.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-ordinary-tests.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-preflight-docker.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-prepare-runtime.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-queue-density-ledger.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-raw-docker-e2.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-run.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-runtime-manifest.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-scale-out-ledger.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-source-diff-summary.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-source-revision.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-first-summary.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-build-kind-image.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-build-loadgen.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-build-raw-image.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-build-service.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-cleanup-after-raw.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-cleanup-final.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-exit-ledger.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-kind-e2.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-preflight-docker.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-prepare-runtime.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-prior-evidence.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-raw-docker-e2.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-raw-docker-ledger.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-run.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-runtime-manifest.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-source-diff-summary.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-source-revision.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-e2-rerun-summary.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-remote-b2-failure-review.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-remote-b2-turso-failed.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-post-b2-source-map.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-postgres-ownership-followup.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-postpush-runtime-results.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-server-ownership-followup.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-workflow-debug-deadline-trace-results.json.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-workflow-debug-deadline-trace.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-workload-ci-followup.log.gz",
+    "docs/perf/evidence/maintenance-verification-post-b2-v0.31.28/manifest.json",
     "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/allowlist.json",
     "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/fireweed-maintenance-allfeature-clippy-final.log.gz",
     "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/fireweed-maintenance-authority-final-fixed.log.gz",

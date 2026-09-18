@@ -1,5 +1,30 @@
 # SS phased capacity ladder
 
+**Current-status amendment:** The rows and implementation-status statements
+below are historical same-host phased measurements on `sindri`. Their original
+sources, workload shapes and results are preserved. SQLite storage and the
+SQLite constructors described below are now retired; their rates remain
+historical calibration evidence.
+
+The later full-workflow reference on Forseti is clean source
+`49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707`: two eight-million-recipient
+campaigns measured **15,816.54 / 13,989.98 complete recipients/s**, with worst
+cycles of **13,174.50 / 12,880.61 recipients/s**. That workflow ingests original
+rows, enriches metadata and scheduled times, delivers in chunks, reports final
+dispositions and purges by retention. See the
+[repeated canonical evidence manifest](../../../helix/04-build/evidence/workflow-capacity/fireweed-idle-wait-qualified-manifest.json)
+and [disk baseline and napkin math](../../disk-baseline-and-napkin-math.md).
+These results precede the maintenance candidate; its fresh qualification
+remains pending in the
+[maintenance baseline](../../maintenance-release-baseline.md#candidate-verification-status).
+
+The open `fireweed-e2cd5913` contract requires the exact phased harness at
+N=10,000, push/claim batches of 100 and inflight=8, with all four settled phases
+at least 10,000 items/s and residual `pending=0, leased=0, complete=10000`,
+recorded at one SHA. Full-workflow campaign rates do not supply those four
+measurements or a same-host comparison with this ladder. No new comparable
+phased row is claimed here; the tracker is unchanged.
+
 Same-host before/after only. Sqlite-log G-gates require N=1,000,000. N=10k/100k are not comparable to those G-rows.
 
 **Active program:** object-log × Turso (`filesystem--turso`) plus RSS. Goal: [ss-objectlog-turso-memory-goal.md](../../../helix/04-build/ss-objectlog-turso-memory-goal.md).
@@ -215,6 +240,15 @@ not claim a T2 pass; a short observed cycle does not fail S3m. S5 re-derives
 on the activated fence path. Any required value above its cap still blocks
 S5.
 
-N=100k exact-high-water drain calibration remains the ignored
-`shadow_claim_drain_calibration_uses_exact_high_water` harness
-(`SS_CLAIM_CALIBRATION_N` may lower N locally). No new rate row.
+**Current calibration status:**
+`shadow_claim_drain_calibration_uses_exact_high_water` remains explicitly
+ignored/opt-in in the current source (`SS_CLAIM_CALIBRATION_N` can override its
+default N=100k). It has been executed: the maintenance 10k and 100k diagnostic
+reruns completed in **9.700 / 65.931 seconds**, with 100-item selection medians
+of **4.200 / 4.363 ms**. Both passed the physical projection-high-water equality
+check against the durable log after a retained-read drain barrier. The **T2
+latency diagnostic remains false**. Exact scope, comparisons and evidence are
+in the [maintenance baseline](../../maintenance-release-baseline.md#cleanup-and-api-parity).
+These traced tmpfs drain measurements are separate from both the four-phase
+ladder and canonical on-disk campaigns; they do not add a comparable phased row
+or qualify the current candidate.

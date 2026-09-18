@@ -194,26 +194,125 @@ cleanup tested.
 ## Candidate verification status
 
 The maintenance changes were first published as review checkpoint `fc0c5bd7`,
-followed by identity hotfix `0f9c9601`, before release qualification. This follow-up
-adds the query, gate, feature-boundary and test-audit corrections below. The
-final all-feature, all-target workspace Clippy check passes with warnings denied.
+followed by identity hotfix `0f9c9601` and verification checkpoint `b2c43ea3`,
+before release qualification. These checkpoints include the query, gate,
+feature-boundary and test-audit corrections below. The current all-feature,
+all-target workspace Clippy check passes with warnings denied in 12.09 seconds
+([archived log](evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-clippy-post-b2.log.gz)).
 The default public CI gate also passes all six stages, including 152 facade
 library tests, mutation/recovery tests and source-package verification. The
 retired-constructor regressions in `encapsulation`,
 `facade` and `active_scope_routing` pass all 18 tests in the current all-feature
-run. The independent benchmark workspace, remaining upstream stress cases and
-fresh capacity qualification still require completion.
+run. The independent benchmark tests and corrected live E2 reruns now pass as
+recorded below. Candidate-4 inventory and poststage checks also pass. The two
+upstream stress reruns and fresh capacity qualification still require completion.
 This checkpoint is not the final measured source or a completed release.
 
-The compiled inventory passes, but the subsequent storage-remediation closure
-policy remains blocked. It treats the documented vendored macro/feature-only
-dependency declarations as unused dependency debt, and also flags upstream test
-annotations, explicit SQL diagnostics and reclamation counter assignments.
-The source-I/O inventory's stale aggregate identity lookup is corrected; its
-write, check and self-test pass. The closure failure is preserved in
+The earlier compiled inventory passed, but its subsequent storage-remediation
+closure check failed on vendored dependency declarations, upstream test annotations,
+explicit SQL diagnostics and a reclamation counter assignment. The original
+failure remains in
 `/tmp/fireweed-maintenance-checkpoint-poststage-followup-results.json` and its
-named log. Resolving these classifications must preserve upstream limitations
-and must not turn unexecuted or failing tests into passes.
+named log. The classification correction is now applied and verified by the
+candidate-4 compiled inventory and poststage policy checks, including their
+negative fixtures: zero product debt, with 148 external observations retained,
+explicitly outside product qualification. Only the two reviewed
+macro/feature exceptions remain allowed: `antithesis_sdk` in `turso_core` and
+`parking_lot` with `send_guard` in `turso_sdk_kit`; the policy checks their actual
+manifest/source requirements. The three named SQL diagnostics require retained
+successful historical logs and explicitly claim neither current execution nor
+capacity qualification. The reclamation counter records backpressure, not a
+skipped test. Product debt remains subject to closure, with normalized vendor
+scope checks preventing relabeling of first-party findings.
+The source-I/O inventory's stale aggregate identity lookup is corrected; its
+write, check and self-test pass. These classification changes do not turn
+unexecuted or failing upstream tests into passes.
+
+After `b2c43ea3`, the ordinary independent benchmark run passed all 30 tests with
+zero ignored tests. Its two live E2 cases were deliberately deferred to separate,
+serial Docker and kind invocations. Both live attempts then failed the same
+non-owner assertion: `XLEN` returned zero for a queue absent from that node's
+catalog. Fixture cleanup succeeded after both attempts. This was a server
+ownership defect, not a stale test expectation: the ownership control plane can
+resolve arbitrary keys, while a missing log partition has epoch zero. Ownership
+acquisition now verifies the queue definition before creating a lease or
+advancing its durable fence. The existing live rejection assertions are
+unchanged. The complete server integration rerun passes 34 tests, zero failed
+or ignored, in 20.88 seconds, including the new black-box Strict/AsyncProjection
+unknown-queue read/write regression. The subsequent raw Docker rerun passes its
+one test in 34.37 seconds, and the kind rerun passes its one test in 106.78 seconds;
+both have zero failures or ignored tests and successful fixture cleanup. These
+are test-harness durations, not the shorter measured ingest/drain intervals.
+At eight owners, each run rejects all 56 of 56 cross-node queue probes.
+
+| Eight-owner observation | Raw Docker | kind |
+| --- | ---: | ---: |
+| Aggregate ingest, items/s | 16,577 | 16,563 |
+| Slowest ingest queue, items/s | 2,072 | 2,075 |
+| Aggregate claim/finalize, items/s | 81,938 | 72,850 |
+
+Each sweep uses 2/4/8 independent owner containers on this one machine, one
+queue per owner, 12,000 items per queue and eight connections per queue. It
+measures RESP push and claim/finalize with tmpfs storage; it does not exercise
+the complete enrichment/retention workflow. The per-queue ingest target of
+approximately 2,778 items/s was not met: the slowest queues across the sweeps
+achieved 1,754 items/s and 1,777 items/s. That capacity target is reported
+separately from the portable correctness/progress gate. These single runs use
+the fast release profile and a dirty `b2c43ea3`-based checkout, so they do not
+qualify canonical workflow throughput or a governed deployment.
+
+The PostgreSQL ownership follow-up also passes both tests, zero failed or
+ignored, in 0.15 seconds: shared owner membership/monotonic epochs and one-hop
+`MOVED` endpoint discovery.
+
+Remote CI also exposed a missing `rg` prerequisite; workflow setup now installs
+`ripgrep` explicitly. Its corrected remote run remains unverified here. The
+concurrent full-delivery contract now uses its existing transient-backpressure
+retry helper within the original 45-second overall deadline, while retaining
+full-batch and disjoint-ID assertions. All 13 local contract tests pass. The full
+debug workload attempt completed with 33 passes, one failure and zero ignored
+tests: the three-cycle original-row recycling test exceeded its 120-second
+watchdog. A separate 600-second debug watchdog is now configured; the release
+watchdog remains 120 seconds and the workload/accounting assertions are
+unchanged. The exact traced debug rerun passes in 417.47 seconds, completing
+all three cycles with 12,096 deliveries, 404 planned failures, zero pending rows
+and zero leases per cycle. The first two complete cycle times are 139.61 and
+139.74 seconds, including purge: the trace shows steady work beyond the old
+watchdog. It resolves that failed case without rewriting the full-run totals.
+These test deadlines are completion safeguards, not throughput targets; traced
+debug execution is not release capacity evidence.
+
+The [durable post-b2 verification manifest](evidence/maintenance-verification-post-b2-v0.31.28/manifest.json)
+records 67 artifacts with source paths and hashes: the ordinary benchmark run,
+initial live failures and successful reruns, cleanup ledgers, workload failure
+and complete debug retry trace, server/PostgreSQL results, remote CI failures,
+Clippy and candidate-4 prestage checks. Original failures remain intact. The
+runtime ledger records a dirty checkout based on `b2c43ea3`; these results are
+not clean-source release evidence. The 67-artifact archive ends at prestage;
+it does not contain the later candidate-4 compiled inventory or poststage logs.
+Those completed records await archival in the final evidence commit. Fresh
+canonical C1/P1/C2/P2 qualification remains pending.
+
+All 13 candidate-4 prestage checks pass, including root/benchmark formatting,
+route and binding regeneration, workflow-policy fixtures, storage authority
+and release identity. Their [completed prestage ledger](evidence/maintenance-verification-post-b2-v0.31.28/fireweed-maintenance-final-static-candidate-4-prestage-results.json.gz)
+is retained in the same archive.
+The candidate-4 compiled inventory then passed in 2,072.307 seconds: both
+workspaces compile and list successfully, with 2,041 harness routes and five
+exactly executed documentation tests. This is route/listing evidence, not a
+claim that all 2,041 runtime tests passed in that inventory command. All eight
+poststage checks also pass, including workflow-inline classification, the
+evidence-I/O baseline write/check/self-test, storage policy and its negative
+fixtures, and the final whitespace check. The original closure failure remains
+recorded; the corrected classification does not qualify upstream failures.
+
+The completed records are
+`/tmp/fireweed-maintenance-final-static-candidate-4-inventory-results.json`,
+its named inventory snapshot/log, and
+`/tmp/fireweed-maintenance-final-static-candidate-4-poststage-results.json`
+with its named logs. These later records are outside the 67-artifact post-b2
+archive and await the final evidence commit. The two upstream stress reruns
+and fresh canonical C1/P1/C2/P2 measurements remain pending.
 
 The initial full workspace attempt produced 183 completed harness summaries:
 2,019 passes and ten failures, plus a separately interrupted large calibration.
@@ -236,10 +335,10 @@ memory/Turso test targets also compile. A focused memory-only workflow run
 passes after restricting object-log tests to their required feature. The
 additional retired-flush regression verifies zero and positive values reject at
 both public and normalized configuration boundaries; its focused run passes.
-Source changes after the full run consist of the focused gate correction,
-private-wrapper removal, feature guards and configuration rejection above;
-their affected checks are recorded separately. Repeated capacity qualification
-is pending.
+Source changes after the full run include the focused gate correction,
+private-wrapper removal, feature guards, configuration rejection and the
+post-checkpoint ownership/fixture corrections above; their affected checks are
+recorded separately. Repeated capacity qualification is pending.
 The final evidence commit must replace this status with measured candidate
 identity, exact completed test results, limitations and fresh performance data.
 Earlier diagnostic failures are not release passes.
@@ -295,8 +394,10 @@ capacity qualification remains separate.
 The subsequent [prepush evidence manifest](evidence/maintenance-verification-prepush-v0.31.28/manifest.json)
 preserves 55 completed artifacts covering final Clippy, feature/configuration
 checks, the public CI gate and compiled inventory, including failed intermediate
-attempts and their corrections. Both workspaces compile and list successfully:
-2,040 harness routes and five observed documentation tests. Listing a harness
+attempts and their corrections. That earlier candidate-3 inventory records both
+workspaces compiling/listing, 2,040 harness routes and five observed documentation
+tests; the later candidate-4 count above includes the new ownership regression.
+Listing a harness
 does not establish that its runtime test passed; the runtime outcomes above
 remain the applicable evidence.
 
@@ -319,8 +420,9 @@ claimed; the reference measurements above remain historical.
 
 Docker access is available through `newgrp docker` after adding `erik` to the
 Docker group. The pinned container lifecycle tests passed in the full workspace
-follow-up. The two real multi-node benchmark tests still require a current-source
-run. PostgreSQL, MinIO and Kafka local services already support the
+follow-up. Both real multi-node benchmark tests now pass after the ownership
+correction, with the capacity limitations described above.
+PostgreSQL, MinIO and Kafka local services already support the
 other integration suites. Source-preview packaging is explicitly unsigned and
 does not claim the separate governed deployment qualification.
 

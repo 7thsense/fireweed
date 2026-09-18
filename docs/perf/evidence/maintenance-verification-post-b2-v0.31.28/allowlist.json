@@ -1,0 +1,270 @@
+[
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-root-fmt.log",
+    "role": "Candidate-4 completed prestage: prestage root-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-bench-fmt.log",
+    "role": "Candidate-4 completed prestage: prestage bench-fmt; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-diff-check.log",
+    "role": "Candidate-4 completed prestage: prestage diff-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-api005.log",
+    "role": "Candidate-4 completed prestage: prestage api005; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-routes.log",
+    "role": "Candidate-4 completed prestage: prestage routes; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-bindings.log",
+    "role": "Candidate-4 completed prestage: prestage bindings; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-governed-allowlist.log",
+    "role": "Candidate-4 completed prestage: prestage governed-allowlist; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy.log",
+    "role": "Candidate-4 completed prestage: prestage workflow-policy; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-workflow-policy-fixtures.log",
+    "role": "Candidate-4 completed prestage: prestage workflow-policy-fixtures; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-retired-e3.log",
+    "role": "Candidate-4 completed prestage: prestage retired-e3; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-storage-authority.log",
+    "role": "Candidate-4 completed prestage: prestage storage-authority; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-release-version-sources.log",
+    "role": "Candidate-4 completed prestage: prestage release-version-sources; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-release-identity.log",
+    "role": "Candidate-4 completed prestage: prestage release-identity; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-prestage-results.json",
+    "role": "Candidate-4 completed prestage: serial static-driver outcomes, including incomplete or failed steps"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-postpush-runtime-results.json",
+    "role": "Dirty b2-based runtime attempt ledger: workload 33 passed/1 watchdog failure, server 34 passed; historical pending-rerun text retained verbatim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workload-ci-followup.log",
+    "role": "Completed debug workload attempt: 33 passed, 1 failed, zero ignored; original three-cycle watchdog failure preserved"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workflow-debug-deadline-trace-results.json",
+    "role": "Completed exact debug retry: 1 passed in 417.47s with cycle/accounting/API timing summary; not release capacity qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-workflow-debug-deadline-trace.log",
+    "role": "Complete unabridged 417.47s debug retry trace; 600s debug watchdog, unchanged 120s release watchdog; not capacity qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-server-ownership-followup.log",
+    "role": "Completed server integration follow-up: 34 passed, zero failed/ignored, 20.88s; includes unknown-queue ownership regression"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-postgres-ownership-followup.log",
+    "role": "Completed PostgreSQL ownership follow-up: 2 passed, zero failed/ignored, 0.15s runtime"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-live-e2-followup-results.json",
+    "role": "Derived raw Docker/kind result rows and raw-log hashes: both reruns passed; fast release profile and dirty b2-based source, below 2778 per-queue ingest target, not canonical qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-clippy-post-b2.log",
+    "role": "Completed post-b2 workspace Clippy: root-confirmed exit 0, 12.09s; vendored warnings preserved; not runtime or capacity qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-run.json",
+    "role": "e2-first: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-summary.json",
+    "role": "e2-first: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-exit-ledger.log",
+    "role": "e2-first: complete serial per-step exit ledger, JSON Lines copied byte-for-byte under .log suffix"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-runtime-manifest.json",
+    "role": "e2-first: service/loadgen binary and runtime ABI hashes; fixture metadata, not production packaging"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-source-revision.log",
+    "role": "e2-first: completed source-revision step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-source-diff-summary.log",
+    "role": "e2-first: completed source-diff-summary step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-ordinary-tests.log",
+    "role": "e2-first: completed ordinary-tests step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-ordinary-doctests.log",
+    "role": "e2-first: completed ordinary-doctests step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-service.log",
+    "role": "e2-first: completed build-service step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-loadgen.log",
+    "role": "e2-first: completed build-loadgen step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-prepare-runtime.log",
+    "role": "e2-first: completed prepare-runtime step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-preflight-docker.log",
+    "role": "e2-first: completed preflight-docker step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-raw-image.log",
+    "role": "e2-first: completed build-raw-image step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-build-kind-image.log",
+    "role": "e2-first: completed build-kind-image step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-before-live-hook.log",
+    "role": "e2-first: completed before-live-hook step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-raw-docker-e2.log",
+    "role": "e2-first: completed raw-docker-e2 step, recorded status=failed exit=101; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-cleanup-after-raw.log",
+    "role": "e2-first: completed cleanup-after-raw step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-kind-e2.log",
+    "role": "e2-first: completed kind-e2 step, recorded status=failed exit=101; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-cleanup-final.log",
+    "role": "e2-first: completed cleanup-final step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-run.json",
+    "role": "e2-rerun: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-summary.json",
+    "role": "e2-rerun: run configuration/outcome with original provenance and failure/cleanup status; not canonical qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-exit-ledger.log",
+    "role": "e2-rerun: complete serial per-step exit ledger, JSON Lines copied byte-for-byte under .log suffix"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-runtime-manifest.json",
+    "role": "e2-rerun: service/loadgen binary and runtime ABI hashes; fixture metadata, not production packaging"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-source-revision.log",
+    "role": "e2-rerun: completed source-revision step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-source-diff-summary.log",
+    "role": "e2-rerun: completed source-diff-summary step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-service.log",
+    "role": "e2-rerun: completed build-service step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-loadgen.log",
+    "role": "e2-rerun: completed build-loadgen step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-prepare-runtime.log",
+    "role": "e2-rerun: completed prepare-runtime step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-preflight-docker.log",
+    "role": "e2-rerun: completed preflight-docker step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-raw-image.log",
+    "role": "e2-rerun: completed build-raw-image step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-build-kind-image.log",
+    "role": "e2-rerun: completed build-kind-image step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-raw-docker-e2.log",
+    "role": "e2-rerun: completed raw-docker-e2 step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-cleanup-after-raw.log",
+    "role": "e2-rerun: completed cleanup-after-raw step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-kind-e2.log",
+    "role": "e2-rerun: completed kind-e2 step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-cleanup-final.log",
+    "role": "e2-rerun: completed cleanup-final step, recorded status=passed exit=0; see unchanged outcome ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-prior-evidence.json",
+    "role": "E2 rerun reference to the original 30-test ordinary run; explicitly does not claim those tests were rerun"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-kind-matrix.log",
+    "role": "First kind failure matrix: empty original JSON Lines file retained as no successful rows; failure remains in raw log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-queue-density-ledger.log",
+    "role": "Original completed ordinary benchmark queue-density record, byte-preserved JSON Lines; portable verification only"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-first-scale-out-ledger.log",
+    "role": "Original completed ordinary benchmark scale-out record, byte-preserved JSON Lines; portable verification only"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-e2-rerun-raw-docker-ledger.log",
+    "role": "Completed raw Docker rerun exact result ledger, byte-preserved JSON Lines; fast release verification profile"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-remote-b2-failure-review.json",
+    "role": "Read-only completed remote b2 CI/Turso failure review with run URLs, times and skipped later steps; no corrected remote success claimed"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-remote-b2-turso-failed.log",
+    "role": "Original remote b2 Turso workflow failure log: concurrent-delivery projection-coverage Backpressure failure; not a passing run"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-archive-review.json",
+    "role": "Archive preparation scope, read-only policy review, exclusions and absent cleaned kind matrix; no execution or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-b2-failed.log",
+    "role": "Original completed remote b2 CI missing-rg failure log, run 35290736995; gh failed-log read exited zero, the CI job failed; no corrected remote success claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-post-b2-source-map.json",
+    "role": "Original-to-archive-input source mapping with byte counts and SHA-256 digests; copies preserve all bytes and execution provenance"
+  }
+]

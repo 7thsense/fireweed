@@ -31,6 +31,90 @@ META_POLICY_SOURCES = {
     "scripts/ci/storage-remediation-policy.py",
 }
 
+# Explicit diagnostic experiments, each with a retained historical single-test log.
+# These are not workflow/capacity gates and do not establish current execution.
+SQL_TIMING_DIAGNOSTICS = {
+    ("crates/fireweed-turso/src/projection.rs", "compare_retained_point_and_joined_replacements"): (
+        '#[ignore = "explicit retained-VM SQL diagnostic, not workflow qualification"]',
+        "fireweed-retained-point-diagnostic.log",
+    ),
+    ("crates/fireweed-turso/src/projection.rs", "compare_retained_direct_and_joined_replacements"): (
+        '#[ignore = "explicit retained-VM SQL diagnostic, not workflow qualification"]',
+        "fireweed-direct-analyzed-diagnostic.log",
+    ),
+    ("crates/fireweed-turso/tests/replacement_shape_diagnostic.rs", "compare_replacement_shapes_and_statement_sizes"): (
+        '#[ignore = "explicit native SQL timing diagnostic; not a workflow or capacity gate"]',
+        "fireweed-replacement-shape-diagnostic.log",
+    ),
+}
+
+
+
+def sql_timing_diagnostic_log_passed(log: str, name: str) -> bool:
+    """Accept one complete diagnostic harness, including interleaved nocapture output."""
+    summaries = list(re.finditer(r"^test result:[^\n]*$", log, re.MULTILINE))
+    runs = list(re.finditer(r"^running \d+ tests?$", log, re.MULTILINE))
+    tests = list(re.finditer(r"^test ([\w:]+) \.\.\. ?([^\n]*)$", log, re.MULTILINE))
+    if len(summaries) != 1 or len(runs) != 1 or len(tests) != 1:
+        return False
+    summary, run, test = summaries[0], runs[0], tests[0]
+    if not re.fullmatch(
+        r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out; finished in \S+",
+        summary.group(0),
+    ):
+        return False
+    if run.group(0) != "running 1 test" or not run.end() <= test.start() < summary.start():
+        return False
+    if test.group(1).rsplit("::", 1)[-1] != name or log[summary.end():].strip():
+        return False
+    if re.search(r"\bFAILED\b|^failures:|^error: test failed|panicked at", log, re.MULTILINE):
+        return False
+    # With nocapture, libtest's final `ok` may follow the diagnostic's output
+    # on its own line. Require that status before the single outer summary.
+    completion = log[test.end():summary.start()].strip().splitlines()
+    return test.group(2).strip() == "ok" or bool(completion and completion[-1] == "ok")
+
+
+def sql_timing_diagnostic_detail(path: str, attribute: str, following: str) -> str:
+    function = re.match(r"\s*async fn (\w+)\(\)", following)
+    if function is None:
+        return ""
+    name = function.group(1)
+    spec = SQL_TIMING_DIAGNOSTICS.get((path, name))
+    if spec is None or attribute != spec[0]:
+        return ""
+    evidence_path = "docs/helix/04-build/evidence/workflow-capacity/" + spec[1]
+    evidence = ROOT / evidence_path
+    if not evidence.is_file():
+        return ""
+    log = evidence.read_text()
+    if not sql_timing_diagnostic_log_passed(log, name):
+        return ""
+    return (
+        "explicit_sql_timing_diagnostic; historical_run=" + evidence_path
+        + "; evidence_sha256=" + hashlib.sha256(evidence.read_bytes()).hexdigest()
+        + "; not_current_execution; not_capacity_qualification"
+    )
+
+
+def separate_external_dependencies(debt: dict[str, list[dict[str, object]]]) -> dict[str, object]:
+    """Keep upstream observations visible, without treating them as product passes."""
+    findings = []
+    for registry, rows in debt.items():
+        product_rows = []
+        for row in rows:
+            if str(row["path"]).startswith("vendor/"):
+                findings.append({"registry": registry, "finding": row})
+            else:
+                product_rows.append(row)
+        debt[registry] = product_rows
+    return {
+        "scope": "vendor/",
+        "qualification": "not_qualified_by_product_closure",
+        "findings": findings,
+    }
+
+
 PRODUCT_WORKFLOW_REQUIREMENTS = [
     "product_validation_tests",
     "product_workflow_scheduled_action_delivery_e2e",
@@ -626,8 +710,14 @@ def scan_source_debt(
         if path.endswith(".rs"):
             for match in re.finditer(r"#\s*\[\s*ignore(?:\s*=\s*[^\]]+)?\]", text):
                 line = text.count("\n", 0, match.start()) + 1
+                diagnostic = sql_timing_diagnostic_detail(path, match.group(0), text[match.end():])
                 debt["ignored_tests"].append(
-                    debt_row("ignored_test", path, line, match.group(0), performance=performance, e3=e3)
+                    debt_row(
+                        "ignored_test", path, line, match.group(0),
+                        performance=performance, e3=e3,
+                        status="discovery_negative" if diagnostic else "debt",
+                        detail=diagnostic,
+                    )
                 )
             for match in re.finditer(r"^\s*//[!/]\s*```([^\n]*)$", text, re.MULTILINE):
                 fence_info = match.group(1).strip()
@@ -819,6 +909,14 @@ def reclassify_residual_debt(debt: dict[str, list[dict[str, object]]]) -> None:
                 row["detail"] = (detail + "; intentional_env_or_release_ignore").strip("; ")
             # Counter/prose false positives and saturation physics messages are not LOUD skips.
             if category in {"loud_skip", "harness_skip", "opt_in"}:
+                # This exact production assignment records reclaim backpressure;
+                # the nearby continue is retry scheduling, not a passing test skip.
+                if (
+                    path == "crates/fireweed-objectlog/src/reclaim_tick.rs"
+                    and identity == "metrics.pages_skipped_while_full = metrics.pages_skipped_while_full.saturating_add(1);"
+                ):
+                    row["status"] = "discovery_negative"
+                    row["detail"] = (detail + "; reclaim_backpressure_counter_not_test_skip").strip("; ")
                 lower_id = identity.lower()
                 if any(
                     marker in lower_id
@@ -1120,6 +1218,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
     # Final pass: rows appended after scan_source_debt (rustdoc exact failures, prior carry)
     # still need discovery_negative classification.
     reclassify_residual_debt(debt)
+    external_dependencies = separate_external_dependencies(debt)
     return {
         "schema_version": 1,
         "generated_by": "scripts/ci/inventory-storage-remediation.py",
@@ -1130,6 +1229,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
         "rustdoc_routes": sorted(rustdoc_routes, key=lambda row: row["id"]),
         "fireweed_test_placement": fireweed_test_placement,
         "debt_registries": debt,
+        "external_dependency_observations": external_dependencies,
         "release_repeat_quarantine": repeat_contract,
         "discovery_negatives": [
             "Iterator::skip and iterator .skip(...) calls",
