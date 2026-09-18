@@ -1,9 +1,87 @@
 # Disk baseline and Fireweed capacity estimates
 
-## Qualified: repeated 12,500 complete campaign recipients/sec (2026-09-16)
+## Current maintenance attempt: primitives pass; campaigns fail (2026-09-18 UTC)
 
-**The fixed 10k target and 25% stretch target are both achieved in repeated
-canonical qualification.** Clean source `49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707`,
+**Current source is not campaign-qualified.** Clean source
+`654e4a175aaaf420d88fbdec5794687b72442ea0` (S2), normal release CLI SHA-256
+`8071feb98f8ce9c951be891b77d87deaff25f32a06a2f6eac7fdc99287b6c573`, ran the
+canonical C1/P1/C2/P2 sequence serially. Both million-row primitive repeats
+passed all 29 checks and every 10k rows/sec floor:
+
+| Primitive | P1 rows/sec | P2 rows/sec |
+| --- | ---: | ---: |
+| Insert | 26,962 | 22,616 |
+| Enrich by key | 26,725 | 21,549 |
+| Schedule by ID | 54,546 | 40,536 |
+| Claim and complete | 16,898 | 13,036 |
+| Purge | 39,864 | 29,509 |
+
+Both eight-cycle campaigns failed during cycle seven after six complete
+million-recipient cycles, with `object-log post-position produce timed out`
+reported as an ambiguous log position. Each completed cycle records final
+outcomes, verification and purge of all million recipients. Neither attempt
+produced the final correctness result. Therefore **there is no qualified 8M
+throughput, slowest-cycle rate, CPU-ms/recipient or bytes/recipient for S2**.
+The final throughput, reporting, disposition and growth gates remain required;
+partial completion does not satisfy them. The historical `49f1b6b` qualification
+below remains evidence for that source and host state, not this maintenance source.
+
+| Failed campaign attempt | C1 | C2 |
+| --- | ---: | ---: |
+| Process elapsed seconds | 782.96 | 852.72 |
+| Process CPU-seconds | 6,626.61 | 6,967.91 |
+| Mean process CPU-seconds/second | 8.46 | 8.17 |
+| Peak RSS, GiB | 17.44 | 16.83 |
+| Sampled host-device writes, GiB | 32.89 | 33.68 |
+| Sampled host-device write rate, MiB/sec | 43.12 | 40.52 |
+| Mean host-device write-request time, ms | 77.90 | 83.89 |
+| Host-device busy time | 89.43% | 91.64% |
+
+These counters include work in the unfinished cycle. Host-device observations
+omit startup/tail and are host-wide, not attributable exclusively to Fireweed.
+The mean CPU occupancy and device busy time do not identify the timeout's cause.
+
+### Fresh disk observation and conditional budget
+
+Before the canonical attempt, serial private-file `dd` transfers wrote 8 GiB
+each from a prepared random source, including final `fdatasync`, on Forseti's
+Kingston NVMe through LUKS/Btrfs:
+
+| Mode, in execution order | Elapsed seconds | Logical MiB/sec | Host-device MiB/sec | Mean write-request ms | Device busy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Direct, new NoCOW file | 108.01 | 75.84 | 76.51 | 105.61 | 97.68% |
+| Buffered, ordinary file | 162.06 | 50.55 | 51.30 | 209.44 | 99.94% |
+
+These are two finite observations, not sustained SSD ceilings. The second mode
+followed the first; temperature rose from 30.85 to 65.85 C across the pair and
+discard activity differed. Neither these observations nor the difference from
+earlier approximately 900 MiB/sec bursts isolates TRIM, Btrfs, cache, thermals or
+another cause. No TRIM or system setting changed for this calibration.
+
+Using the historical qualified cost only, 12.5k complete recipients/sec would
+require **10.23–10.73 CPU-seconds/sec** and **47.25–47.42 MiB/sec host writes**;
+10k would require **8.18–8.59 CPU-seconds/sec** and **37.80–37.94 MiB/sec**.
+The stretch write demand is 92.11–92.44% of the newly observed buffered
+host-device rate. That cross-workload ratio is a resource comparison, not a
+remaining-headroom estimate or proof that either target is impossible. Log
+synchronization, projection writes, reads and their latency distribution must
+be measured together. Projection durability still comes exclusively from the log.
+
+The [final verification archive](evidence/maintenance-verification-final-v0.31.28/manifest.json)
+preserves all four raw reports, device summaries, fresh calibration, exact source
+hashes and failed exits. The [maintenance baseline](maintenance-release-baseline.md)
+records the same-binary four-cycle trace and completed two-cycle disk/RAM/disk
+comparison: 12,383 / 15,694 / 11,729 complete recipients/sec. RAM improved this
+short-run rate by 30.17% against the mean disk controls, but every main DB stayed
+4 KiB; this does not measure the later checkpoint regime or resolve cycle seven.
+All original qualification failures remain. Source-preview artifacts use S3
+`522ea1f1f9fadf8efbdcd493d2c6f9c7d351981a`, whose only difference from measured
+S2 is an exact secret-scanner test-fixture exception; runtime results retain S2.
+
+## Historical qualification: repeated 12,500 complete campaign recipients/sec (2026-09-16)
+
+**The fixed 10k target and 25% stretch target were both achieved by this
+historical source in repeated canonical qualification.** Clean source `49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707`,
 CLI SHA-256 `0bc944811975d74f8199a4fbbda6c8057d33879ab3c1118d4db842749d5348c7`,
 completed the unchanged serial campaign/primitive/campaign/primitive runner with
 exit zero. Both eight-million-recipient campaigns pass all **2,278 checks** at

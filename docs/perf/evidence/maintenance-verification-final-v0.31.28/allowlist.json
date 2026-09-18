@@ -1,0 +1,1394 @@
+[
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-inventory-compiled-inventory.log",
+    "role": "Completed candidate-4 inventory: inventory compiled-inventory; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-inventory-inventory-snapshot.json",
+    "role": "Completed candidate-4 inventory: generated compiled source/harness inventory snapshot"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-inventory-results.json",
+    "role": "Completed candidate-4 inventory: serial static-driver outcomes, including incomplete or failed steps"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-workflow-inline.log",
+    "role": "Completed candidate-4 poststage: poststage workflow-inline; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-evidence-source-write.log",
+    "role": "Completed candidate-4 poststage: poststage evidence-source-write; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-evidence-source-check.log",
+    "role": "Completed candidate-4 poststage: poststage evidence-source-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-evidence-source-fixtures.log",
+    "role": "Completed candidate-4 poststage: poststage evidence-source-fixtures; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-storage-policy.log",
+    "role": "Completed candidate-4 poststage: poststage storage-policy; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-storage-policy-fixtures.log",
+    "role": "Completed candidate-4 poststage: poststage storage-policy-fixtures; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-workflow-inline-check.log",
+    "role": "Completed candidate-4 poststage: poststage workflow-inline-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-diff-check.log",
+    "role": "Completed candidate-4 poststage: poststage diff-check; result ledger records exit status"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-inventory-snapshot.json",
+    "role": "Completed candidate-4 poststage: generated compiled source/harness inventory snapshot"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-final-static-candidate-4-poststage-results.json",
+    "role": "Completed candidate-4 poststage: serial static-driver outcomes, including incomplete or failed steps"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-inventory-source-refresh.log",
+    "role": "Completed earlier poststage follow-up inventory-source-refresh, exit 0; retained failed-attempt lineage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-workflow-inline.log",
+    "role": "Completed earlier poststage follow-up workflow-inline, exit 0; retained failed-attempt lineage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-evidence-source-write.log",
+    "role": "Completed earlier poststage follow-up evidence-source-write, exit 0; retained failed-attempt lineage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-evidence-source-check.log",
+    "role": "Completed earlier poststage follow-up evidence-source-check, exit 0; retained failed-attempt lineage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-evidence-source-fixtures.log",
+    "role": "Completed earlier poststage follow-up evidence-source-fixtures, exit 0; retained failed-attempt lineage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-storage-policy.log",
+    "role": "Completed earlier poststage follow-up storage-policy, exit 1; retained failed-attempt lineage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-checkpoint-poststage-followup-results.json",
+    "role": "Completed earlier poststage follow-up failure ledger; storage-policy rejection preserved alongside corrected candidate-4 results"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-optimized-build.log",
+    "role": "Completed upstream stress test build PASS at unchanged source bb443691fdaad86b62a5461ce28dd6fbcdde2a71; opt-level 3, debug assertions and overflow checks enabled, 16 codegen units, LTO disabled; not workflow capacity qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-optimized-01.log",
+    "role": "Completed previously timed-out full B-tree equal-size test PASS at unchanged source bb443691fdaad86b62a5461ce28dd6fbcdde2a71; opt-level 3, debug assertions and overflow checks enabled, 16 codegen units, LTO disabled; SEED=1729, serial, 900-second watchdog, 16-GiB address-space limit"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-optimized-02.log",
+    "role": "Completed previously timed-out full page-cache memory stability test PASS at unchanged source bb443691fdaad86b62a5461ce28dd6fbcdde2a71; opt-level 3, debug assertions and overflow checks enabled, 16 codegen units, LTO disabled; SEED=1729, serial, 900-second watchdog, 16-GiB address-space limit; final growth 5259264 bytes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-upstream-optimized-results.json",
+    "role": "Completed optimized stress build and two passing serial test results with binary identity at unchanged source bb443691fdaad86b62a5461ce28dd6fbcdde2a71; original 13 PASS / 3 FAIL / 2 timeout ledger remains separately retained; opt-level 3, debug assertions and overflow checks enabled, 16 codegen units, LTO disabled"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-results.json",
+    "role": "Fresh completed disk calibration raw report with all host samples"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-direct-nocow.log",
+    "role": "Fresh direct NoCOW dd stderr/progress and final fdatasync-inclusive transfer result"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-buffered-normal.log",
+    "role": "Fresh buffered ordinary-file dd stderr/progress and final fdatasync-inclusive transfer result"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-run.log",
+    "role": "Completed isolated disk calibration driver output"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-measurement-script.log",
+    "role": "Exact executed Python measurement source; copied verbatim with log extension for verification archiver"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-summary.json",
+    "role": "Derived fresh disk calibration summary with exact units, formulas and historical-comparison limitations"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-disk-20260918T014511-archive-copies.json",
+    "role": "Hash manifest proving exact-byte disk evidence copies and derived-summary identity"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-phases.json",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; final observer ledger, runner -15, observer 143, cleanup complete"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-runner.log",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; completed shell log ending during C1"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-phase-1-monitor.log",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; successful phase-1 monitor log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-phase-1-summary.log",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; successful phase-1 summary helper log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-phase-1-device-summary.json",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; partial-phase host-wide observation summary, not process-only attribution or full-run throughput"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-qualification-interrupted-events-jsonl.log",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; exact-byte JSONL observation copy; original path/hash in archive-copy proof"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-qualification-interrupted-phase-1-device-jsonl.log",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; exact-byte JSONL observation copy; original path/hash in archive-copy proof"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-qualification-interrupted-archive-copies.json",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; original/copy path and SHA-256 proof"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-qualification-interrupted-status.json",
+    "role": "Intentionally interrupted bb443691 qualification attempt; diagnostic evidence only, not a completed correctness/capacity result or throughput failure; explicit interruption context and preserved input identities"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-interrupted-qualification-data-cleanup.json",
+    "role": "Completed removal of only the intentionally interrupted bb443691 attempt's benchmark-owned temporary data directory; measurement reports and observer records preserved; no qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-bb443691-ci-result.json",
+    "role": "Completed remote CI success at exact bb443691 source, including public gate and policy Exact bb443691 CI terminal success before fixture correction."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-bb443691-turso-result.json",
+    "role": "Completed remote Turso workflow failure at exact bb443691 source; native/workflow stages passed, 12-cell route stage failed, downstream stages skipped Exact bb443691 Turso terminal failure: required PostgreSQL fixture missing; subsequent steps not executed."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-bb443691-turso-failed.log",
+    "role": "Completed failed remote 12-cell route log at bb443691; FIREWEED_PG_TEST_URL missing; preserve fail-closed fixture failure Completed bb443691 raw missing-fixture test failure, exit 101; remains a failure, not overwritten by local follow-up checks."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-fixtures-self-test.log",
+    "role": "Completed CI fixture correction local fixtures-self-test check PASS before clean S2; not canonical qualification or remote verification Completed fixtures-self-test; exit 0 recorded in fireweed-maintenance-ci-fixtures-final-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-policy.log",
+    "role": "Completed CI fixture correction local policy check PASS before clean S2; not canonical qualification or remote verification Completed policy; exit 0 recorded in fireweed-maintenance-ci-fixtures-final-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-policy-tests.log",
+    "role": "Completed CI fixture correction local policy-tests check PASS before clean S2; not canonical qualification or remote verification Completed policy-tests; exit 0 recorded in fireweed-maintenance-ci-fixtures-final-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-fmt.log",
+    "role": "Completed CI fixture correction local fmt check PASS before clean S2; not canonical qualification or remote verification Completed fmt; exit 0 recorded in fireweed-maintenance-ci-fixtures-final-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-shape.log",
+    "role": "Completed CI fixture correction local shape check PASS before clean S2; not canonical qualification or remote verification Completed shape; exit 0 recorded in fireweed-maintenance-ci-fixtures-final-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-clippy.log",
+    "role": "Completed CI fixture correction local clippy check PASS before clean S2; not canonical qualification or remote verification Completed clippy; exit 0 recorded in fireweed-maintenance-ci-fixtures-final-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-final-results.json",
+    "role": "Completed six-step CI fixture correction verification ledger; all local checks PASS, clean S2 remote verification pending Completed 6-step fixture verification ledger; original commands, durations and exit codes preserved."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-source-refresh.log",
+    "role": "Source-only inventory refresh (--write, without --with-cargo); root reported exit 0; empty stdout is not independent exit evidence. Original candidate-4 2041 routes and 5 executed doctests retained, no recompile claimed."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-workflow-inline.log",
+    "role": "Completed workflow-inline regeneration; root reported exit 0 before the seven-step poststage ledger."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-results.json",
+    "role": "Completed 7-step fixture verification ledger; original commands, durations and exit codes preserved."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-evidence-write.log",
+    "role": "Completed evidence-write; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-evidence-check.log",
+    "role": "Completed evidence-check; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-evidence-fixtures.log",
+    "role": "Completed evidence-fixtures; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-storage-policy.log",
+    "role": "Completed storage-policy; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-storage-fixtures.log",
+    "role": "Completed storage-fixtures; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-inline-check.log",
+    "role": "Completed inline-check; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-ci-fixtures-post-diff.log",
+    "role": "Completed diff; exit 0 recorded in fireweed-maintenance-ci-fixtures-post-results.json."
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-phases.json",
+    "role": "Terminal observer ledger, preserving actual runner/observer exits and every error"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-events-jsonl.log",
+    "role": "Completed observer JSONL events; exact bytes preserved with .log extension"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-runner.log",
+    "role": "Completed four-phase shell output, including failed attempts and final exit"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C1-report.json",
+    "role": "C1 complete report bytes; actual failure/gates retained, never reclassified"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C1-device-summary.json",
+    "role": "C1 completed host-wide device summary; not log/projection attribution"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C1-device-jsonl.log",
+    "role": "C1 completed raw host observations, exact JSONL bytes with .log extension"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C1-monitor.log",
+    "role": "C1 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C1-summary.log",
+    "role": "C1 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P1-report.json",
+    "role": "P1 complete report bytes; actual failure/gates retained, never reclassified"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P1-device-summary.json",
+    "role": "P1 completed host-wide device summary; not log/projection attribution"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P1-device-jsonl.log",
+    "role": "P1 completed raw host observations, exact JSONL bytes with .log extension"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P1-monitor.log",
+    "role": "P1 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P1-summary.log",
+    "role": "P1 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C2-report.json",
+    "role": "C2 complete report bytes; actual failure/gates retained, never reclassified"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C2-device-summary.json",
+    "role": "C2 completed host-wide device summary; not log/projection attribution"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C2-device-jsonl.log",
+    "role": "C2 completed raw host observations, exact JSONL bytes with .log extension"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C2-monitor.log",
+    "role": "C2 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-C2-summary.log",
+    "role": "C2 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P2-report.json",
+    "role": "P2 complete report bytes; actual failure/gates retained, never reclassified"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P2-device-summary.json",
+    "role": "P2 completed host-wide device summary; not log/projection attribution"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P2-device-jsonl.log",
+    "role": "P2 completed raw host observations, exact JSONL bytes with .log extension"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P2-monitor.log",
+    "role": "P2 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-P2-summary.log",
+    "role": "P2 completed helper log; exit status is retained in phase ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-summary.json",
+    "role": "Derived completed failed/mixed attempt summary; no release qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-summary-script.log",
+    "role": "Exact diagnostic preparation source, copied with .log extension; no workload execution"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-completed-attempt-copy-manifest.json",
+    "role": "Original/copy paths and exact-byte SHA-256 identities for completed attempt evidence"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-c1-failure-report.json",
+    "role": "Completed S2 C1 FAILURE report, exit1 after object-log post-position produce timeout; exact-byte copy including stderr and storage evidence; no final workload result or qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-c1-failure-device-jsonl.log",
+    "role": "Completed C1-only host observations; exact JSONL bytes with .log extension; no active P1/C2/P2 data"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-ci-fixtures-phase-1-device-summary.json",
+    "role": "Completed C1-only host-wide device/process summary; failed workflow remains unqualified"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-ci-fixtures-phase-1-monitor.log",
+    "role": "Completed C1 phase-1 observation helper output; empty log is not independent exit-status proof"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-v0.31.28-qualification-ci-fixtures-phase-1-summary.log",
+    "role": "Completed C1 phase-1 observation helper output; empty log is not independent exit-status proof"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-c1-failure-diagnostic.json",
+    "role": "Derived completed C1 failure analysis: six finished cycles, observed terminal dispositions, phase wall distributions and bounded device windows; no full-run throughput"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-c1-failure-diagnostic.log",
+    "role": "Human-readable completed C1 diagnostic summary; measurements refer only to bounded completed/partial observations, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-c1-failure-archive-copies.json",
+    "role": "SHA-256 proof of exact-byte completed C1 report and device JSONL copies"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-c1-failure-summary-script.log",
+    "role": "Exact source of read-only C1 analysis, copied with .log extension for archiver; no workload commands"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-device-records.log",
+    "role": "raw PID-guarded host-device samples; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-reserve-records.log",
+    "role": "disk and memory reserve observations; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-analysis-markdown.log",
+    "role": "exact Markdown diagnostic summary; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-analysis-source.log",
+    "role": "read-only analysis source; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-source-fireweed-maintenance-traced-four-cycles.log",
+    "role": "exact completed diagnostic helper source; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-source-workflow-capacity.log",
+    "role": "exact completed diagnostic helper source; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-source-fireweed-maintenance-placement-device-monitor.log",
+    "role": "exact completed diagnostic helper source; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-source-fireweed-device-summary-v3.log",
+    "role": "exact completed diagnostic helper source; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-historical-constraints.log",
+    "role": "review of rejected concurrency experiments; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-status.json",
+    "role": "terminal execution and cleanup ledger; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-report.json",
+    "role": "complete traced workload report including raw stderr and all gate failures; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-provenance.json",
+    "role": "explicit diagnostic provenance; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-device-summary.json",
+    "role": "whole-host counter summary; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-recorder.log",
+    "role": "completed recorder output; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-monitor.log",
+    "role": "completed device monitor output; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-summary.log",
+    "role": "completed device-summary output; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-analysis.json",
+    "role": "derived timings/correlation and limitations; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-archive-copies.json",
+    "role": "exact-byte copy identity proof; diagnostic only, not qualification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-status.json",
+    "role": "original terminal attempt status: maintenance-placement-preflight-20260918; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-context.json",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/context.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-final-projection-files.json",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/final-projection-files.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-namespace-owner.json",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/namespace-owner.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-namespace.log",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/namespace.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-outer-status.json",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/outer-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-ownership.json",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/ownership.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-20260918-namespace-preflight-phase-status.json",
+    "role": "original maintenance-placement-preflight-20260918/namespace-preflight/phase-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-status.json",
+    "role": "original terminal attempt status: maintenance-placement-preflight-shm-20260918; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-RAM-cleanup.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/RAM-cleanup.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-context.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/context.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-final-projection-files.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/final-projection-files.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-outer-status.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/outer-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-ownership.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/ownership.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-phase-owner.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/phase-owner.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-phase-status.json",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/phase-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-preflight-shm-20260918-ram-preflight-runner.log",
+    "role": "original maintenance-placement-preflight-shm-20260918/RAM-preflight/runner.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-status.json",
+    "role": "original terminal attempt status: maintenance-placement-two-cycle-shm-20260918; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-RAM-cleanup.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/RAM-cleanup.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-context.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/context.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-final-projection-files.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/final-projection-files.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-outer-status.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/outer-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-ownership.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/ownership.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-phase-owner.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/phase-owner.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-phase-status.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/phase-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-ram-preflight-runner.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/RAM-preflight/runner.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-abort.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/abort.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-allocation-jsonl.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/allocation.jsonl; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-context.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/context.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-device-summary.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/device-summary.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-device-summary.stderr.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/device-summary.stderr.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-device-jsonl.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/device.jsonl; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-device-stop.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/device.stop; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-diagnostic-checks.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/diagnostic-checks.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-final-projection-files.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/final-projection-files.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-monitor.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/monitor.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-outer-status.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/outer-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-ownership.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/ownership.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-phase-owner.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/phase-owner.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-phase-status.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/phase-status.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-recorder.stderr.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/recorder.stderr.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-report.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/report.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-runner.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/runner.log; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-unmodified-gates.json",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/unmodified-gates.json; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-two-cycle-shm-20260918-disk-1-workload-pid.log",
+    "role": "original maintenance-placement-two-cycle-shm-20260918/disk-1/workload.pid; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-driver-before-shm.log",
+    "role": "exact historical driver snapshot matching recorded identity: before-shm; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-driver-before-swapin-fix.log",
+    "role": "exact historical driver snapshot matching recorded identity: before-swapin-fix; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-usage-at-copy-time.log",
+    "role": "usage snapshot includes later declared swap-guard revision; not the original attempt configuration; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-stopped-fixture-data-cleanup.json",
+    "role": "completed PostgreSQL/MinIO disposable fixture cleanup after shutdown verification; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-copy-source.log",
+    "role": "bounded exact-copy script source; completed diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-summary.json",
+    "role": "derived completed-attempt summary and caveats; diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-summary.log",
+    "role": "plain-language completed-attempt summary; diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-prior-attempts-archive-copies.json",
+    "role": "original/copy SHA256 and byte-count identity proof; diagnostic only, no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-status.json",
+    "role": "original terminal attempt status; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-RAM-cleanup.json",
+    "role": "original RAM-preflight/RAM-cleanup.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-context.json",
+    "role": "original RAM-preflight/context.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-final-projection-files.json",
+    "role": "original RAM-preflight/final-projection-files.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-outer-status.json",
+    "role": "original RAM-preflight/outer-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-ownership.json",
+    "role": "original RAM-preflight/ownership.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-phase-owner.json",
+    "role": "original RAM-preflight/phase-owner.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-phase-status.json",
+    "role": "original RAM-preflight/phase-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-ram-preflight-runner.log",
+    "role": "original RAM-preflight/runner.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-abort.json",
+    "role": "original disk-1/abort.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-allocation-jsonl.log",
+    "role": "original disk-1/allocation.jsonl; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-context.json",
+    "role": "original disk-1/context.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-device-summary.json",
+    "role": "original disk-1/device-summary.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-device-summary.stderr.log",
+    "role": "original disk-1/device-summary.stderr.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-device-jsonl.log",
+    "role": "original disk-1/device.jsonl; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-device-stop.log",
+    "role": "original disk-1/device.stop; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-diagnostic-checks.json",
+    "role": "original disk-1/diagnostic-checks.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-final-projection-files.json",
+    "role": "original disk-1/final-projection-files.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-monitor.log",
+    "role": "original disk-1/monitor.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-outer-status.json",
+    "role": "original disk-1/outer-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-ownership.json",
+    "role": "original disk-1/ownership.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-phase-owner.json",
+    "role": "original disk-1/phase-owner.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-phase-status.json",
+    "role": "original disk-1/phase-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-recorder.stderr.log",
+    "role": "original disk-1/recorder.stderr.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-report.json",
+    "role": "original disk-1/report.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-runner.log",
+    "role": "original disk-1/runner.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-unmodified-gates.json",
+    "role": "original disk-1/unmodified-gates.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-disk-1-workload-pid.log",
+    "role": "original disk-1/workload.pid; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-driver-before-zram-v3.log",
+    "role": "exact swapguard2 driver source matching recorded script SHA; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-usage-snapshot.log",
+    "role": "previously frozen usage snapshot describing swapguard2; predates later zram revision; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-copy-source.log",
+    "role": "bounded completed-abort copy script; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-postattempt-swap-observation.json",
+    "role": "timestamped postattempt swap-device observation; no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-summary.json",
+    "role": "derived abort summary with partial counts separately; no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-summary.log",
+    "role": "plain-language abort caveats; no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-swapguard2-abort-archive-copies.json",
+    "role": "exact original/copy SHA256 and byte-count proof; no performance or qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-status.json",
+    "role": "original terminal attempt status; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-RAM-cleanup.json",
+    "role": "original RAM-preflight/RAM-cleanup.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-context.json",
+    "role": "original RAM-preflight/context.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-final-projection-files.json",
+    "role": "original RAM-preflight/final-projection-files.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-outer-status.json",
+    "role": "original RAM-preflight/outer-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-ownership.json",
+    "role": "original RAM-preflight/ownership.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-phase-owner.json",
+    "role": "original RAM-preflight/phase-owner.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-phase-status.json",
+    "role": "original RAM-preflight/phase-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-ram-preflight-runner.log",
+    "role": "original RAM-preflight/runner.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-abort.json",
+    "role": "original disk-1/abort.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-allocation-jsonl.log",
+    "role": "original disk-1/allocation.jsonl; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-context.json",
+    "role": "original disk-1/context.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-device-summary.json",
+    "role": "original disk-1/device-summary.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-device-summary.stderr.log",
+    "role": "original disk-1/device-summary.stderr.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-device-jsonl.log",
+    "role": "original disk-1/device.jsonl; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-device-stop.log",
+    "role": "original disk-1/device.stop; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-diagnostic-checks.json",
+    "role": "original disk-1/diagnostic-checks.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-final-projection-files.json",
+    "role": "original disk-1/final-projection-files.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-monitor.log",
+    "role": "original disk-1/monitor.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-outer-status.json",
+    "role": "original disk-1/outer-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-ownership.json",
+    "role": "original disk-1/ownership.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-phase-owner.json",
+    "role": "original disk-1/phase-owner.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-phase-status.json",
+    "role": "original disk-1/phase-status.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-recorder.stderr.log",
+    "role": "original disk-1/recorder.stderr.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-report.json",
+    "role": "original disk-1/report.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-runner.log",
+    "role": "original disk-1/runner.log; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-unmodified-gates.json",
+    "role": "original disk-1/unmodified-gates.json; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-disk-1-workload-pid.log",
+    "role": "original disk-1/workload.pid; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-driver-before-zram-v4.log",
+    "role": "exact historical v3 driver matching recorded SHA; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-copy-source.log",
+    "role": "bounded completed-attempt copy source; aborted diagnostic, no performance/qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-summary.json",
+    "role": "derived abort/partial-evidence summary; no qualification/performance claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-summary.log",
+    "role": "plain-language abort caveats; no qualification/performance claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-zram-v3-abort-archive-copies.json",
+    "role": "exact original/copy SHA256 proof; no qualification/performance claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-api-object-upload.json",
+    "role": "API object upload record; branch_updated=false at this stage; exact source publication only"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-api-commit-upload.json",
+    "role": "API commit upload record; exact SHA/tree/parent identity; branch_updated=false at this stage"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-publication-observation.json",
+    "role": "post-publication fetched-ref/commit identity observation with explicit API evidence boundaries; no qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-status.json",
+    "role": "Terminal three-arm status and comparison inputs"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-context.json",
+    "role": "disk-1 exact completed context.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-phase-owner.json",
+    "role": "disk-1 exact completed phase-owner.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-ownership.json",
+    "role": "disk-1 exact completed ownership.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-phase-status.json",
+    "role": "disk-1 exact completed phase-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-outer-status.json",
+    "role": "disk-1 exact completed outer-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-runner.log",
+    "role": "disk-1 exact completed runner.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-report.json",
+    "role": "disk-1 exact completed report.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-recorder.stderr.log",
+    "role": "disk-1 exact completed recorder.stderr.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-monitor.log",
+    "role": "disk-1 exact completed monitor.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-device-jsonl.log",
+    "role": "disk-1 exact completed device.jsonl"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-device-summary.json",
+    "role": "disk-1 exact completed device-summary.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-device-summary.stderr.log",
+    "role": "disk-1 exact completed device-summary.stderr.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-allocation-jsonl.log",
+    "role": "disk-1 exact completed allocation.jsonl"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-final-projection-files.json",
+    "role": "disk-1 exact completed final-projection-files.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-diagnostic-checks.json",
+    "role": "disk-1 exact completed diagnostic-checks.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-1-unmodified-gates.json",
+    "role": "disk-1 exact completed unmodified-gates.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-context.json",
+    "role": "ram exact completed context.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-phase-owner.json",
+    "role": "ram exact completed phase-owner.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-ownership.json",
+    "role": "ram exact completed ownership.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-phase-status.json",
+    "role": "ram exact completed phase-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-outer-status.json",
+    "role": "ram exact completed outer-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-runner.log",
+    "role": "ram exact completed runner.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-report.json",
+    "role": "ram exact completed report.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-recorder.stderr.log",
+    "role": "ram exact completed recorder.stderr.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-monitor.log",
+    "role": "ram exact completed monitor.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-device-jsonl.log",
+    "role": "ram exact completed device.jsonl"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-device-summary.json",
+    "role": "ram exact completed device-summary.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-device-summary.stderr.log",
+    "role": "ram exact completed device-summary.stderr.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-allocation-jsonl.log",
+    "role": "ram exact completed allocation.jsonl"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-final-projection-files.json",
+    "role": "ram exact completed final-projection-files.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-diagnostic-checks.json",
+    "role": "ram exact completed diagnostic-checks.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-unmodified-gates.json",
+    "role": "ram exact completed unmodified-gates.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-ram-RAM-cleanup.json",
+    "role": "Exact owned RAM directory cleanup after writers stopped"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-context.json",
+    "role": "disk-2 exact completed context.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-phase-owner.json",
+    "role": "disk-2 exact completed phase-owner.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-ownership.json",
+    "role": "disk-2 exact completed ownership.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-phase-status.json",
+    "role": "disk-2 exact completed phase-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-outer-status.json",
+    "role": "disk-2 exact completed outer-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-runner.log",
+    "role": "disk-2 exact completed runner.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-report.json",
+    "role": "disk-2 exact completed report.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-recorder.stderr.log",
+    "role": "disk-2 exact completed recorder.stderr.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-monitor.log",
+    "role": "disk-2 exact completed monitor.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-device-jsonl.log",
+    "role": "disk-2 exact completed device.jsonl"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-device-summary.json",
+    "role": "disk-2 exact completed device-summary.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-device-summary.stderr.log",
+    "role": "disk-2 exact completed device-summary.stderr.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-allocation-jsonl.log",
+    "role": "disk-2 exact completed allocation.jsonl"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-final-projection-files.json",
+    "role": "disk-2 exact completed final-projection-files.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-diagnostic-checks.json",
+    "role": "disk-2 exact completed diagnostic-checks.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-disk-2-unmodified-gates.json",
+    "role": "disk-2 exact completed unmodified-gates.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-context.json",
+    "role": "Exact completed empty RAM preflight context.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-phase-owner.json",
+    "role": "Exact completed empty RAM preflight phase-owner.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-ownership.json",
+    "role": "Exact completed empty RAM preflight ownership.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-phase-status.json",
+    "role": "Exact completed empty RAM preflight phase-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-outer-status.json",
+    "role": "Exact completed empty RAM preflight outer-status.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-runner.log",
+    "role": "Exact completed empty RAM preflight runner.log"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-RAM-cleanup.json",
+    "role": "Exact completed empty RAM preflight RAM-cleanup.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-preflight-final-projection-files.json",
+    "role": "Exact completed empty RAM preflight final-projection-files.json"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-driver.log",
+    "role": "Exact executed helper source; script_sha256"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-monitor-source.log",
+    "role": "Exact executed helper source; monitor_sha256"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-base-monitor-source.log",
+    "role": "Exact executed helper source; base_monitor_sha256"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-device-summary-source.log",
+    "role": "Exact executed helper source; summary_sha256"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-quota-helper-source.log",
+    "role": "Exact executed helper source; quota_helper_sha256"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-recorder-source.log",
+    "role": "Exact executed helper source; recorder_sha256"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-usage.log",
+    "role": "V4 protocol description; report/driver remain authoritative"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-summary.json",
+    "role": "Derived terminal three-arm summary and formulas"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-doc-addition.log",
+    "role": "Concise current placement diagnostic documentation draft"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-summary-source.log",
+    "role": "Exact completed-evidence summary/archive source"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-summary-finalization-source.log",
+    "role": "Final derived checkpoint observations/napkin table source; raw reports unchanged"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-placement-v4-completed-copy-manifest.json",
+    "role": "Exact completed placement evidence copy hashes"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-ci-result.json",
+    "role": "Completed remote ci verdict at exact 654e4a175aaaf420d88fbdec5794687b72442ea0; success"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-ci-full-archive.log",
+    "role": "Completed remote ci full log; only masked checkout header omitted, provenance in redaction manifest"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-ci-fetch-ledger.json",
+    "role": "Actual GitHub fetch commands, exit codes, timestamps and hashes of untouched downloaded metadata/raw logs"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-ci-result.json.fetch.stderr.log",
+    "role": "Completed GitHub fetch stderr, retained even when empty"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-ci-full.log.fetch.stderr.log",
+    "role": "Completed GitHub fetch stderr, retained even when empty"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-turso-result.json",
+    "role": "Completed remote turso projection verdict at exact 654e4a175aaaf420d88fbdec5794687b72442ea0; success"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-turso-full-archive.log",
+    "role": "Completed remote turso projection full log; only masked checkout header omitted, provenance in redaction manifest"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-turso-fetch-ledger.json",
+    "role": "Actual GitHub fetch commands, exit codes, timestamps and hashes of untouched downloaded metadata/raw logs"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-turso-result.json.fetch.stderr.log",
+    "role": "Completed GitHub fetch stderr, retained even when empty"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-turso-full.log.fetch.stderr.log",
+    "role": "Completed GitHub fetch stderr, retained even when empty"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-remote-redactions.json",
+    "role": "Explicit raw-to-archive source/hash mapping for already-masked checkout header removal"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-654e4a17-remote-verdict.json",
+    "role": "Exact-source completed workflow summary; no performance qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-ci-result.json",
+    "role": "Completed remote ci verdict at exact 522ea1f1f9fadf8efbdcd493d2c6f9c7d351981a; success"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-ci-full-archive.log",
+    "role": "Completed remote ci full log; only masked checkout header omitted, provenance in redaction manifest"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-ci-fetch-ledger.json",
+    "role": "Actual GitHub fetch commands, exit codes, timestamps and hashes of untouched downloaded metadata/raw logs"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-ci-result.json.fetch.stderr.log",
+    "role": "Completed GitHub fetch stderr, retained even when empty"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-ci-full.log.fetch.stderr.log",
+    "role": "Completed GitHub fetch stderr, retained even when empty"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-remote-redactions.json",
+    "role": "Explicit raw-to-archive source/hash mapping for already-masked checkout header removal"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-522ea1f1-remote-verdict.json",
+    "role": "Exact-source completed workflow summary; no performance qualification claim"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-source-boundary-review.log",
+    "role": "Completed independent review; verbatim Markdown copy: s3-source-boundary-review"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-source-preview-policy-review.log",
+    "role": "Completed independent review; verbatim Markdown copy: source-preview-policy-review"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-rejected-concurrency-experiments.log",
+    "role": "Completed independent review; verbatim Markdown copy: rejected-concurrency-experiments"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-canonical-regression-review.log",
+    "role": "Completed independent review; verbatim Markdown copy: s2-canonical-regression-review"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-public-release-gate.json",
+    "role": "Initial local manifest result: missing cargo-deny failure preserved"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-public-release-gate.log",
+    "role": "Initial local manifest native output: missing cargo-deny failure preserved"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-public-release-gate-tools.json",
+    "role": "Second local manifest result: exact vendor test-key finding preserved"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-public-release-gate-tools.log",
+    "role": "Second local manifest output: exact vendor test-key finding preserved"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-secret-redacted.json",
+    "role": "Redacted metadata for exact historical deterministic local test-key finding"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-secret-redacted.log",
+    "role": "Redacted scanner output for original finding"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s2-gitleaks-install.log",
+    "role": "Pinned gitleaks installation/checksum verification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-secret-history.log",
+    "role": "Focused full-history scanner rerun with exact reviewed exception"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-public-release-gate.json",
+    "role": "Complete eight-gate local public release result PASS on clean S3"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-public-release-gate.log",
+    "role": "Complete eight-gate local public release native output on clean S3"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-source-identity.json",
+    "role": "S3 package source / S2 runtime source exact diff identity"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-source-boundary-review.json",
+    "role": "Independent scanner-only S2-to-S3 source identity review"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-release-preparation.json",
+    "role": "Completed S3 version, identity and source-package command ledger"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-release-versions.log",
+    "role": "S3 public version source validation"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-release-identity.log",
+    "role": "S3 release identity validation"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-release-package.log",
+    "role": "S3 shared source predicate and four source-preview artifacts verification"
+  },
+  {
+    "path": "/tmp/fireweed-maintenance-s3-release-package-checksums.json",
+    "role": "Exact local dry-run source-preview package checksums; remote build verified separately"
+  }
+]

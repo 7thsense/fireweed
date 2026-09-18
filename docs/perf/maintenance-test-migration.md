@@ -1,6 +1,23 @@
 # Maintenance test migration (v0.31.28)
 
-This audit records SQLite retirement, duplicate removal, and restoration of positive native Turso API conformance assertions for this release. It records test ownership rather than execution results; the release evidence must establish which compiled harnesses passed. The assertion baseline protects the resulting test set, and historical test names remain below.
+This audit records SQLite retirement, duplicate removal, restoration of positive native Turso API conformance assertions, and completed validation for this release. Original failures, focused reruns and performance qualification remain distinct. The assertion baseline protects the resulting test set, and historical test names remain below.
+
+## Current source validation
+
+| Source / scope | Completed result |
+| --- | --- |
+| S2 `654e4a17` | [CI 35303227120](https://github.com/7thsense/fireweed/actions/runs/35303227120) and [Turso 35303227154](https://github.com/7thsense/fireweed/actions/runs/35303227154) pass, including the corrected external fixtures. |
+| S3 `522ea1f1`, evidence-scanner change only | [CI 35304454728](https://github.com/7thsense/fireweed/actions/runs/35304454728), all eight local public-release gates, and the package check pass. |
+| S2 canonical C1/P1/C2/P2 | Both primitive repeats pass all 29 checks. Both campaigns fail during cycle seven after six complete cycles with an ambiguous log position following a produce timeout. Neither has a final eight-million-recipient correctness result. |
+| S2 four-cycle trace and two-cycle disk/RAM/disk comparison | Diagnostic evidence only; neither replaces the eight-cycle qualification. The placement arms pass their short-run assertions but do not reach the materialized-main checkpoint regime. |
+
+The canonical performance target remains unmet for the current source. Successful
+source-preview gates and package validation do not establish workflow capacity
+or publication status. Runtime measurements retain their S2 source/binary
+identity; the scanner-only S3 change is not a new workload measurement. The
+[final verification manifest](evidence/maintenance-verification-final-v0.31.28/manifest.json)
+retains the compiled inventory, local and remote verification, optimized upstream
+follow-ups, and completed measurement attempts with their original outcomes.
 
 ## Ported or renamed assertions
 
@@ -139,8 +156,10 @@ The 10,000-item diagnostic improved from 42.383 to 9.700 seconds, with selection
 median/p95 falling from 325.022/358.512 to 4.200/4.425 ms per 100-item sample.
 That traced tmpfs comparison includes stronger drain assertions and other gate
 selection changes; it is not canonical on-disk workflow qualification. The
-reported T2 diagnostic remains above its latency budget, and fresh capacity
-measurements remain pending.
+reported T2 diagnostic remains above its latency budget. Fresh S2 capacity
+measurements are complete: both primitive repeats pass, but both full campaigns
+fail during cycle seven. The subsequent four-cycle trace and two-cycle placement
+comparison remain diagnostics, not qualifying replacements.
 
 PostgreSQL-log/Turso embedded delivery now uses the log's durable emission cursor.
 The server residual delivery fixture appends through the public Redis interface,
@@ -200,13 +219,19 @@ installs its missing `ripgrep` prerequisite. At `bb443691`, the ordinary CI run
 passes; the separate Turso workflow passes native tests and public workflow/log
 recovery, then fails its 12-cell route test because `FIREWEED_PG_TEST_URL` is
 unset. The assertion remains fail-closed; skipped downstream stages are not
-passes. All six focused fixture-correction checks pass locally; clean S2 and
-its remote verification remain pending.
-The partial canonical attempt was intentionally interrupted after this discovery,
-with process and owned temporary-data cleanup recorded. Its preserved observations
-are diagnostic evidence, not a throughput failure or qualification. Candidate
-remeasurement remains pending, and the v0.31.28 source-preview prerelease has not
-been published.
+passes. All six focused fixture-correction checks pass locally. Clean S2
+`654e4a17` subsequently passes both CI 35303227120 and Turso 35303227154,
+including the fixture-dependent matrix stages.
+The earlier `bb443691` partial canonical attempt was intentionally interrupted
+after the missing-fixture discovery, with process and owned temporary-data cleanup
+recorded. Its preserved observations
+are diagnostic evidence, not a throughput failure or qualification. The later
+uninterrupted S2 C1/P1/C2/P2 sequence is separate evidence: both primitive repeats
+pass 29/29 checks, while both campaigns time out during cycle seven after six
+complete cycles. The full-run target remains unmet. S3 `522ea1f1` changes only the
+evidence scanner and passes CI 35304454728, all eight local public-release gates
+and package validation; these results do not claim publication or performance
+qualification.
 
 The applied inventory/policy correction retains vendored findings in explicit
 external observations, outside product closure and without declaring them
@@ -225,11 +250,14 @@ documentation tests. All eight poststage checks pass, including the corrected
 storage-policy classifications and negative fixtures: zero product debt, with
 148 external observations retained without qualification. The earlier
 closure failure and upstream limitations remain recorded. Route listing alone
-does not establish execution of every runtime test. The new inventory/poststage
-records await final archival and are not included in the existing 67-artifact
-post-b2 manifest. Both upstream stress reruns now pass with their assertions
-retained; canonical C1/P1/C2/P2 qualification remains pending. Completed attempt
-locations and pending canonical qualification are recorded in the
+does not establish execution of every runtime test. The inventory/poststage
+records are retained in the
+[final verification manifest](evidence/maintenance-verification-final-v0.31.28/manifest.json),
+separately from the earlier 67-artifact post-b2 manifest. Both optimized upstream
+stress reruns pass with their assertions retained. Canonical C1/P1/C2/P2
+measurement is complete but does not qualify: both campaign attempts fail and
+both primitive attempts pass. The completed attempts and remaining performance
+gap are recorded in the
 [maintenance verification baseline](maintenance-release-baseline.md#candidate-verification-status).
 
 ## Retired evidence producers and current entrypoints
@@ -295,11 +323,15 @@ tests subsequently completed and passed on unchanged source `bb443691`. The
 optimized build retained all assertions and iteration counts, debug assertions
 and overflow checks, with 16 codegen units and LTO disabled. Serial execution
 retained `SEED=1729` and a 16-GiB address-space limit, with a 900-second watchdog
-per test. These follow-ups resolve the two incomplete stress cases and await
-final archival; they do not turn the earlier timed-out attempts into passes.
+per test. These follow-ups resolve the two incomplete stress cases and are
+retained in the
+[final verification manifest](evidence/maintenance-verification-final-v0.31.28/manifest.json);
+they do not turn the earlier timed-out attempts into passes.
 The failed MVCC bootstrap/concurrency cases do not exercise Fireweed's supported
 journal mode, which rejects MVCC configuration. Exact failures, limits, regular
 suite counts and working evidence locations are recorded in the
 [maintenance verification baseline](maintenance-release-baseline.md#vendored-verification-results).
-These upstream results neither replace final product conformance nor establish
-the pending candidate's performance qualification.
+These upstream results neither replace product conformance nor establish
+performance qualification. Current S2/S3 source validation passes as recorded
+above; both S2 full-campaign attempts remain failed, with no eight-million-recipient
+rate claimed for either.

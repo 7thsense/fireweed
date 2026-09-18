@@ -1,6 +1,160 @@
 # Maintenance release: baseline and verification
 
-## Baseline identity
+## Source-preview identity and current capacity
+
+The v0.31.28 source-preview artifact source (S3) is
+`522ea1f1f9fadf8efbdcd493d2c6f9c7d351981a`. Runtime measurements belong to its
+parent (S2), `654e4a175aaaf420d88fbdec5794687b72442ea0`, and normal release
+workload binary `8071feb98f8ce9c951be891b77d87deaff25f32a06a2f6eac7fdc99287b6c573`.
+S3 changes only three `.gitleaksignore` lines: one exact historical fingerprint
+for a deterministic temporary-database encryption test key and two rationale
+comments. Every other tracked path is byte-identical. The runtime measurements
+were not rerun or relabelled for S3. This source preview makes no governed
+readiness, signing or Snorri production-migration claim.
+
+All eight required local public-release gates passed on clean S3, including
+functional checks, dependency/license policy, the full-history secret scan,
+source-package verification and release-channel checks. Its exact source archive,
+SBOM, unsigned provenance and checksum files also passed separate packaging
+verification. [S2 CI](https://github.com/7thsense/fireweed/actions/runs/35303227120),
+[S2 Turso](https://github.com/7thsense/fireweed/actions/runs/35303227154) and
+[S3 CI](https://github.com/7thsense/fireweed/actions/runs/35304454728) passed.
+S3 did not trigger the path-filtered Turso workflow. The initial missing-tool
+failure and vendor test-key finding remain preserved alongside their corrections.
+
+The [final verification manifest](evidence/maintenance-verification-final-v0.31.28/manifest.json)
+contains 348 completed artifacts, including raw failed and successful reports,
+executed diagnostic scripts, device counters, observer/process cleanup, exact
+source identities and remote run evidence. Compressed and decompressed hashes
+are recorded; archiving does not transfer source identities or make failures pass.
+Earlier checkpoint/prepush/post-b2 archives retain the preceding test attempts.
+
+**Current sustained campaign qualification failed.** The serial
+C1/P1/C2/P2 attempt passed both primitive suites but failed both full campaigns
+with authoritative-log post-position produce timeouts after six complete cycles.
+Neither failed campaign has a complete result; dividing by eight million would
+invent a throughput measurement. The historical `49f1b6b` qualification below
+remains historical. The 10k complete-recipient floor and 12.5k stretch goal
+remain unqualified on the maintenance source. The release channel and capacity
+qualification are separate.
+
+### Four-cycle checkpoint diagnostic
+
+A separate four-cycle diagnostic used the same clean S2 and binary, unchanged
+one-million-resident-row/64-store/128-campaign shape, and three explicit tracing
+flags. All four million recipient lifecycles completed: each cycle independently
+verified and purged one million rows, with 967,741 deliveries, 32,259 planned
+terminal failures, and zero pending or leased rows. Its diagnostic rate was
+**8,638.52 recipients/sec**, CPU cost **0.911280 ms/recipient**, and peak RSS
+**17.104 GiB**. These are traced four-cycle observations, not eight-cycle
+qualification or a substitute for the failed full campaigns.
+
+| Cycle | Campaign wall median / maximum | Delivery median |
+| --- | ---: | ---: |
+| 1 | 62.498 / 64.971 s | 23.219 s |
+| 2 | 93.474 / 95.727 s | 29.737 s |
+| 3 | 102.340 / 104.069 s | 32.582 s |
+| 4 | 188.449 / 193.298 s | 106.047 s |
+
+The trace recorded **78 checkpoint attempts: 77 successes and one error**. The
+error's cause was not recorded; the same store subsequently succeeded, and all
+64 stores reported successful checkpointing. Successful attempts had median
+**3.644321 s** and maximum **10.010102 s**. Their wave coincided with the fourth
+cycle: the bracketing device window measured 46.665 MiB/s of host writes,
+98.50% busy, 116.565 ms mean completed-write latency, and 2.997 process CPU
+seconds per wall second. These whole-device counters cannot attribute traffic
+to individual projection or log files or establish an SSD bandwidth ceiling.
+
+The 42,756 completed local publications reached **19.068902 s**; file-data sync
+reached **13.775142 s** and directory sync **11.838483 s**. The 22,093 successful
+log produce operations reached **26.021177 s**. Operations overlap: their
+durations must not be summed into lost wall time. Publication/produce records
+lack absolute timestamps and per-store join identifiers, so they cannot be
+matched exactly to checkpoint events. This successful-only trace does not identify
+the operation that timed out in either earlier campaign.
+
+The workload exited zero; the diagnostic wrapper completed and cleaned up.
+The recorder correctly retained **133 failed qualification checks**, including
+the trace override, overall/three cycle rate misses, and 64 materialization plus
+64 stability checks. With only four cycles, the last-three main-file snapshots
+still include the pre-checkpoint 4-KiB files. None of those failures is removed
+or converted into a pass. The [trace analysis](evidence/maintenance-verification-final-v0.31.28/fireweed-maintenance-s2-traced-four-cycles-checkpoint-wave-1-analysis.json.gz)
+and its raw records, original failed gates and executed analysis scripts are
+included in the final verification manifest.
+
+## Completed placement diagnostic: two cycles per arm (2026-09-18 UTC)
+
+Clean source `654e4a175aaaf420d88fbdec5794687b72442ea0`, normal release binary `8071feb98f8ce9c951be891b77d87deaff25f32a06a2f6eac7fdc99287b6c573` completed **disk / RAM / disk**, serially. Each arm completed two million recipients with unchanged workflow assertions and authoritative logs on disk. This is a placement diagnostic, not eight-cycle qualification.
+
+| Metric | Disk 1 | RAM projection | Disk 2 |
+| --- | ---: | ---: | ---: |
+| Complete recipients/sec | 12,383.20 | 15,693.88 | 11,729.11 |
+| Slowest cycle equivalent recipients/sec | 10,611.96 | 15,974.95 | 10,870.18 |
+| CPU-ms/recipient | 0.85441 | 0.84816 | 0.93912 |
+| Peak process RSS, GiB | 16.21 | 16.52 | 16.24 |
+| Sampled peak projection allocation, GiB | 14.87 | 13.53 | 15.16 |
+| Largest sampled per-store WAL, MiB | 254.62 | 226.06 | 254.48 |
+| Sampled host writes, GiB | 5.8555 | 2.6293 | 5.4987 |
+| Sampled host write rate, MiB/sec | 37.50 | 21.52 | 33.50 |
+| Mean host write-request time, ms | 24.43 | 41.84 | 42.60 |
+| Host device busy time, % | 80.16 | 73.04 | 86.41 |
+| Worst progress-read p95, seconds | 0.577 | 0.408 | 0.330 |
+| Host zram swap-in / swap-out, MiB | 1.766 / 14.219 | 0.227 / 0.117 | 0.570 / 0.000 |
+| Diagnostic checks passed | 517 | 517 | 517 |
+
+Against the arithmetic mean of the disk controls, RAM changed throughput by **+30.17%**, CPU cost per recipient by **-5.42%**, and sampled host write bytes by **-53.69%**. Host bytes are not exclusive Fireweed attribution, and sampling omits startup/tail.
+
+Both-cycle exact outcomes, progress and due bounds passed. **All 64 main DB files per arm remained 4 KiB**, with maximum sampled WAL below 448 MiB/store: this comparison does not exercise the materialized-main checkpoint regime. The unmodified qualification outputs remain archived: two cycles fail the sustained campaign-count requirement, and RAM additionally fails on-disk projection placement. Both disk controls also fail the 12.5k overall-throughput gate; none of the three arms qualifies. Neither the eight-cycle checkpoint/RSS-stability gates nor the cycle-seven timeout is resolved by completing two cycles. The faster RAM arm supports a current short-run projection placement cost, without identifying the cause of the later canonical log timeout.
+
+Conditional arithmetic at the measured two-cycle costs (CPU-seconds/sec / host MiB/sec):
+
+| Complete recipients/sec | Disk 1 | RAM projection | Disk 2 |
+| --- | ---: | ---: | ---: |
+| 10,000 | 8.54 / 29.98 | 8.48 / 13.46 | 9.39 / 28.15 |
+| 12,500 | 10.68 / 37.48 | 10.60 / 16.83 | 11.74 / 35.19 |
+
+These are proportional resource budgets for the completed short shape, not sustained capacity estimates beyond its checkpoint boundary.
+
+Actual zram-only/no-backing identity remained unchanged. Workload VmSwap stayed zero, and host swap-out remained within 16 MiB per arm. Host swap-in is recorded as background CPU/memory context; values above 16 MiB are annotated, without a zero-swapping or no-other-host-activity claim. The earlier three diagnostic aborts and the failed canonical campaigns remain separate evidence.
+
+Exact reports, device/allocation samples, identities, cleanup records, unmodified gates and executed scripts are in the final verification manifest. The [placement summary](evidence/maintenance-verification-final-v0.31.28/fireweed-maintenance-placement-v4-completed-summary.json.gz) records formulas and source hashes. The earlier mount preflight failure and three guard-triggered aborts remain separately archived; no incomplete arm is assigned a complete-run rate.
+
+## Previously rejected concurrency changes
+
+The present investigation must account for experiments already completed:
+
+| Candidate | Observed result and retained decision |
+| --- | --- |
+| Shared log flush runtimes | The repeated 8M campaign fell to 12,043.94/sec, with an 8,907.78/sec worst cycle, failing the base floor. Earlier thread/RSS savings did not establish sustained capacity. Pooling was removed; independent startup/draining correctness fixes remain. |
+| Shared directory-sync barriers | Two candidate screens avoided only 0.252% and 0.498% of publication barriers. Mean throughput fell 1.24%; total sync calls increased 0.13%. Removed without sustained qualification. |
+| Global cap of 16 active projection applies | Two one-cycle comparisons lost 6.72% and 5.00% throughput while CPU cost rose 8.20% and 11.67%. The policy was removed despite passing cancellation/fairness/correctness tests. These screens did not exercise a sustained checkpoint wave; they still reject repeating the same cap without a distinct measured mechanism. |
+
+The raw historical manifests are
+`fireweed-shared-log-runtime-sustained-manifest.json`,
+`fireweed-directory-sync-screen-manifest.json`, and
+`fireweed-apply-admission-screen-manifest.json` under
+`docs/helix/04-build/evidence/workflow-capacity/`. The
+[campaign qualification history](campaign-qualification-plan.md) explains each
+candidate, comparison, and rollback. Reducing each log runtime to one worker and
+staggering checkpoint thresholds were also rejected; neither is a new fix.
+
+Current native apply acquires one writer per store before `spawn_blocking` and
+retains it through commit/rollback. Ordinary Tokio callers use their current
+runtime; the two-worker runtime is only a fallback and does not impose a
+process-wide two-apply limit. Relational work uses a separate inner blocking hop.
+Thus a global admission change would need to address the actual owned apply
+path, preserve cancellation and ownership, and improve on the rejected policy.
+The four-cycle trace supplies evidence for further attribution. The completed
+short placement comparison confirms a projection-placement cost before
+checkpointing, but does not explain the later produce timeout. Next code work
+must correlate log publication/produce phases with absolute timestamps and
+store identities, then isolate checkpoint/writeback interaction without changing
+log durability. Compare any proposed change serially against the same source,
+retain failed outcomes, and repeat both full eight-cycle campaigns and primitive
+suites before declaring the performance goal complete. A blind retry or a longer
+produce timeout would not establish that the underlying stall is fixed.
+
+## Historical qualified baseline identity
 
 The reference implementation is source
 `49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707`, with workload binary SHA-256
@@ -8,7 +162,8 @@ The reference implementation is source
 The repeated qualification and compressed raw evidence are documented in
 [disk-baseline-and-napkin-math.md](disk-baseline-and-napkin-math.md).
 These measurements precede the maintenance dependency refresh. They must not be
-reported as measurements of the new release until its candidate is remeasured.
+reported as measurements of the maintenance source. Its completed remeasurement
+and failed full campaigns are recorded above.
 
 | Measurement | First repetition | Second repetition |
 | --- | ---: | ---: |
@@ -55,7 +210,7 @@ For the workflow target, use measured work per recipient:
   layers. Do not add them to physical host writes or divide sequential `dd`
   bandwidth by logical payload size to claim a workflow ceiling.
 
-A full-length disk/RAM placement comparison roughly halved host writes without
+A historical full-length disk/RAM placement comparison roughly halved host writes without
 improving throughput. The retained idle-worker fix instead reduced scheduler
 activity and improved measured CPU cost. This supports focusing optimization on
 code; it does not prove device latency can never become a bottleneck.
@@ -112,7 +267,7 @@ scratch state before one log append.
 Fixed-width indexed ordering uses covering seeks with numeric item-ID ties;
 its cursor regression checks the actual query plan for unwanted temporary
 sorting. Retained-row pagination uses numeric ID order and a partial index,
-whose additional write cost will be included in the candidate remeasurement.
+whose additional write cost is included in the current maintenance measurements.
 An `EXPLAIN QUERY PLAN` check also exposed an unintended read cost: adding that
 retained-ID index made a metrics client-key membership join choose a queue-prefix
 scan instead of the active client-key lookup. The query now pins
@@ -152,7 +307,7 @@ flush latency, so these serial whole-cycle results include its batching policy.
 Their mean complete claim/finalize/drain cycles remain 43.926 ms and 45.220 ms per
 100 items, above the diagnostic's 25-ms budget; its T2 diagnostic remains false. This diagnostic improvement does
 not qualify the historical S3m/S5 contract or the current workflow capacity bar.
-Fresh canonical capacity qualification remains pending.
+The subsequent canonical maintenance attempts failed as recorded above.
 
 Debug verification also exposed a stack overflow while Turso compiled nested
 SQL expressions for variable-length compound-index fields. GDB and disassembly
@@ -206,8 +361,8 @@ retired-constructor regressions in `encapsulation`,
 run. The independent benchmark tests and corrected live E2 reruns now pass as
 recorded below. Candidate-4 inventory and poststage checks also pass. Both
 upstream shared-code stress reruns now pass with their assertions retained; fresh
-capacity qualification still requires completion.
-This checkpoint is not the final measured source or a completed release.
+capacity qualification failed on S2 as recorded above. These earlier checkpoint
+results retain their execution identities; the source-preview package uses S3.
 
 At clean checkpoint `bb443691fdaad86b62a5461ce28dd6fbcdde2a71`, remote
 [CI passed](https://github.com/7thsense/fireweed/actions/runs/35296298646), including
@@ -217,8 +372,9 @@ passed native Clippy/tests and public workflow correctness/log recovery, then
 failed its 12-cell route test because `FIREWEED_PG_TEST_URL` was unset. The test
 correctly rejected a missing PostgreSQL fixture; later facade/server stages were
 skipped. This is not a passing full Turso matrix. The CI fixture correction passes all six focused local checks (fixture self-test,
-policy, policy tests, formatting, workflow shape and Clippy). New clean source S2
-and its remote verification remain pending.
+policy, policy tests, formatting, workflow shape and Clippy). The correction was
+published as S2; its complete CI and Turso workflows subsequently passed at the
+links above, including the provisioned PostgreSQL/S3 matrix and downstream stages.
 
 The canonical attempt on `bb443691` was intentionally stopped with SIGTERM after
 that CI fixture omission was found. Its final observer ledger records runner
@@ -228,9 +384,10 @@ confirms removal of only its benchmark-owned temporary data directory while
 preserving measurement/observer files. No full campaign report or four-phase
 result exists, so this interruption establishes neither workflow throughput nor
 a throughput failure. The partial observations remain diagnostic evidence. All
-four serial C1/P1/C2/P2 phases must run afresh on clean S2 using the separate
-`ci-fixtures` attempt paths. Candidate remeasurement remains pending; the
-v0.31.28 source-preview prerelease has not been published.
+four serial C1/P1/C2/P2 phases subsequently ran on clean S2 using the separate
+`ci-fixtures` attempt paths: both primitive suites passed and both campaigns
+failed during cycle seven. Their final records remain separate from this
+intentionally interrupted attempt.
 
 The earlier compiled inventory passed, but its subsequent storage-remediation
 closure check failed on vendored dependency declarations, upstream test annotations,
@@ -314,8 +471,8 @@ Clippy and candidate-4 prestage checks. Original failures remain intact. The
 runtime ledger records a dirty checkout based on `b2c43ea3`; these results are
 not clean-source release evidence. The 67-artifact archive ends at prestage;
 it does not contain the later candidate-4 compiled inventory or poststage logs.
-Those completed records await archival in the final evidence commit. Fresh
-canonical C1/P1/C2/P2 qualification remains pending.
+Those completed records are now in the final verification archive. Current
+canonical outcomes are recorded above; full campaign qualification failed.
 
 All 13 candidate-4 prestage checks pass, including root/benchmark formatting,
 route and binding regeneration, workflow-policy fixtures, storage authority
@@ -335,9 +492,9 @@ The completed records are
 its named inventory snapshot/log, and
 `/tmp/fireweed-maintenance-final-static-candidate-4-poststage-results.json`
 with its named logs. These later records are outside the 67-artifact post-b2
-archive and await the final evidence commit. The two upstream stress reruns
-are complete as recorded below; fresh canonical C1/P1/C2/P2 measurements remain
-pending.
+archive and are now preserved in the final verification manifest. The two
+upstream stress reruns and canonical C1/P1/C2/P2 attempt are complete; their
+distinct results are recorded below and above respectively.
 
 The initial full workspace attempt produced 183 completed harness summaries:
 2,019 passes and ten failures, plus a separately interrupted large calibration.
@@ -363,10 +520,9 @@ both public and normalized configuration boundaries; its focused run passes.
 Source changes after the full run include the focused gate correction,
 private-wrapper removal, feature guards, configuration rejection and the
 post-checkpoint ownership/fixture corrections above; their affected checks are
-recorded separately. Repeated capacity qualification is pending.
-The final evidence commit must replace this status with measured candidate
-identity, exact completed test results, limitations and fresh performance data.
-Earlier diagnostic failures are not release passes.
+recorded separately. Repeated capacity qualification failed on S2; the completed
+reports, exact source identities and fresh device counters are preserved in the
+final verification archive. Earlier diagnostic failures are not release passes.
 
 The follow-up assertion audit removed four core test stubs that exercised string
 counting or standard-library parsing without testing Fireweed behavior. The
@@ -439,9 +595,10 @@ Completed independent checks include source packaging/channel checks, site
 browser verification (88 screenshots, zero layout issues or broken links), and
 the vendored suites detailed below. These checks do not replace final candidate
 workspace verification or the canonical serial C1/P1/C2/P2 capacity runs. The
-maintenance candidate still needs its own clean source and binary identities,
-four passing reports, and fresh host-counter evidence before qualification is
-claimed; the reference measurements above remain historical.
+maintenance candidate now has its own clean source and binary identities and
+fresh host-counter evidence, but only two of the four canonical reports pass.
+Both full campaigns must pass before capacity qualification can be claimed;
+the reference measurements above remain historical.
 
 Docker access is available through `newgrp docker` after adding `erik` to the
 Docker group. The pinned container lifecycle tests passed in the full workspace
@@ -515,6 +672,6 @@ completed optimized follow-up is recorded separately in
 `/tmp/fireweed-maintenance-upstream-optimized-results.json`,
 `fireweed-maintenance-upstream-optimized-build.log`, and
 `fireweed-maintenance-upstream-optimized-01.log` / `-02.log` in `/tmp`; these four
-records await final evidence archival. The test binary SHA-256 is
+records are preserved in the final verification archive. The test binary SHA-256 is
 `1431aea46a714b5efdd61256c24ab26e64c28c8c16f6428928939d8f18587dcf`. These are
 correctness/stress results, not canonical workflow capacity qualification.

@@ -1,7 +1,69 @@
 # Workflow capacity versus hardware cost
 
-**Current baseline, 2026-09-15:** blocked discard through LUKS was repaired;
-8 GiB direct/buffered writes now measure 900/738 MiB/sec. The unchanged
+## Current maintenance capacity status (2026-09-18 UTC)
+
+**The current maintenance source is not campaign-qualified.** On clean S2
+`654e4a175aaaf420d88fbdec5794687b72442ea0`, normal release binary
+`8071feb98f8ce9c951be891b77d87deaff25f32a06a2f6eac7fdc99287b6c573`, the serial
+C1/P1/C2/P2 attempt passed both million-row primitive repeats (29/29 checks each).
+The slower repeat delivered 22,616 insert, 21,549 enrichment, 40,536 scheduling,
+13,036 claim-and-complete and 29,509 purge rows/sec. These are individual
+operation rates; they are not a complete campaign recipient rate.
+
+Both campaigns failed during cycle seven after six complete million-recipient
+cycles, with an ambiguous log position caused by a produce timeout. They emitted
+no final correctness result. Do not divide their elapsed time, CPU or device
+bytes by the configured eight million recipients: **current full-campaign
+throughput and per-recipient resource cost are unavailable**. The historical
+`49f1b6b` repeats did qualify at 12.5k, but that result does not qualify S2.
+[The disk baseline](disk-baseline-and-napkin-math.md) records all four outcomes
+and the fresh calibration.
+
+For any completed workload, the conditional resource arithmetic is:
+
+- CPU demand in CPU-seconds/sec = target work units/sec × CPU-ms/work unit / 1000.
+- Host write demand in MiB/sec = target work units/sec × sampled host bytes/work unit / 2^20.
+
+| Measured cost basis | CPU-ms/unit | Host bytes/unit | CPU demand at 10k / 12.5k units/sec | Host MiB/sec at 10k / 12.5k units/sec |
+| --- | ---: | ---: | ---: | ---: |
+| Historical qualified campaign, one complete recipient | 0.81836–0.85866 | about 3,964–3,978 | 8.18–8.59 / 10.23–10.73 | 37.80–37.94 / 47.25–47.42 |
+| S2 primitives, one input row through all five phases | 0.56167–0.57698 | 6,827–7,789 | 5.62–5.77 / 7.02–7.21 | 65.11–74.28 / 81.38–92.85 |
+| S2 full campaign | Unavailable: both attempts failed | Unavailable | Unavailable | Unavailable |
+
+The primitive budget covers all five phases per input row, including varied
+payload bodies; it neither represents campaign metadata-only updates nor
+attributes cost to any one primitive. Passing each 10k operation floor does not
+establish that all five phases can continuously process 10k complete rows/sec.
+These extrapolations hold measured cost constant and predict neither tail
+latency nor completion under load.
+
+Fresh 8 GiB `dd` observations including final sync measured **75.84 MiB/sec direct
+NoCOW** and **50.55 MiB/sec buffered**; host-device counters measured 76.51 and
+51.30 MiB/sec respectively. The historical stretch write budget is 92.11–92.44%
+of that buffered host-device observation. Finite sequential transfers and mixed
+queue/log I/O differ, so this ratio establishes neither remaining capacity nor
+an SSD ceiling. C1/C2 themselves averaged 8.46/8.17 process CPU-seconds/sec and
+43.12/40.52 host-device MiB/sec over the failed attempts, with write-request
+means 77.90/83.89 ms. Those are observations, not timeout attribution.
+
+Keep the unchanged 10k complete-recipient target, 12.5k stretch target and all
+correctness/reporting/retention gates. The next code investigation must explain
+the repeatable log timeout and complete both eight-cycle campaigns. The
+[maintenance baseline](maintenance-release-baseline.md) records the completed
+same-binary trace and disk/RAM/disk diagnostic. At two-cycle costs, 12.5k complete
+recipients/sec would demand 10.68 / 10.60 / 11.74 CPU-seconds/sec and
+37.48 / 16.83 / 35.19 host MiB/sec respectively. None of those arms reached
+materialized-main checkpointing, so these remain short-run conditional budgets.
+The full campaign costs remain unavailable. Source-preview artifacts use the
+scanner-only descendant S3; runtime measurements remain attributed to S2.
+
+The [final verification manifest](evidence/maintenance-verification-final-v0.31.28/manifest.json)
+preserves the four campaign/primitive reports, fresh disk calibration, trace,
+placement attempts and their original gates. Host-device counters are host-wide,
+exclude sampling gaps at the start/end, and are not NAND-internal writes.
+
+**Historical baseline, 2026-09-15:** blocked discard through LUKS was repaired;
+8 GiB direct/buffered writes then measured 900/738 MiB/sec. The unchanged
 Fireweed CLI completed its first fully qualifying eight-cycle run at 15,064
 recipients/sec (slowest cycle 14,342/sec). See
 [disk baseline and napkin math](disk-baseline-and-napkin-math.md) for the
