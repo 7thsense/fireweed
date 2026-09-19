@@ -102,11 +102,11 @@ fn facade_exports_queue_definition_construction_surface() {
     assert_eq!(validated.queue_id.as_str(), "q2");
 }
 
-/// The blessed construction path: `fireweed::open_memory` yields a usable handle with no concrete backend
+/// The blessed construction path: `fireweed::open_product` yields a usable handle with no concrete backend
 /// type named by the caller (the returned type is `RuntimeCore<impl LibBackend>`).
 #[tokio::test]
-async fn open_memory_builds_a_usable_fireweed() {
-    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+async fn open_product_builds_a_usable_fireweed() {
+    let fireweed = fireweed::open_product(Arc::new(ManualClock::at(0)));
     fireweed.create_queue(qdef()).await.unwrap();
     fireweed
         .push(
@@ -119,14 +119,16 @@ async fn open_memory_builds_a_usable_fireweed() {
         .await
         .unwrap();
     let claimed = fireweed.claim(&qkey(), 10, 1_000).await.unwrap();
-    assert_eq!(claimed.len(), 1, "open_memory handle claims normally");
+    assert_eq!(claimed.len(), 1, "open_product handle claims normally");
 }
 
 /// The filesystem log path builds and round-trips too.
 #[tokio::test]
 async fn filesystem_log_builds_a_usable_fireweed() {
     let fixture = storage::Fixture::new();
-    let fireweed = storage::open_log_memory(fixture.path(), Arc::new(ManualClock::at(0))).unwrap();
+    let fireweed = storage::open_log_turso_async(fixture.path(), Arc::new(ManualClock::at(0)))
+        .await
+        .unwrap();
     fireweed.create_queue(qdef()).await.unwrap();
     fireweed
         .push(&qkey(), fireweed::NewItem::default())
@@ -142,7 +144,9 @@ async fn filesystem_log_retained_handle_owns_path() {
     let path = storage_test_path("retained-handle-owns-path");
     let cleanup_path = std::path::PathBuf::from(&path);
     let fireweed = retain_static(
-        storage::open_log_memory(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
+        storage::open_log_turso_async(path.as_str(), Arc::new(ManualClock::at(0)))
+            .await
+            .unwrap(),
     );
     drop(path);
 
@@ -163,7 +167,9 @@ async fn filesystem_log_owned_path_reopens_after_all_handles_drop() {
     let path = storage_test_path("owned-path-reopens");
     {
         let fireweed = retain_static(
-            storage::open_log_memory(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
+            storage::open_log_turso_async(path.as_str(), Arc::new(ManualClock::at(0)))
+                .await
+                .unwrap(),
         );
         fireweed.create_queue(qdef()).await.unwrap();
         fireweed
@@ -176,7 +182,9 @@ async fn filesystem_log_owned_path_reopens_after_all_handles_drop() {
     }
 
     let reopened = retain_static(
-        storage::open_log_memory(path.as_str(), Arc::new(ManualClock::at(1))).unwrap(),
+        storage::open_log_turso_async(path.as_str(), Arc::new(ManualClock::at(1)))
+            .await
+            .unwrap(),
     );
     assert_eq!(reopened.metrics(&qkey()).await.unwrap().pending, 1);
     drop(reopened);

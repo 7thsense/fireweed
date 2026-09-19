@@ -368,35 +368,29 @@ fn pack_wait_evidence(compatible_mutations: &Value) -> Value {
     })
 }
 
-fn open_mixed_product(root: &Path) -> EngineResult<Fireweed> {
-    open(
-        StorageConfig {
-            log: LogConfig::Filesystem {
-                root: root.join("log"),
-            },
-            projection: ProjectionStoreConfig::Turso {
-                path: root.join("projection.db"),
-            },
-            control_plane: None,
-            authority: None,
-            response_barrier: ResponseBarrier::AsyncProjection,
-            async_projection: Some(AsyncProjectionSpec::default()),
-            sqlite_projection_deferred_flush_chunk: None,
-            segments: SegmentConfig {
-                target_bytes: 256 * 1_024,
-                max_latency_ms: 50,
-            },
-            namespace: "ss-mixed".to_owned(),
-            recovery: RecoveryPolicy::default(),
-        },
-        Arc::new(SystemClock),
-    )
+async fn open_mixed_product(root: &Path) -> EngineResult<Fireweed> {
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut cfg = StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        root.join("projection.db"),
+    );
+    cfg.namespace = format!("ss-mixed-{}-{nonce}", std::process::id());
+    open_async(cfg, Arc::new(SystemClock)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_non_default_claim_registers_lease_before_render() -> EngineResult<()> {
     let root = unique_root();
-    let fireweed = open_mixed_product(&root)?;
+    let fireweed = open_mixed_product(&root).await?;
     let queue = queue_key("q-legacy-claim-regression");
     fireweed
         .create_queue(qdef("q-legacy-claim-regression"))
@@ -441,7 +435,7 @@ async fn objectlog_turso_non_default_claim_registers_lease_before_render() -> En
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_eventual_lifecycle_accepts_durable_append() -> EngineResult<()> {
     let root = unique_root();
-    let fireweed = open_mixed_product(&root)?;
+    let fireweed = open_mixed_product(&root).await?;
     let queue = queue_key("q-eventual-lifecycle-regression");
     fireweed
         .create_queue(qdef("q-eventual-lifecycle-regression"))
@@ -865,7 +859,7 @@ async fn ss_mixed_overlap_baseline() -> EngineResult<()> {
     assert_eq!(acquired_epoch, 1);
 
     drop(log);
-    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let fireweed = Arc::new(open_mixed_product(&root).await?);
     let observation_reader = open_turso_projection_async(&projection_path).await?;
     let wal_before = wal_bytes(&projection_path);
 
@@ -1841,7 +1835,7 @@ async fn shadow_mutation_generation_calibration() -> EngineResult<()> {
     combined_soak_one_below_every_cap(&mut counters);
 
     let root = unique_root();
-    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let fireweed = Arc::new(open_mixed_product(&root).await?);
     let due = now();
     let compatible =
         compatible_mutation_cohort(Arc::clone(&fireweed), queue_key("q-s3s-compatible"), due)
@@ -2744,7 +2738,7 @@ async fn claim_nine_pending_queues_eventually_complete() -> EngineResult<()> {
     counters = ShadowCounters::default();
 
     let root = unique_root();
-    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let fireweed = Arc::new(open_mixed_product(&root).await?);
     let live = live_nine_pending_claim_queues(Arc::clone(&fireweed), now(), &mut counters).await?;
     eprintln!(
         "{}",
@@ -2766,7 +2760,7 @@ async fn shadow_claim_four_incompatible_pending_keys_reject_third_turn() -> Engi
     counters = ShadowCounters::default();
 
     let root = unique_root();
-    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let fireweed = Arc::new(open_mixed_product(&root).await?);
     let live =
         live_four_incompatible_pending_claim_keys(Arc::clone(&fireweed), now(), &mut counters)
             .await?;
@@ -2791,7 +2785,7 @@ async fn shadow_claim_combined_soak_stays_one_below_every_cap() -> EngineResult<
     let root = unique_root();
     let projection_path = root.join("projection.db");
     let driver_path = root.join("s3m-driver.db");
-    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let fireweed = Arc::new(open_mixed_product(&root).await?);
     let driver_store = TursoRelational::open(TursoConfig::local(&driver_path))
         .await
         .map_err(|error| EngineError::Storage(error.to_string()))?;
@@ -2852,7 +2846,7 @@ async fn shadow_claim_drain_calibration_uses_exact_high_water() -> EngineResult<
     let root = unique_root();
     let projection_path = root.join("projection.db");
     let driver_path = root.join("s3m-driver.db");
-    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let fireweed = Arc::new(open_mixed_product(&root).await?);
     let driver_store = TursoRelational::open(TursoConfig::local(&driver_path))
         .await
         .map_err(|error| EngineError::Storage(error.to_string()))?;

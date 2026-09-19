@@ -55,7 +55,7 @@ fn target(queue: QueueKey, max: usize) -> MultiQueueClaimTarget {
 #[tokio::test]
 async fn memory_claims_share_time_and_preserve_input_order() {
     let clock = Arc::new(ManualClock::at(17));
-    let fireweed = fireweed::open_memory(clock);
+    let fireweed = fireweed::open_product(clock);
     let a = queue("a");
     let b = queue("b");
     for (key, id) in [(&a, "a"), (&b, "b")] {
@@ -84,7 +84,7 @@ async fn memory_claims_share_time_and_preserve_input_order() {
 
 #[tokio::test]
 async fn structural_and_definition_preflight_have_no_claim_effects() {
-    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    let fireweed = fireweed::open_product(Arc::new(ManualClock::at(0)));
     let a = queue("a");
     let b = queue("b");
     fireweed.create_queue(definition("a")).await.unwrap();

@@ -203,7 +203,9 @@ async fn time_only_crossed_group_triggers_progress_guard_without_reordering() {
             .unwrap()
             .as_nanos()
     ));
-    let durable = storage::open_log_memory(path.to_str().unwrap(), clock.clone()).unwrap();
+    let durable = storage::open_log_turso_async(path.to_str().unwrap(), clock.clone())
+        .await
+        .unwrap();
     durable.create_queue(definition(&q, 60_000)).await.unwrap();
     durable
         .push(

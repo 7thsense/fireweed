@@ -1,3 +1,7 @@
+#[cfg(feature = "objectlog")]
+#[path = "support/storage.rs"]
+mod storage;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -108,7 +112,7 @@ fn addressed_request(
 
 #[tokio::test]
 async fn memory_facade_mutates_atomically_and_replays_exact_response() {
-    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let fireweed = fireweed::open_product(Arc::new(SystemClock));
     let queue = create(&fireweed, "memory").await;
     let key = ClientItemKey::new("item-a").unwrap();
     let item_id = fireweed
@@ -180,7 +184,7 @@ async fn memory_facade_mutates_atomically_and_replays_exact_response() {
 
 #[tokio::test]
 async fn selector_first_match_invalidates_lease_and_retained_terminal_can_be_purged() {
-    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let fireweed = fireweed::open_product(Arc::new(SystemClock));
     let queue = create(&fireweed, "selector").await;
     let item_id = fireweed
         .push(
@@ -323,7 +327,7 @@ async fn selector_first_match_invalidates_lease_and_retained_terminal_can_be_pur
 
 #[tokio::test]
 async fn active_lease_boundary_and_composed_predicates_use_evaluated_at() {
-    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let fireweed = fireweed::open_product(Arc::new(SystemClock));
     let queue = create(&fireweed, "lease-boundary").await;
     let item_id = fireweed.push(&queue, NewItem::default()).await.unwrap();
     let claimed = fireweed.claim(&queue, 1, 10_000).await.unwrap().remove(0);
@@ -411,7 +415,7 @@ async fn active_lease_boundary_and_composed_predicates_use_evaluated_at() {
 
 #[tokio::test]
 async fn require_active_allows_a_lifecycle_transition_and_invalidates_the_lease() {
-    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let fireweed = fireweed::open_product(Arc::new(SystemClock));
     let queue = create(&fireweed, "require-active-transition").await;
     let item_id = fireweed.push(&queue, NewItem::default()).await.unwrap();
     let claimed = fireweed.claim(&queue, 1, 10_000).await.unwrap().remove(0);
@@ -458,7 +462,7 @@ async fn require_active_allows_a_lifecycle_transition_and_invalidates_the_lease(
 
 #[tokio::test]
 async fn selector_precondition_failure_keeps_first_match_ownership() {
-    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let fireweed = fireweed::open_product(Arc::new(SystemClock));
     let queue = create(&fireweed, "selector-precondition").await;
     let key = ClientItemKey::new("selector-precondition-item").unwrap();
     fireweed
@@ -534,7 +538,17 @@ async fn objectlog_inmemory_reopen_replays_without_selector_evaluation() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&root);
-    let fireweed = fireweed::open_objectlog(&root, Arc::new(SystemClock)).unwrap();
+    let ns = format!(
+        "mut-ol-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let runtime = storage::product_config(&root, &ns);
+    let fireweed = fireweed::open_async(runtime.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap();
     let queue = create(&fireweed, "objectlog").await;
     let item_id = fireweed
         .push(
@@ -554,7 +568,9 @@ async fn objectlog_inmemory_reopen_replays_without_selector_evaluation() {
         .unwrap();
     drop(fireweed);
 
-    let reopened = fireweed::open_objectlog(&root, Arc::new(SystemClock)).unwrap();
+    let reopened = fireweed::open_async(runtime, Arc::new(SystemClock))
+        .await
+        .unwrap();
     let replayed = reopened.mutate_items(&queue, request).await.unwrap();
     assert_eq!(replayed, committed);
     drop(reopened);
@@ -572,27 +588,22 @@ async fn objectlog_turso_reopen_replays_without_selector_evaluation() {
             .unwrap()
             .as_nanos()
     ));
-    let runtime = StorageConfig {
-        log: LogConfig::Filesystem {
-            root: root.join("object-log"),
-        },
-        authority: Some(ObjectLogAuthority::NativeConditionalWrite),
-        control_plane: None,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
-        projection: ProjectionStoreConfig::Turso {
-            path: root.join("projection.db"),
-        },
-        response_barrier: ResponseBarrier::AsyncProjection,
-        segments: SegmentConfig::new(262_144, 20).unwrap(),
-        namespace: "mutation-objectlog-turso".into(),
-        recovery: RecoveryPolicy {
-            incompatible_projection: RecoveryAction::RebuildProjection,
-            verify_checksums: true,
-            max_tail_commands: 1_000_000,
-        },
+    let ns = format!(
+        "mut-olt-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut runtime = storage::product_config(&root, &ns);
+    runtime.recovery = RecoveryPolicy {
+        incompatible_projection: RecoveryAction::RebuildProjection,
+        verify_checksums: true,
+        max_tail_commands: 1_000_000,
     };
-    let fireweed = fireweed::open(runtime.clone(), Arc::new(SystemClock)).unwrap();
+    let fireweed = fireweed::open_async(runtime.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap();
     let queue = create(&fireweed, "objectlog-turso").await;
     let item_id = fireweed
         .push(
@@ -612,7 +623,9 @@ async fn objectlog_turso_reopen_replays_without_selector_evaluation() {
         .unwrap();
     drop(fireweed);
 
-    let reopened = fireweed::open(runtime, Arc::new(SystemClock)).unwrap();
+    let reopened = fireweed::open_async(runtime, Arc::new(SystemClock))
+        .await
+        .unwrap();
     assert_eq!(
         reopened.mutate_items(&queue, request).await.unwrap(),
         committed

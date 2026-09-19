@@ -78,7 +78,7 @@ fn metadata_equals_compatibility(group: &str, region: &str) -> ClaimCompatibilit
 /// (AsyncLogReplayBackend / InMemoryProjection path).
 #[tokio::test]
 async fn claim_with_metadata_equals_filters_over_memory() {
-    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    let fireweed = fireweed::open_product(Arc::new(ManualClock::at(0)));
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
 
@@ -165,13 +165,10 @@ async fn claim_with_metadata_equals_filters_over_local_durable_profiles() {
     }
 
     exercise(
-        "filesystem_memory",
-        storage::open_log_memory(log_path.to_str().unwrap(), Arc::new(ManualClock::at(0))).unwrap(),
-    )
-    .await;
-    exercise(
-        "filesystem_turso",
-        storage::open_log_turso(rel_path.to_str().unwrap(), Arc::new(ManualClock::at(0))).unwrap(),
+        "s3_turso",
+        storage::open_log_turso_async(rel_path.to_str().unwrap(), Arc::new(ManualClock::at(0)))
+            .await
+            .unwrap(),
     )
     .await;
 
@@ -190,7 +187,9 @@ async fn stamped_discovery_preserves_ungrouped_order_through_relational_construc
         "fireweed-facade-stamped-discovery-{}-{nonce}.db",
         std::process::id()
     ));
-    let fireweed = storage::open_log_memory(path.to_str().unwrap(), clock).unwrap();
+    let fireweed = storage::open_log_turso_async(path.to_str().unwrap(), clock)
+        .await
+        .unwrap();
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
     let ungrouped = at(10);
@@ -233,7 +232,7 @@ async fn stamped_discovery_preserves_ungrouped_order_through_relational_construc
 #[cfg(feature = "turso")]
 #[tokio::test]
 async fn request_id_push_retention_survives_filesystem_reopen() {
-    use storage::open_log_memory;
+    use storage::open_log_turso_async;
     let path = std::env::temp_dir()
         .join(format!(
             "fireweed-facade-request-id-reopen-{}-{}.db",
@@ -250,7 +249,9 @@ async fn request_id_push_retention_survives_filesystem_reopen() {
     let q = qkey();
     let rid = RequestId::new("facade-reopen-req").unwrap();
     let first_ids = {
-        let fireweed = open_log_memory(&path, Arc::new(ManualClock::at(0))).unwrap();
+        let fireweed = open_log_turso_async(&path, Arc::new(ManualClock::at(0)))
+            .await
+            .unwrap();
         fireweed.create_queue(qdef()).await.unwrap();
         assert!(
             fireweed
@@ -278,7 +279,9 @@ async fn request_id_push_retention_survives_filesystem_reopen() {
         );
         first.item_ids.clone()
     };
-    let reopened = open_log_memory(&path, Arc::new(ManualClock::at(0))).unwrap();
+    let reopened = open_log_turso_async(&path, Arc::new(ManualClock::at(0)))
+        .await
+        .unwrap();
     reopened.create_queue(qdef()).await.unwrap();
     let replay = reopened
         .push_batch_with_request_id(&q, rid.clone(), vec![at(10), at(20)])
@@ -305,11 +308,7 @@ async fn request_id_push_retention_survives_filesystem_reopen() {
 #[tokio::test]
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 async fn objectlog_turso_strict_upsert_claim_commit_transition() {
-    use fireweed::{
-        EntryOutcome, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
-        ProjectionConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig,
-        SideRecord,
-    };
+    use fireweed::{EntryOutcome, RecoveryAction, RecoveryPolicy, SideRecord};
 
     let root = std::env::temp_dir().join(format!(
         "fireweed-facade-objlog-sqlite-strict-{}-{}",
@@ -322,43 +321,23 @@ async fn objectlog_turso_strict_upsert_claim_commit_transition() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
 
-    let config = ObjectLogRuntimeConfig {
-        object_log: ObjectLogStorage::Local {
-            root: root.join("object-log"),
-        },
-        authority: ObjectLogAuthority::NativeConditionalWrite,
-        projection: ProjectionConfig::Sqlite {
-            path: root.join("projection.sqlite"),
-        },
-        response_barrier: ResponseBarrier::AsyncProjection,
-        segments: SegmentConfig::new(262_144, 20).unwrap(),
-        namespace: "upsert-claim-commit".into(),
-        recovery: RecoveryPolicy {
-            incompatible_projection: RecoveryAction::RebuildProjection,
-            verify_checksums: true,
-            max_tail_commands: 1_000_000,
-        },
+    let mut config =
+        storage::product_config(&root, &storage::unique_namespace("upsert-claim-commit"));
+    config.recovery = RecoveryPolicy {
+        incompatible_projection: RecoveryAction::RebuildProjection,
+        verify_checksums: true,
+        max_tail_commands: 1_000_000,
     };
-    let fireweed = fireweed::open(
-        {
-            let path = match &config.projection {
-                ProjectionConfig::Sqlite { path } => path.clone(),
-                _ => unreachable!(),
-            };
-            let mut config = config.into_matrix_config();
-            config.projection = fireweed::ProjectionStoreConfig::Turso { path };
-            config
-        },
-        Arc::new(ManualClock::at(1_000)),
-    )
-    .unwrap();
+    let fireweed = fireweed::open_async(config, Arc::new(ManualClock::at(1_000)))
+        .await
+        .unwrap();
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
 
     let caps = fireweed.commit_capabilities(&q).unwrap();
-    assert!(
-        caps.atomic_transition_commit,
-        "Strict objectlog×sqlite must advertise atomic commit"
+    assert_eq!(
+        caps.durability_class,
+        fireweed::DurabilityClass::EventualApply
     );
 
     let key = ClientItemKey::new("work-1").unwrap();
@@ -428,7 +407,7 @@ async fn objectlog_turso_strict_upsert_claim_commit_transition() {
 /// prefix instead of tracking key lists in the checkpoint head.
 #[tokio::test]
 async fn side_records_by_prefix_reads_through_facade_over_filesystem_log() {
-    use storage::open_log_memory;
+    use storage::open_log_turso_async;
     let path = std::env::temp_dir()
         .join(format!(
             "fireweed-facade-prefix-scan-{}-{}.db",
@@ -444,7 +423,9 @@ async fn side_records_by_prefix_reads_through_facade_over_filesystem_log() {
     let _ = storage::cleanup(&path);
     let q = qkey();
 
-    let fireweed = open_log_memory(&path, Arc::new(ManualClock::at(0))).unwrap();
+    let fireweed = open_log_turso_async(&path, Arc::new(ManualClock::at(0)))
+        .await
+        .unwrap();
     fireweed.create_queue(qdef()).await.unwrap();
 
     let key = ClientItemKey::new("work-1").unwrap();

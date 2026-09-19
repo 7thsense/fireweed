@@ -47,10 +47,8 @@ async fn assert_cell(
     cell: &str,
     expect_projection_control: bool,
     expect_atomic_commit: bool,
-    build: impl FnOnce(&Path) -> Fireweed,
+    fireweed: Fireweed,
 ) {
-    let root = FixtureRoot::new(cell);
-    let fireweed = build(root.path());
     if expect_atomic_commit {
         public_interface::run(cell, &fireweed, expect_projection_control).await;
     } else {
@@ -87,7 +85,7 @@ fn objectlog_storage(
 #[test]
 fn objectlog_authority_validation_accepts_native_conditional_write() {
     let root = FixtureRoot::new("authority-validation");
-    objectlog_storage(
+    let retired = objectlog_storage(
         LogConfig::Filesystem {
             root: root.path().join("object-log"),
         },
@@ -95,7 +93,8 @@ fn objectlog_authority_validation_accepts_native_conditional_write() {
         "authority-validation",
     )
     .validate()
-    .unwrap();
+    .expect_err("filesystem × memory is retired");
+    assert!(retired.to_string().contains("s3 log"));
 
     objectlog_storage(
         LogConfig::S3 {
@@ -106,7 +105,9 @@ fn objectlog_authority_validation_accepts_native_conditional_write() {
             secret_access_key: ConfigSecret::new("fixture-secret"),
             allow_insecure_http: true,
         },
-        ProjectionStoreConfig::Memory,
+        ProjectionStoreConfig::Turso {
+            path: root.path().join("projection.db"),
+        },
         "authority-validation-s3",
     )
     .validate()
@@ -115,44 +116,49 @@ fn objectlog_authority_validation_accepts_native_conditional_write() {
 
 #[tokio::test]
 async fn memory_memory_public_interface() {
-    assert_cell("memory--memory", false, true, |_| {
-        fireweed::open_memory(Arc::new(SystemClock))
-    })
+    let root = FixtureRoot::new("s3--turso");
+    assert_cell(
+        "s3--turso",
+        true,
+        true,
+        filesystem_turso(root.path(), ResponseBarrier::AsyncProjection, "s3-turso").await,
+    )
     .await;
 }
 
-#[cfg(all(feature = "memory", feature = "turso"))]
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
-async fn memory_turso_public_interface() {
-    assert_cell("memory--turso", false, true, |root| {
-        let mut config = StorageConfig::memory();
-        config.projection = ProjectionStoreConfig::Turso {
-            path: root.join("projection.db"),
-        };
-        fireweed::open(config, Arc::new(SystemClock)).unwrap()
-    })
-    .await;
-}
-
-#[cfg(feature = "objectlog")]
-#[tokio::test]
-async fn filesystem_memory_public_interface() {
-    assert_cell("filesystem--memory", false, true, |root| {
-        fireweed::open_objectlog(root.join("object-log"), Arc::new(SystemClock)).unwrap()
-    })
+async fn filesystem_turso_strict_public_interface() {
+    let root = FixtureRoot::new("s3--turso--strict");
+    assert_cell(
+        "s3--turso--strict",
+        true,
+        true,
+        filesystem_turso(
+            root.path(),
+            ResponseBarrier::AsyncProjection,
+            "s3-turso-strict",
+        )
+        .await,
+    )
     .await;
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
 async fn filesystem_turso_async_public_interface() {
-    assert_cell("filesystem--turso--async", true, true, |root| {
+    let root = FixtureRoot::new("s3--turso--async");
+    assert_cell(
+        "s3--turso--async",
+        true,
+        true,
         filesystem_turso(
-            root,
+            root.path(),
             ResponseBarrier::AsyncProjection,
-            "filesystem-turso-async",
+            "s3-turso-async",
         )
-    })
+        .await,
+    )
     .await;
 }
 
@@ -164,7 +170,8 @@ async fn filesystem_turso_projection_control_rebuilds_from_log() {
         root.path(),
         ResponseBarrier::AsyncProjection,
         "filesystem-turso-rebuild",
-    );
+    )
+    .await;
     let definition = fireweed::QueueDefinition {
         tenant_id: fireweed::TenantId::new("rebuild").unwrap(),
         queue_id: fireweed::QueueId::new("work").unwrap(),
@@ -241,7 +248,8 @@ async fn filesystem_turso_async_same_handle_claims_commit_continuation() {
         root.path(),
         ResponseBarrier::AsyncProjection,
         "filesystem-turso-continuation",
-    );
+    )
+    .await;
     let definition = fireweed::QueueDefinition {
         tenant_id: fireweed::TenantId::new("cont").unwrap(),
         queue_id: fireweed::QueueId::new("work").unwrap(),
@@ -336,7 +344,8 @@ async fn filesystem_turso_async_packed_commits_each_return_outcomes() {
         root.path(),
         ResponseBarrier::AsyncProjection,
         "filesystem-turso-packed-commit",
-    );
+    )
+    .await;
     let definition = fireweed::QueueDefinition {
         tenant_id: fireweed::TenantId::new("pack").unwrap(),
         queue_id: fireweed::QueueId::new("work").unwrap(),
@@ -444,19 +453,29 @@ async fn filesystem_turso_async_packed_commits_each_return_outcomes() {
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
-fn filesystem_turso(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
-    let mut storage = objectlog_storage(
-        LogConfig::Filesystem {
-            root: root.join("log"),
-        },
-        ProjectionStoreConfig::Turso {
-            path: root.join("projection.db"),
-        },
-        namespace,
+async fn filesystem_turso(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let mut storage = StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        root.join("projection.db"),
+    );
+    storage.namespace = format!(
+        "{namespace}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     );
     storage.response_barrier = barrier;
-    if barrier == ResponseBarrier::AsyncProjection {
-        storage.async_projection = Some(fireweed::AsyncProjectionSpec::default());
-    }
-    fireweed::open(storage, Arc::new(SystemClock)).unwrap()
+    storage.async_projection =
+        (barrier == ResponseBarrier::AsyncProjection).then(fireweed::AsyncProjectionSpec::default);
+    fireweed::open_async(storage, Arc::new(SystemClock))
+        .await
+        .unwrap()
 }

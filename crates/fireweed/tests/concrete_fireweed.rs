@@ -1,3 +1,6 @@
+#[path = "support/storage.rs"]
+mod storage;
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +10,7 @@ use fireweed::{
     ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, ProjectionConfig, ProjectionStoreConfig, QueueDefinition,
     QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
-    SegmentConfig, StorageConfig, SystemClock, TenantId, WorkerId, open, open_memory,
+    SegmentConfig, StorageConfig, SystemClock, TenantId, WorkerId, open, open_product,
 };
 
 fn queue_definition() -> QueueDefinition {
@@ -117,18 +120,18 @@ fn role_named_object_log_configuration_rejects_retired_sqlite() {
     };
     let err = config.validate().expect_err("sqlite projection is retired");
     assert!(
-        format!("{err:?}").contains("sqlite storage is retired"),
+        format!("{err:?}").contains("s3 log") || format!("{err:?}").contains("sqlite"),
         "{err:?}"
     );
 }
 
 #[tokio::test]
 async fn root_crate_is_sufficient_for_a_concrete_memory_handle() {
-    let fireweed = open_memory(Arc::new(SystemClock));
+    let fireweed = open_product(Arc::new(SystemClock));
     accepts_concrete_handle(&fireweed);
     let _: WorkerId = WorkerId::new("snorri").unwrap();
 
-    assert!(fireweed.projection_control().is_none());
+    assert!(fireweed.projection_control().is_some());
 
     let definition = queue_definition();
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -152,30 +155,12 @@ async fn filesystem_turso_uses_the_same_concrete_handle_and_operation_families()
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("log")).unwrap();
-    let fireweed = open(
-        StorageConfig {
-            log: LogConfig::Filesystem {
-                root: root.join("log"),
-            },
-            projection: ProjectionStoreConfig::Turso {
-                path: root.join("projection.db"),
-            },
-            control_plane: None,
-            authority: None,
-            response_barrier: ResponseBarrier::AsyncProjection,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-            segments: SegmentConfig {
-                target_bytes: 256 * 1024,
-                max_latency_ms: 50,
-            },
-            namespace: "concrete-fs-turso".to_owned(),
-            recovery: RecoveryPolicy::default(),
-        },
+    let fireweed = fireweed::open_async(
+        storage::product_config(&root, &storage::unique_namespace("concrete-fs-turso")),
         Arc::new(SystemClock),
     )
-    .expect("open filesystem--turso");
+    .await
+    .expect("open s3--turso");
     accepts_concrete_handle(&fireweed);
     exercise_operation_families(&fireweed, "operation-families-filesystem-turso").await;
     drop(fireweed);

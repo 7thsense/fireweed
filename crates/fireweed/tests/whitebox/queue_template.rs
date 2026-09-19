@@ -221,36 +221,34 @@ fn temporary_path(tag: &str) -> PathBuf {
 async fn durable_public_constructors_reopen_idempotently() {
     let queue = key("tenant", "durable");
 
-    let objectlog = temporary_path("objectlog");
-    let handle = fireweed::open_objectlog(&objectlog, Arc::new(ManualClock::at(10))).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let turso_root = temporary_path("s3-turso");
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let mut cfg = StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        turso_root.join("projection.turso"),
+    );
+    cfg.namespace = format!("queue-template-durable-{}-{}", std::process::id(), nonce);
+    let handle = fireweed::open_async(cfg.clone(), Arc::new(ManualClock::at(10)))
+        .await
+        .unwrap();
     assert_ensure(&handle, &queue, true).await;
+    let _ = handle.metrics(&queue).await;
     drop(handle);
-    let handle = fireweed::open_objectlog(&objectlog, Arc::new(ManualClock::at(20))).unwrap();
+    let handle = fireweed::open_async(cfg, Arc::new(ManualClock::at(20)))
+        .await
+        .unwrap();
     assert_ensure(&handle, &queue, false).await;
     drop(handle);
-
-    #[cfg(feature = "turso")]
-    {
-        let turso_root = temporary_path("filesystem-turso");
-        std::fs::create_dir_all(turso_root.join("log")).unwrap();
-        let mut cfg = StorageConfig::memory();
-        cfg.log = LogConfig::Filesystem {
-            root: turso_root.join("log"),
-        };
-        cfg.projection = ProjectionStoreConfig::Turso {
-            path: turso_root.join("projection.turso"),
-        };
-        let handle = open(cfg.clone(), Arc::new(ManualClock::at(10))).unwrap();
-        assert_ensure(&handle, &queue, true).await;
-        drop(handle);
-        let handle = open(cfg, Arc::new(ManualClock::at(20))).unwrap();
-        assert_ensure(&handle, &queue, false).await;
-        drop(handle);
-
-        std::fs::remove_dir_all(turso_root).unwrap();
-    }
-
-    std::fs::remove_dir_all(objectlog).unwrap();
+    std::fs::remove_dir_all(turso_root).unwrap();
 }
 
 #[cfg(feature = "postgres")]

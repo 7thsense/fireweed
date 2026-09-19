@@ -42,19 +42,11 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
-# Public axes only: logs memory|postgres|filesystem|s3; projections memory|turso|postgres.
-# Full 12-cell matrix fixtures (plus shared multi-replica S3/control-plane and lakebase variants).
-# MATRIX_COMBINATIONS is the injective map onto the 12 canonical cell IDs (log--projection).
+# Public product is s3 log × turso projection.
 MATRIX_COMBINATIONS=(
-    memory-memory memory-turso memory-postgres
-    postgres-memory postgres-turso postgres-postgres
-    filesystem-memory filesystem-turso filesystem-postgres
-    s3-memory s3-turso s3-postgres
+    s3-turso
 )
-VARIANT_COMBINATIONS=(
-    shared-s3-postgres-control-plane
-    lakebase-postgres
-)
+VARIANT_COMBINATIONS=()
 COMBINATIONS=("${MATRIX_COMBINATIONS[@]}" "${VARIANT_COMBINATIONS[@]}")
 
 # Canonical cell ID separator from storage-authority-manifest.json.
@@ -376,31 +368,26 @@ assert_generated_bootstrap_contract() {
 }
 
 assert_demoted_projection_schema_exclusion() {
-    # Public projection enum is memory|turso|postgres.
+    # Public projection enum is turso.
     # Demoted aliases (hybrid, hybrid-async, hybrid-strict, inmemory) must fail schema validation.
-    # turso is public and must NOT be re-added to this rejected-name guard.
     local demoted
     for demoted in hybrid hybrid-async hybrid-strict inmemory; do
         local output
         output="$(mktemp)"
 
         if helm template "fireweed-demoted-${demoted}" "$CHART_DIR" \
-            --set storage.log.backend=filesystem \
+            --set storage.log.backend=s3 \
             --set "storage.projection.backend=${demoted}" >"$output" 2>&1; then
-            err "filesystem/${demoted} unexpectedly rendered; demoted projections must remain outside the chart schema"
+            err "s3/${demoted} unexpectedly rendered; demoted projections must remain outside the chart schema"
             cat "$output" >&2
             rm -f "$output"
             exit 1
         fi
 
-        # Helm 3 and Helm 4 format schema failures differently. Require the exact
-        # path and allowed public enum from either formatter so a schema expansion, a
-        # template-time rejection, or an unrelated render failure cannot satisfy
-        # this public-support boundary.
-        local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'turso', 'postgres'"
-        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "turso", "postgres"'
+        local helm4_error="- at '/storage/projection/backend': value must be one of 'turso'"
+        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "turso"'
         if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
-            err "filesystem/${demoted} did not fail with the exact public projection enum-exclusion error"
+            err "s3/${demoted} did not fail with the exact public projection enum-exclusion error"
             cat "$output" >&2
             rm -f "$output"
             exit 1
@@ -409,15 +396,14 @@ assert_demoted_projection_schema_exclusion() {
         rm -f "$output"
     done
 
-    # turso must be accepted by schema (cannot be re-added to the rejected-name guard above).
     local turso_output
     turso_output="$(mktemp)"
     if ! helm template fireweed-public-turso "$CHART_DIR" \
-        --set storage.log.backend=filesystem \
+        --set storage.log.backend=s3 \
         --set storage.projection.backend=turso \
         --set storage.projection.turso.path=/var/lib/fireweed/projection/projection.turso \
         >"$turso_output" 2>&1; then
-        err "filesystem/turso must render; turso is a public projection value"
+        err "s3/turso must render; turso is a public projection value"
         cat "$turso_output" >&2
         rm -f "$turso_output"
         exit 1
@@ -431,7 +417,7 @@ assert_demoted_projection_schema_exclusion() {
     log_output="$(mktemp)"
     if helm template fireweed-demoted-objectlog "$CHART_DIR" \
         --set storage.log.backend=objectlog \
-        --set storage.projection.backend=memory >"$log_output" 2>&1; then
+        --set storage.projection.backend=turso >"$log_output" 2>&1; then
         err "objectlog log backend unexpectedly rendered; must remain outside the chart schema"
         cat "$log_output" >&2
         rm -f "$log_output"
@@ -470,7 +456,7 @@ helm_defaults_to_turso_projection() {
 
     rendered="$(mktemp)"
     helm template fireweed-default-turso "$CHART_DIR" >"$rendered"
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "filesystem"' "default log axis"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "s3"' "default log axis"
     assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "turso"' "default projection axis"
     assert_contains "$rendered" 'FIREWEED_TURSO_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.turso"' "default turso path in ConfigMap"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "default PVC for turso projection"
@@ -481,9 +467,9 @@ helm_defaults_to_turso_projection() {
 }
 
 assert_canonical_matrix_mapping() {
-    echo "--- canonical 12-cell T4 fixture mapping ---"
+    echo "--- canonical s3--turso T4 fixture mapping ---"
     local -A seen_cells=()
-    local combo cell_id expected_count=12
+    local combo cell_id expected_count=1
     if ((${#MATRIX_COMBINATIONS[@]} != expected_count)); then
         err "MATRIX_COMBINATIONS must have exactly ${expected_count} entries (got ${#MATRIX_COMBINATIONS[@]})"
         exit 1
@@ -504,7 +490,7 @@ assert_canonical_matrix_mapping() {
         err "expected ${expected_count} distinct canonical cell IDs, got ${#seen_cells[@]}"
         exit 1
     fi
-    echo "canonical 12-cell T4 mapping: OK"
+    echo "canonical s3--turso T4 mapping: OK"
 }
 
 assert_combination_contract() {

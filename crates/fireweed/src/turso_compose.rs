@@ -4936,7 +4936,6 @@ impl DerivedObjectLogTursoBackend {
                 )
                 .await?;
                 drop(fence);
-                self.wait_request_entry_coverage(&request.shard).await?;
                 self.projection
                     .remember_leases(&request.shard, &item_ids, request.lease_token.clone())
                     .await;

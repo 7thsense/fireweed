@@ -155,7 +155,7 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
 #[allow(dead_code)]
 async fn every_constructor_returns_one_opaque_type() -> fireweed::EngineResult<()> {
     let clock = || Arc::new(fireweed::SystemClock) as Arc<dyn fireweed::Clock>;
-    let _: Fireweed = fireweed::open_memory(clock());
+    let _: Fireweed = fireweed::open_product(clock());
     let _: Fireweed = fireweed::open_objectlog(PathBuf::from("object-log"), clock())?;
     let _: Fireweed = fireweed::open_postgres("postgres://example", clock())?;
     let _: Fireweed = fireweed::open_postgres_async("postgres://example", clock()).await?;
@@ -211,7 +211,7 @@ async fn every_constructor_returns_one_opaque_type() -> fireweed::EngineResult<(
 
 fn main() {
     assert_send_sync::<Fireweed>();
-    let queue = fireweed::open_memory(Arc::new(fireweed::SystemClock));
+    let queue = fireweed::open_product(Arc::new(fireweed::SystemClock));
     assert_eq!(format!("{queue:?}"), "Fireweed { .. }");
     // Optional runtime smoke from this independent workspace. Opening verifies
     // that the effective checkpoint setting reaches downstream consumers.

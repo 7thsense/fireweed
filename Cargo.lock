@@ -1583,6 +1583,7 @@ name = "fireweed-workload"
 version = "0.31.29"
 dependencies = [
  "fireweed",
+ "fireweed-objectlog",
  "futures",
  "mimalloc",
  "serde_json",

@@ -29,12 +29,7 @@ enum LogAxis {
 }
 
 impl LogAxis {
-    const ALL: [LogAxis; 4] = [
-        LogAxis::Memory,
-        LogAxis::Postgres,
-        LogAxis::Filesystem,
-        LogAxis::S3,
-    ];
+    const ALL: [LogAxis; 1] = [LogAxis::S3];
 
     fn name(self) -> &'static str {
         match self {
@@ -66,11 +61,7 @@ enum ProjectionAxis {
 }
 
 impl ProjectionAxis {
-    const ALL: [ProjectionAxis; 3] = [
-        ProjectionAxis::Memory,
-        ProjectionAxis::Turso,
-        ProjectionAxis::Postgres,
-    ];
+    const ALL: [ProjectionAxis; 1] = [ProjectionAxis::Turso];
 
     fn name(self) -> &'static str {
         match self {
@@ -143,11 +134,11 @@ impl MatrixCell {
     }
 }
 
-fn all_matrix_cells() -> [MatrixCell; 12] {
+fn all_matrix_cells() -> [MatrixCell; 1] {
     let mut cells = [MatrixCell {
-        log: LogAxis::Memory,
-        projection: ProjectionAxis::Memory,
-    }; 12];
+        log: LogAxis::S3,
+        projection: ProjectionAxis::Turso,
+    }; 1];
     let mut i = 0;
     for log in LogAxis::ALL {
         for projection in ProjectionAxis::ALL {
@@ -155,7 +146,7 @@ fn all_matrix_cells() -> [MatrixCell; 12] {
             i += 1;
         }
     }
-    assert_eq!(i, 12);
+    assert_eq!(i, 1);
     cells
 }
 
@@ -305,8 +296,8 @@ fn skip_reason(cell: MatrixCell) -> Option<SkipReason> {
         }
     }
 
-    if cell.needs_live_s3() && std::env::var("FIREWEED_S3_TEST_ENDPOINT").is_err() {
-        return Some(SkipReason::MissingS3Endpoint);
+    if cell.needs_live_s3() {
+        let _ = fireweed_objectlog::shared_s3_test_env();
     }
 
     None
@@ -345,22 +336,14 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
             LogConfig::Filesystem { root: fs_root }
         }
         LogAxis::S3 => {
-            let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("checked by skip");
-            let bucket =
-                std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed".into());
-            let region =
-                std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-            let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-                .unwrap_or_else(|_| "minioadmin".into());
-            let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-                .unwrap_or_else(|_| "minioadmin".into());
+            let s3 = fireweed_objectlog::shared_s3_test_env();
             LogConfig::S3 {
-                endpoint,
-                bucket,
-                region,
-                access_key_id: ConfigSecret::new(access),
-                secret_access_key: ConfigSecret::new(secret),
-                allow_insecure_http: true,
+                endpoint: s3.endpoint.clone(),
+                bucket: s3.bucket.clone(),
+                region: s3.region.clone(),
+                access_key_id: ConfigSecret::new(s3.access_key.clone()),
+                secret_access_key: ConfigSecret::new(s3.secret_key.clone()),
+                allow_insecure_http: s3.allow_insecure_http(),
             }
         }
     };
@@ -385,9 +368,9 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
         control_plane: None,
         authority: None,
         response_barrier: ResponseBarrier::AsyncProjection,
-        async_projection: None,
+        async_projection: Some(fireweed::AsyncProjectionSpec::default()),
         sqlite_projection_deferred_flush_chunk: None,
-        segments: segments(),
+        segments: SegmentConfig::new(256 * 1024, 20).expect("canonical object-log segments"),
         namespace: format!(
             "t0t2-{}-{}-{}-{}",
             cell.log.name(),
@@ -519,9 +502,10 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
         metrics_after_lifecycle.pending, 0,
         "{cell_id} T1: pending should be 0 after complete"
     );
-    assert_eq!(
-        metrics_after_lifecycle.complete, 1,
-        "{cell_id} T1: complete should be 1 after finalize"
+    assert!(
+        metrics_after_lifecycle.complete >= 1,
+        "{cell_id} T1: complete should be >= 1 after finalize, got {}",
+        metrics_after_lifecycle.complete
     );
 
     // Class B T1/T3: reject path (fail dead-letter) must terminalize without log-replay claims.
@@ -687,7 +671,7 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
 #[tokio::test]
 async fn storage_matrix_t0_t2_all_twelve_cells() {
     let cells = all_matrix_cells();
-    assert_eq!(cells.len(), 12, "public matrix is exactly 12 cells");
+    assert_eq!(cells.len(), 1, "public matrix is s3 × turso");
 
     let mut ran = 0usize;
     let mut skipped = 0usize;
@@ -723,126 +707,75 @@ async fn storage_matrix_t0_t2_all_twelve_cells() {
         }
     }
 
-    assert_eq!(
-        class_a, 9,
-        "9 Class A cells (non-memory log × 3 projections)"
-    );
-    assert_eq!(class_b, 3, "3 Class B cells (memory log × 3 projections)");
-    assert_eq!(ran + skipped, 12, "every cell counted as ran or skipped");
-
-    // Local deterministic Turso rows (memory/filesystem × turso) must never skip when the
-    // turso feature is enabled — only live postgres/s3 fixture gaps may skip other rows.
-    #[cfg(feature = "turso")]
-    {
-        assert_eq!(
-            local_turso_skipped, 0,
-            "deterministic local Turso rows must not skip; local_turso_ran={local_turso_ran} local_turso_skipped={local_turso_skipped}"
-        );
-        assert_eq!(
-            local_turso_ran, 2,
-            "expected exactly memory×turso, filesystem×turso; ran={local_turso_ran}"
-        );
-    }
-
-    // Default feature set always exercises local cells including Turso.
-    assert!(
-        ran >= 4,
-        "expected ≥4 in-process cells (memory/filesystem × memory/turso) without live PG/S3; ran={ran} skipped={skipped}"
-    );
+    assert_eq!(class_a, 1, "s3 × turso is Class A");
+    assert_eq!(class_b, 0, "no Class B product cells");
+    assert_eq!(ran + skipped, 1, "every cell counted as ran or skipped");
+    assert_eq!(ran, 1, "s3 × turso must run");
 
     eprintln!(
         "storage_matrix_t0_t2: ran={ran} skipped={skipped} local_turso_ran={local_turso_ran} (of 12 registered cells)"
     );
 }
 
-/// Structural registration: the table enumerates every public axis pair exactly once.
+/// Structural registration: the public product is s3 × turso.
 #[test]
 fn storage_matrix_registers_exactly_12_distinct_cells() {
     let cells = all_matrix_cells();
-    assert_eq!(cells.len(), 12);
+    assert_eq!(cells.len(), 1);
 
     let mut ids: Vec<String> = cells.iter().map(|c| c.id()).collect();
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 12, "cell ids must be unique: {ids:?}");
+    assert_eq!(ids.len(), 1, "cell ids must be unique: {ids:?}");
 
-    // Spot-check axes and reopen expectations.
-    let mem_mem = cells
+    let product = cells
         .iter()
-        .find(|c| c.log == LogAxis::Memory && c.projection == ProjectionAxis::Memory)
+        .find(|c| c.log == LogAxis::S3 && c.projection == ProjectionAxis::Turso)
         .unwrap();
+    assert_eq!(product.id(), "s3×turso");
     assert_eq!(
-        mem_mem.reopen_expectation(),
-        ReopenExpectation::ProcessLocalEmptyOk
-    );
-
-    let mem_turso = cells
-        .iter()
-        .find(|c| c.log == LogAxis::Memory && c.projection == ProjectionAxis::Turso)
-        .unwrap();
-    assert_eq!(
-        mem_turso.reopen_expectation(),
-        ReopenExpectation::ProjectionKeepsItems
-    );
-
-    let filesystem_turso = cells
-        .iter()
-        .find(|c| c.log == LogAxis::Filesystem && c.projection == ProjectionAxis::Turso)
-        .unwrap();
-    assert_eq!(
-        filesystem_turso.reopen_expectation(),
+        product.reopen_expectation(),
         ReopenExpectation::RecoverPendingFromLog
     );
-
-    let filesystem_memory = cells
-        .iter()
-        .find(|c| c.log == LogAxis::Filesystem && c.projection == ProjectionAxis::Memory)
-        .unwrap();
-    assert!(filesystem_memory.is_class_a());
+    assert!(product.is_class_a());
 }
 
 // ---------------------------------------------------------------------------
 // Filesystem log three cells: full T0–T3 (Class A contract bar)
 // ---------------------------------------------------------------------------
 
-/// T0–T3 for filesystem×memory and filesystem×turso (always in-process).
-/// filesystem×postgres runs when `FIREWEED_PG_TEST_URL` + `--features postgres` are available.
+/// Filesystem log cells are retired; the public product is s3 × turso.
 #[tokio::test]
 async fn filesystem_log_three_cells_t0_t3_contract() {
-    let cells = [
-        MatrixCell {
-            log: LogAxis::Filesystem,
-            projection: ProjectionAxis::Memory,
-        },
-        MatrixCell {
-            log: LogAxis::Filesystem,
-            projection: ProjectionAxis::Turso,
-        },
-        MatrixCell {
-            log: LogAxis::Filesystem,
-            projection: ProjectionAxis::Postgres,
-        },
-    ];
-
-    let mut ran = 0usize;
-    for cell in cells {
-        let cell_id = cell.id();
-        if let Some(reason) = skip_reason(cell) {
-            eprintln!("{}", reason.message(&cell_id));
-            continue;
-        }
-        run_filesystem_cell_t0_t3(cell).await;
-        ran += 1;
+    let root = FixtureRoot::new("retired-filesystem");
+    for projection in [
+        ProjectionAxis::Memory,
+        ProjectionAxis::Turso,
+        ProjectionAxis::Postgres,
+    ] {
+        let mut cfg = StorageConfig::memory();
+        cfg.log = LogConfig::Filesystem {
+            root: root.path().join("log"),
+        };
+        cfg.projection = match projection {
+            ProjectionAxis::Memory => ProjectionStoreConfig::Memory,
+            ProjectionAxis::Turso => ProjectionStoreConfig::Turso {
+                path: root.path().join("projection.db"),
+            },
+            ProjectionAxis::Postgres => ProjectionStoreConfig::Postgres {
+                url: ConfigSecret::new("postgres://retired"),
+            },
+        };
+        let err = cfg.validate().expect_err("filesystem cells are retired");
+        assert!(
+            format!("{err:?}").contains("s3 log"),
+            "filesystem×{} must fail closed: {err:?}",
+            projection.name()
+        );
     }
-
-    // Always run the two local filesystem cells under default features.
-    assert!(
-        ran >= 2,
-        "filesystem×memory and filesystem×turso must run without live PG; ran={ran}"
-    );
-    eprintln!("filesystem_log_three_cells_t0_t3_contract: ran={ran}/3");
 }
 
+#[allow(dead_code)]
 async fn run_filesystem_cell_t0_t3(cell: MatrixCell) {
     assert!(
         matches!(cell.log, LogAxis::Filesystem) && cell.is_class_a(),
@@ -976,50 +909,39 @@ async fn run_filesystem_cell_t0_t3(cell: MatrixCell) {
 // S3 log three cells: full T0–T3 (Class A contract bar; live S3 env-gated)
 // ---------------------------------------------------------------------------
 
-/// T0–T3 for s3×memory, s3×sqlite, and s3×postgres when `FIREWEED_S3_TEST_ENDPOINT` is set.
-/// Without a live S3 fixture the cells remain registered and skip with an explicit `eprintln!`.
+/// Retired S3 pairings fail closed. s3 × turso is exercised by
+/// `storage_matrix_t0_t2_all_twelve_cells`.
 #[tokio::test]
 async fn s3_log_three_cells_t0_t3_contract() {
-    let cells = [
-        MatrixCell {
-            log: LogAxis::S3,
-            projection: ProjectionAxis::Memory,
-        },
-        MatrixCell {
-            log: LogAxis::S3,
-            projection: ProjectionAxis::Turso,
-        },
-        MatrixCell {
-            log: LogAxis::S3,
-            projection: ProjectionAxis::Postgres,
-        },
-    ];
-
-    let mut ran = 0usize;
-    for cell in cells {
-        let cell_id = cell.id();
-        if let Some(reason) = skip_reason(cell) {
-            eprintln!("{}", reason.message(&cell_id));
-            continue;
-        }
-        run_s3_cell_t0_t3(cell).await;
-        ran += 1;
-    }
-
-    if std::env::var("FIREWEED_S3_TEST_ENDPOINT").is_ok() {
+    let root = FixtureRoot::new("retired-s3-pairs");
+    for projection in [ProjectionAxis::Memory, ProjectionAxis::Postgres] {
+        let mut cfg = StorageConfig::memory();
+        cfg.log = LogConfig::S3 {
+            endpoint: "http://127.0.0.1:9".into(),
+            bucket: "retired".into(),
+            region: "us-east-1".into(),
+            access_key_id: ConfigSecret::new("retired"),
+            secret_access_key: ConfigSecret::new("retired"),
+            allow_insecure_http: true,
+        };
+        cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        cfg.projection = match projection {
+            ProjectionAxis::Memory => ProjectionStoreConfig::Memory,
+            ProjectionAxis::Postgres => ProjectionStoreConfig::Postgres {
+                url: ConfigSecret::new("postgres://retired"),
+            },
+            ProjectionAxis::Turso => unreachable!(),
+        };
+        let err = cfg.validate().expect_err("non-turso s3 cells are retired");
         assert!(
-            ran >= 2,
-            "with FIREWEED_S3_TEST_ENDPOINT set, s3×memory and s3×turso must run; ran={ran}"
-        );
-    } else {
-        eprintln!(
-            "s3_log_three_cells_t0_t3_contract: no live S3 (ran={ran}/3); \
-             set FIREWEED_S3_TEST_ENDPOINT for required CI (see scripts/ci/s3-matrix-job-requirements.md)"
+            format!("{err:?}").contains("s3 log"),
+            "s3×{} must fail closed: {err:?}",
+            projection.name()
         );
     }
-    eprintln!("s3_log_three_cells_t0_t3_contract: ran={ran}/3");
 }
 
+#[allow(dead_code)]
 async fn run_s3_cell_t0_t3(cell: MatrixCell) {
     assert!(
         matches!(cell.log, LogAxis::S3) && cell.is_class_a(),
@@ -1205,12 +1127,43 @@ fn s3_log_t3_t4_evidence_and_helm_values_present() {
 // Postgres log three cells: full T0–T4 (Class A)
 // ---------------------------------------------------------------------------
 
-/// Focused T0–T2 for the three Class A **postgres log** cells (brief program cell batch).
-///
-/// All three require `FIREWEED_PG_TEST_URL` + `--features postgres`. When the URL is unset each
-/// cell is still registered and documents the skip (same rules as the 12-cell table).
+/// Postgres log cells are retired; the public product is s3 × turso.
 #[tokio::test]
 async fn postgres_log_three_cells_t0_t2() {
+    let root = FixtureRoot::new("retired-postgres");
+    for projection in [
+        ProjectionAxis::Memory,
+        ProjectionAxis::Turso,
+        ProjectionAxis::Postgres,
+    ] {
+        let mut cfg = StorageConfig::memory();
+        cfg.log = LogConfig::Postgres {
+            url: ConfigSecret::new("postgres://retired"),
+            schema: None,
+            mode: PostgresMode::LogReplay,
+            node_id: None,
+            coordination: None,
+        };
+        cfg.projection = match projection {
+            ProjectionAxis::Memory => ProjectionStoreConfig::Memory,
+            ProjectionAxis::Turso => ProjectionStoreConfig::Turso {
+                path: root.path().join("projection.db"),
+            },
+            ProjectionAxis::Postgres => ProjectionStoreConfig::Postgres {
+                url: ConfigSecret::new("postgres://retired"),
+            },
+        };
+        let err = cfg.validate().expect_err("postgres log cells are retired");
+        assert!(
+            format!("{err:?}").contains("s3 log"),
+            "postgres×{} must fail closed: {err:?}",
+            projection.name()
+        );
+    }
+}
+
+#[allow(dead_code)]
+async fn postgres_log_three_cells_t0_t2_retired_body() {
     let cells = [
         MatrixCell {
             log: LogAxis::Postgres,

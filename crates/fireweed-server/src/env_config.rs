@@ -9,12 +9,12 @@
 //! with `default-features = false`, drops this module (and all env-name knowledge) entirely.
 //!
 //! Public product names (injection values):
-//! - log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
-//! - projection: `memory` | `sqlite` | `turso` | `postgres` (default: `turso`)
+//! - log: `s3`
+//! - projection: `turso`
 //!
 //! Legacy / non-public names are **hard-rejected** on this surface (no long-lived aliases):
-//! `objectlog`, `inmemory`, `hybrid`, `hybrid-strict`, `hybrid-async`. Direct
-//! [`Config`] / [`BackendSpec`] construction can still name internal Hybrid profiles.
+//! `memory`, `postgres`, `filesystem`, `sqlite`, `objectlog`, `inmemory`,
+//! `hybrid`, `hybrid-strict`, `hybrid-async`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -423,90 +423,24 @@ fn parse_backend(
     env: &BTreeMap<String, String>,
     segments: SegmentConfig,
 ) -> Result<BackendSpec, ConfigError> {
-    // Product defaults: filesystem log × turso projection (public axes only; TD-010).
-    let log = env_or(env, "FIREWEED_LOG_BACKEND", "filesystem");
+    // Product default: s3 log × turso projection.
+    let log = env_or(env, "FIREWEED_LOG_BACKEND", "s3");
     let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "turso");
 
-    // Public product log names: memory|postgres|filesystem|s3.
-    // Legacy `objectlog` (+ store local/s3) is hard-rejected — use filesystem or s3.
     let log_spec = match log.as_str() {
-        "memory" => LogSpec::Memory,
-        "sqlite" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ));
-        }
-        // First-class filesystem object log (local directory / NAS).
-        "filesystem" => {
-            if let Some((key, _)) = env
-                .iter()
-                .find(|(key, _)| key.starts_with("FIREWEED_OBJECT_LOG_S3_"))
-            {
-                return Err(ConfigError::new(format!(
-                    "{key} is set while FIREWEED_LOG_BACKEND=filesystem; refusing to ignore shared S3 configuration"
-                )));
-            }
-            LogSpec::ObjectLog(ObjectLogSpec::local(
-                PathBuf::from(env_or(
-                    env,
-                    "FIREWEED_OBJECT_LOG_ROOT",
-                    "/var/lib/fireweed/object-log",
-                )),
-                segments,
-            ))
-        }
-        // First-class S3-compatible object log.
         "s3" => LogSpec::ObjectLog(object_log_spec_s3(env, segments)?),
-        "objectlog" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "objectlog is not a public product log value (public: memory|postgres|filesystem|s3); \
-                 use FIREWEED_LOG_BACKEND=filesystem (local/NAS) or FIREWEED_LOG_BACKEND=s3",
-            ));
-        }
-        #[cfg(feature = "postgres")]
-        "postgres" => {
-            // Resolve the DSN + optional Databricks credentials from the env names the Helm Lakebase
-            // profile renders (DSN secret `FIREWEED_POSTGRES_LOG_DATABASE_URL`; `FIREWEED_PG_URL` is the
-            // local/dev fallback). Fails closed if an sslmode=require DSN meets a non-tls build.
-            crate::resolve_postgres_log(env)
-                .map_err(|reason| unsupported_storage(&log, &projection, &reason))?
-        }
-        #[cfg(not(feature = "postgres"))]
-        "postgres" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "postgres adapter is wired through the blocking-safe PostgresNativeBackend, but this \
-                 binary was built without the `postgres` cargo feature; rebuild with `--features \
-                 postgres` (or `--features postgres,tls` for native-tls)",
-            ));
-        }
         other => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|postgres|filesystem|s3"
+                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected s3 (storage is s3 log × turso projection only)"
                 ),
             ));
         }
     };
 
-    // Public product projection names: memory|turso|postgres (default turso).
-    // Legacy `inmemory` and demoted hybrid* are hard-rejected (construct Config directly for Hybrid tests).
     let projection_spec = match projection.as_str() {
-        "memory" => ProjectionSpec::InMemory,
-        "sqlite" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ));
-        }
         "turso" => {
             #[cfg(feature = "turso-projection")]
             {
@@ -525,81 +459,33 @@ fn parse_backend(
                     &projection,
                     "turso projection requires the `turso-projection` cargo feature; rebuild with \
                      default features (or `--features turso-projection`). Feature-disabled builds \
-                     reject turso before storage I/O and never fall back to sqlite or memory",
+                     reject turso before storage I/O and never fall back",
                 ));
             }
-        }
-        "inmemory" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "inmemory is not a public product projection (public: memory|turso|postgres); \
-                 use FIREWEED_PROJECTION_BACKEND=memory",
-            ));
-        }
-        // Demoted from the public projection axis: hybrid profiles remain in the type system for
-        // direct Config construction / internal tests, but the env adapter rejects public select.
-        "hybrid" | "hybrid-strict" | "hybrid-async" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "this projection is not a public product value (public: memory|turso|postgres). \
-                 hybrid|hybrid-strict|hybrid-async are demoted from the public env/Helm projection axis",
-            ));
-        }
-        #[cfg(feature = "postgres")]
-        "postgres" => {
-            // Resolve the DSN from the env names the Helm chart's `storage.projection.postgres` axis
-            // renders (DSN secret `FIREWEED_POSTGRES_PROJECTION_DATABASE_URL`; `FIREWEED_PG_PROJECTION_URL` is
-            // the local/dev fallback). Fails closed if an sslmode=require DSN meets a non-tls build.
-            crate::resolve_postgres_projection(env)
-                .map_err(|reason| unsupported_storage(&log, &projection, &reason))?
-        }
-        #[cfg(not(feature = "postgres"))]
-        "postgres" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "postgres projection adapter is wired through the blocking-safe PostgresRelational store, \
-                 but this binary was built without the `postgres` cargo feature; rebuild with `--features \
-                 postgres` (or `--features postgres,tls` for native-tls)",
-            ));
         }
         other => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|turso|postgres"
+                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected turso (storage is s3 log × turso projection only)"
                 ),
             ));
         }
     };
 
-    // Current public 4×3 storage matrix.
-    let wired = match (&log_spec, &projection_spec) {
-        (LogSpec::Memory, ProjectionSpec::InMemory) => true,
-        // Class B: memory log × durable projection (projection survives process death; no log rebuild).
-        (LogSpec::Memory, ProjectionSpec::Turso { .. }) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::Memory, ProjectionSpec::Postgres { .. }) => true,
-        (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
-        (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::ObjectLog(_), ProjectionSpec::Postgres { .. }) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::Postgres { .. }, ProjectionSpec::Turso { .. }) => true,
-        #[cfg(feature = "postgres")]
-        (LogSpec::Postgres { .. }, ProjectionSpec::Postgres { .. }) => true,
-        _ => false,
-    };
+    let wired = matches!(
+        (&log_spec, &projection_spec),
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }),
+            ProjectionSpec::Turso { .. }
+        )
+    );
     if !wired {
         return Err(unsupported_storage(
             &log,
             &projection,
-            "this FIREWEED_LOG_BACKEND × FIREWEED_PROJECTION_BACKEND pairing is not wired by fireweed-server",
+            "storage is s3 log × turso projection only",
         ));
     }
 
@@ -836,9 +722,39 @@ mod tests {
             .collect()
     }
 
+    fn s3_env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut env = map(&[
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:19000"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-test"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "fireweed"),
+            (
+                "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+                "fireweed-test-minio",
+            ),
+            ("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP", "true"),
+        ]);
+        for (key, value) in pairs {
+            env.insert((*key).to_owned(), (*value).to_owned());
+        }
+        env
+    }
+
+    #[test]
+    fn empty_env_requires_s3_fields() {
+        let err = Config::from_env(&BTreeMap::new()).expect_err("s3 fields are required");
+        assert!(
+            err.0.contains("FIREWEED_OBJECT_LOG_S3_ENDPOINT") || err.0.contains("s3"),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn defaults_when_env_is_empty() {
-        let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
+        let config = Config::from_env(&s3_env(&[])).expect("s3 env yields product defaults");
         assert!(matches!(config.backend.log, LogSpec::ObjectLog(_)));
         // TD-010: Turso is the public default projection when FIREWEED_PROJECTION_BACKEND is absent.
         assert!(

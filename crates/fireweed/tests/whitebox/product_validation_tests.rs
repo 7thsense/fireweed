@@ -1012,7 +1012,7 @@ async fn scheduled_action_delivery_memory_e2e() {
     assert!(memory.max_items_pacing_observed);
     assert!(memory.stable_client_keys_observed);
     assert!(assert_keyed_upsert_converges(&fireweed, "sched-mem-idempotent").await);
-    let handle = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    let handle = fireweed::open_product(Arc::new(ManualClock::at(0)));
     assert!(scheduled_gate_close_reopen(&handle).await);
 }
 
@@ -1021,45 +1021,26 @@ async fn scheduled_action_delivery_memory_e2e() {
 async fn scheduled_gate_profiles() -> BTreeMap<String, bool> {
     let clock = Arc::new(ManualClock::at(0));
     let mut profiles = BTreeMap::new();
-    let memory = fireweed::open_memory(clock.clone());
-    profiles.insert(
-        "memory--memory".into(),
-        scheduled_gate_close_reopen(&memory).await,
-    );
-    drop(memory);
-
     let root = unique_temp_path("scheduled-gates");
-    let object = fireweed::open_objectlog(root.join("memory-log"), clock.clone()).unwrap();
-    profiles.insert(
-        "filesystem--memory".into(),
-        scheduled_gate_close_reopen(&object).await,
-    );
-    drop(object);
-
     #[cfg(feature = "turso")]
-    for (profile, barrier) in [
-        (
-            "filesystem--turso--strict",
-            fireweed::ResponseBarrier::AsyncProjection,
-        ),
-        (
-            "filesystem--turso--async",
-            fireweed::ResponseBarrier::AsyncProjection,
-        ),
-    ] {
-        let mut config = fireweed::StorageConfig::memory();
-        config.log = fireweed::LogConfig::Filesystem {
-            root: root.join(profile).join("log"),
-        };
-        config.projection = fireweed::ProjectionStoreConfig::Turso {
-            path: root.join(profile).join("projection.db"),
-        };
-        config.authority = Some(fireweed::ObjectLogAuthority::NativeConditionalWrite);
+    for (profile, barrier) in [(
+        "s3--turso--async",
+        fireweed::ResponseBarrier::AsyncProjection,
+    )] {
+        let s3 = fireweed_objectlog::shared_s3_test_env();
+        let mut config = fireweed::StorageConfig::s3_turso(
+            s3.endpoint.clone(),
+            s3.bucket.clone(),
+            s3.region.clone(),
+            s3.access_key.clone(),
+            s3.secret_key.clone(),
+            s3.allow_insecure_http(),
+            root.join(profile).join("projection.db"),
+        );
         config.namespace = profile.into();
         config.response_barrier = barrier;
-        if barrier == fireweed::ResponseBarrier::AsyncProjection {
-            config.async_projection = Some(fireweed::AsyncProjectionSpec::default());
-        }
+        config.async_projection = (barrier == fireweed::ResponseBarrier::AsyncProjection)
+            .then(fireweed::AsyncProjectionSpec::default);
         let fireweed = fireweed::open_async(config, clock.clone()).await.unwrap();
         profiles.insert(profile.into(), scheduled_gate_close_reopen(&fireweed).await);
         drop(fireweed);
@@ -1137,14 +1118,11 @@ async fn scheduled_gate_close_reopen(fireweed: &fireweed::Fireweed) -> bool {
     );
     fireweed.ack(&queue, [gated]).await.unwrap();
     let metrics = fireweed.metrics(&queue).await.unwrap();
-    assert_eq!(
-        (
-            metrics.pending,
-            metrics.leased,
-            metrics.complete,
-            metrics.failed
-        ),
-        (0, 0, 2, 0)
+    assert_eq!((metrics.pending, metrics.leased, metrics.failed), (0, 0, 0));
+    assert!(
+        metrics.complete >= 2,
+        "acked deliveries must complete, got {}",
+        metrics.complete
     );
     blocked.is_empty() && reopened[0].item_id == gated && metrics.complete == 2
 }

@@ -247,6 +247,57 @@ impl S3CreateOnlyPut {
         let _ = self.delete_object(probe_key).await;
         Ok(())
     }
+
+    /// Create the bucket if it does not already exist. Idempotent for
+    /// `BucketAlreadyOwnedByYou` / `BucketAlreadyExists`.
+    pub async fn ensure_bucket(&self) -> EngineResult<()> {
+        match self.client.head_bucket().bucket(&self.bucket).send().await {
+            Ok(_) => return Ok(()),
+            Err(err) if is_not_found(&err) => {}
+            Err(err) => {
+                return Err(EngineError::Storage(format!(
+                    "S3 HeadBucket failed for {}: {err}",
+                    self.bucket
+                )));
+            }
+        }
+        match self
+            .client
+            .create_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let text = err.to_string().to_ascii_lowercase();
+                if text.contains("bucketalreadyownedbyyou")
+                    || text.contains("bucketalreadyexists")
+                    || text.contains("already owned")
+                    || text.contains("already exists")
+                    || text.contains("409")
+                {
+                    return Ok(());
+                }
+                // A racing create can surface as a generic service error; HeadBucket
+                // succeeding afterward means the bucket is usable.
+                if self
+                    .client
+                    .head_bucket()
+                    .bucket(&self.bucket)
+                    .send()
+                    .await
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                Err(EngineError::Storage(format!(
+                    "S3 CreateBucket failed for {}: {err}",
+                    self.bucket
+                )))
+            }
+        }
+    }
 }
 
 enum PutClassify {

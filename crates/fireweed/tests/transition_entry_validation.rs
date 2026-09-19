@@ -145,7 +145,7 @@ async fn rejected_entries_leave_claims_keys_and_fences_available(fireweed: Firew
 
 #[tokio::test]
 async fn memory_rejected_entries_do_not_reserve_claims_client_keys_or_instance_fences() {
-    rejected_entries_leave_claims_keys_and_fences_available(open_memory(Arc::new(
+    rejected_entries_leave_claims_keys_and_fences_available(open_product(Arc::new(
         ManualClock::at(0),
     )))
     .await;

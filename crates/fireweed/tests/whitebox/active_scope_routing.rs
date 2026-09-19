@@ -86,15 +86,20 @@ async fn queue_definition_accessor_reads_memory_and_durable_policy() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(root.join("log")).unwrap();
-    let mut cfg = StorageConfig::memory();
-    cfg.log = LogConfig::Filesystem {
-        root: root.join("log"),
-    };
-    cfg.projection = ProjectionStoreConfig::Turso {
-        path: root.join("projection.turso"),
-    };
-    let durable = open(cfg, Arc::new(ManualClock::at(0))).unwrap();
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let mut cfg = StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        root.join("projection.turso"),
+    );
+    cfg.namespace = "active-scope".into();
+    let durable = fireweed::open_async(cfg, Arc::new(ManualClock::at(0)))
+        .await
+        .unwrap();
     durable.create_queue(definition(&q, 54_321)).await.unwrap();
     assert_eq!(
         durable
