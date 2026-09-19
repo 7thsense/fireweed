@@ -88,7 +88,6 @@ fn composed_storage_config(inputs: &mut [String]) -> ComposedStorageConfig {
         },
         response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(8 * 1024 * 1024, 20).unwrap(),
         namespace: std::mem::take(&mut inputs[6]),
         recovery: ProjectionRecoveryPolicy {
@@ -125,12 +124,11 @@ fn composed_storage_config_is_owned_and_secret_safe() {
             root: "local-log".into(),
         },
         object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ComposedProjectionConfig::Sqlite {
-            path: "projection.sqlite".into(),
+        projection: ComposedProjectionConfig::Turso {
+            path: "projection.turso".into(),
         },
         response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection: Some(AsyncProjectionSpec::default()),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(1024, 5).unwrap(),
         namespace: "local-test".to_owned(),
         recovery: ProjectionRecoveryPolicy {
@@ -138,11 +136,7 @@ fn composed_storage_config_is_owned_and_secret_safe() {
             ..Default::default()
         },
     };
-    assert!(
-        matches!(
-            local.validate(),
-            Err(EngineError::Invalid(msg)) if msg.contains("sqlite storage is retired")
-        ),
-        "composed sqlite projection must fail closed"
-    );
+    local
+        .validate()
+        .expect("local object-log × turso validates");
 }

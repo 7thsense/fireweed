@@ -326,7 +326,6 @@ async fn p7n_filesystem_turso_lifecycle() {
             authority: Some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
             control_plane: None,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             projection: ProjectionStoreConfig::Turso {
                 path: root.path().join("projection.db"),
             },
@@ -444,7 +443,6 @@ mod postgres_cells {
             authority: Some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
             control_plane: None,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             projection: ProjectionStoreConfig::Postgres {
                 url: ConfigSecret::new(url),
             },

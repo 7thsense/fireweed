@@ -118,9 +118,6 @@ Durability/control-plane rules (not a hard-coded SQLite projection):
   persistence.enabled=false (emptyDir so each pod keeps a private projection image)
 */}}
 {{- define "fireweed-queue.validateReplicaProfile" -}}
-{{- if or (eq .Values.storage.log.backend "sqlite") (eq .Values.storage.projection.backend "sqlite") -}}
-{{- fail "sqlite storage is retired; use filesystem log and turso projection" -}}
-{{- end -}}
 {{- $replicas := int .Values.replicaCount -}}
 {{- $s3Log := eq (include "fireweed-queue.logIsS3" .) "true" -}}
 {{- $localProj := eq (include "fireweed-queue.projectionIsPodLocalRebuildable" .) "true" -}}

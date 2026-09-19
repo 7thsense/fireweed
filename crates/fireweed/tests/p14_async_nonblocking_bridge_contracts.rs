@@ -71,7 +71,6 @@ fn filesystem_memory_config(root: PathBuf, namespace: String) -> StorageConfig {
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
         recovery: RecoveryPolicy {
@@ -246,7 +245,6 @@ async fn p14_s3_memory_keeps_single_thread_heartbeat_live() {
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: format!("p14-s3-{}", std::process::id()),
         recovery: RecoveryPolicy {

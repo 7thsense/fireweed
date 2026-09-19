@@ -75,7 +75,6 @@ fn objectlog_storage(
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(262_144, 20).unwrap(),
         namespace: namespace.into(),
         recovery: RecoveryPolicy::default(),

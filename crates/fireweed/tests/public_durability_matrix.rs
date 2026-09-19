@@ -264,7 +264,6 @@ fn objectlog_turso(root: &Path, barrier: ResponseBarrier, cell: &str) -> Firewee
             response_barrier: barrier,
             async_projection: (barrier == ResponseBarrier::AsyncProjection)
                 .then(AsyncProjectionSpec::default),
-            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig::new(262_144, 20).unwrap(),
             namespace: format!("durability-{cell}"),
             recovery: RecoveryPolicy {

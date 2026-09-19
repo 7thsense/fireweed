@@ -8,8 +8,8 @@
 //! [`Fireweed::complete`] / [`Fireweed::retry`] / [`Fireweed::release`]) complete
 //! when **this request** is on the log: per-entry `Committed` / `Conflict` / ids.
 //! That is not a snapshot of Pending. [`Fireweed::claim`] polls currently
-//! selectable work (applied rows, plus this process's unpublished continuation
-//! items). An empty claim is a normal poll, not a failed commit. Inspect
+//! selectable applied rows. An empty claim is a normal poll, not a failed
+//! commit. Inspect
 //! [`Fireweed::commit_capabilities`] for visibility; do not infer Turso serving
 //! from [`ResponseBarrier`] alone.
 //!
@@ -708,20 +708,19 @@ impl fmt::Debug for ObjectLogConfig {
 /// (crate-private; the public projection axis is [`ProjectionStoreConfig`]).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ComposedProjectionConfig {
-    #[cfg(all(feature = "objectlog", feature = "turso"))]
-    Turso { path: PathBuf },
-    /// Preserved only to reject the retired public convenience selector.
-    Sqlite { path: PathBuf },
+    Turso {
+        path: PathBuf,
+    },
     /// The URL may contain credentials and is therefore redacted from diagnostics.
-    Postgres { url: SecretValue },
+    Postgres {
+        url: SecretValue,
+    },
 }
 
 impl fmt::Debug for ComposedProjectionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(all(feature = "objectlog", feature = "turso"))]
             Self::Turso { path } => f.debug_struct("Turso").field("path", path).finish(),
-            Self::Sqlite { path } => f.debug_struct("Sqlite").field("path", path).finish(),
             Self::Postgres { .. } => f
                 .debug_struct("Postgres")
                 .field("url", &"<redacted>")
@@ -732,7 +731,7 @@ impl fmt::Debug for ComposedProjectionConfig {
 
 /// The acknowledgement barrier for composed object-log compositions.
 ///
-/// The product barrier is log-ack plus unpublished overlay. Serving apply may lag.
+/// The product barrier is log-ack. Serving apply may lag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitResponseBarrier {
     AsyncProjection,
@@ -813,7 +812,6 @@ pub(crate) struct ComposedStorageConfig {
     pub projection: ComposedProjectionConfig,
     pub response_barrier: CommitResponseBarrier,
     pub async_projection: Option<AsyncProjectionSpec>,
-    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
     pub segments: SegmentSettings,
     pub namespace: String,
     pub recovery: ProjectionRecoveryPolicy,
@@ -866,17 +864,17 @@ pub enum ObjectLogAuthority {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionConfig {
-    Sqlite { path: PathBuf },
+    Turso { path: PathBuf },
     Postgres { url: ConfigSecret },
 }
 
 /// When a mutating operation may return success relative to log append and projection apply.
 ///
 /// The only public barrier is [`ResponseBarrier::AsyncProjection`]: mutate acks the
-/// log; Turso apply may lag; same-process `claim` can take unpublished continuation
-/// items. There is no Strict/sync serving snapshot. Inspect `commit_capabilities`
-/// for durability class. Public reads (`side_record`, `live_item`, `metrics`) may
-/// wait coverage; ordinary item `claim` does not.
+/// log; Turso apply may lag; `claim` polls applied rows. There is no Strict/sync
+/// serving snapshot and no process-local unpublished overlay. Inspect
+/// `commit_capabilities` for durability class. Public reads (`side_record`,
+/// `live_item`, `metrics`) may wait coverage; ordinary item `claim` does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrier {
     AsyncProjection,
@@ -1056,8 +1054,6 @@ impl PostgresRuntimeConfig {
 pub enum LogConfig {
     /// Retired compatibility selector.
     Memory,
-    /// Retired compatibility selector; validation rejects SQLite before opening storage.
-    Sqlite { path: PathBuf },
     /// Retired compatibility selector.
     Postgres {
         url: ConfigSecret,
@@ -1084,7 +1080,6 @@ impl LogConfig {
     pub fn axis_name(&self) -> &'static str {
         match self {
             Self::Memory => "memory",
-            Self::Sqlite { .. } => "sqlite",
             Self::Postgres { .. } => "postgres",
             Self::Filesystem { .. } => "filesystem",
             Self::S3 { .. } => "s3",
@@ -1104,9 +1099,6 @@ impl LogConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionStoreConfig {
     Memory,
-    Sqlite {
-        path: PathBuf,
-    },
     /// Local embedded Turso 0.7 ordinary-WAL projection (ADR-016 / TD-010 default).
     Turso {
         path: PathBuf,
@@ -1121,7 +1113,6 @@ impl ProjectionStoreConfig {
     pub fn axis_name(&self) -> &'static str {
         match self {
             Self::Memory => "memory",
-            Self::Sqlite { .. } => "sqlite",
             Self::Turso { .. } => "turso",
             Self::Postgres { .. } => "postgres",
         }
@@ -1143,8 +1134,6 @@ pub struct StorageConfig {
     /// Object-log apply bounds. `None` uses [`AsyncProjectionSpec::default`] on
     /// filesystem/S3 logs. Must be `None` on memory/postgres logs.
     pub async_projection: Option<AsyncProjectionSpec>,
-    /// Retired compatibility field. Any supplied value is rejected before storage I/O.
-    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
     pub segments: SegmentConfig,
     pub namespace: String,
     pub recovery: RecoveryPolicy,
@@ -1164,7 +1153,6 @@ impl StorageConfig {
             authority: None,
             response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {
                 target_bytes: 1024 * 1024,
                 max_latency_ms: 5,
@@ -1200,7 +1188,6 @@ impl StorageConfig {
             authority: Some(ObjectLogAuthority::NativeConditionalWrite),
             response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: Some(AsyncProjectionSpec::default()),
-            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {
                 target_bytes: 256 * 1024,
                 max_latency_ms: 20,
@@ -1222,9 +1209,6 @@ impl StorageConfig {
     pub fn validate(&self) -> EngineResult<()> {
         if self.namespace.trim().is_empty() {
             return Err(EngineError::Invalid("storage namespace must not be empty"));
-        }
-        if self.sqlite_projection_deferred_flush_chunk.is_some() {
-            return Err(EngineError::Invalid(RETIRED_STORAGE_CELL));
         }
 
         let LogConfig::S3 {
@@ -1351,7 +1335,6 @@ fn validate_filesystem_selection(
 ) -> EngineResult<()> {
     match projection {
         ProjectionStoreConfig::Memory
-        | ProjectionStoreConfig::Sqlite { .. }
         | ProjectionStoreConfig::Turso { .. }
         | ProjectionStoreConfig::Postgres { .. } => Ok(()),
     }
@@ -1367,7 +1350,6 @@ fn validate_s3_selection(
     // barrier and AsyncProjectionSpec without a second Strict pin.
     match projection {
         ProjectionStoreConfig::Memory
-        | ProjectionStoreConfig::Sqlite { .. }
         | ProjectionStoreConfig::Turso { .. }
         | ProjectionStoreConfig::Postgres { .. } => Ok(()),
     }
@@ -1396,7 +1378,7 @@ impl ObjectLogRuntimeConfig {
                 },
             },
             projection: match self.projection {
-                ProjectionConfig::Sqlite { path } => ProjectionStoreConfig::Sqlite { path },
+                ProjectionConfig::Turso { path } => ProjectionStoreConfig::Turso { path },
                 ProjectionConfig::Postgres { url } => ProjectionStoreConfig::Postgres { url },
             },
             control_plane: None,
@@ -1404,7 +1386,6 @@ impl ObjectLogRuntimeConfig {
             response_barrier: self.response_barrier,
             async_projection: (self.response_barrier == ResponseBarrier::AsyncProjection)
                 .then(AsyncProjectionSpec::default),
-            sqlite_projection_deferred_flush_chunk: None,
             segments: self.segments,
             namespace: self.namespace,
             recovery: self.recovery,
@@ -1431,7 +1412,7 @@ impl ObjectLogRuntimeConfig {
             },
         };
         let projection = match self.projection {
-            ProjectionConfig::Sqlite { path } => ComposedProjectionConfig::Sqlite { path },
+            ProjectionConfig::Turso { path } => ComposedProjectionConfig::Turso { path },
             ProjectionConfig::Postgres { url } => ComposedProjectionConfig::Postgres { url: url.0 },
         };
         composed_storage_config(
@@ -1441,7 +1422,6 @@ impl ObjectLogRuntimeConfig {
             self.response_barrier,
             (self.response_barrier == ResponseBarrier::AsyncProjection)
                 .then(AsyncProjectionSpec::default),
-            None,
             self.segments,
             self.namespace,
             self.recovery,
@@ -1472,7 +1452,6 @@ mod storage_config_matrix_tests {
             authority: None,
             response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             segments: segments(),
             namespace: "matrix-test".to_owned(),
             recovery: RecoveryPolicy::default(),
@@ -1482,9 +1461,6 @@ mod storage_config_matrix_tests {
     fn all_logs() -> Vec<LogConfig> {
         vec![
             LogConfig::Memory,
-            LogConfig::Sqlite {
-                path: PathBuf::from("/tmp/log.db"),
-            },
             LogConfig::Postgres {
                 url: ConfigSecret::new("postgres://localhost/fireweed"),
                 schema: Some("fw".to_owned()),
@@ -1509,9 +1485,6 @@ mod storage_config_matrix_tests {
     fn all_projections() -> Vec<ProjectionStoreConfig> {
         vec![
             ProjectionStoreConfig::Memory,
-            ProjectionStoreConfig::Sqlite {
-                path: PathBuf::from("/tmp/projection.db"),
-            },
             ProjectionStoreConfig::Turso {
                 path: PathBuf::from("/tmp/projection-turso.db"),
             },
@@ -1541,81 +1514,24 @@ mod storage_config_matrix_tests {
     }
 
     #[test]
-    fn sqlite_log_and_projection_fail_closed_as_retired() {
-        let err = base(
-            LogConfig::Sqlite {
-                path: PathBuf::from("/tmp/log.db"),
-            },
-            ProjectionStoreConfig::Memory,
-        )
-        .validate()
-        .expect_err("sqlite log is retired");
-        assert!(
-            matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log") && msg.contains("turso")),
-            "got {err:?}"
-        );
-
-        let err = base(
-            LogConfig::Memory,
-            ProjectionStoreConfig::Sqlite {
-                path: PathBuf::from("/tmp/projection.db"),
-            },
-        )
-        .validate()
-        .expect_err("sqlite projection is retired");
-        assert!(
-            matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log") && msg.contains("turso")),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn retired_deferred_flush_settings_fail_closed_at_both_config_boundaries() {
-        let mut public = StorageConfig::s3_turso(
-            "https://s3.example",
-            "fireweed",
-            "us-east-1",
-            "akid",
-            "secret",
-            false,
-            PathBuf::from("/tmp/projection-turso.db"),
-        );
-        public.segments = segments();
-        public.namespace = "retired-flush".to_owned();
-        public.validate().unwrap();
-        for chunk in [0, 1, 1024, usize::MAX] {
-            public.sqlite_projection_deferred_flush_chunk = Some(chunk);
-            let result = public.validate();
-            assert!(
-                matches!(result, Err(EngineError::Invalid(message))
-                if message.contains("s3 log") && message.contains("turso")),
-                "{result:?}"
-            );
-        }
-    }
-
-    #[test]
     fn legacy_selector_enumeration_rejects_retired_cells() {
         let logs = all_logs();
-        assert_eq!(logs.len(), 5);
+        assert_eq!(logs.len(), 4);
         let projections = all_projections();
-        assert_eq!(projections.len(), 4);
+        assert_eq!(projections.len(), 3);
 
         let mut axis_names = Vec::new();
         for log in &logs {
             axis_names.push(log.axis_name());
             assert_eq!(log.is_durable_log(), log.axis_name() != "memory");
         }
-        assert_eq!(
-            axis_names,
-            vec!["memory", "sqlite", "postgres", "filesystem", "s3"]
-        );
+        assert_eq!(axis_names, vec!["memory", "postgres", "filesystem", "s3"]);
         assert_eq!(
             projections
                 .iter()
                 .map(|p| p.axis_name())
                 .collect::<Vec<_>>(),
-            vec!["memory", "sqlite", "turso", "postgres"]
+            vec!["memory", "turso", "postgres"]
         );
 
         let mut public_cells = 0usize;
@@ -1650,7 +1566,7 @@ mod storage_config_matrix_tests {
             }
         }
         assert_eq!(public_cells, 1);
-        assert_eq!(retired_cells, 19);
+        assert_eq!(retired_cells, 11);
     }
 
     /// AC: Turso default selection, all four log compositions, single-thread heartbeat.
@@ -1667,15 +1583,6 @@ mod storage_config_matrix_tests {
             .axis_name(),
             "turso"
         );
-        // Enum variant remains for match exhaustiveness; validate() fail-closes it.
-        assert_eq!(
-            ProjectionStoreConfig::Sqlite {
-                path: PathBuf::from("/tmp/sqlite.db"),
-            }
-            .axis_name(),
-            "sqlite"
-        );
-
         // Open local-capable public log × turso compositions (postgres/s3 need live fixtures).
         let clock = Arc::new(SystemClock);
         let root = std::env::temp_dir().join(format!(
@@ -1888,7 +1795,7 @@ mod storage_config_matrix_tests {
                 root: PathBuf::from("/data/log"),
             },
             authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Sqlite {
+            projection: ProjectionConfig::Turso {
                 path: PathBuf::from("/data/proj.db"),
             },
             response_barrier: ResponseBarrier::AsyncProjection,
@@ -1900,22 +1807,22 @@ mod storage_config_matrix_tests {
         assert!(matches!(mapped.log, LogConfig::Filesystem { .. }));
         assert!(matches!(
             mapped.projection,
-            ProjectionStoreConfig::Sqlite { .. }
+            ProjectionStoreConfig::Turso { .. }
         ));
         assert!(
             matches!(
                 mapped.validate(),
                 Err(EngineError::Invalid(msg)) if msg.contains("s3 log")
             ),
-            "mapped filesystem/sqlite selectors must fail closed"
+            "mapped filesystem/turso selectors must fail closed"
         );
     }
 
     #[test]
     fn rejects_empty_paths_and_filesystem_postgres_authority() {
         let mut bad = StorageConfig::memory();
-        bad.log = LogConfig::Sqlite {
-            path: PathBuf::new(),
+        bad.log = LogConfig::Filesystem {
+            root: PathBuf::new(),
         };
         assert!(matches!(bad.validate(), Err(EngineError::Invalid(_))));
     }
@@ -1972,7 +1879,7 @@ mod storage_config_matrix_tests {
 
     #[test]
     fn split_s3_field_validation_preserves_exact_errors() {
-        let projection = ProjectionStoreConfig::Sqlite {
+        let projection = ProjectionStoreConfig::Turso {
             path: PathBuf::from("/tmp/projection.db"),
         };
         let fields = [
@@ -2201,7 +2108,7 @@ mod storage_config_matrix_tests {
                 allow_insecure_http: true,
             },
             authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Sqlite {
+            projection: ProjectionConfig::Turso {
                 path: PathBuf::from("/tmp/nested-projection.db"),
             },
             response_barrier: ResponseBarrier::AsyncProjection,
@@ -2236,7 +2143,7 @@ mod storage_config_matrix_tests {
         assert!(allow_insecure_http);
         assert!(matches!(
             composed.projection,
-            ComposedProjectionConfig::Sqlite { ref path }
+            ComposedProjectionConfig::Turso { ref path }
                 if path == &PathBuf::from("/tmp/nested-projection.db")
         ));
         assert_eq!(
@@ -2493,15 +2400,9 @@ impl ComposedStorageConfig {
             )?,
         }
         match &self.projection {
-            #[cfg(all(feature = "objectlog", feature = "turso"))]
             ComposedProjectionConfig::Turso { path } if path.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
                     "Turso projection path must not be empty",
-                ));
-            }
-            ComposedProjectionConfig::Sqlite { .. } => {
-                return Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
                 ));
             }
             ComposedProjectionConfig::Postgres { url } if url.is_empty() => {
@@ -2512,11 +2413,6 @@ impl ComposedStorageConfig {
             _ => {}
         }
         validate_async_projection_spec(self.async_projection)?;
-        if self.sqlite_projection_deferred_flush_chunk.is_some() {
-            return Err(EngineError::Invalid(
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ));
-        }
         if self.recovery.max_tail_commands == 0 {
             return Err(EngineError::Invalid(
                 "object-log recovery tail bound must be non-zero",
@@ -5330,7 +5226,6 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
             projection,
             config.response_barrier,
             config.async_projection,
-            config.sqlite_projection_deferred_flush_chunk,
             config.segments,
             config.namespace,
             config.recovery,
@@ -5379,12 +5274,6 @@ fn open_memory_log_cell(
                 ))
             }
         }
-        ProjectionStoreConfig::Sqlite { path } => {
-            let _ = (path, clock, namespace);
-            Err(EngineError::Invalid(
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ))
-        }
         ProjectionStoreConfig::Turso { path } => {
             #[cfg(all(feature = "memory", feature = "turso"))]
             {
@@ -5425,17 +5314,6 @@ fn open_memory_log_cell(
     }
 }
 
-fn open_sqlite_log_cell(
-    path: PathBuf,
-    projection: ProjectionStoreConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    let _ = (path, projection, clock);
-    Err(EngineError::Invalid(
-        "sqlite storage is retired; use filesystem log and turso projection",
-    ))
-}
-
 fn open_postgres_log_cell(
     url: ConfigSecret,
     schema: Option<String>,
@@ -5468,12 +5346,6 @@ fn open_postgres_log_cell(
                 },
                 clock,
             ),
-            ProjectionStoreConfig::Sqlite { path } => {
-                let _ = (path, clock, mode, node_id, coordination, schema);
-                Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
-                ))
-            }
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
                 {
@@ -5531,7 +5403,6 @@ fn open_filesystem_log_cell(
     projection: ProjectionStoreConfig,
     response_barrier: ResponseBarrier,
     async_projection: Option<AsyncProjectionSpec>,
-    sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
@@ -5545,7 +5416,6 @@ fn open_filesystem_log_cell(
             projection,
             response_barrier,
             async_projection,
-            sqlite_projection_deferred_flush_chunk,
             segments,
             namespace,
             recovery,
@@ -5569,23 +5439,6 @@ fn open_filesystem_log_cell(
                 recovery,
                 clock,
             ),
-            ProjectionStoreConfig::Sqlite { path } => {
-                let _ = (
-                    root,
-                    authority,
-                    path,
-                    response_barrier,
-                    async_projection,
-                    sqlite_projection_deferred_flush_chunk,
-                    segments,
-                    namespace,
-                    recovery,
-                    clock,
-                );
-                Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
-                ))
-            }
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
                 {
@@ -5595,7 +5448,6 @@ fn open_filesystem_log_cell(
                         ComposedProjectionConfig::Turso { path: path.clone() },
                         response_barrier,
                         async_projection,
-                        sqlite_projection_deferred_flush_chunk,
                         segments,
                         namespace.clone(),
                         recovery,
@@ -5624,7 +5476,6 @@ fn open_filesystem_log_cell(
                         path,
                         response_barrier,
                         async_projection,
-                        sqlite_projection_deferred_flush_chunk,
                         segments,
                         namespace,
                         recovery,
@@ -5648,7 +5499,6 @@ fn open_filesystem_log_cell(
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
                             async_projection,
-                            sqlite_projection_deferred_flush_chunk,
                             segments,
                             namespace,
                             recovery,
@@ -5685,7 +5535,6 @@ fn open_s3_log_cell(
     projection: ProjectionStoreConfig,
     response_barrier: ResponseBarrier,
     async_projection: Option<AsyncProjectionSpec>,
-    sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
@@ -5699,7 +5548,6 @@ fn open_s3_log_cell(
             projection,
             response_barrier,
             async_projection,
-            sqlite_projection_deferred_flush_chunk,
             segments,
             namespace,
             recovery,
@@ -5723,23 +5571,6 @@ fn open_s3_log_cell(
                 recovery,
                 clock,
             ),
-            ProjectionStoreConfig::Sqlite { path } => {
-                let _ = (
-                    provider,
-                    authority,
-                    path,
-                    response_barrier,
-                    async_projection,
-                    sqlite_projection_deferred_flush_chunk,
-                    segments,
-                    namespace,
-                    recovery,
-                    clock,
-                );
-                Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
-                ))
-            }
             ProjectionStoreConfig::Turso { path } => {
                 #[cfg(feature = "turso")]
                 {
@@ -5749,7 +5580,6 @@ fn open_s3_log_cell(
                         ComposedProjectionConfig::Turso { path: path.clone() },
                         response_barrier,
                         async_projection,
-                        sqlite_projection_deferred_flush_chunk,
                         segments,
                         namespace.clone(),
                         recovery,
@@ -5796,7 +5626,6 @@ fn open_s3_log_cell(
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
                             async_projection,
-                            sqlite_projection_deferred_flush_chunk,
                             segments,
                             namespace,
                             recovery,
@@ -5813,7 +5642,6 @@ fn open_s3_log_cell(
                         url,
                         response_barrier,
                         async_projection,
-                        sqlite_projection_deferred_flush_chunk,
                         segments,
                         namespace,
                         recovery,
@@ -5835,7 +5663,6 @@ fn composed_storage_config(
     projection: ComposedProjectionConfig,
     _response_barrier: ResponseBarrier,
     async_projection: Option<AsyncProjectionSpec>,
-    sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
@@ -5851,7 +5678,6 @@ fn composed_storage_config(
         projection,
         response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection,
-        sqlite_projection_deferred_flush_chunk,
         segments: SegmentSettings {
             target_bytes: segments.target_bytes,
             max_latency_ms: segments.max_latency_ms,

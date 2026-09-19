@@ -81,8 +81,6 @@ pub use postgres_native::{
 pub enum LogSpec {
     /// In-memory reference log (atomic class; non-durable).
     Memory,
-    /// Durable sqlite command log at `path` (atomic class).
-    Sqlite { path: PathBuf },
     /// Segmented group-commit object log over the explicitly selected local or shared object-store profile.
     ObjectLog(ObjectLogSpec),
     /// SYNC postgres durable-log adapter (atomic class), driven through the blocking-safe
@@ -105,7 +103,6 @@ impl LogSpec {
     fn label(&self) -> &'static str {
         match self {
             LogSpec::Memory => "memory",
-            LogSpec::Sqlite { .. } => "sqlite",
             LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. }) => "filesystem",
             LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }) => "s3",
             #[cfg(feature = "postgres")]
@@ -306,29 +303,12 @@ impl ObjectLogSpec {
 pub enum ProjectionSpec {
     /// In-memory `ProjectionData` projection, rebuilt by log replay on open.
     InMemory,
-    /// Derived relational sqlite projection (`fireweed_items` is the read model) at `path`.
-    Sqlite { path: PathBuf },
     /// Native-async local Turso 0.7 ordinary-WAL derived projection (TD-010 / ADR-016 public default).
     /// Composes with all four log axes through the generic native-async engine when the
     /// `turso-projection` feature is enabled (default-on for stock `fireweed-service`).
     Turso { path: PathBuf },
-    /// SQLite-first durable projection image plus hot in-memory serving at `path`.
-    Hybrid { path: PathBuf },
-    /// The `objectlog/hybrid-strict` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
-    /// projection image at `path` as [`Self::Hybrid`], but the group-commit write path commits the sealed
-    /// batch DURABLY to SQLite BEFORE applying it to hot memory (`apply_durable_then_memory`). A SQLite
-    /// failure returns no success and replays the object-log tail; a SQLite-commit-then-memory-apply failure
-    /// poisons the store fail-closed until restart, when memory rehydrates from the SQLite `ProjectionImage`.
-    HybridStrict { path: PathBuf },
-    /// The `objectlog/hybrid-async` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
-    /// projection image at `path` as [`Self::Hybrid`], selected under its canonical `hybrid-async` name so
-    /// the deployment carries the async-apply debt/backpressure/poison threshold config
-    /// ([`BackendSpec::async_projection`]). Manifest commit + synchronous in-memory apply/render is the success
-    /// barrier; the durable SQLite image is an asynchronous checkpoint that MAY lag and is caught up by
-    /// object-log tail replay on recovery.
-    HybridAsync { path: PathBuf },
     /// SYNC postgres relational projection (`PostgresRelational`, atomic class) at `url`, composed against
-    /// a durable log axis ([`LogSpec::Postgres`], [`LogSpec::Sqlite`], or Class B memory log). `url` is a
+    /// a durable log axis ([`LogSpec::Postgres`] or Class B memory log). `url` is a
     /// libpq/postgres connection string; connect + recover MUST run off the reactor (the composition root
     /// drives it through `spawn_blocking`, same as the log axis). Requires the `postgres` cargo feature.
     #[cfg(feature = "postgres")]
@@ -342,11 +322,7 @@ impl ProjectionSpec {
         match self {
             // Public matrix name is `memory`.
             ProjectionSpec::InMemory => "memory",
-            ProjectionSpec::Sqlite { .. } => "sqlite",
             ProjectionSpec::Turso { .. } => "turso",
-            ProjectionSpec::Hybrid { .. } => "hybrid",
-            ProjectionSpec::HybridStrict { .. } => "hybrid-strict",
-            ProjectionSpec::HybridAsync { .. } => "hybrid-async",
             #[cfg(feature = "postgres")]
             ProjectionSpec::Postgres { .. } => "postgres",
         }
@@ -373,22 +349,11 @@ pub enum ControlPlaneSpec {
 /// Class A durable-log axes that can host a reconstructible emission cursor (TD-008).
 fn log_spec_is_durable_class_a(log: &LogSpec) -> bool {
     match log {
-        LogSpec::Sqlite { .. } | LogSpec::ObjectLog(_) => true,
+        LogSpec::ObjectLog(_) => true,
         #[cfg(feature = "postgres")]
         LogSpec::Postgres { .. } => true,
         LogSpec::Memory => false,
     }
-}
-
-/// Legacy Hybrid projection variants still present until P12a removes them. Enabled change-record
-/// delivery on these selectors is retired; Disabled remains usable for migration tests.
-fn projection_is_legacy_hybrid(projection: &ProjectionSpec) -> bool {
-    matches!(
-        projection,
-        ProjectionSpec::Hybrid { .. }
-            | ProjectionSpec::HybridStrict { .. }
-            | ProjectionSpec::HybridAsync { .. }
-    )
 }
 
 /// Exact feature-off rejection retained when relocating external-Kafka gating into pure validation.
@@ -820,12 +785,8 @@ pub struct BackendSpec {
     /// (`Config.backend.response_barrier`); there is no top-level `Config` duplicate.
     pub response_barrier: ResponseBarrierSpec,
     /// Provider-neutral async response-policy bounds. Required exactly when
-    /// [`Self::response_barrier`] is [`ResponseBarrierSpec::AsyncProjection`]. The three transitional
-    /// Hybrid-family arms consume it through one private SQLite adapter until P12a removes those profiles.
+    /// [`Self::response_barrier`] is [`ResponseBarrierSpec::AsyncProjection`].
     pub async_projection: Option<AsyncProjectionSpec>,
-    /// Optional SQLite projection apply-batch bound, independent of response-barrier policy.
-    /// Explicit values are valid only on object-log (filesystem|s3) × SQLite-family projections.
-    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
 }
 
 impl BackendSpec {
@@ -837,7 +798,6 @@ impl BackendSpec {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         }
     }
 }
@@ -1045,31 +1005,6 @@ impl Config {
                 .validate(spec.segment_config().target_bytes)
                 .map_err(EngineError::Invalid)?;
         }
-        if let LogSpec::Sqlite { .. } = &self.backend.log {
-            return Err(EngineError::Invalid(
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ));
-        }
-        match &self.backend.projection {
-            ProjectionSpec::Sqlite { .. }
-            | ProjectionSpec::Hybrid { .. }
-            | ProjectionSpec::HybridStrict { .. }
-            | ProjectionSpec::HybridAsync { .. } => {
-                return Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
-                ));
-            }
-            _ => {}
-        }
-        if self
-            .backend
-            .sqlite_projection_deferred_flush_chunk
-            .is_some()
-        {
-            return Err(EngineError::Invalid(
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ));
-        }
         // Pre-I/O Turso path validation (AC-TURSO-5): empty paths fail closed before database open.
         if let ProjectionSpec::Turso { path } = &self.backend.projection {
             if path.as_os_str().is_empty() {
@@ -1169,13 +1104,6 @@ impl Config {
             change_record_sink::ChangeRecordSinkMode::ExternalKafka
         ) {
             return Err(EngineError::Invalid(EXTERNAL_KAFKA_FEATURE_REQUIRED));
-        }
-
-        // Hybrid enabled delivery is retired before Class A capability checks (P12a removes selectors).
-        if projection_is_legacy_hybrid(&self.backend.projection) {
-            return Err(EngineError::Invalid(
-                "legacy-projection-change-record-delivery-retired",
-            ));
         }
 
         // Class B memory log cannot provide log-derived history (TD-008).
@@ -2308,7 +2236,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         control_plane,
         response_barrier,
         async_projection,
-        sqlite_projection_deferred_flush_chunk,
     } = config.backend;
     // The sync Postgres client owns an internal runtime, so connect off the Tokio reactor. Erase the
     // concrete implementation only after construction; every backend arm receives this same selected
@@ -2332,13 +2259,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     // debug-segments / recovery-tail env contract (which the per-append-seal composed `ObjectLog` axis does
     // not express), so they remain on the segmented backends until that contract is folded into the axis.
     match (log, projection) {
-        (LogSpec::Sqlite { .. }, _)
-        | (_, ProjectionSpec::Sqlite { .. })
-        | (_, ProjectionSpec::Hybrid { .. })
-        | (_, ProjectionSpec::HybridStrict { .. })
-        | (_, ProjectionSpec::HybridAsync { .. }) => Err(EngineError::Invalid(
-            "sqlite storage is retired; use filesystem log and turso projection",
-        )),
         (LogSpec::Memory, ProjectionSpec::InMemory) => {
             let backend = Arc::new(composed_memory_backend().with_node_id(node_id));
             run_owned(
@@ -2397,7 +2317,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
                 debug_segments,
-                sqlite_projection_deferred_flush_chunk,
             );
             let backend = open_objectlog_filesystem_memory_backend(
                 root,
@@ -2444,7 +2363,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
                 debug_segments,
-                sqlite_projection_deferred_flush_chunk,
             );
             let backend = open_objectlog_s3_memory_backend(
                 endpoint,
@@ -2636,7 +2554,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 config_objectlog_queue_limit,
                 recovery_max_tail,
                 debug_segments,
-                sqlite_projection_deferred_flush_chunk,
             );
             let backend = open_objectlog_filesystem_postgres_backend(
                 root,
@@ -2687,7 +2604,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 config_objectlog_queue_limit,
                 recovery_max_tail,
                 debug_segments,
-                sqlite_projection_deferred_flush_chunk,
             );
             let backend = open_objectlog_s3_postgres_backend(
                 endpoint,
@@ -3588,7 +3504,6 @@ mod byte_admission_wiring_tests {
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier,
                 async_projection,
-                sqlite_projection_deferred_flush_chunk: None,
             },
             0,
             "127.0.0.1:0".to_owned(),
@@ -3617,9 +3532,7 @@ mod byte_admission_wiring_tests {
                             SegmentConfig::new(1, 20)
                                 .expect("structurally valid but production-unsafe segment config"),
                         )),
-                        ProjectionSpec::Hybrid {
-                            path: std::env::temp_dir().join("fireweed-p3c-strict.sqlite"),
-                        },
+                        ProjectionSpec::InMemory,
                         None,
                     ),
                 ),
@@ -3628,31 +3541,21 @@ mod byte_admission_wiring_tests {
                     true,
                     startup_validation_config(
                         validation_object_log("class-a-async"),
-                        ProjectionSpec::HybridAsync {
-                            path: std::env::temp_dir().join("fireweed-p3c-async.sqlite"),
-                        },
+                        ProjectionSpec::InMemory,
                         Some(AsyncProjectionSpec::default()),
                     ),
                 ),
                 (
                     "class-b-strict-disabled",
                     false,
-                    startup_validation_config(
-                        LogSpec::Memory,
-                        ProjectionSpec::Sqlite {
-                            path: std::env::temp_dir().join("fireweed-p3c-class-b.sqlite"),
-                        },
-                        None,
-                    ),
+                    startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None),
                 ),
                 (
                     "class-b-async-enabled",
                     true,
                     startup_validation_config(
                         LogSpec::Memory,
-                        ProjectionSpec::Sqlite {
-                            path: std::env::temp_dir().join("fireweed-p3c-class-b-async.sqlite"),
-                        },
+                        ProjectionSpec::InMemory,
                         Some(AsyncProjectionSpec::default()),
                     ),
                 ),
@@ -3691,23 +3594,6 @@ mod byte_admission_wiring_tests {
             disabled.validate_for_start(),
             Err(EngineError::Invalid(
                 "change-record-endpoint-requires-enabled"
-            ))
-        );
-
-        // Enabled Hybrid is retired for change-record delivery.
-        let mut hybrid = startup_validation_config(
-            validation_object_log("wired"),
-            ProjectionSpec::Hybrid {
-                path: std::env::temp_dir().join("fireweed-p3c-wired.sqlite"),
-            },
-            None,
-        );
-        hybrid.change_record_sink.enabled = true;
-        hybrid.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
-        assert_eq!(
-            hybrid.validate_for_start(),
-            Err(EngineError::Invalid(
-                "legacy-projection-change-record-delivery-retired"
             ))
         );
 
@@ -3853,21 +3739,6 @@ mod byte_admission_wiring_tests {
     }
 
     #[test]
-    fn retired_deferred_flush_is_rejected_before_io() {
-        for projection in [
-            ProjectionSpec::InMemory,
-            ProjectionSpec::Turso {
-                path: "/never-created/projection.db".into(),
-            },
-        ] {
-            let mut config =
-                startup_validation_config(validation_object_log("retired-flush"), projection, None);
-            config.backend.sqlite_projection_deferred_flush_chunk = Some(17);
-            assert!(config.validate_for_start().is_err());
-        }
-    }
-
-    #[test]
     fn p3v_barrier_precedes_sink_composition_and_matches_facade_fingerprints() {
         // Barrier wins over sink composition: AsyncProjection on Class B with a valid enabled endpoint
         // returns the barrier cell error, not ChangeRecordsRequireDurableLog.
@@ -3982,7 +3853,6 @@ mod byte_admission_wiring_tests {
                         .then_some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
                     response_barrier: ResponseBarrier::AsyncProjection,
                     async_projection: None,
-                    sqlite_projection_deferred_flush_chunk: None,
                     segments: FacadeSegments::new(262_144, 20).expect("valid"),
                     namespace: "p3v-fp".into(),
                     recovery: fireweed::RecoveryPolicy::default(),
@@ -4066,37 +3936,6 @@ mod byte_admission_wiring_tests {
                 Err(EngineError::Invalid(EXTERNAL_KAFKA_FEATURE_REQUIRED))
             );
         }
-
-        // Hybrid enabled (embedded) is retired before any construction.
-        let mut hybrid_enabled = startup_validation_config(
-            validation_object_log("hybrid-retired"),
-            ProjectionSpec::HybridStrict {
-                path: std::env::temp_dir().join("fireweed-p8c-hybrid-strict.sqlite"),
-            },
-            None,
-        );
-        hybrid_enabled.change_record_sink.enabled = true;
-        assert_eq!(
-            hybrid_enabled.validate_for_start(),
-            Err(EngineError::Invalid(
-                "legacy-projection-change-record-delivery-retired"
-            ))
-        );
-
-        // Hybrid disabled remains usable for migration tests.
-        let hybrid_disabled = startup_validation_config(
-            validation_object_log("hybrid-disabled"),
-            ProjectionSpec::Hybrid {
-                path: std::env::temp_dir().join("fireweed-p8c-hybrid-disabled.sqlite"),
-            },
-            None,
-        );
-        assert_eq!(
-            hybrid_disabled.validate_for_start(),
-            Err(EngineError::Invalid(
-                "sqlite storage is retired; use filesystem log and turso projection"
-            ))
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4199,7 +4038,6 @@ mod byte_admission_wiring_tests {
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
             },
             0,
             "127.0.0.1:0".to_string(),
@@ -4228,7 +4066,6 @@ mod byte_admission_wiring_tests {
                     control_plane: ControlPlaneSpec::InProcess,
                     response_barrier: ResponseBarrierSpec::AsyncProjection,
                     async_projection: None,
-                    sqlite_projection_deferred_flush_chunk: None,
                 },
                 0,
                 "127.0.0.1:0".to_owned(),
@@ -4473,7 +4310,6 @@ mod byte_admission_wiring_tests {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         };
         assert_eq!(spec.log.label(), "filesystem");
         match &spec.log {
@@ -4582,7 +4418,6 @@ mod byte_admission_wiring_tests {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         };
         assert_eq!(spec.log.label(), "s3");
         match &spec.log {
@@ -4944,7 +4779,6 @@ mod class_b_memory_log_tests {
             authority: None,
             response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             segments: segments(),
             namespace: format!("class-b-{}-{}-{}", proj.name(), slug, std::process::id()),
             recovery: RecoveryPolicy::default(),

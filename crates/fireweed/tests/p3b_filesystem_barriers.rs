@@ -54,7 +54,6 @@ fn filesystem_config(
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: barrier,
         async_projection: (barrier == ResponseBarrier::AsyncProjection).then(non_default_spec),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
         recovery: RecoveryPolicy {
@@ -219,17 +218,4 @@ fn exact_invalid_neighbors_and_facade_routing_are_guarded() {
     with_spec.async_projection = Some(non_default_spec());
     assert_eq!(with_spec.validate(), Ok(()));
 
-    let mut wrong_chunk = filesystem_config(
-        fixture.path().join("wrong-chunk"),
-        ProjectionStoreConfig::Memory,
-        ResponseBarrier::AsyncProjection,
-        "p3b-wrong-chunk".to_owned(),
-    );
-    wrong_chunk.sqlite_projection_deferred_flush_chunk = Some(7);
-    assert_eq!(
-        wrong_chunk.validate(),
-        Err(EngineError::Invalid(
-            "sqlite storage is retired; use filesystem log and turso projection"
-        ))
-    );
 }

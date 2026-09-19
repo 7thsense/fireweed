@@ -266,7 +266,6 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     });
     disabled.change_record_sink = ChangeRecordSinkConfig::default();
     let server = start(disabled)
@@ -281,7 +280,6 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     });
     embedded.change_record_sink = embedded_sink();
     assert_eq!(
@@ -296,7 +294,6 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     });
     http.change_record_sink = http_sink(8080);
     assert_eq!(
@@ -311,7 +308,6 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     });
     tuple.change_record_sink.endpoint = Some("http://127.0.0.1:9".into());
     assert_eq!(
@@ -339,7 +335,6 @@ async fn p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b() {
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
             });
             c.change_record_sink = kafka_sink();
             c
@@ -358,7 +353,6 @@ async fn p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b() {
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
             });
             c.change_record_sink = kafka_sink();
             c
@@ -385,7 +379,6 @@ async fn p8c_residual_class_a_non_pg_embedded_delivery_smokes() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         });
         smoke_embedded_cell(config, "filesystem×memory").await;
         let _ = std::fs::remove_dir_all(&root);
@@ -399,7 +392,6 @@ async fn p8c_residual_class_a_non_pg_embedded_delivery_smokes() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         });
         smoke_embedded_cell(config, "filesystem×turso").await;
         let _ = std::fs::remove_dir_all(&root);
@@ -427,7 +419,6 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         });
         smoke_embedded_cell(config, "postgres×memory").await;
         drop_schema(&url, &schema).await;
@@ -448,7 +439,6 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         });
         let mut config = config;
         config.change_record_sink = embedded_sink();
@@ -511,7 +501,6 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         });
         smoke_embedded_cell(config, "postgres×postgres").await;
         drop_schema(&url, &schema).await;
@@ -529,7 +518,6 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         });
         smoke_embedded_cell(config, "filesystem×postgres").await;
         let _ = std::fs::remove_dir_all(&root);
@@ -551,7 +539,6 @@ async fn p8c_residual_class_a_http_delivery_smoke_through_spawned_task() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     });
     config.change_record_sink = http_sink(port);
     let server = start(config)

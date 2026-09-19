@@ -493,14 +493,12 @@ fn parse_backend(
     let response_barrier = ResponseBarrierSpec::AsyncProjection;
     let thresholds = hybrid_async_thresholds(env)?;
     let async_projection = Some(thresholds);
-    let sqlite_projection_deferred_flush_chunk = None;
     Ok(BackendSpec {
         log: log_spec,
         projection: projection_spec,
         control_plane: parse_control_plane(env, replicas)?,
         response_barrier,
         async_projection,
-        sqlite_projection_deferred_flush_chunk,
     })
 }
 
@@ -745,7 +743,9 @@ mod tests {
 
     #[test]
     fn empty_env_requires_s3_fields() {
-        let err = Config::from_env(&BTreeMap::new()).expect_err("s3 fields are required");
+        let Err(err) = Config::from_env(&BTreeMap::new()) else {
+            panic!("s3 fields are required");
+        };
         assert!(
             err.0.contains("FIREWEED_OBJECT_LOG_S3_ENDPOINT") || err.0.contains("s3"),
             "{err:?}"
@@ -786,12 +786,7 @@ mod tests {
 
     #[test]
     fn turso_projection_is_the_public_env_default() {
-        // Omit FIREWEED_PROJECTION_BACKEND → Turso with the single documented path default.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-        ]))
-        .expect("filesystem × default turso");
+        let config = Config::from_env(&s3_env(&[])).expect("s3 × default turso");
         match config.backend.projection {
             ProjectionSpec::Turso { path } => {
                 assert_eq!(
@@ -801,77 +796,35 @@ mod tests {
             }
             other => panic!("expected Turso default, got label={}", other.label()),
         }
-        // Explicit override of path alone keeps Turso selection.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "memory"),
-            (
-                "FIREWEED_TURSO_PROJECTION_PATH",
-                "/data/custom-projection.turso",
-            ),
-        ]))
-        .expect("memory × default turso with custom path");
+        let config = Config::from_env(&s3_env(&[(
+            "FIREWEED_TURSO_PROJECTION_PATH",
+            "/data/custom-projection.turso",
+        )]))
+        .expect("s3 × turso with custom path");
         match config.backend.projection {
             ProjectionSpec::Turso { path } => {
                 assert_eq!(path, PathBuf::from("/data/custom-projection.turso"));
             }
             other => panic!("expected Turso, got {}", other.label()),
         }
-        // Explicit memory/Turso/PostgreSQL remain selectable.
-        for (proj, check) in [
-            ("memory", "memory"),
-            ("turso", "turso"),
-            ("postgres", "postgres"),
-        ] {
-            let mut pairs = vec![
-                ("FIREWEED_LOG_BACKEND", "memory"),
-                ("FIREWEED_PROJECTION_BACKEND", proj),
-            ];
-            if proj == "turso" {
-                pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/x.db"));
-            }
-            if proj == "postgres" {
-                pairs.push(("FIREWEED_PG_PROJECTION_URL", "postgres://u:p@localhost/db"));
-            }
-            let config = Config::from_env(&map(&pairs)).unwrap_or_else(|e| {
-                panic!("explicit {proj} must remain selectable: {e}");
-            });
-            assert_eq!(config.backend.projection.label(), check);
-        }
     }
 
     #[test]
     fn public_projection_help_and_parser_are_bijective() {
-        // Public names accepted by the parser must match the help advertisement set.
-        const PUBLIC: &[&str] = &["memory", "turso", "postgres"];
-        for name in PUBLIC {
-            let mut pairs = vec![
-                ("FIREWEED_LOG_BACKEND", "memory"),
-                ("FIREWEED_PROJECTION_BACKEND", *name),
-            ];
-            if *name == "turso" {
-                pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/p.turso"));
-            }
-            if *name == "postgres" {
-                pairs.push(("FIREWEED_PG_PROJECTION_URL", "postgres://u:p@localhost/db"));
-            }
-            let config = Config::from_env(&map(&pairs)).unwrap_or_else(|e| {
-                panic!("public projection {name} must parse: {e}");
-            });
-            assert_eq!(config.backend.projection.label(), *name);
-        }
-        // Non-public aliases stay rejected (bijection: parser domain == public set).
+        let config = Config::from_env(&s3_env(&[("FIREWEED_PROJECTION_BACKEND", "turso")]))
+            .expect("turso remains the public projection");
+        assert_eq!(config.backend.projection.label(), "turso");
         for bad in [
+            "memory",
+            "postgres",
+            "sqlite",
             "inmemory",
             "hybrid",
             "hybrid-strict",
             "hybrid-async",
             "objectlog",
         ] {
-            let result = Config::from_env(&map(&[
-                ("FIREWEED_LOG_BACKEND", "filesystem"),
-                ("FIREWEED_PROJECTION_BACKEND", bad),
-                ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-            ]));
+            let result = Config::from_env(&s3_env(&[("FIREWEED_PROJECTION_BACKEND", bad)]));
             assert!(
                 result.is_err(),
                 "{bad} must be rejected on public env surface"
@@ -880,54 +833,34 @@ mod tests {
     }
 
     #[test]
-    fn all_four_log_specs_accept_turso() {
-        let logs: Vec<Vec<(&str, &str)>> = vec![
-            vec![
-                ("FIREWEED_LOG_BACKEND", "memory"),
-                ("FIREWEED_PROJECTION_BACKEND", "turso"),
-                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/m.turso"),
-            ],
-            vec![
-                ("FIREWEED_LOG_BACKEND", "postgres"),
-                ("FIREWEED_PG_URL", "postgres://u:p@localhost/db"),
-                ("FIREWEED_PROJECTION_BACKEND", "turso"),
-                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/pg.turso"),
-            ],
-            vec![
-                ("FIREWEED_LOG_BACKEND", "filesystem"),
-                ("FIREWEED_OBJECT_LOG_ROOT", "/tmp/olog"),
-                ("FIREWEED_PROJECTION_BACKEND", "turso"),
-                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/fs.turso"),
-            ],
-            vec![
-                ("FIREWEED_LOG_BACKEND", "s3"),
-                ("FIREWEED_PROJECTION_BACKEND", "turso"),
-                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/s3.turso"),
-                ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
-                ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fw"),
-                ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
-                ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
-                ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
-                ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
-            ],
-        ];
-        for pairs in logs {
-            let config = Config::from_env(&map(&pairs)).unwrap_or_else(|e| {
-                panic!("log×turso must parse for {:?}: {e}", pairs[0]);
-            });
-            assert_eq!(config.backend.projection.label(), "turso");
-            assert_eq!(config.validate_for_start(), Ok(()));
+    fn retired_log_backends_are_rejected() {
+        for log in ["memory", "postgres", "filesystem", "sqlite", "objectlog"] {
+            let result = Config::from_env(&s3_env(&[("FIREWEED_LOG_BACKEND", log)]));
+            assert!(result.is_err(), "{log} log must be rejected");
         }
     }
 
     #[test]
+    fn s3_turso_is_the_public_env_cell() {
+        let config = Config::from_env(&s3_env(&[(
+            "FIREWEED_TURSO_PROJECTION_PATH",
+            "/tmp/s3.turso",
+        )]))
+        .expect("s3 × turso");
+        assert_eq!(config.backend.projection.label(), "turso");
+        assert_eq!(config.backend.log.label(), "s3");
+        assert_eq!(config.validate_for_start(), Ok(()));
+    }
+
+    #[test]
     fn postgres_pool_size_is_positive_and_bounded() {
-        let configured = Config::from_env(&map(&[("FIREWEED_POSTGRES_POOL_SIZE", "3")]))
+        let configured = Config::from_env(&s3_env(&[("FIREWEED_POSTGRES_POOL_SIZE", "3")]))
             .expect("valid postgres pool size");
         assert_eq!(configured.postgres_pool_size, 3);
 
         for invalid in ["0", "65", "not-a-number"] {
-            let error = match Config::from_env(&map(&[("FIREWEED_POSTGRES_POOL_SIZE", invalid)])) {
+            let error = match Config::from_env(&s3_env(&[("FIREWEED_POSTGRES_POOL_SIZE", invalid)]))
+            {
                 Err(error) => error,
                 Ok(_) => panic!("invalid postgres pool size must fail closed"),
             };
@@ -936,10 +869,8 @@ mod tests {
     }
 
     #[test]
-    fn memory_backend_and_scalar_knobs_are_honored() {
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+    fn scalar_knobs_are_honored_on_the_product_cell() {
+        let config = Config::from_env(&s3_env(&[
             ("FIREWEED_NODE_ID", "7"),
             ("FIREWEED_LISTEN_ADDR", "127.0.0.1:6390"),
             ("FIREWEED_WORKER_THREADS", "4"),
@@ -953,11 +884,8 @@ mod tests {
             ("FIREWEED_BOOTSTRAP_QUEUES", "ta:qa,tb:qb"),
         ]))
         .expect("valid env");
-        assert!(matches!(config.backend.log, LogSpec::Memory));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::InMemory
-        ));
+        assert_eq!(config.backend.log.label(), "s3");
+        assert_eq!(config.backend.projection.label(), "turso");
         assert_eq!(config.node_id, 7);
         assert_eq!(config.listen, "127.0.0.1:6390");
         assert_eq!(config.worker_threads, Some(4));
@@ -973,276 +901,8 @@ mod tests {
     }
 
     #[test]
-    fn public_matrix_names_parse_five_logs_and_three_projections() {
-        // memory log × memory projection (public name, not only inmemory alias)
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
-        ]))
-        .expect("memory×memory");
-        assert!(matches!(config.backend.log, LogSpec::Memory));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::InMemory
-        ));
-        assert_eq!(config.backend.log.label(), "memory");
-        assert_eq!(config.backend.projection.label(), "memory");
-
-        // filesystem log (first-class) × memory projection
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
-        ]))
-        .expect("filesystem×memory");
-        assert_eq!(config.backend.log.label(), "filesystem");
-        assert!(matches!(
-            config.backend.log,
-            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
-        ));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::InMemory
-        ));
-
-        // Class B: memory log × sqlite projection (durable projection; no log rebuild)
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/mem-class-b.db"),
-        ]))
-        .expect("memory×sqlite Class B");
-        assert!(matches!(config.backend.log, LogSpec::Memory));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Turso { ref path } if path == &PathBuf::from("/data/mem-class-b.db")
-        ));
-        assert_eq!(config.backend.log.label(), "memory");
-        assert_eq!(config.backend.projection.label(), "turso");
-
-        // filesystem log (first-class) × sqlite projection
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/fw-proj.db"),
-        ]))
-        .expect("filesystem×sqlite");
-        match &config.backend.log {
-            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { root, .. }) => {
-                assert_eq!(root, &PathBuf::from("/data/fw-log"));
-            }
-            _ => panic!(
-                "expected filesystem object log, got label={}",
-                config.backend.log.label()
-            ),
-        }
-        assert_eq!(config.backend.log.label(), "filesystem");
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Turso { .. }
-        ));
-
-        // s3 log (first-class) × memory projection
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "s3"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:9000"),
-            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fw"),
-            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
-            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
-            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "minio"),
-            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "minio123"),
-            ("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP", "true"),
-        ]))
-        .expect("s3×memory");
-        assert!(matches!(
-            config.backend.log,
-            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
-        ));
-        assert_eq!(config.backend.log.label(), "s3");
-        assert_eq!(config.backend.projection.label(), "memory");
-
-        // s3 log (first-class) × sqlite projection
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "s3"),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3-proj.db"),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
-            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
-            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
-            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
-            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
-            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
-        ]))
-        .expect("s3×sqlite");
-        assert_eq!(config.backend.log.label(), "s3");
-        assert!(matches!(
-            config.backend.log,
-            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
-        ));
-        assert_eq!(config.backend.projection.label(), "turso");
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Turso { ref path } if path == &PathBuf::from("/data/s3-proj.db")
-        ));
-    }
-
-    #[test]
-    fn legacy_product_aliases_are_hard_rejected() {
-        // objectlog (+ store local/s3 product path) — use filesystem|s3 instead.
-        for (log, projection) in [
-            ("objectlog", "memory"),
-            ("objectlog", "sqlite"),
-            ("filesystem", "inmemory"),
-            ("memory", "inmemory"),
-        ] {
-            let Err(err) = Config::from_env(&map(&[
-                ("FIREWEED_LOG_BACKEND", log),
-                ("FIREWEED_PROJECTION_BACKEND", projection),
-            ])) else {
-                panic!("{log}×{projection} must be hard-rejected on the public env surface");
-            };
-            assert!(
-                err.0.contains("FIREWEED_LOG_BACKEND=")
-                    || err.0.contains("FIREWEED_PROJECTION_BACKEND="),
-                "unexpected error for {log}×{projection}: {}",
-                err.0
-            );
-            if log == "objectlog" {
-                assert!(
-                    err.0.contains("objectlog is not a public product log"),
-                    "{}",
-                    err.0
-                );
-            }
-            if projection == "inmemory" {
-                assert!(
-                    err.0
-                        .contains("inmemory is not a public product projection"),
-                    "{}",
-                    err.0
-                );
-            }
-        }
-    }
-
-    /// First-class `s3` log pairs with the postgres projection (requires `postgres` feature).
-    /// Shares the ObjectLog × Postgres server composition arm with `filesystem`.
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn s3_log_pairs_with_postgres_projection() {
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "s3"),
-            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
-            (
-                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
-                "postgres://fireweed:fireweed@127.0.0.1:5432/fireweed",
-            ),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
-            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
-            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
-            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
-            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "production-access"),
-            (
-                "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
-                "production-secret",
-            ),
-        ]))
-        .expect("s3×postgres");
-        assert_eq!(config.backend.log.label(), "s3");
-        assert!(matches!(
-            config.backend.log,
-            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
-        ));
-        assert_eq!(config.backend.projection.label(), "postgres");
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Postgres { .. }
-        ));
-    }
-
-    /// Public product names: log=s3 × projection={memory,sqlite} (and postgres under feature).
-    #[test]
-    fn first_class_s3_log_pairs_with_public_projections() {
-        let s3_base: &[(&str, &str)] = &[
-            ("FIREWEED_LOG_BACKEND", "s3"),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
-            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed"),
-            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
-            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
-            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
-            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
-        ];
-        for (projection, expect_label) in [("memory", "memory"), ("turso", "turso")] {
-            let mut pairs = s3_base.to_vec();
-            pairs.push(("FIREWEED_PROJECTION_BACKEND", projection));
-            if projection == "sqlite" {
-                pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/var/lib/fw/proj.db"));
-            }
-            let config = Config::from_env(&map(&pairs))
-                .unwrap_or_else(|e| panic!("s3×{projection} must parse: {e}"));
-            assert_eq!(config.backend.log.label(), "s3");
-            assert!(matches!(
-                config.backend.log,
-                LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
-            ));
-            assert_eq!(config.backend.projection.label(), expect_label);
-        }
-    }
-
-    /// Class B cell: memory log × postgres projection is allowlisted (feature `postgres`).
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn memory_log_postgres_projection_is_wired() {
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
-            (
-                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
-                "postgres://postgres@127.0.0.1:5432/fireweed_proj",
-            ),
-        ]))
-        .expect("memory×postgres Class B");
-        assert!(matches!(config.backend.log, LogSpec::Memory));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Postgres { ref url }
-                if url == "postgres://postgres@127.0.0.1:5432/fireweed_proj"
-        ));
-        assert_eq!(config.backend.log.label(), "memory");
-        assert_eq!(config.backend.projection.label(), "postgres");
-    }
-
-    /// First-class `filesystem` log pairs with the postgres projection (requires `postgres` feature).
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn filesystem_log_pairs_with_postgres_projection() {
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
-            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
-            (
-                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
-                "postgres://fireweed:fireweed@127.0.0.1:5432/fireweed",
-            ),
-        ]))
-        .expect("filesystem×postgres");
-        assert_eq!(config.backend.log.label(), "filesystem");
-        assert!(matches!(
-            config.backend.log,
-            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
-        ));
-        assert_eq!(config.backend.projection.label(), "postgres");
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Postgres { .. }
-        ));
-    }
-
-    #[test]
     fn generated_bootstrap_queue_inventory() {
-        let generated = map(&[
+        let generated = s3_env(&[
             ("FIREWEED_BOOTSTRAP_GENERATED_COUNT", "1001"),
             ("FIREWEED_BOOTSTRAP_GENERATED_TENANT", "density"),
             ("FIREWEED_BOOTSTRAP_GENERATED_PREFIX", "q"),
@@ -1279,7 +939,7 @@ mod tests {
             "the same generated contract must produce the same ordered inventory"
         );
 
-        let explicit = Config::from_env(&map(&[
+        let explicit = Config::from_env(&s3_env(&[
             ("FIREWEED_BOOTSTRAP_QUEUES", "override:only"),
             ("FIREWEED_BOOTSTRAP_GENERATED_COUNT", "1001"),
             ("FIREWEED_BOOTSTRAP_GENERATED_TENANT", "density"),
@@ -1294,7 +954,7 @@ mod tests {
     #[test]
     fn runtime_resource_metrics_path_rejects_empty_and_relative_values() {
         for value in ["", "   ", "relative/resources.json"] {
-            let error = match Config::from_env(&map(&[(
+            let error = match Config::from_env(&s3_env(&[(
                 "FIREWEED_RUNTIME_RESOURCE_METRICS_PATH",
                 value,
             )])) {
@@ -1313,14 +973,15 @@ mod tests {
     #[test]
     fn generated_bootstrap_queue_inventory_rejects_invalid_or_unbounded_counts() {
         for count in ["", "zero", "0", "10001", "18446744073709551616"] {
-            let result = Config::from_env(&map(&[("FIREWEED_BOOTSTRAP_GENERATED_COUNT", count)]));
+            let result =
+                Config::from_env(&s3_env(&[("FIREWEED_BOOTSTRAP_GENERATED_COUNT", count)]));
             assert!(
                 result.is_err(),
                 "generated count {count:?} must be rejected"
             );
         }
 
-        let empty_prefix = Config::from_env(&map(&[
+        let empty_prefix = Config::from_env(&s3_env(&[
             ("FIREWEED_BOOTSTRAP_GENERATED_COUNT", "1"),
             ("FIREWEED_BOOTSTRAP_GENERATED_PREFIX", ""),
         ]));
@@ -1329,7 +990,7 @@ mod tests {
             "empty generated prefix must be rejected"
         );
 
-        let invalid_tenant = Config::from_env(&map(&[
+        let invalid_tenant = Config::from_env(&s3_env(&[
             ("FIREWEED_BOOTSTRAP_GENERATED_COUNT", "1"),
             ("FIREWEED_BOOTSTRAP_GENERATED_TENANT", ""),
         ]));
@@ -1341,7 +1002,7 @@ mod tests {
 
     #[test]
     fn objectlog_byte_limits_are_typed_and_validated_against_segment_target() {
-        let config = Config::from_env(&map(&[
+        let config = Config::from_env(&s3_env(&[
             ("FIREWEED_SEGMENT_TARGET_BYTES", "1024"),
             ("FIREWEED_OBJECTLOG_BUFFERED_BYTES_GLOBAL", "8192"),
             ("FIREWEED_OBJECTLOG_BUFFERED_BYTES_TENANT", "4096"),
@@ -1372,7 +1033,7 @@ mod tests {
             ],
         ] {
             assert!(
-                Config::from_env(&map(&pairs)).is_err(),
+                Config::from_env(&s3_env(&pairs)).is_err(),
                 "accepted {pairs:?}"
             );
         }
@@ -1387,33 +1048,23 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_turso_projection_carries_paths_and_segment_config() {
-        // The filesystem object log's only production form is the segmented group-commit substrate;
-        // the retired `FIREWEED_OBJECT_LOG_MODE` knob is ignored, and the projection axis is the
-        // derived sqlite store.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/proj.db"),
+    fn s3_turso_projection_carries_paths_and_segment_config() {
+        let config = Config::from_env(&s3_env(&[
+            ("FIREWEED_TURSO_PROJECTION_PATH", "/data/proj.turso"),
             ("FIREWEED_SEGMENT_TARGET_BYTES", "131072"),
             ("FIREWEED_SEGMENT_MAX_LATENCY_MS", "5"),
         ]))
         .expect("valid env");
         match (config.backend.log, config.backend.projection) {
             (
-                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
-                    root,
-                    segment_config,
-                }),
+                LogSpec::ObjectLog(ObjectLogSpec::S3 { segment_config, .. }),
                 ProjectionSpec::Turso { path },
             ) => {
-                assert_eq!(root, PathBuf::from("/data/olog"));
-                assert_eq!(path, PathBuf::from("/data/proj.db"));
+                assert_eq!(path, PathBuf::from("/data/proj.turso"));
                 assert_eq!(segment_config.target_bytes, 131_072);
                 assert_eq!(segment_config.max_latency_ms, 5);
             }
-            _ => panic!("expected filesystem log × sqlite projection"),
+            _ => panic!("expected s3 log × turso projection"),
         }
     }
 
@@ -1421,10 +1072,8 @@ mod tests {
     fn turso_projection_is_accepted_on_public_env_surface() {
         // Turso is the public default projection (TD-010); explicit selection parses with the
         // single documented FIREWEED_TURSO_PROJECTION_PATH setting.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
+        let config = Config::from_env(&s3_env(&[
             ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
             ("FIREWEED_TURSO_PROJECTION_PATH", "/data/projection.turso"),
         ]))
         .expect("public env surface accepts turso");
@@ -1441,18 +1090,12 @@ mod tests {
         // hybrid|hybrid-strict|hybrid-async are demoted from the public FIREWEED_PROJECTION_BACKEND
         // axis. Internal Config construction may still name them; the env adapter fails closed.
         for projection in ["hybrid", "hybrid-strict", "hybrid-async"] {
-            let result = Config::from_env(&map(&[
-                ("FIREWEED_LOG_BACKEND", "filesystem"),
-                ("FIREWEED_PROJECTION_BACKEND", projection),
-                ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-                ("FIREWEED_TURSO_PROJECTION_PATH", "/data/hybrid.db"),
-            ]));
+            let result = Config::from_env(&s3_env(&[("FIREWEED_PROJECTION_BACKEND", projection)]));
             let Err(err) = result else {
                 panic!("{projection} must be rejected on the public env surface");
             };
             assert!(
-                err.0.contains("FIREWEED_PROJECTION_BACKEND=")
-                    && (err.0.contains("not a public product value") || err.0.contains("demoted")),
+                err.0.contains("FIREWEED_PROJECTION_BACKEND"),
                 "unexpected error for {projection}: {}",
                 err.0
             );
@@ -1461,7 +1104,7 @@ mod tests {
 
     #[test]
     fn fjord_namespace_config_is_parsed_from_env() {
-        let config = Config::from_env(&map(&[
+        let config = Config::from_env(&s3_env(&[
             ("FIREWEED_FJORD_STATE_ROOT", "/data/fjord"),
             ("FIREWEED_FJORD_CLUSTER_ID", "fjord-test"),
         ]))
@@ -1494,13 +1137,13 @@ mod tests {
                         ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
                     ]);
                 }
-                let result = Config::from_env(&map(&pairs));
+                let result = Config::from_env(&s3_env(&pairs));
                 let Err(err) = result else {
                     panic!("{log}/{projection} must be rejected on the public env surface");
                 };
                 assert!(
-                    err.0
-                        .contains(&format!("FIREWEED_PROJECTION_BACKEND={projection}")),
+                    err.0.contains("FIREWEED_LOG_BACKEND")
+                        || err.0.contains("FIREWEED_PROJECTION_BACKEND"),
                     "{}",
                     err.0
                 );
@@ -1512,14 +1155,12 @@ mod tests {
     fn hybrid_async_thresholds_default_when_env_absent() {
         // Default Strict composition leaves async unset (P3v Option/barrier coherence). P12a later
         // maps explicit barrier syntax; public env cannot select HybridAsync today.
-        let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
+        let config = Config::from_env(&s3_env(&[])).expect("s3 env yields defaults");
         assert_eq!(
             config.backend.response_barrier,
             ResponseBarrierSpec::AsyncProjection
         );
         assert!(config.backend.async_projection.is_some());
-        // Default projection is turso → deferred-flush is not cell-applicable.
-        assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
         assert_eq!(config.validate_for_start(), Ok(()));
     }
 
@@ -1529,25 +1170,14 @@ mod tests {
         // parsed for zero-bound ConfigError fingerprints but are not attached under Strict
         // (Strict+Some is a typed EngineError at start). Deferred flush attaches on
         // filesystem×sqlite only.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "filesystem"),
-            (
-                "FIREWEED_OBJECT_LOG_ROOT",
-                "/tmp/fireweed-p3v-deferred-flush-env",
-            ),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            (
-                "FIREWEED_TURSO_PROJECTION_PATH",
-                "/tmp/fireweed-p3v-deferred-flush-env.sqlite",
-            ),
+        let config = Config::from_env(&s3_env(&[
             ("FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "5000"),
             ("FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES", "1048576"),
             ("FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX", "64"),
             ("FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS", "30000"),
             ("FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD", "5"),
-            ("FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK", "17"),
         ]))
-        .expect("valid filesystem×sqlite env");
+        .expect("valid s3×turso env");
         assert_eq!(
             config.backend.response_barrier,
             ResponseBarrierSpec::AsyncProjection
@@ -1556,7 +1186,6 @@ mod tests {
             config.backend.async_projection.is_some(),
             "object-log env attaches async projection bounds"
         );
-        assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
         assert_eq!(config.validate_for_start(), Ok(()));
     }
 
@@ -1564,7 +1193,7 @@ mod tests {
     fn hybrid_async_zero_threshold_is_rejected() {
         // A zero debt bound would leave the queue instantly and permanently backpressured — reject it at
         // configuration time rather than silently accepting a queue that can never admit a mutation.
-        let result = Config::from_env(&map(&[(
+        let result = Config::from_env(&s3_env(&[(
             "FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS",
             "0",
         )]));
@@ -1581,7 +1210,7 @@ mod tests {
 
     #[test]
     fn hybrid_async_zero_poison_retry_threshold_is_rejected() {
-        let result = Config::from_env(&map(&[(
+        let result = Config::from_env(&s3_env(&[(
             "FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD",
             "0",
         )]));
@@ -1593,7 +1222,7 @@ mod tests {
 
     #[test]
     fn unknown_log_backend_is_rejected() {
-        let result = Config::from_env(&map(&[("FIREWEED_LOG_BACKEND", "bogus")]));
+        let result = Config::from_env(&s3_env(&[("FIREWEED_LOG_BACKEND", "bogus")]));
         let Err(err) = result else {
             panic!("unknown log backend must fail");
         };
@@ -1603,7 +1232,7 @@ mod tests {
     #[test]
     fn unwired_pairing_is_rejected() {
         // Public surface never accepts hybrid; demoted names fail before pairing checks.
-        let result = Config::from_env(&map(&[
+        let result = Config::from_env(&s3_env(&[
             ("FIREWEED_LOG_BACKEND", "memory"),
             ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
         ]));
@@ -1615,7 +1244,7 @@ mod tests {
 
     #[test]
     fn hybrid_pairing_is_rejected_for_any_public_log() {
-        let result = Config::from_env(&map(&[
+        let result = Config::from_env(&s3_env(&[
             ("FIREWEED_LOG_BACKEND", "sqlite"),
             ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
         ]));
@@ -1623,8 +1252,7 @@ mod tests {
             panic!("sqlite/hybrid must be rejected");
         };
         assert!(
-            err.0
-                .contains("FIREWEED_LOG_BACKEND=sqlite FIREWEED_PROJECTION_BACKEND=hybrid"),
+            err.0.contains("FIREWEED_LOG_BACKEND") || err.0.contains("FIREWEED_PROJECTION_BACKEND"),
             "{}",
             err.0
         );
@@ -1632,7 +1260,7 @@ mod tests {
 
     #[test]
     fn malformed_bootstrap_queue_is_rejected() {
-        let result = Config::from_env(&map(&[("FIREWEED_BOOTSTRAP_QUEUES", "no-colon-here")]));
+        let result = Config::from_env(&s3_env(&[("FIREWEED_BOOTSTRAP_QUEUES", "no-colon-here")]));
         let Err(err) = result else {
             panic!("missing colon must fail");
         };
@@ -1642,7 +1270,7 @@ mod tests {
     #[test]
     fn sink_endpoint_validation_is_deferred_for_enabled_and_disabled_env_configs() {
         for enabled in ["false", "true"] {
-            let config = Config::from_env(&map(&[
+            let config = Config::from_env(&s3_env(&[
                 ("FIREWEED_CHANGE_RECORD_SINK_ENABLED", enabled),
                 ("FIREWEED_CHANGE_RECORD_SINK_ENDPOINT", "not-a-url"),
             ]))
@@ -1666,7 +1294,7 @@ mod tests {
                 "FIREWEED_CHANGE_RECORD_SINK_TICK_INTERVAL_MS must be greater than 0",
             ),
         ] {
-            let error = Config::from_env(&map(&[
+            let error = Config::from_env(&s3_env(&[
                 ("FIREWEED_CHANGE_RECORD_SINK_ENABLED", "true"),
                 (key, "0"),
             ]))
@@ -1681,33 +1309,17 @@ mod tests {
     // the `--features postgres` (no-tls) matrix leg stays green.
     #[cfg(feature = "tls")]
     #[test]
-    fn lakebase_postgres_env_resolves_with_tls_and_databricks_credentials() {
-        let config = Config::from_env(&map(&[
+    fn lakebase_postgres_log_is_retired_on_the_public_env_surface() {
+        let result = Config::from_env(&s3_env(&[
             ("FIREWEED_LOG_BACKEND", "postgres"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
             (
                 "FIREWEED_POSTGRES_LOG_DATABASE_URL",
                 "postgres://app:native-password@instance.lakebase.cloud:5432/db?sslmode=require",
             ),
-            ("DATABRICKS_HOST", "https://example.cloud.databricks.com"),
-            ("DATABRICKS_DATABASE_INSTANCE_NAME", "lakebase-prod"),
-            ("DATABRICKS_CLIENT_ID", "sp-client"),
-            ("DATABRICKS_CLIENT_SECRET", "sp-secret"),
-        ]))
-        .expect("Lakebase env resolves without a live DB");
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::InMemory
-        ));
-        match config.backend.log {
-            LogSpec::Postgres { url, credentials } => {
-                assert!(url.contains("sslmode=require"));
-                assert!(
-                    credentials.is_some(),
-                    "Databricks service-principal env must inject a credential provider"
-                );
-            }
-            _ => panic!("postgres env must select LogSpec::Postgres"),
-        }
+        ]));
+        let Err(err) = result else {
+            panic!("postgres log is retired on the public env surface");
+        };
+        assert!(err.0.contains("FIREWEED_LOG_BACKEND"), "{}", err.0);
     }
 }

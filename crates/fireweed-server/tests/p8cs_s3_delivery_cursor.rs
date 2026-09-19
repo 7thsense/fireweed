@@ -406,7 +406,6 @@ async fn p8cs_s3_memory_embedded_emitter_lifecycle() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         vec![def],
     );
@@ -430,7 +429,6 @@ async fn p8cs_s3_postgres_embedded_emitter_lifecycle() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         vec![def],
     );
@@ -457,7 +455,6 @@ async fn p8cs_s3_memory_http_delivery_smoke_through_spawned_task() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         vec![def],
     );
@@ -497,7 +494,6 @@ async fn p8cs_s3_postgres_http_delivery_smoke_through_spawned_task() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         vec![def],
     );
@@ -534,7 +530,6 @@ async fn p8cs_external_kafka_feature_off_rejects_s3_class_a() {
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
             },
             vec![qdef()],
         );
@@ -569,7 +564,6 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         vec![opted_out],
     );
@@ -587,7 +581,6 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         vec![qdef()],
     );

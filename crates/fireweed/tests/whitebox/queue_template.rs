@@ -294,7 +294,6 @@ fn postgres_public_constructors_and_composed_reopen_idempotently() {
             },
             response_barrier: CommitResponseBarrier::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
             namespace: format!("queue-template-{nonce}"),
             recovery: ProjectionRecoveryPolicy::default(),

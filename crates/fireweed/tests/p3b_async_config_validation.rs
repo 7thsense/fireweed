@@ -16,7 +16,6 @@ fn base(log: LogConfig, projection: ProjectionStoreConfig) -> StorageConfig {
         authority: None,
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(1024, 5).unwrap(),
         namespace: "p3b-validation".to_owned(),
         recovery: RecoveryPolicy::default(),
@@ -147,36 +146,6 @@ fn all_six_non_object_log_async_selections_fail_before_io() {
         }
     }
     assert!(!root.exists(), "validation performed filesystem I/O");
-}
-
-#[test]
-fn retired_sqlite_deferred_flush_tuning_is_rejected_before_io() {
-    let root = PathBuf::from("/p3b-retired-tuning-never-opened");
-    for projection in [
-        ProjectionStoreConfig::Memory,
-        turso_projection("projection.db"),
-        postgres_projection(),
-    ] {
-        for barrier in [
-            ResponseBarrier::AsyncProjection,
-            ResponseBarrier::AsyncProjection,
-        ] {
-            for chunk in [0, 17] {
-                let mut config = filesystem(projection.clone(), &root);
-                config.response_barrier = barrier;
-                config.async_projection = (barrier == ResponseBarrier::AsyncProjection)
-                    .then(AsyncProjectionSpec::default);
-                config.sqlite_projection_deferred_flush_chunk = Some(chunk);
-                assert_eq!(
-                    config.validate(),
-                    Err(EngineError::Invalid(
-                        "sqlite storage is retired; use filesystem log and turso projection"
-                    ))
-                );
-            }
-        }
-    }
-    assert!(!root.exists());
 }
 
 #[test]

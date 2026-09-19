@@ -344,7 +344,6 @@ fn build_storage_config(
         authority,
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: matrix_segments()?,
         namespace: namespace.into(),
         recovery: matrix_recovery(),

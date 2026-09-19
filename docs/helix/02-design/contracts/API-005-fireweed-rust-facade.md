@@ -141,20 +141,19 @@ Correctness and progress requirements for the facade execution path:
 
 5. **Two-phase mutate and discover (required).** Mutating calls
    (`commit`, packed `complete` / `retry` / `release`, push) complete when
-   **this request** is durable on the log and this process's unpublished
-   overlay is updated. They return per-entry outcomes. They do not mean
-   every worker's next `claim` sees new Pending rows. `claim` polls
-   currently selectable work: Turso-applied rows plus this process's
-   log-acked continuation items that have not applied yet. Empty `claim`
-   is a normal poll, never `Conflict` for apply lag. Public reads
+   **this request** is durable on the log. They return per-entry outcomes.
+   They do not mean every worker's next `claim` sees new Pending rows.
+   `claim` polls currently selectable applied rows. Empty `claim` is a
+   normal poll, never `Conflict` for apply lag. Public reads
    (`side_record`, `live_item`, `metrics`) may wait projection coverage.
    Ordinary item `claim` must not. Inspect `commit_capabilities`
    (`DurabilityClass::EventualApply` on native Turso) rather than
    treating construction as a serving snapshot. `ResponseBarrier` has a
    single value, [`ResponseBarrier::AsyncProjection`]. Batching and
    generation packing remain the fast path. Fire-and-forget mutate is
-   forbidden. The durable log remains the object-log abstraction
-   (`LogConfig::S3` / filesystem object-log), not a raw S3 SDK write.
+   forbidden. There is no process-local unpublished overlay. The durable
+   log remains the object-log abstraction (`LogConfig::S3` / filesystem
+   object-log), not a raw S3 SDK write.
 
 ### Construction
 

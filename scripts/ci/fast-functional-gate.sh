@@ -16,8 +16,8 @@ rustup run 1.97.1 cargo test --locked -p fireweed \
     --test concrete_fireweed \
     --test item_mutation
 
-rustup run 1.97.1 cargo test --locked -p fireweed \
-    --test public_interface_conformance memory_memory_public_interface -- --exact
+rustup run 1.97.1 cargo test --locked -p fireweed --features objectlog,turso \
+    --test public_interface_conformance filesystem_turso_async_public_interface -- --exact
 
 # Facade lib suite must compile (v0.24 process gap fireweed-c1dc998a). Ignored tests are
 # allowed only with an explicit #[ignore = "..."] reason on the incomplete product surface.

@@ -70,7 +70,6 @@ fn config(root: &Path, schema: &str, url: &str) -> ComposedStorageConfig {
         },
         response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
         namespace: schema.to_owned(),
         recovery: ProjectionRecoveryPolicy::default(),

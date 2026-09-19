@@ -57,7 +57,7 @@
     },
     {
       "path": "docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md",
-      "sha256": "95b01a6fad6700e3f535b46fc27dddb249bc74ef2be2e86dd88bc774a562ae8b"
+      "sha256": "9ed8560b2cdf4e28dbbdf854aa133845fd13d06f069d988a33ae2a52af8974c7"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md",

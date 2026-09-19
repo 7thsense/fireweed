@@ -120,7 +120,6 @@ fn storage(
         control_plane: None,
         response_barrier: barrier,
         async_projection: (barrier == ResponseBarrier::AsyncProjection).then(async_spec),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: production_segments(),
         namespace: format!("p10r-{tag}"),
         recovery: RecoveryPolicy {

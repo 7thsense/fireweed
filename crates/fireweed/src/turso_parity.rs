@@ -562,7 +562,6 @@ impl DerivedObjectLogTursoBackend {
         let node_id = self.node_id;
         let strategy = self.engine.commit_strategy();
         let coordinator = self.async_apply.clone();
-        let unpublished_pending = Arc::clone(&self.unpublished_pending);
         let fence = self.selection_fence.clone();
         let admission = self.fence_admission.clone();
         self.engine
@@ -590,41 +589,12 @@ impl DerivedObjectLogTursoBackend {
                             .await?;
                     let commit: Commit = Arc::new(move |request| {
                         let strategy = Arc::clone(&strategy);
-                        let coordinator = coordinator.clone();
-                        let unpublished_pending = Arc::clone(&unpublished_pending);
                         Box::pin(async move {
-                            let pending: Vec<PushItem> = request
-                                .commands()
-                                .iter()
-                                .filter_map(|envelope| match &envelope.command {
-                                    QueueCommand::Push(command) => Some(command.items.clone()),
-                                    _ => None,
-                                })
-                                .flatten()
-                                .collect();
-                            let outcome = strategy
+                            strategy
                                 .commit(request.with_append_admission(
                                     AppendAdmissionClass::SharedSelectionLive,
                                 ))
-                                .await?;
-                            // Log ack is the mutate completion. Same-process Claim
-                            // reads unpublished pending; public reads still wait
-                            // coverage. Do not block this response on Turso apply.
-                            if coordinator.is_some()
-                                && let Some(position) = outcome.positions().last()
-                                && !pending.is_empty()
-                            {
-                                unpublished_pending
-                                    .lock()
-                                    .await
-                                    .entry(position.queue.clone())
-                                    .or_default()
-                                    .push(UnpublishedPending {
-                                        through: position.clone(),
-                                        items: pending,
-                                    });
-                            }
-                            Ok(outcome)
+                                .await
                         })
                     });
                     operation(Operation {

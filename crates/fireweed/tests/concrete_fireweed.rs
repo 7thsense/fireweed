@@ -110,8 +110,8 @@ fn role_named_object_log_configuration_rejects_retired_sqlite() {
             root: "object-log".into(),
         },
         authority: ObjectLogAuthority::NativeConditionalWrite,
-        projection: ProjectionConfig::Sqlite {
-            path: "projection.sqlite".into(),
+        projection: ProjectionConfig::Turso {
+            path: "projection.turso".into(),
         },
         response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(1024, 5).unwrap(),

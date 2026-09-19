@@ -97,7 +97,6 @@ fn s3_config(
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: barrier,
         async_projection: (barrier == ResponseBarrier::AsyncProjection).then(non_default_spec),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
         recovery: RecoveryPolicy {
@@ -144,7 +143,6 @@ fn structural_s3_config(
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: barrier,
         async_projection: (barrier == ResponseBarrier::AsyncProjection).then(non_default_spec),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
         recovery: RecoveryPolicy::default(),
@@ -182,34 +180,6 @@ fn s3_validate_time_pins_are_retired_for_all_three_projections() {
 }
 
 #[test]
-fn s3_retired_deferred_flush_rejected_before_io() {
-    for projection in [
-        ProjectionStoreConfig::Memory,
-        ProjectionStoreConfig::Turso {
-            path: PathBuf::from("/p3s-must-not-exist/projection.db"),
-        },
-        ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
-        },
-    ] {
-        for barrier in [
-            ResponseBarrier::AsyncProjection,
-            ResponseBarrier::AsyncProjection,
-        ] {
-            let mut config =
-                structural_s3_config(projection.clone(), barrier, "retired-tuning".into());
-            config.sqlite_projection_deferred_flush_chunk = Some(7);
-            assert_eq!(
-                config.validate(),
-                Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection"
-                ))
-            );
-        }
-    }
-}
-
-#[test]
 fn unsupported_s3_field_and_endpoint_negatives_are_retained() {
     let projection = ProjectionStoreConfig::Memory;
     let empty_fields = StorageConfig {
@@ -226,7 +196,6 @@ fn unsupported_s3_field_and_endpoint_negatives_are_retained() {
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: "p3s-empty-fields".to_owned(),
         recovery: RecoveryPolicy::default(),
@@ -254,7 +223,6 @@ fn unsupported_s3_field_and_endpoint_negatives_are_retained() {
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: Some(non_default_spec()),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: "p3s-unreachable".to_owned(),
         recovery: RecoveryPolicy::default(),

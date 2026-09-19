@@ -153,7 +153,6 @@ async fn postgres_turso_combo_runs_under_tokio() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     };
     let server = start(Config::new(
         backend,
@@ -190,7 +189,6 @@ async fn postgres_postgres_combo_runs_under_tokio() {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     };
     let server = start(Config::new(
         backend,

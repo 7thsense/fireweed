@@ -81,7 +81,6 @@ fn fs_backend(root: PathBuf) -> BackendSpec {
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     }
 }
 fn embedded_sink() -> ChangeRecordSinkConfig {

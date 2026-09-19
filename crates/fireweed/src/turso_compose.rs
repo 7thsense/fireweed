@@ -55,7 +55,7 @@ use fireweed_engine::{
 #[cfg(feature = "objectlog")]
 use fireweed_engine::{
     AsyncProjectionSpec, CLAIM_GENERATION_MAX_REQUESTS, ClaimDriverReadAdmission, ClaimQueueTurn,
-    ClaimedItem, ControlPlane, DispatchError, ExpiredLeaseCursor, ExpiredLeasePage, FinalizeKind,
+    ControlPlane, DispatchError, ExpiredLeaseCursor, ExpiredLeasePage, FinalizeKind,
     IdempotencyDecision, MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MutationGenerationMemberOutcome,
     MutationGenerationWork, MutationIngress, MutationSequencer, MutationSequencerKey,
     OwnedTaskDispatcher, OwnedTaskFactory, PreparedClaim, PreparedClaimedResult, PreparedFinalize,
@@ -277,28 +277,8 @@ const MICROBATCH_LINGER: Duration = Duration::from_millis(10);
 
 /// Reference size for the configured generation budget. Live reservations
 /// must never be truncated merely to fit this estimate.
-#[cfg(test)]
-const CLAIM_SELECT_EXCLUDE_CAP: usize =
-    GENERATION_MAX_ITEMS.saturating_mul(fireweed_engine::MUTATION_MAX_GENERATIONS_PER_QUEUE);
-
 #[cfg(any(feature = "objectlog", test))]
-struct UnpublishedMutation {
-    through: CommandPosition,
-    snapshot: MutationDriverSnapshot,
-}
-
-/// Log-acked Push rows not yet visible to Turso Claim SELECT.
-///
-/// `commit` on AsyncProjection returns after the object-log append. Continuation
-/// items live here so the same process can claim them without waiting apply.
-#[cfg(feature = "objectlog")]
-struct UnpublishedPending {
-    through: CommandPosition,
-    items: Vec<PushItem>,
-}
-
-#[cfg(any(feature = "objectlog", test))]
-fn overlay_claim_exclude(snapshot: &MutationDriverSnapshot) -> Vec<ItemId> {
+fn claim_exclude_ids(snapshot: &MutationDriverSnapshot) -> Vec<ItemId> {
     let mut ids: Vec<ItemId> = snapshot
         .leased_ids
         .iter()
@@ -323,76 +303,6 @@ fn identity_base(definition: QueueDefinition) -> MutationDriverSnapshot {
         leased_ids: HashSet::new(),
         terminal_ids: HashSet::new(),
     }
-}
-
-/// Keys / indexes / pause only. Do not fold leases or item bodies — Claim exclude
-/// stays unpublished-overlay sized, not O(N).
-#[cfg(feature = "objectlog")]
-fn merge_applied_identity_facts(
-    snapshot: &mut MutationDriverSnapshot,
-    incoming: &MutationDriverSnapshot,
-) {
-    // Applied key membership is read by indexed point lookup. Retaining every
-    // historical key here leaked memory and rejected reuse after purge.
-    // Retained request outcomes are read from the projection with their expiry.
-    // Only unpublished generations need process-local request fingerprints.
-    snapshot
-        .unique_index_values
-        .extend(incoming.unique_index_values.iter().cloned());
-    for (group, count) in &incoming.group_counts {
-        let current = snapshot.group_counts.get(group).copied().unwrap_or(0);
-        snapshot
-            .group_counts
-            .insert(group.clone(), current.max(*count));
-    }
-    snapshot.paused_drain_intake |= incoming.paused_drain_intake;
-}
-
-#[cfg(any(feature = "objectlog", test))]
-fn merge_unpublished_into_snapshot(
-    snapshot: &mut MutationDriverSnapshot,
-    unpublished: &MutationDriverSnapshot,
-) {
-    snapshot
-        .client_keys
-        .extend(unpublished.client_keys.iter().cloned());
-    for (request_id, fingerprint) in &unpublished.request_fingerprints {
-        snapshot
-            .request_fingerprints
-            .insert(request_id.clone(), *fingerprint);
-    }
-    snapshot
-        .unique_index_values
-        .extend(unpublished.unique_index_values.iter().cloned());
-    for (group, count) in &unpublished.group_counts {
-        let current = snapshot.group_counts.get(group).copied().unwrap_or(0);
-        snapshot
-            .group_counts
-            .insert(group.clone(), current.max(*count));
-    }
-    for item in &unpublished.batch_items {
-        match snapshot
-            .batch_items
-            .iter_mut()
-            .find(|existing| existing.item_id == item.item_id)
-        {
-            Some(existing) => {
-                if existing.item_version < item.item_version {
-                    *existing = item.clone();
-                }
-            }
-            None => snapshot.batch_items.push(item.clone()),
-        }
-    }
-    snapshot
-        .leased_ids
-        .extend(unpublished.leased_ids.iter().copied());
-    snapshot
-        .leased_ids
-        .retain(|id| !unpublished.terminal_ids.contains(id));
-    snapshot
-        .terminal_ids
-        .extend(unpublished.terminal_ids.iter().copied());
 }
 
 /// Copy only identity facts a generation can consult. The authoritative cache may
@@ -446,61 +356,6 @@ fn identity_for_generation(
 }
 
 #[cfg(feature = "objectlog")]
-fn overlay_delta(
-    before: &MutationDriverSnapshot,
-    after: &MutationDriverSnapshot,
-) -> MutationDriverSnapshot {
-    MutationDriverSnapshot {
-        definition: after.definition.clone(),
-        paused_drain_intake: after.paused_drain_intake,
-        client_keys: after
-            .client_keys
-            .difference(&before.client_keys)
-            .cloned()
-            .collect(),
-        request_fingerprints: after
-            .request_fingerprints
-            .iter()
-            .filter(|(request_id, _)| !before.request_fingerprints.contains_key(*request_id))
-            .map(|(request_id, fingerprint)| (request_id.clone(), *fingerprint))
-            .collect(),
-        unique_index_values: after
-            .unique_index_values
-            .difference(&before.unique_index_values)
-            .cloned()
-            .collect(),
-        group_counts: after
-            .group_counts
-            .iter()
-            .filter(|(group, count)| {
-                **count > before.group_counts.get(*group).copied().unwrap_or(0)
-            })
-            .map(|(group, count)| (group.clone(), *count))
-            .collect(),
-        batch_items: after
-            .batch_items
-            .iter()
-            .filter(|item| {
-                !before.batch_items.iter().any(|existing| {
-                    existing.item_id == item.item_id && existing.item_version >= item.item_version
-                })
-            })
-            .cloned()
-            .collect(),
-        leased_ids: after
-            .leased_ids
-            .difference(&before.leased_ids)
-            .copied()
-            .collect(),
-        terminal_ids: after
-            .terminal_ids
-            .difference(&before.terminal_ids)
-            .copied()
-            .collect(),
-    }
-}
-
-#[cfg(feature = "objectlog")]
 fn command_kind(command: &QueueCommand) -> &'static str {
     match command {
         QueueCommand::CreateQueue(_) => "CreateQueue",
@@ -527,58 +382,6 @@ fn unpublished_has_identity(snapshot: &MutationDriverSnapshot) -> bool {
         || !snapshot.batch_items.is_empty()
         || !snapshot.leased_ids.is_empty()
         || !snapshot.terminal_ids.is_empty()
-}
-
-#[cfg(feature = "objectlog")]
-fn push_item_from_claimed(item: &ClaimedItem) -> PushItem {
-    PushItem {
-        client_item_key: item.client_item_key.clone(),
-        item_id: item.item_id,
-        priority: item.priority.clone(),
-        not_before: item.not_before,
-        group_key: item.group_key.clone(),
-        max_attempts: item.max_attempts,
-        payload: item.payload.clone(),
-        fields: item.fields.clone(),
-        metadata: item.metadata.clone(),
-        cohort_size: None,
-        gate_keys: item.gate_keys.clone(),
-        index_fields: BTreeMap::new(),
-        entity_document: item.entity.clone(),
-    }
-}
-
-#[cfg(feature = "objectlog")]
-fn claimed_from_push_item(
-    item: &PushItem,
-    lease_token: LeaseToken,
-    lease_expires_at: UtcTimestamp,
-) -> ClaimedItem {
-    ClaimedItem {
-        item_id: item.item_id,
-        client_item_key: item.client_item_key.clone(),
-        item_version: 1,
-        priority: item.priority.clone(),
-        group_key: item.group_key.clone(),
-        not_before: item.not_before,
-        lease_token: Some(lease_token),
-        lease_expires_at,
-        attempt_count: 0,
-        max_attempts: item.max_attempts,
-        payload: item.payload.clone(),
-        fields: item.fields.clone(),
-        metadata: item.metadata.clone(),
-        gate_keys: item.gate_keys.clone(),
-        entity: item.entity_document.clone(),
-    }
-}
-
-#[cfg(test)]
-fn prune_unpublished_gens(gens: &mut Vec<UnpublishedMutation>, applied: Option<&CommandPosition>) {
-    let Some(applied) = applied else {
-        return;
-    };
-    gens.retain(|entry| !position_covers(Some(applied), &entry.through));
 }
 
 #[cfg(feature = "objectlog")]
@@ -959,8 +762,8 @@ mod contention_mapping_tests {
             "ordinary item Claim selects applied rows from Turso"
         );
         assert!(
-            realized.contains("take_unpublished_pending"),
-            "same-process Claim fills log-acked Push rows that Turso has not applied"
+            !realized.contains("take_unpublished_pending"),
+            "Claim must not fill a process-local unpublished row cache"
         );
         assert!(
             !realized.contains("QueueServingSet") && !realized.contains("take_eligible"),
@@ -972,16 +775,12 @@ mod contention_mapping_tests {
             "async fn allocate_accepted_pushes(",
         );
         assert!(
-            drive.contains("wait_selected_frontiers(&queue, false, wait_push_apply)"),
-            "Claim SELECT waits for unpublished Push apply, not the previous Claim"
+            drive.contains("wait_selected_frontiers(&queue, claimed, claimed)"),
+            "Claim SELECT waits for previous claim and push to apply"
         );
         assert!(
             drive.contains("claim_select.lock()"),
             "this process owns the Turso writer and sequences Claim SELECT in memory"
-        );
-        assert!(
-            !drive.contains("wait_selected_frontiers(&queue, last_claim"),
-            "item Claim must not wait for prior Claim apply before SELECT"
         );
         let continuation = between(
             preamble,
@@ -1049,7 +848,7 @@ mod contention_mapping_tests {
         assert!(derived_push.contains("sequencer"));
         assert!(
             derived_push.contains("allocate_accepted_pushes"),
-            "add must allocate durable debt in the elected driver after overlay"
+            "add must allocate durable debt in the elected driver after accept"
         );
         assert!(
             derived_push.contains("applied_identity"),
@@ -1068,28 +867,20 @@ mod contention_mapping_tests {
             "one generation must be one packed append, not N serial commits"
         );
         assert!(
-            derived_push.contains("unpublished_mutations"),
-            "next generation must overlay unpublished identities instead of waiting apply"
-        );
-        assert!(
-            derived_push.contains("prune_unpublished_applied"),
-            "overlay must drop generations the serving projection has already applied"
+            !derived_push.contains("unpublished_mutations"),
+            "packed generations must not keep an unpublished identity overlay"
         );
         assert!(
             derived_push.contains("realize_accepted_claims"),
             "ordinary item Claim must realize on the same packed Update generation as field-update"
         );
         assert!(
-            derived_push.contains("overlay_delta"),
-            "unpublished overlay must store this generation's delta, not the merged history"
-        );
-        assert!(
             derived_push.contains("wait_selected_frontiers"),
-            "candidate mutations keep the frontier helper; overlay replaces apply waits"
+            "the next generation waits for previous apply instead of an unpublished overlay"
         );
         assert!(
-            derived_push.contains("if !snapshot_batch_keys.is_empty() || !batch_ids.is_empty()"),
-            "addressed rewrites require projection coverage before snapshot validation"
+            derived_push.contains("if needs_serving_snapshot"),
+            "keyed identity and addressed rewrites require projection coverage before snapshot validation"
         );
         assert!(
             derived_push.contains("acquire_shared"),
@@ -1175,7 +966,7 @@ mod contention_mapping_tests {
             .expect("admit");
         let generation = sequencer.start_generation(&shard).expect("start");
         let members = validate_inert_mutation_generation(&snapshot, std::slice::from_ref(&work))
-            .expect("overlay");
+            .expect("validate");
         assert!(matches!(
             members[0].outcome,
             MutationGenerationMemberOutcome::PushAccepted
@@ -1186,7 +977,7 @@ mod contention_mapping_tests {
             finish_inert_mutation_generation_append(&mut prepared).expect("co-seal carrier");
         assert!(
             commits.is_empty(),
-            "unprepared add overlay must not append; the driver allocates after accept"
+            "unprepared add must not append; the driver allocates after accept"
         );
         let expired = abort_unplanned_generation_on_deadline(
             Vec::<
@@ -1208,92 +999,6 @@ mod contention_mapping_tests {
                 resource: "mutation sequencer wait",
             }
         );
-    }
-
-    #[test]
-    fn overlay_claim_exclude_unions_leased_and_terminal_without_history() {
-        use std::collections::HashSet;
-
-        use fireweed_core::{ItemId, QueueId, TenantId};
-        use fireweed_engine::{CommandPosition, MutationDriverSnapshot};
-
-        let mut snapshot = MutationDriverSnapshot {
-            definition: fireweed_core::QueueDefinition {
-                tenant_id: TenantId::new("t").unwrap(),
-                queue_id: QueueId::new("q").unwrap(),
-                priority_model: fireweed_core::PriorityModel::timestamp_ascending(),
-                ordering_mode: fireweed_core::OrderingMode::Strict,
-                max_rank_error: 0,
-                progress_bound_ms: 60_000,
-                eligibility_policy: fireweed_core::EligibilityPolicy::default(),
-                cohort_policy: None,
-                recurrence: fireweed_core::RecurrencePolicy::default(),
-                request_id_retention_ms: 60_000,
-                client_item_key_retention_ms: 60_000,
-                terminal_retention_ms: 60_000,
-                max_lease_duration_ms: 60_000,
-                retry_policy: fireweed_core::RetryPolicy { max_attempts: 3 },
-                max_push_batch_size: 100,
-                max_claim_batch_size: 100,
-                max_eligible_group_size: None,
-                secondary_indexes: Vec::new(),
-                entity_schema: None,
-                typed_indexes: Vec::new(),
-                emit_change_records: false,
-            },
-            paused_drain_intake: false,
-            client_keys: HashSet::new(),
-            request_fingerprints: std::collections::HashMap::new(),
-            unique_index_values: HashSet::new(),
-            group_counts: std::collections::HashMap::new(),
-            batch_items: Vec::new(),
-            leased_ids: HashSet::from([ItemId::from_u64(1), ItemId::from_u64(2)]),
-            terminal_ids: HashSet::from([ItemId::from_u64(2), ItemId::from_u64(3)]),
-        };
-        let exclude = overlay_claim_exclude(&snapshot);
-        assert_eq!(
-            exclude,
-            vec![
-                ItemId::from_u64(1),
-                ItemId::from_u64(2),
-                ItemId::from_u64(3)
-            ]
-        );
-        assert_eq!(
-            CLAIM_SELECT_EXCLUDE_CAP,
-            fireweed_engine::MUTATION_MAX_GENERATIONS_PER_QUEUE * GENERATION_MAX_ITEMS
-        );
-        snapshot.leased_ids = (0..(CLAIM_SELECT_EXCLUDE_CAP as u64 + 1))
-            .map(ItemId::from_u64)
-            .collect();
-        snapshot.terminal_ids.clear();
-        assert!(overlay_claim_exclude(&snapshot).len() > CLAIM_SELECT_EXCLUDE_CAP);
-
-        let shard =
-            fireweed_engine::QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
-        let mut applied = snapshot.clone();
-        applied.leased_ids.clear();
-        applied.terminal_ids = HashSet::from([ItemId::from_u64(1)]);
-        let mut inflight = snapshot.clone();
-        inflight.leased_ids = HashSet::from([ItemId::from_u64(9)]);
-        inflight.terminal_ids.clear();
-        let mut gens = vec![
-            UnpublishedMutation {
-                through: CommandPosition::new(shard.clone(), 1, 10),
-                snapshot: applied,
-            },
-            UnpublishedMutation {
-                through: CommandPosition::new(shard.clone(), 1, 20),
-                snapshot: inflight,
-            },
-        ];
-        prune_unpublished_gens(&mut gens, Some(&CommandPosition::new(shard, 1, 10)));
-        assert_eq!(gens.len(), 1);
-        let mut merged = snapshot.clone();
-        merged.leased_ids.clear();
-        merged.terminal_ids.clear();
-        merge_unpublished_into_snapshot(&mut merged, &gens[0].snapshot);
-        assert_eq!(overlay_claim_exclude(&merged), vec![ItemId::from_u64(9)]);
     }
 
     #[test]
@@ -1348,12 +1053,12 @@ mod contention_mapping_tests {
             "async fn dispatch_claim(",
         );
         assert!(
-            realized.contains("overlay_claim_exclude"),
-            "next Claim must exclude unpublished overlay ids, not remembered history"
+            realized.contains("claim_exclude_ids"),
+            "this generation's already-selected ids are excluded from later Claims in the same batch"
         );
         assert!(
-            realized.contains("take_unpublished_pending"),
-            "Claim fills log-acked continuation rows before Turso apply"
+            !realized.contains("take_unpublished_pending"),
+            "Claim must not fill a process-local unpublished row cache"
         );
         assert!(
             !realized.contains("remembered_lease_ids"),
@@ -1361,7 +1066,7 @@ mod contention_mapping_tests {
         );
         assert!(
             !realized.contains("item_id NOT IN"),
-            "Claim SELECT must filter overlay ids in memory, not SQL NOT IN"
+            "Claim SELECT must filter this-generation ids in memory, not SQL NOT IN"
         );
         assert!(
             !realized.contains("borrow_committed_driver_connection"),
@@ -3244,8 +2949,6 @@ pub struct DerivedObjectLogTursoBackend {
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
     frontiers: Arc<tokio::sync::Mutex<HashMap<QueueKey, QueueFrontiers>>>,
-    unpublished_mutations: Arc<tokio::sync::Mutex<HashMap<QueueKey, Vec<UnpublishedMutation>>>>,
-    unpublished_pending: Arc<tokio::sync::Mutex<HashMap<QueueKey, Vec<UnpublishedPending>>>>,
     applied_identity: Arc<tokio::sync::Mutex<HashMap<QueueKey, MutationDriverSnapshot>>>,
     sequencer: MutationSequencer<QueueKey, MutationSequencerKey, MutationGenerationWork>,
     claim_turns: ClaimQueueTurn<QueueKey>,
@@ -3295,8 +2998,6 @@ impl DerivedObjectLogTursoBackend {
         let last_produce = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let produce_caught_up = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let frontiers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let unpublished_mutations = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let unpublished_pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let applied_identity = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let commit_idempotency = new_commit_idempotency();
         let selection_fence = SelectionFence::default();
@@ -3360,8 +3061,6 @@ impl DerivedObjectLogTursoBackend {
             last_produce,
             produce_caught_up,
             frontiers,
-            unpublished_mutations,
-            unpublished_pending,
             applied_identity,
             sequencer: MutationSequencer::new(),
             claim_turns: ClaimQueueTurn::default(),
@@ -3805,95 +3504,6 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
-    async fn prune_unpublished_applied(&self, queue: &QueueKey) {
-        let applied = match &self.async_apply {
-            Some(coordinator) => coordinator.snapshot(queue).await.applied_high_water,
-            None => None,
-        };
-        let mut unpublished = self.unpublished_mutations.lock().await;
-        let mut folded = Vec::new();
-        if let Some(gens) = unpublished.get_mut(queue) {
-            if self.async_apply.is_none() {
-                folded.extend(gens.drain(..).map(|entry| entry.snapshot));
-            } else {
-                gens.retain(|entry| {
-                    if position_covers(applied.as_ref(), &entry.through) {
-                        folded.push(entry.snapshot.clone());
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-            if gens.is_empty() {
-                unpublished.remove(queue);
-            }
-        }
-        drop(unpublished);
-        {
-            let mut pending = self.unpublished_pending.lock().await;
-            if let Some(gens) = pending.get_mut(queue) {
-                if self.async_apply.is_none() {
-                    gens.clear();
-                } else {
-                    gens.retain(|entry| !position_covers(applied.as_ref(), &entry.through));
-                }
-                if gens.is_empty() {
-                    pending.remove(queue);
-                }
-            }
-        }
-        if folded.is_empty() {
-            return;
-        }
-        let mut identity = self.applied_identity.lock().await;
-        let entry = identity
-            .entry(queue.clone())
-            .or_insert_with(|| identity_base(folded[0].definition.clone()));
-        for snapshot in folded {
-            merge_applied_identity_facts(entry, &snapshot);
-        }
-    }
-
-    async fn take_unpublished_pending(
-        &self,
-        queue: &QueueKey,
-        exclude: &HashSet<ItemId>,
-        max: usize,
-        now: UtcTimestamp,
-    ) -> Vec<PushItem> {
-        if max == 0 {
-            return Vec::new();
-        }
-        let mut pending = self.unpublished_pending.lock().await;
-        let Some(gens) = pending.get_mut(queue) else {
-            return Vec::new();
-        };
-        let mut taken = Vec::new();
-        for entry in gens.iter_mut() {
-            let mut keep = Vec::new();
-            for item in entry.items.drain(..) {
-                if taken.len() >= max
-                    || exclude.contains(&item.item_id)
-                    || item.not_before.is_some_and(|not_before| not_before > now)
-                {
-                    keep.push(item);
-                } else {
-                    taken.push(item);
-                }
-            }
-            entry.items = keep;
-            if taken.len() >= max {
-                break;
-            }
-        }
-        gens.retain(|entry| !entry.items.is_empty());
-        if gens.is_empty() {
-            pending.remove(queue);
-        }
-        taken
-    }
-
     async fn record_frontier(&self, shard: &QueueKey, claim: bool) -> EngineResult<()> {
         let Some(position) = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?
         else {
@@ -4159,6 +3769,7 @@ impl DerivedObjectLogTursoBackend {
                 canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(items)?,
                 legacy_body_hash: fireweed_engine::push_body_hash(items)?,
             };
+            self.wait_request_entry_coverage(&request.shard).await?;
             let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
             match self
                 .projection
@@ -4423,13 +4034,9 @@ impl DerivedObjectLogTursoBackend {
             .iter()
             .map(|work| work.as_ref().clone())
             .collect();
-        self.prune_unpublished_applied(&queue).await;
         let has_claim = works
             .iter()
             .any(|work| matches!(work, MutationGenerationWork::Claim { .. }));
-        // The SQL selector cannot see updated payload/order in an identity-only
-        // overlay. Earlier candidate writes must be visible before selecting.
-        let wait_push_apply = has_claim;
         if has_claim {
             self.catch_up_produce(&queue).await?;
         }
@@ -4438,10 +4045,12 @@ impl DerivedObjectLogTursoBackend {
         let mut batch_ids = Vec::new();
         let mut claimed = false;
         let mut records_mutation = false;
+        let mut has_request_id = false;
         for work in &works {
             match work {
                 MutationGenerationWork::Push { request, .. } => {
                     records_mutation = true;
+                    has_request_id |= request.request_id.is_some();
                     keys.extend(
                         request
                             .items
@@ -4451,6 +4060,7 @@ impl DerivedObjectLogTursoBackend {
                 }
                 MutationGenerationWork::BatchUpdate { request, .. } => {
                     records_mutation = true;
+                    has_request_id = true;
                     for update in &request.updates {
                         if let fireweed_engine::BatchUpdateItemRef::ItemId(id) = &update.item_ref {
                             batch_ids.push(*id);
@@ -4472,14 +4082,13 @@ impl DerivedObjectLogTursoBackend {
                         "addressed request in identity generation",
                     ));
                 }
-                MutationGenerationWork::Finalize { .. }
-                | MutationGenerationWork::Singleton { .. } => {}
+                MutationGenerationWork::Finalize { .. } => records_mutation = true,
+                MutationGenerationWork::Singleton { .. } => {}
             }
         }
-        // New Push rows must exist in Turso before Claim SELECT. Previous
-        // Claims are reserved in-process (claim_select mutex + unpublished
-        // overlay ids). Do not wait for those rows to become Leased.
-        self.wait_selected_frontiers(&queue, false, wait_push_apply)
+        // Claim SELECT reads Turso. Wait for this process's previous claim and
+        // push to apply so those rows exist. Mutate acks the log without that wait.
+        self.wait_selected_frontiers(&queue, claimed, claimed)
             .await?;
         let definition =
             AsyncControlPlane::queue_definition(self.control.as_ref(), queue.clone()).await?;
@@ -4489,9 +4098,6 @@ impl DerivedObjectLogTursoBackend {
             .acquire_shared(queue.clone())
             .await
             .map_err(map_coord)?;
-        // An exclusive addressed mutation may have applied while admission waited.
-        // Do not overlay older leased identities onto those now-visible replacements.
-        self.prune_unpublished_applied(&queue).await;
         let now = match &works[0] {
             MutationGenerationWork::Push { request, .. } => request.now,
             MutationGenerationWork::BatchUpdate { now, .. }
@@ -4507,7 +4113,7 @@ impl DerivedObjectLogTursoBackend {
         let snapshot_batch_keys = batch_keys;
         let needs_serving_snapshot =
             !keys.is_empty() || !snapshot_batch_keys.is_empty() || !batch_ids.is_empty();
-        if !snapshot_batch_keys.is_empty() || !batch_ids.is_empty() {
+        if needs_serving_snapshot || has_request_id {
             self.wait_request_entry_coverage(&queue).await?;
         }
         let _slot = if needs_serving_snapshot || claimed {
@@ -4522,15 +4128,12 @@ impl DerivedObjectLogTursoBackend {
                 None => identity_base(definition.clone()),
             }
         } else {
-            // Claim/Complete overlay is process-local. Opening a Deferred reader
-            // snapshot here waits behind the Turso IMMEDIATE apply of the previous
-            // packed Update and serializes ack of the next generation.
             identity_base(definition.clone())
         };
         if needs_serving_snapshot {
             let loaded = self
                 .projection
-                .mutation_driver_snapshot_on_serving_reader(
+                .mutation_driver_snapshot(
                     &queue,
                     definition.clone(),
                     &keys,
@@ -4589,11 +4192,6 @@ impl DerivedObjectLogTursoBackend {
                 _ => {}
             }
         }
-        if let Some(gens) = self.unpublished_mutations.lock().await.get(&queue) {
-            for entry in gens {
-                merge_unpublished_into_snapshot(&mut snapshot, &entry.snapshot);
-            }
-        }
         let (mut members, mut folded) =
             validate_inert_mutation_generation_folding(&snapshot, &works)?;
         let _claim_select = if claimed {
@@ -4607,9 +4205,6 @@ impl DerivedObjectLogTursoBackend {
         self.allocate_accepted_pushes(&definition, &works, &mut members, &mut folded)
             .await?;
         drop(_slot);
-        // Retain the generation turn through append AND publication of its
-        // unpublished identity delta. Releasing it while extracting commands
-        // lets the next claim snapshot omit this generation's selected IDs.
         let mut prepared = retain_sequencer_after_slot_release(members.clone(), generation);
         let commits =
             coalesce_generation_commits(finish_inert_mutation_generation_append(&mut prepared)?)?;
@@ -4645,21 +4240,6 @@ impl DerivedObjectLogTursoBackend {
                             .await;
                     }
                 }
-            }
-            let delta = overlay_delta(&snapshot, &folded);
-            if unpublished_has_identity(&delta)
-                && let Some(through) =
-                    AsyncLogStore::high_water(self.log.as_ref(), queue.clone()).await?
-            {
-                self.unpublished_mutations
-                    .lock()
-                    .await
-                    .entry(queue.clone())
-                    .or_default()
-                    .push(UnpublishedMutation {
-                        through,
-                        snapshot: delta,
-                    });
             }
             if claimed {
                 self.record_frontier(&queue, true).await?;
@@ -4755,8 +4335,7 @@ impl DerivedObjectLogTursoBackend {
         if claim_members.is_empty() {
             return Ok(());
         }
-        self.prune_unpublished_applied(queue).await;
-        let exclude = overlay_claim_exclude(folded);
+        let exclude = claim_exclude_ids(folded);
         let selected = self
             .projection
             .item_claim_microbatch_on_serving_reader_with_gate_policy(
@@ -4775,29 +4354,10 @@ impl DerivedObjectLogTursoBackend {
             Some(epoch) => epoch,
             None => AsyncLogStore::current_epoch(self.log.as_ref(), queue.clone()).await?,
         };
-        let mut seen: HashSet<ItemId> = exclude.iter().copied().collect();
-        for (ids, items) in &selected {
-            seen.extend(ids.iter().copied());
-            seen.extend(items.iter().map(|item| item.item_id));
-        }
-        for (index, (ids, mut items)) in claim_indices.into_iter().zip(selected) {
+        for (index, (ids, items)) in claim_indices.into_iter().zip(selected) {
             let MutationGenerationWork::Claim { id, request } = &works[index] else {
                 continue;
             };
-            let remaining = request.max_items.saturating_sub(ids.len());
-            let overlay = self
-                .take_unpublished_pending(queue, &seen, remaining, request.eligibility_at())
-                .await;
-            seen.extend(overlay.iter().map(|item| item.item_id));
-            let mut ids = ids;
-            for item in &overlay {
-                ids.push(item.item_id);
-                items.push(claimed_from_push_item(
-                    item,
-                    request.lease_token.clone(),
-                    request.lease_expires_at,
-                ));
-            }
             if ids.is_empty() {
                 members[index].outcome = MutationGenerationMemberOutcome::Claim {
                     id: *id,
@@ -5080,23 +4640,6 @@ impl DerivedObjectLogTursoBackend {
         // the projection. A remembered bearer alone cannot substitute for the
         // acknowledged Claim's state: it may still be Pending while apply runs.
         self.wait_request_entry_coverage(shard).await?;
-        let ids: Vec<ItemId> = outcomes.iter().map(|outcome| outcome.item_id).collect();
-        let mut restored = if !ids.is_empty() {
-            let token = fireweed_engine::generate_query_lease_token()?;
-            self.projection
-                .materialize_pending_on_serving_reader(shard, &ids, &token, now)
-                .await?
-        } else {
-            Vec::new()
-        };
-        for item in &mut restored {
-            if let Some(outcome) = outcomes
-                .iter()
-                .find(|outcome| outcome.item_id == item.item_id)
-            {
-                item.not_before = outcome.not_before;
-            }
-        }
         let PreparedFinalize { request, .. } = self
             .engine
             .prepare_finalize(shard.clone(), outcomes, now, expected_epoch)
@@ -5104,47 +4647,8 @@ impl DerivedObjectLogTursoBackend {
             .map_err(map_lifecycle)?;
         self.commit_prepared(request, AppendAdmissionClass::SelectionRequired)
             .await?;
-        self.publish_released_unpublished_pending(shard, restored)
-            .await;
+        self.record_frontier(shard, false).await?;
         Ok(())
-    }
-
-    async fn publish_released_unpublished_pending(
-        &self,
-        shard: &QueueKey,
-        restored: Vec<ClaimedItem>,
-    ) {
-        if restored.is_empty() {
-            return;
-        }
-        let Some(position) = AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
-            .await
-            .ok()
-            .flatten()
-        else {
-            return;
-        };
-        let ids: Vec<ItemId> = restored.iter().map(|item| item.item_id).collect();
-        {
-            let mut unpublished = self.unpublished_mutations.lock().await;
-            if let Some(gens) = unpublished.get_mut(shard) {
-                for entry in gens {
-                    for id in &ids {
-                        entry.snapshot.leased_ids.remove(id);
-                    }
-                }
-            }
-        }
-        let items = restored.iter().map(push_item_from_claimed).collect();
-        self.unpublished_pending
-            .lock()
-            .await
-            .entry(shard.clone())
-            .or_default()
-            .push(UnpublishedPending {
-                through: position,
-                items,
-            });
     }
 
     fn create_queue_impl(
@@ -5295,8 +4799,6 @@ impl DerivedObjectLogTursoBackend {
         self.pause_async_apply();
         self.drop_queued_async_apply(&definitions).await;
         self.projection.delete_projection().await?;
-        self.unpublished_mutations.lock().await.clear();
-        self.unpublished_pending.lock().await.clear();
         self.applied_identity.lock().await.clear();
         self.frontiers.lock().await.clear();
         self.last_produce.lock().await.clear();
@@ -5633,9 +5135,8 @@ impl DerivedObjectLogTursoBackend {
                                 };
                                 response.position = Some(position.clone());
                             }
-                            // Arbitrary replacements are not represented by the native
-                            // identity overlay. Make them visible before another group
-                            // or a claim can validate against the SQL projection.
+                            // Make replacements visible before another group or a
+                            // claim validates against the SQL projection.
                             if let (Some(coordinator), Some(position)) =
                                 (&coordinator, outcome.positions().last())
                             {
@@ -7437,37 +6938,6 @@ mod s3c_activation {
         unique.dedup();
         assert_eq!(unique.len(), n);
         assert_eq!(backend.metrics(&shard).await.unwrap().pending as usize, n);
-        drop(backend);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn duplicate_client_key_conflicts_before_apply_covers() {
-        let root = std::env::temp_dir().join(format!(
-            "fireweed-s3c-dup-{}-{}",
-            std::process::id(),
-            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
-        ));
-        let backend = open(&root).await;
-        let definition = qdef("q-s3c-dup");
-        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-        backend.create_queue(definition).await.unwrap();
-        let now = UtcTimestamp::new(1, 0).unwrap();
-        let spec = PushSpec {
-            client_item_key: Some(ClientItemKey::new("same").unwrap()),
-            payload: Some(Bytes::from_static(b"a")),
-            ..PushSpec::default()
-        };
-        backend
-            .push(&shard, vec![spec.clone()], now, None)
-            .await
-            .expect("first push");
-        let duplicate = backend.push(&shard, vec![spec], now, None).await;
-        assert!(
-            matches!(duplicate, Err(EngineError::Conflict)),
-            "unpublished overlay must reject the duplicate key, got {duplicate:?}"
-        );
-        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
         drop(backend);
         let _ = std::fs::remove_dir_all(root);
     }

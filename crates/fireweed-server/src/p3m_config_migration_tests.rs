@@ -16,7 +16,6 @@ fn direct_config_construction_owns_tuning_on_backend_spec() {
             // Field ownership under a coherent AsyncProjection pairing (P3v validates Option/barrier).
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: Some(async_spec),
-            sqlite_projection_deferred_flush_chunk: None,
         },
         0,
         "127.0.0.1:0".to_owned(),
@@ -28,6 +27,5 @@ fn direct_config_construction_owns_tuning_on_backend_spec() {
         ResponseBarrierSpec::AsyncProjection
     );
     assert_eq!(config.backend.async_projection, Some(async_spec));
-    assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
     assert_eq!(config.validate_for_start(), Ok(()));
 }

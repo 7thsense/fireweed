@@ -369,7 +369,6 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
         authority: None,
         response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: Some(fireweed::AsyncProjectionSpec::default()),
-        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(256 * 1024, 20).expect("canonical object-log segments"),
         namespace: format!(
             "t0t2-{}-{}-{}-{}",

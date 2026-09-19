@@ -586,7 +586,6 @@ mod tests {
             authority: Some(ObjectLogAuthority::NativeConditionalWrite),
             response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig::new(256 * 1024, 20).expect("segments"),
             namespace: format!("tp005-lifecycle-{label}-{nonce}"),
             recovery: RecoveryPolicy {

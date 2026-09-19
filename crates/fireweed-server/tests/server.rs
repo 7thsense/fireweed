@@ -56,7 +56,6 @@ fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
     }
 }
 
@@ -1052,7 +1051,6 @@ async fn turso_startup_validation_precedes_storage_io() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         0,
         "127.0.0.1:0".to_string(),
@@ -1097,7 +1095,6 @@ async fn memory_turso_server_push_claim_lifecycle() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         0,
         "127.0.0.1:0".to_string(),
@@ -1771,7 +1768,6 @@ async fn change_record_sink_rejected_on_class_b_memory_log() {
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         0,
         "127.0.0.1:0".to_string(),
@@ -1806,7 +1802,6 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
             },
             0,
             "127.0.0.1:0".to_owned(),
@@ -1867,41 +1862,6 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
             class_b
         );
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn change_record_sink_rejected_on_legacy_hybrid_projection() {
-    let (object_root, projection_path) = tmp_runtime_paths("change-record-sink-hybrid-retired");
-    let mut config = Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    );
-    config.backend.projection = ProjectionSpec::Hybrid {
-        path: projection_path.clone(),
-    };
-    set_segment_config(
-        &mut config,
-        SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
-    );
-    // Embedded (no endpoint) so feature-off Kafka does not mask the Hybrid retirement.
-    config.change_record_sink = ChangeRecordSinkConfig {
-        enabled: true,
-        endpoint: None,
-        ..ChangeRecordSinkConfig::default()
-    };
-
-    assert_eq!(
-        start(config)
-            .await
-            .err()
-            .expect("objectlog/hybrid must refuse enabled change-record delivery"),
-        EngineError::Invalid("legacy-projection-change-record-delivery-retired")
-    );
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2229,7 +2189,6 @@ async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_de
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
         },
         0,
         "127.0.0.1:0".to_string(),
