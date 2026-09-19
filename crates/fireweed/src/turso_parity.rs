@@ -343,21 +343,24 @@ impl Operation {
         envelope.request_fingerprint = Some(fingerprint);
         envelope.request_outcome = Some(RequestOutcome::ClaimByQuery {
             item_ids: item_ids.clone(),
-            lease_token: token,
+            lease_token: token.clone(),
             worker_id: Some(request.worker_id),
         });
-        self.append(vec![envelope]).await?;
-        let items = AsyncProjectionStore::render_claimed(
-            self.projection.as_ref(),
-            self.shard.clone(),
-            item_ids.clone(),
-        )
-        .await?;
+        let items = self
+            .projection
+            .materialize_pending_on_serving_reader(
+                &self.shard,
+                &item_ids,
+                &token,
+                context.lease_expires_at(request.lease_duration_ms),
+            )
+            .await?;
         if items.len() != item_ids.len() {
             return Err(EngineError::Storage(
                 "query claim materialization lost selected rows".into(),
             ));
         }
+        self.append(vec![envelope]).await?;
         Ok(Claimed {
             items,
             ..Default::default()
@@ -434,22 +437,25 @@ impl Operation {
         envelope.request_fingerprint = Some(fingerprint);
         envelope.request_outcome = Some(RequestOutcome::ClaimByItemIds {
             claimed_item_ids: item_ids.clone(),
-            lease_token: token,
+            lease_token: token.clone(),
             outcomes: outcomes.clone(),
             worker_id: Some(request.worker_id),
         });
-        self.append(vec![envelope]).await?;
-        let items = AsyncProjectionStore::render_claimed(
-            self.projection.as_ref(),
-            self.shard.clone(),
-            item_ids.clone(),
-        )
-        .await?;
+        let items = self
+            .projection
+            .materialize_pending_on_serving_reader(
+                &self.shard,
+                &item_ids,
+                &token,
+                context.lease_expires_at(request.lease_duration_ms),
+            )
+            .await?;
         if items.len() != item_ids.len() {
             return Err(EngineError::Storage(
                 "addressed claim materialization lost selected rows".into(),
             ));
         }
+        self.append(vec![envelope]).await?;
         Ok(fireweed_engine::ClaimByItemIdsResponse { items, outcomes })
     }
 
@@ -556,6 +562,7 @@ impl DerivedObjectLogTursoBackend {
         let node_id = self.node_id;
         let strategy = self.engine.commit_strategy();
         let coordinator = self.async_apply.clone();
+        let unpublished_pending = Arc::clone(&self.unpublished_pending);
         let fence = self.selection_fence.clone();
         let admission = self.fence_admission.clone();
         self.engine
@@ -584,22 +591,38 @@ impl DerivedObjectLogTursoBackend {
                     let commit: Commit = Arc::new(move |request| {
                         let strategy = Arc::clone(&strategy);
                         let coordinator = coordinator.clone();
+                        let unpublished_pending = Arc::clone(&unpublished_pending);
                         Box::pin(async move {
+                            let pending: Vec<PushItem> = request
+                                .commands()
+                                .iter()
+                                .filter_map(|envelope| match &envelope.command {
+                                    QueueCommand::Push(command) => Some(command.items.clone()),
+                                    _ => None,
+                                })
+                                .flatten()
+                                .collect();
                             let outcome = strategy
                                 .commit(request.with_append_admission(
                                     AppendAdmissionClass::SharedSelectionLive,
                                 ))
                                 .await?;
-                            if let (Some(coordinator), Some(position)) =
-                                (coordinator, outcome.positions().last())
+                            // Log ack is the mutate completion. Same-process Claim
+                            // reads unpublished pending; public reads still wait
+                            // coverage. Do not block this response on Turso apply.
+                            if coordinator.is_some()
+                                && let Some(position) = outcome.positions().last()
+                                && !pending.is_empty()
                             {
-                                coordinator
-                                    .wait_until_covers(
-                                        &position.queue,
-                                        position,
-                                        S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
-                                    )
-                                    .await?;
+                                unpublished_pending
+                                    .lock()
+                                    .await
+                                    .entry(position.queue.clone())
+                                    .or_default()
+                                    .push(UnpublishedPending {
+                                        through: position.clone(),
+                                        items: pending,
+                                    });
                             }
                             Ok(outcome)
                         })
