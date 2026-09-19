@@ -29,7 +29,7 @@ use object_log::{
     MemoryBlobStore, PartitionKey, Sequencer,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
 
 use crate::s3_create_only::S3CreateOnlyPut;
 
@@ -466,6 +466,18 @@ fn store_tag_for_authority(authority: &DefinitionAuthority) -> String {
 
 fn log_trace_enabled() -> bool {
     std::env::var_os("FIREWEED_LOG_TRACE").is_some()
+}
+
+fn s3_concurrent_produce_limit() -> &'static Semaphore {
+    static LIMIT: OnceLock<Semaphore> = OnceLock::new();
+    LIMIT.get_or_init(|| {
+        let permits = std::env::var("OBJECT_LOG_S3_MAX_CONCURRENT_PRODUCE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(16usize)
+            .max(1);
+        Semaphore::new(permits)
+    })
 }
 
 fn partition_component(shard: &QueueKey) -> String {
@@ -1601,6 +1613,16 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             Err(_) => return Err(PackedAppendError::before_timeout()),
         };
         let _metadata = metadata;
+        let _s3_produce_permit = if self.store_tag == "s3" {
+            Some(
+                s3_concurrent_produce_limit()
+                    .acquire()
+                    .await
+                    .expect("s3 produce semaphore remains open"),
+            )
+        } else {
+            None
+        };
         if let Some(gate) = &gate {
             for phase in &gate.post_positions {
                 phase.store(true, Ordering::Release);
