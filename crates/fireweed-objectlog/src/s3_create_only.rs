@@ -19,6 +19,8 @@ use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
 use fireweed_engine::{EngineError, EngineResult};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// S3 conditional PutObject/GetObject helper for one bucket (create-only + CAS).
@@ -36,40 +38,13 @@ impl S3CreateOnlyPut {
         access_key_id: &str,
         secret_access_key: &str,
     ) -> Self {
-        let creds = Credentials::new(
-            access_key_id,
-            secret_access_key,
-            None,
-            None,
-            "fireweed-objectlog-create-only",
-        );
-        let conf = aws_sdk_s3::config::Builder::new()
-            .behavior_version(BehaviorVersion::latest())
-            .endpoint_url(endpoint_url)
-            .region(Region::new(region.to_string()))
-            .credentials_provider(creds)
-            .force_path_style(true)
-            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
-            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
-            .timeout_config(
-                TimeoutConfig::builder()
-                    .connect_timeout(Duration::from_secs(env_u64(
-                        "OBJECT_LOG_S3_CONNECT_TIMEOUT_SECS",
-                        5,
-                    )))
-                    .read_timeout(Duration::from_secs(env_u64(
-                        "OBJECT_LOG_S3_READ_TIMEOUT_SECS",
-                        10,
-                    )))
-                    .operation_timeout(Duration::from_secs(env_u64(
-                        "OBJECT_LOG_S3_OPERATION_TIMEOUT_SECS",
-                        30,
-                    )))
-                    .build(),
-            )
-            .build();
         Self {
-            client: Client::from_conf(conf),
+            client: shared_create_only_client(
+                endpoint_url,
+                region,
+                access_key_id,
+                secret_access_key,
+            ),
             bucket: bucket.to_string(),
         }
     }
@@ -348,6 +323,63 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn shared_create_only_client(
+    endpoint_url: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) -> Client {
+    type Cache = HashMap<(String, String, String, String), Client>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let key = (
+        endpoint_url.to_string(),
+        region.to_string(),
+        access_key_id.to_string(),
+        secret_access_key.to_string(),
+    );
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("s3 create-only client cache");
+    if let Some(client) = guard.get(&key) {
+        return client.clone();
+    }
+    let creds = Credentials::new(
+        access_key_id,
+        secret_access_key,
+        None,
+        None,
+        "fireweed-objectlog-create-only",
+    );
+    let client = Client::from_conf(
+        aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .endpoint_url(endpoint_url)
+            .region(Region::new(region.to_string()))
+            .credentials_provider(creds)
+            .force_path_style(true)
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .connect_timeout(Duration::from_secs(env_u64(
+                        "OBJECT_LOG_S3_CONNECT_TIMEOUT_SECS",
+                        5,
+                    )))
+                    .read_timeout(Duration::from_secs(env_u64(
+                        "OBJECT_LOG_S3_READ_TIMEOUT_SECS",
+                        10,
+                    )))
+                    .operation_timeout(Duration::from_secs(env_u64(
+                        "OBJECT_LOG_S3_OPERATION_TIMEOUT_SECS",
+                        30,
+                    )))
+                    .build(),
+            )
+            .build(),
+    );
+    guard.insert(key, client.clone());
+    client
 }
 
 #[cfg(test)]

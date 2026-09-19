@@ -15,12 +15,76 @@ use aws_sdk_s3::config::{
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use bytes::{Bytes, BytesMut};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 fn unavailable<E: std::fmt::Display>(e: E) -> ObjectLogError {
     ObjectLogError::StorageUnavailable(e.to_string())
+}
+
+fn transient_s3(err: &impl std::fmt::Display) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("dispatch failure")
+        || text.contains("service error")
+        || text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("connection refused")
+        || text.contains("temporarily unavailable")
+        || text.contains("slowdown")
+}
+
+fn shared_s3_client(
+    endpoint_url: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) -> Client {
+    type Cache = HashMap<(String, String, String, String), Client>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let key = (
+        endpoint_url.to_string(),
+        region.to_string(),
+        access_key_id.to_string(),
+        secret_access_key.to_string(),
+    );
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("s3 client cache");
+    if let Some(client) = guard.get(&key) {
+        return client.clone();
+    }
+    let creds = Credentials::new(access_key_id, secret_access_key, None, None, "object-log");
+    let client = Client::from_conf(
+        aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .endpoint_url(endpoint_url)
+            .region(Region::new(region.to_string()))
+            .credentials_provider(creds)
+            .force_path_style(true)
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .connect_timeout(Duration::from_secs(env_u64(
+                        "OBJECT_LOG_S3_CONNECT_TIMEOUT_SECS",
+                        5,
+                    )))
+                    .read_timeout(Duration::from_secs(env_u64(
+                        "OBJECT_LOG_S3_READ_TIMEOUT_SECS",
+                        10,
+                    )))
+                    .operation_timeout(Duration::from_secs(env_u64(
+                        "OBJECT_LOG_S3_OPERATION_TIMEOUT_SECS",
+                        30,
+                    )))
+                    .build(),
+            )
+            .build(),
+    );
+    guard.insert(key, client.clone());
+    client
 }
 
 /// S3-compatible blob store.
@@ -47,34 +111,8 @@ impl S3BlobStore {
         access_key_id: &str,
         secret_access_key: &str,
     ) -> Self {
-        let creds = Credentials::new(access_key_id, secret_access_key, None, None, "object-log");
-        let conf = aws_sdk_s3::config::Builder::new()
-            .behavior_version(BehaviorVersion::latest())
-            .endpoint_url(endpoint_url)
-            .region(Region::new(region.to_string()))
-            .credentials_provider(creds)
-            .force_path_style(true)
-            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
-            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
-            .timeout_config(
-                TimeoutConfig::builder()
-                    .connect_timeout(Duration::from_secs(env_u64(
-                        "OBJECT_LOG_S3_CONNECT_TIMEOUT_SECS",
-                        5,
-                    )))
-                    .read_timeout(Duration::from_secs(env_u64(
-                        "OBJECT_LOG_S3_READ_TIMEOUT_SECS",
-                        10,
-                    )))
-                    .operation_timeout(Duration::from_secs(env_u64(
-                        "OBJECT_LOG_S3_OPERATION_TIMEOUT_SECS",
-                        30,
-                    )))
-                    .build(),
-            )
-            .build();
         Self {
-            client: Client::from_conf(conf),
+            client: shared_s3_client(endpoint_url, region, access_key_id, secret_access_key),
             bucket: bucket.to_string(),
             multipart_threshold: 16 * 1024 * 1024,
             part_size: 8 * 1024 * 1024,
@@ -344,20 +382,34 @@ impl BlobStore for S3BlobStore {
             return self.put_multipart(key, value).await;
         }
         let byte_len = value.len() as u64;
-        let request = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(ByteStream::from(value));
-        if self.disable_payload_signing {
-            request.customize().disable_payload_signing().send().await
-        } else {
-            request.send().await
+        let mut delay = Duration::from_millis(25);
+        let mut last = None;
+        for attempt in 0..5u32 {
+            let request = self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .body(ByteStream::from(value.clone()));
+            let result = if self.disable_payload_signing {
+                request.customize().disable_payload_signing().send().await
+            } else {
+                request.send().await
+            };
+            match result {
+                Ok(_) => {
+                    self.record_media(1, byte_len);
+                    return Ok(());
+                }
+                Err(err) if attempt + 1 < 5 && transient_s3(&err) => {
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                    last = Some(err);
+                }
+                Err(err) => return Err(unavailable(err)),
+            }
         }
-        .map_err(unavailable)?;
-        self.record_media(1, byte_len);
-        Ok(())
+        Err(unavailable(last.expect("s3 put retry exhausted")))
     }
 
     fn take_media_op_stats(&self) -> Option<MediaOpStats> {
