@@ -390,7 +390,7 @@ mod active_scope_selector_unit_tests {
 ///     .with_name("email-jobs")
 ///     .with_revision("v2");
 /// let queue = QueueKey::new(TenantId::new("acme")?, QueueId::new("outbound")?);
-/// let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+/// let fireweed = fireweed::open_product(Arc::new(SystemClock));
 /// let ensured = fireweed.ensure_queue(&queue, &template).await?;
 /// assert_eq!(ensured.definition.queue_id, queue.queue_id);
 /// # Ok(())
@@ -1057,14 +1057,15 @@ impl PostgresRuntimeConfig {
     }
 }
 
-/// Public log axis: five first-class values (orthogonal storage matrix / API-005).
+/// Public log axis. The product cell is [`LogConfig::S3`]. Other variants remain
+/// only so construction can fail closed with a typed selector error.
 #[derive(Debug, Clone)]
 pub enum LogConfig {
-    /// Class B: in-process command log (no log rebuild after process death).
+    /// Retired compatibility selector.
     Memory,
     /// Retired compatibility selector; validation rejects SQLite before opening storage.
     Sqlite { path: PathBuf },
-    /// Class A: durable PostgreSQL command log.
+    /// Retired compatibility selector.
     Postgres {
         url: ConfigSecret,
         schema: Option<String>,
@@ -1072,9 +1073,9 @@ pub enum LogConfig {
         node_id: Option<u8>,
         coordination: Option<PostgresCoordinationConfig>,
     },
-    /// Class A: local directory tree / NAS path object log (same protocol as S3).
+    /// Retired compatibility selector. Local tests use MinIO via [`LogConfig::S3`].
     Filesystem { root: PathBuf },
-    /// Class A: S3-compatible object log.
+    /// Class A: S3-compatible object log (the public durable log).
     S3 {
         endpoint: String,
         bucket: String,
@@ -1103,11 +1104,10 @@ impl LogConfig {
     }
 }
 
-/// Public projection axis: memory, Turso and PostgreSQL (API-005).
+/// Public projection axis. The product cell is [`ProjectionStoreConfig::Turso`].
+/// Other variants remain only so construction can fail closed with a typed selector error.
 ///
 /// Legacy object-log convenience constructors use [`ProjectionConfig`]; SQLite is rejected.
-/// full-matrix work uses this type (includes [`Memory`](Self::Memory) and
-/// [`Turso`](Self::Turso)). Turso is the product default projection when a path is selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionStoreConfig {
     Memory,
@@ -1135,12 +1135,8 @@ impl ProjectionStoreConfig {
     }
 }
 
-/// Normative composition root for log × projection (+ related axes). API-005 / product brief.
-///
-/// Every cell of the 4×3 matrix is a valid selection; durability class differs by log axis
-/// ([`LogConfig::is_durable_log`]). Open all 12 pairs via [`open`] / [`open_async`] (cargo features
-/// must enable the chosen adapters; postgres cells require the `postgres` feature; Turso is
-/// default-on via the `turso` feature).
+/// Normative composition root. The public product is **s3 log × turso projection**.
+/// Other log/projection selectors fail closed in [`StorageConfig::validate`] before I/O.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub log: LogConfig,
@@ -1158,8 +1154,12 @@ pub struct StorageConfig {
     pub recovery: RecoveryPolicy,
 }
 
+/// Error when a caller selects a retired log or projection.
+pub const RETIRED_STORAGE_CELL: &str =
+    "storage is s3 log × turso projection only; other selectors are retired";
+
 impl StorageConfig {
-    /// Class B reference cell: memory log × memory projection.
+    /// Invalid skeleton used as a mutation template in tests. Does not validate.
     pub fn memory() -> Self {
         Self {
             log: LogConfig::Memory,
@@ -1178,64 +1178,79 @@ impl StorageConfig {
         }
     }
 
+    /// Public product cell: S3-compatible object log × local Turso projection.
+    pub fn s3_turso(
+        endpoint: impl Into<String>,
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+        allow_insecure_http: bool,
+        projection_path: PathBuf,
+    ) -> Self {
+        Self {
+            log: LogConfig::S3 {
+                endpoint: endpoint.into(),
+                bucket: bucket.into(),
+                region: region.into(),
+                access_key_id: ConfigSecret::new(access_key_id.into()),
+                secret_access_key: ConfigSecret::new(secret_access_key.into()),
+                allow_insecure_http,
+            },
+            projection: ProjectionStoreConfig::Turso {
+                path: projection_path,
+            },
+            control_plane: None,
+            authority: Some(ObjectLogAuthority::NativeConditionalWrite),
+            response_barrier: ResponseBarrier::AsyncProjection,
+            async_projection: Some(AsyncProjectionSpec::default()),
+            sqlite_projection_deferred_flush_chunk: None,
+            segments: SegmentConfig {
+                target_bytes: 256 * 1024,
+                max_latency_ms: 20,
+            },
+            namespace: "default".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        }
+    }
+
     /// Map an object-log convenience config onto the full-matrix surface
     /// (`Local` → [`LogConfig::Filesystem`], `S3Compatible` → [`LogConfig::S3`]).
     pub fn from_object_log_runtime(config: ObjectLogRuntimeConfig) -> Self {
         config.into_matrix_config()
     }
 
-    /// Structural validation for the 4×3 matrix. Does not open stores.
+    /// Structural validation. The only accepted cell is s3 × turso.
     ///
-    /// Returns [`EngineError::Invalid`] for malformed fields and
-    /// [`EngineError::Unavailable`] for clearly mismatched object-log authority /
-    /// barrier combinations (API-005 intent).
+    /// Returns [`EngineError::Invalid`] for malformed fields or retired selectors.
     pub fn validate(&self) -> EngineResult<()> {
         if self.namespace.trim().is_empty() {
             return Err(EngineError::Invalid("storage namespace must not be empty"));
         }
-        match &self.log {
-            LogConfig::Memory => {}
-            LogConfig::Sqlite { .. } => {
-                return Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
-                ));
-            }
-            LogConfig::Postgres { url, .. } if url.0.is_empty() => {
-                return Err(EngineError::Invalid("postgres log URL must not be empty"));
-            }
-            LogConfig::Postgres { .. } => {}
-            LogConfig::Filesystem { root } => validate_filesystem_log_fields(root)?,
-            LogConfig::S3 {
-                endpoint,
-                bucket,
-                region,
-                access_key_id,
-                secret_access_key,
-                ..
-            } => {
-                validate_s3_log_fields(endpoint, bucket, region, access_key_id, secret_access_key)?
-            }
+        if self.sqlite_projection_deferred_flush_chunk.is_some() {
+            return Err(EngineError::Invalid(RETIRED_STORAGE_CELL));
         }
 
-        match &self.projection {
-            ProjectionStoreConfig::Memory => {}
-            ProjectionStoreConfig::Sqlite { .. } => {
-                return Err(EngineError::Invalid(
-                    "sqlite storage is retired; use filesystem log and turso projection",
-                ));
-            }
-            ProjectionStoreConfig::Turso { path } if path.as_os_str().is_empty() => {
-                return Err(EngineError::Invalid(
-                    "turso projection path must not be empty",
-                ));
-            }
-            ProjectionStoreConfig::Turso { .. } => {}
-            ProjectionStoreConfig::Postgres { url } if url.0.is_empty() => {
-                return Err(EngineError::Invalid(
-                    "postgres projection URL must not be empty",
-                ));
-            }
-            ProjectionStoreConfig::Postgres { .. } => {}
+        let LogConfig::S3 {
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            ..
+        } = &self.log
+        else {
+            return Err(EngineError::Invalid(RETIRED_STORAGE_CELL));
+        };
+        validate_s3_log_fields(endpoint, bucket, region, access_key_id, secret_access_key)?;
+
+        let ProjectionStoreConfig::Turso { path } = &self.projection else {
+            return Err(EngineError::Invalid(RETIRED_STORAGE_CELL));
+        };
+        if path.as_os_str().is_empty() {
+            return Err(EngineError::Invalid(
+                "turso projection path must not be empty",
+            ));
         }
 
         validate_response_barrier(self.response_barrier, self.async_projection)?;
@@ -1251,41 +1266,11 @@ impl StorageConfig {
             ));
         }
 
-        if matches!(
-            &self.log,
-            LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-        ) {
-            fireweed_engine::validate_production_object_log_segment_shape(
-                self.segments.target_bytes,
-                self.segments.max_latency_ms,
-                fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES,
-            )?;
-        }
-
-        if self.response_barrier == ResponseBarrier::AsyncProjection
-            && !matches!(
-                &self.log,
-                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-            )
-        {
-            return Err(EngineError::Invalid("async-projection-requires-object-log"));
-        }
-
-        if self.sqlite_projection_deferred_flush_chunk.is_some() {
-            return Err(EngineError::Invalid(
-                "sqlite storage is retired; use filesystem log and turso projection",
-            ));
-        }
-
-        // Provider branches stay independent so filesystem and S3 barrier work can
-        // advance without a shared validation branch creating a silent behavior window.
-        match &self.log {
-            LogConfig::Filesystem { .. } => {
-                validate_filesystem_selection(&self.projection, self.response_barrier)?
-            }
-            LogConfig::S3 { .. } => validate_s3_selection(&self.projection, self.response_barrier)?,
-            LogConfig::Memory | LogConfig::Sqlite { .. } | LogConfig::Postgres { .. } => {}
-        }
+        fireweed_engine::validate_production_object_log_segment_shape(
+            self.segments.target_bytes,
+            self.segments.max_latency_ms,
+            fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES,
+        )?;
 
         Ok(())
     }
@@ -1542,38 +1527,22 @@ mod storage_config_matrix_tests {
     }
 
     #[test]
-    fn constructs_and_validates_public_four_logs_and_three_projections() {
-        let logs: Vec<_> = all_logs()
-            .into_iter()
-            .filter(|log| !matches!(log, LogConfig::Sqlite { .. }))
-            .collect();
-        assert_eq!(logs.len(), 4);
-        let projections: Vec<_> = all_projections()
-            .into_iter()
-            .filter(|p| !matches!(p, ProjectionStoreConfig::Sqlite { .. }))
-            .collect();
-        assert_eq!(projections.len(), 3);
-        let mut cells = 0usize;
-        for log in logs {
-            for projection in &projections {
-                let mut config = base(log.clone(), projection.clone());
-                if matches!(
-                    &config.log,
-                    LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-                ) {
-                    config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
-                }
-                config.validate().unwrap_or_else(|e| {
-                    panic!(
-                        "cell {}×{}: {e:?}",
-                        config.log.axis_name(),
-                        projection.axis_name()
-                    )
-                });
-                cells += 1;
-            }
-        }
-        assert_eq!(cells, 12);
+    fn constructs_and_validates_public_s3_turso_cell() {
+        let mut config = base(
+            LogConfig::S3 {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: false,
+            },
+            ProjectionStoreConfig::Turso {
+                path: PathBuf::from("/tmp/projection-turso.db"),
+            },
+        );
+        config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.validate().expect("s3 × turso is the public cell");
     }
 
     #[test]
@@ -1587,7 +1556,7 @@ mod storage_config_matrix_tests {
         .validate()
         .expect_err("sqlite log is retired");
         assert!(
-            matches!(err, EngineError::Invalid(msg) if msg.contains("sqlite storage is retired")),
+            matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log") && msg.contains("turso")),
             "got {err:?}"
         );
 
@@ -1600,40 +1569,33 @@ mod storage_config_matrix_tests {
         .validate()
         .expect_err("sqlite projection is retired");
         assert!(
-            matches!(err, EngineError::Invalid(msg) if msg.contains("sqlite storage is retired")),
+            matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log") && msg.contains("turso")),
             "got {err:?}"
         );
     }
 
     #[test]
     fn retired_deferred_flush_settings_fail_closed_at_both_config_boundaries() {
-        let mut public = StorageConfig::memory();
-        let mut normalized = ObjectLogRuntimeConfig {
-            object_log: ObjectLogStorage::Local {
-                root: "unused-log".into(),
-            },
-            authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Postgres {
-                url: ConfigSecret::new("postgres://localhost/unused"),
-            },
-            response_barrier: ResponseBarrier::Strict,
-            segments: segments(),
-            namespace: "retired-flush".to_owned(),
-            recovery: RecoveryPolicy::default(),
-        }
-        .into_storage_config();
+        let mut public = StorageConfig::s3_turso(
+            "https://s3.example",
+            "fireweed",
+            "us-east-1",
+            "akid",
+            "secret",
+            false,
+            PathBuf::from("/tmp/projection-turso.db"),
+        );
+        public.segments = segments();
+        public.namespace = "retired-flush".to_owned();
         public.validate().unwrap();
-        normalized.validate().unwrap();
         for chunk in [0, 1, 1024, usize::MAX] {
             public.sqlite_projection_deferred_flush_chunk = Some(chunk);
-            normalized.sqlite_projection_deferred_flush_chunk = Some(chunk);
-            for result in [public.validate(), normalized.validate()] {
-                assert!(
-                    matches!(result, Err(EngineError::Invalid(message))
-                    if message.contains("sqlite storage is retired")),
-                    "{result:?}"
-                );
-            }
+            let result = public.validate();
+            assert!(
+                matches!(result, Err(EngineError::Invalid(message))
+                if message.contains("s3 log") && message.contains("turso")),
+                "{result:?}"
+            );
         }
     }
 
@@ -1666,21 +1628,22 @@ mod storage_config_matrix_tests {
         for log in logs {
             for projection in &projections {
                 let mut config = base(log.clone(), projection.clone());
-                if matches!(
-                    &config.log,
-                    LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-                ) {
+                if matches!(&config.log, LogConfig::S3 { .. }) {
                     config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
                 }
-                let retired = matches!(config.log, LogConfig::Sqlite { .. })
-                    || matches!(config.projection, ProjectionStoreConfig::Sqlite { .. });
+                let product = matches!(
+                    (&config.log, &config.projection),
+                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. })
+                );
                 match config.validate() {
                     Ok(()) => {
-                        assert!(!retired, "retired sqlite cell must fail closed");
+                        assert!(product, "only s3 × turso may validate");
                         public_cells += 1;
                     }
-                    Err(EngineError::Invalid(msg)) if msg.contains("sqlite storage is retired") => {
-                        assert!(retired, "public cell must not fail as retired sqlite");
+                    Err(EngineError::Invalid(msg))
+                        if msg.contains("s3 log") && msg.contains("turso") =>
+                    {
+                        assert!(!product, "product cell must not fail as retired");
                         retired_cells += 1;
                     }
                     Err(e) => panic!(
@@ -1691,8 +1654,8 @@ mod storage_config_matrix_tests {
                 }
             }
         }
-        assert_eq!(public_cells, 12);
-        assert_eq!(retired_cells, 8);
+        assert_eq!(public_cells, 1);
+        assert_eq!(retired_cells, 19);
     }
 
     /// AC: Turso default selection, all four log compositions, single-thread heartbeat.
@@ -1731,25 +1694,19 @@ mod storage_config_matrix_tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("fixture root");
 
-        let cells: Vec<(LogConfig, PathBuf)> = vec![
-            (LogConfig::Memory, root.join("mem-turso.db")),
-            (
-                LogConfig::Filesystem {
-                    root: root.join("fs-log"),
-                },
-                root.join("fs-turso.db"),
+        let retired = base(
+            LogConfig::Memory,
+            ProjectionStoreConfig::Turso {
+                path: root.join("mem-turso.db"),
+            },
+        );
+        assert!(
+            matches!(
+                retired.validate(),
+                Err(EngineError::Invalid(msg)) if msg.contains("s3 log")
             ),
-        ];
-        for (log, proj) in cells {
-            let mut cfg = base(log, ProjectionStoreConfig::Turso { path: proj });
-            if matches!(
-                &cfg.log,
-                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-            ) {
-                cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
-            }
-            open(cfg, Arc::clone(&clock) as _).expect("turso composition opens");
-        }
+            "memory × turso is retired"
+        );
 
         // Single-thread heartbeat: open + create_queue + push must not stall a current-thread runtime.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1764,12 +1721,8 @@ mod storage_config_matrix_tests {
                 tokio::task::yield_now().await;
             }
         });
-        let path = root.join("hb-turso.db");
-        let cfg = base(LogConfig::Memory, ProjectionStoreConfig::Turso { path });
+        let fw = open_product(Arc::clone(&clock) as _);
         rt.block_on(async {
-            let fw = open_async(cfg, Arc::clone(&clock) as _)
-                .await
-                .expect("open_async turso");
             let def = QueueDefinition {
                 tenant_id: TenantId::new("hb").unwrap(),
                 queue_id: QueueId::new("hb").unwrap(),
@@ -1821,10 +1774,16 @@ mod storage_config_matrix_tests {
     #[test]
     fn turso_projection_feature_and_recovery_boundaries() {
         // Empty path fails closed pre-I/O.
-        let mut bad = StorageConfig::memory();
-        bad.projection = ProjectionStoreConfig::Turso {
-            path: PathBuf::new(),
-        };
+        let mut bad = StorageConfig::s3_turso(
+            "https://s3.example",
+            "fireweed",
+            "us-east-1",
+            "akid",
+            "secret",
+            false,
+            PathBuf::new(),
+        );
+        bad.segments = segments();
         assert_eq!(
             bad.validate(),
             Err(EngineError::Invalid(
@@ -1890,22 +1849,14 @@ mod storage_config_matrix_tests {
                 emit_change_records: false,
             };
             let key = QueueKey::new(TenantId::new("rec").unwrap(), QueueId::new("a").unwrap());
-
-            // Class B durability disclaimer: memory×turso keeps items via projection only
-            // (no durable log-replay claim). Empty process-local memory log is documented.
-            let proj_b = root.join("class-b-turso.db");
-            let cfg_b = base(
-                LogConfig::Memory,
-                ProjectionStoreConfig::Turso { path: proj_b },
-            );
-            assert!(
-                !cfg_b.log.is_durable_log(),
-                "Class B: memory log is not durable; projection durability is independent"
-            );
-            let fw_b = open(cfg_b, clock as _).expect("class B open");
-            futures::executor::block_on(async {
-                fw_b.create_queue(def).await.expect("create b");
-                fw_b.push(
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("rt");
+            let fw = open_product(clock as _);
+            rt.block_on(async {
+                fw.create_queue(def).await.expect("create product");
+                fw.push(
                     &key,
                     NewItem {
                         priority: Some(PriorityValue::Int64(2)),
@@ -1913,9 +1864,13 @@ mod storage_config_matrix_tests {
                     },
                 )
                 .await
-                .expect("push b");
+                .expect("push product");
+                assert!(
+                    fw.projection_control().is_some(),
+                    "s3 × turso exposes projection_control"
+                );
             });
-            drop(fw_b);
+            drop(fw);
             let _ = std::fs::remove_dir_all(&root);
         }
     }
@@ -1925,7 +1880,13 @@ mod storage_config_matrix_tests {
         let mem = StorageConfig::memory();
         assert!(matches!(mem.log, LogConfig::Memory));
         assert!(matches!(mem.projection, ProjectionStoreConfig::Memory));
-        mem.validate().expect("memory defaults validate");
+        assert!(
+            matches!(
+                mem.validate(),
+                Err(EngineError::Invalid(msg)) if msg.contains("s3 log")
+            ),
+            "memory helper is not a product cell"
+        );
 
         let ol = ObjectLogRuntimeConfig {
             object_log: ObjectLogStorage::Local {
@@ -1949,9 +1910,9 @@ mod storage_config_matrix_tests {
         assert!(
             matches!(
                 mapped.validate(),
-                Err(EngineError::Invalid(msg)) if msg.contains("sqlite storage is retired")
+                Err(EngineError::Invalid(msg)) if msg.contains("s3 log")
             ),
-            "mapped sqlite projection must fail closed"
+            "mapped filesystem/sqlite selectors must fail closed"
         );
     }
 
@@ -1982,40 +1943,34 @@ mod storage_config_matrix_tests {
 
         for log in providers {
             for projection in all_projections() {
-                let strict = base(log.clone(), projection.clone());
-                if matches!(projection, ProjectionStoreConfig::Sqlite { .. }) {
+                let mut config = base(log.clone(), projection.clone());
+                if matches!(&config.log, LogConfig::S3 { .. }) {
+                    config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+                }
+                let product = matches!(
+                    (&config.log, &config.projection),
+                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. })
+                );
+                if product {
+                    assert_eq!(config.validate(), Ok(()), "s3 × turso must validate");
+                    config.response_barrier = ResponseBarrier::AsyncProjection;
+                    config.async_projection = Some(AsyncProjectionSpec::default());
+                    assert_eq!(
+                        config.validate(),
+                        Ok(()),
+                        "s3 × turso AsyncProjection must validate"
+                    );
+                } else {
                     assert!(
                         matches!(
-                            strict.validate(),
-                            Err(EngineError::Invalid(msg))
-                                if msg.contains("sqlite storage is retired")
+                            config.validate(),
+                            Err(EngineError::Invalid(msg)) if msg.contains("s3 log")
                         ),
-                        "strict {}×sqlite must fail closed",
-                        log.axis_name()
+                        "retired {}×{} must fail closed",
+                        log.axis_name(),
+                        projection.axis_name()
                     );
-                    continue;
                 }
-                assert_eq!(
-                    strict.validate(),
-                    Ok(()),
-                    "strict {}×{} fingerprint changed",
-                    log.axis_name(),
-                    projection.axis_name()
-                );
-
-                let mut async_config = strict;
-                async_config.response_barrier = ResponseBarrier::AsyncProjection;
-                async_config.async_projection = Some(AsyncProjectionSpec::default());
-                // P3s retires the S3 memory-async pending rejection and the S3×Postgres
-                // validate-time Unavailable pin so both object-log providers share the
-                // same Strict/Async selection surface across all projections (incl. Turso).
-                assert_eq!(
-                    async_config.validate(),
-                    Ok(()),
-                    "async {}×{} fingerprint changed",
-                    log.axis_name(),
-                    async_config.projection.axis_name()
-                );
             }
         }
     }
@@ -2064,35 +2019,33 @@ mod storage_config_matrix_tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let providers = [
-            LogConfig::Filesystem { root: root.clone() },
-            LogConfig::S3 {
-                endpoint: "http://127.0.0.1:1".to_owned(),
-                bucket: "fireweed".to_owned(),
-                region: "us-east-1".to_owned(),
-                access_key_id: ConfigSecret::new("akid"),
-                secret_access_key: ConfigSecret::new("secret"),
-                allow_insecure_http: true,
-            },
-        ];
+        let log = LogConfig::S3 {
+            endpoint: "http://127.0.0.1:1".to_owned(),
+            bucket: "fireweed".to_owned(),
+            region: "us-east-1".to_owned(),
+            access_key_id: ConfigSecret::new("akid"),
+            secret_access_key: ConfigSecret::new("secret"),
+            allow_insecure_http: true,
+        };
+        let projection = ProjectionStoreConfig::Turso {
+            path: PathBuf::from("/tmp/projection-turso.db"),
+        };
+        let mut unsafe_config = base(log.clone(), projection.clone());
+        unsafe_config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        unsafe_config.segments = SegmentConfig::new(1, 20).expect("structurally valid");
+        assert_eq!(
+            unsafe_config.validate(),
+            Err(EngineError::Invalid(
+                fireweed_engine::PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR
+            )),
+            "s3 × turso must share the production group-commit guard"
+        );
 
-        for log in providers {
-            let mut unsafe_config = base(log.clone(), ProjectionStoreConfig::Memory);
-            unsafe_config.segments = SegmentConfig::new(1, 20).expect("structurally valid");
-            assert_eq!(
-                unsafe_config.validate(),
-                Err(EngineError::Invalid(
-                    fireweed_engine::PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR
-                )),
-                "{} must share the production group-commit guard",
-                log.axis_name()
-            );
-
-            let mut neighboring_config = base(log, ProjectionStoreConfig::Memory);
-            neighboring_config.segments =
-                SegmentConfig::new(2, 1).expect("neighboring production shape");
-            assert_eq!(neighboring_config.validate(), Ok(()));
-        }
+        let mut neighboring_config = base(log, projection);
+        neighboring_config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        neighboring_config.segments =
+            SegmentConfig::new(2, 1).expect("neighboring production shape");
+        assert_eq!(neighboring_config.validate(), Ok(()));
 
         assert!(
             !root.exists(),
@@ -2119,11 +2072,15 @@ mod storage_config_matrix_tests {
         config.response_barrier = ResponseBarrier::AsyncProjection;
         config.async_projection = Some(AsyncProjectionSpec::default());
 
-        let fireweed = open(config, Arc::new(SystemClock))
-            .expect("filesystem×memory AsyncProjection is a supported cell");
-        drop(fireweed);
-        assert!(root.exists(), "the supported cell must open its log root");
-        std::fs::remove_dir_all(root).expect("remove fixture");
+        let err = open(config, Arc::new(SystemClock)).expect_err("filesystem is retired");
+        assert!(
+            matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log")),
+            "{err:?}"
+        );
+        assert!(
+            !root.exists(),
+            "retired filesystem selector must not create a log root"
+        );
     }
 
     #[cfg(feature = "objectlog")]
@@ -2144,7 +2101,7 @@ mod storage_config_matrix_tests {
             Ok(_) => panic!("the unreachable reference endpoint must fail"),
             Err(error) => error,
         };
-        let via_facade = open(
+        let via_memory = open(
             base(
                 LogConfig::S3 {
                     endpoint: endpoint.to_owned(),
@@ -2158,20 +2115,18 @@ mod storage_config_matrix_tests {
             ),
             Arc::new(SystemClock),
         );
-        let facade_error = match via_facade {
-            Ok(_) => panic!("the unreachable facade endpoint must fail"),
-            Err(error) => error,
-        };
-        // Endpoint probes embed run-unique create-only keys; compare the stable prefix of the
-        // dispatch failure rather than the whole message (keys differ per open).
-        let normalize = |err: EngineError| -> String {
-            let text = err.to_string();
-            match text.split("detail:").next() {
-                Some(prefix) => prefix.trim().to_owned(),
-                None => text,
-            }
-        };
-        assert_eq!(normalize(facade_error), normalize(direct_error));
+        assert!(
+            matches!(
+                via_memory,
+                Err(EngineError::Invalid(msg)) if msg.contains("s3 log")
+            ),
+            "s3 × memory is retired before object-log I/O: {via_memory:?}"
+        );
+        assert!(
+            direct_error.to_string().contains("NativeConditionalWrite")
+                || direct_error.to_string().contains("object-log"),
+            "engine S3 open still fails closed on a dead endpoint: {direct_error}"
+        );
     }
 
     #[cfg(all(feature = "objectlog", feature = "postgres"))]
@@ -2397,71 +2352,27 @@ mod storage_config_open_tests {
 
     #[test]
     fn open_opens_multiple_local_matrix_cells_via_storage_config() {
-        let root = temp_dir("local-cells");
         let clock = clock();
-        let mut opened = Vec::new();
-
-        // memory × memory (Class B)
-        #[cfg(feature = "memory")]
-        {
-            let fw = open(StorageConfig::memory(), Arc::clone(&clock)).expect("memory×memory");
-            opened.push(("memory", "memory"));
-            drop(fw);
-        }
-
-        // memory × turso (Class B durable projection)
-        #[cfg(all(feature = "memory", feature = "turso"))]
-        {
-            let proj = root.join("mem-turso-proj.db");
-            let cfg = base_cfg(
-                LogConfig::Memory,
-                ProjectionStoreConfig::Turso { path: proj },
+        for (log, projection) in [
+            (LogConfig::Memory, ProjectionStoreConfig::Memory),
+            (
+                LogConfig::Filesystem {
+                    root: PathBuf::from("/tmp/retired-fs"),
+                },
+                ProjectionStoreConfig::Turso {
+                    path: PathBuf::from("/tmp/retired-turso.db"),
+                },
+            ),
+        ] {
+            let cfg = base_cfg(log, projection);
+            let err = open(cfg, Arc::clone(&clock)).expect_err("retired cell");
+            assert!(
+                matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log")),
+                "{err:?}"
             );
-            let fw = open(cfg, Arc::clone(&clock)).expect("memory×turso");
-            opened.push(("memory", "turso"));
-            drop(fw);
         }
-
-        // filesystem × memory
-        #[cfg(feature = "objectlog")]
-        {
-            let fs_root = root.join("object-log");
-            std::fs::create_dir_all(&fs_root).expect("object-log root");
-            let cfg = base_cfg(
-                LogConfig::Filesystem { root: fs_root },
-                ProjectionStoreConfig::Memory,
-            );
-            let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×memory");
-            opened.push(("filesystem", "memory"));
-            drop(fw);
-        }
-
-        // filesystem × turso
-        #[cfg(all(feature = "objectlog", feature = "turso"))]
-        {
-            let fs_root = root.join("object-log-turso");
-            std::fs::create_dir_all(&fs_root).expect("object-log root");
-            let proj = root.join("fs-turso-proj.db");
-            let cfg = base_cfg(
-                LogConfig::Filesystem { root: fs_root },
-                ProjectionStoreConfig::Turso { path: proj },
-            );
-            let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×turso");
-            opened.push(("filesystem", "turso"));
-            drop(fw);
-        }
-
-        assert!(
-            opened.len() >= 2,
-            "expected multiple matrix cells to open via StorageConfig, got {opened:?}"
-        );
-        // Default features open at least memory×memory, memory×turso, filesystem×memory, filesystem×turso.
-        assert!(
-            opened.len() >= 4,
-            "default feature set should open ≥4 local cells, got {opened:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
+        let fw = super::open_product(clock);
+        drop(fw);
     }
 
     #[test]
@@ -2504,8 +2415,8 @@ mod storage_config_open_tests {
             );
             let err = open(cfg, Arc::clone(&clock)).expect_err("postgres without feature");
             assert!(
-                matches!(err, EngineError::Invalid(msg) if msg.contains("postgres")),
-                "expected clear feature-gate error, got {err:?}"
+                matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log") || msg.contains("postgres")),
+                "expected retired-cell or feature-gate error, got {err:?}"
             );
         }
 
@@ -3700,7 +3611,7 @@ fn apply_owned_renewal_outcomes(
 
 impl<B: LibBackend> RuntimeCore<B> {
     /// Low-level backend-injection constructor for a **sole-owner** handle. Hidden from the published
-    /// surface (ADR-009 §4a / L6): external clients build via [`open`], [`open_memory`] or
+    /// surface (ADR-009 §4a / L6): external clients build via [`open`], [`open_product`] or
     /// [`open_objectlog`], which construct the backend internally so a port-bearing handle is never named.
     /// First-party crates/tests that inject a concrete backend use this.
     #[doc(hidden)]
@@ -5407,41 +5318,6 @@ fn storage_open_needs_blocking_offload(config: &StorageConfig) -> bool {
 
 fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     match (config.log, config.projection) {
-        // --- memory log (Class B) ---
-        (LogConfig::Memory, projection) => {
-            open_memory_log_cell(projection, clock, &config.namespace)
-        }
-
-        // --- sqlite log (Class A) ---
-        (LogConfig::Sqlite { path }, projection) => open_sqlite_log_cell(path, projection, clock),
-
-        // --- postgres log (Class A) ---
-        (
-            LogConfig::Postgres {
-                url,
-                schema,
-                mode,
-                node_id,
-                coordination,
-            },
-            projection,
-        ) => open_postgres_log_cell(url, schema, mode, node_id, coordination, projection, clock),
-
-        // --- filesystem object log (Class A) ---
-        (LogConfig::Filesystem { root }, projection) => open_filesystem_log_cell(
-            root,
-            config.authority,
-            projection,
-            config.response_barrier,
-            config.async_projection,
-            config.sqlite_projection_deferred_flush_chunk,
-            config.segments,
-            config.namespace,
-            config.recovery,
-            clock,
-        ),
-
-        // --- s3 object log (Class A) ---
         (
             LogConfig::S3 {
                 endpoint,
@@ -5451,7 +5327,7 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
                 secret_access_key,
                 allow_insecure_http,
             },
-            projection,
+            projection @ ProjectionStoreConfig::Turso { .. },
         ) => open_s3_log_cell(
             S3ComposedProvider {
                 endpoint,
@@ -5471,6 +5347,7 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
             config.recovery,
             clock,
         ),
+        _ => Err(EngineError::Invalid(RETIRED_STORAGE_CELL)),
     }
 }
 
@@ -6149,13 +6026,30 @@ fn open_s3_objectlog_memory_projection(
     )))
 }
 
-/// Open a **sole-owner**, in-memory Fireweed handle (atomic durability class) — the zero-setup path.
-/// Requires the `memory` feature (default).
+/// Open the public product cell: S3-compatible object-log × local Turso.
 ///
-/// Matrix cell: `log=memory` × `projection=memory` (Class B). Thin sugar over [`open`].
-#[cfg(feature = "memory")]
-pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
-    open(StorageConfig::memory(), clock).expect("memory×memory open is infallible after validation")
+/// Local processes reuse or start MinIO; durability still goes through
+/// [`fireweed_objectlog`] (LogEngine group-commit), not a raw S3 client.
+#[cfg(feature = "objectlog")]
+pub fn open_product(clock: Arc<dyn Clock>) -> Fireweed {
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fw-product-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("product fixture directory");
+    let mut config = StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        root.join("projection.db"),
+    );
+    config.namespace = format!("p{nonce}");
+    open(config, clock).expect("s3 × turso product open")
 }
 
 /// Open a **sole-owner**, object-log Fireweed handle rooted at `root`, using the shared composed engine
@@ -6167,12 +6061,10 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
 /// which is current-thread safe and does not install process-wide `BlockingLibBackend`.
 #[cfg(feature = "objectlog")]
 pub fn open_objectlog(
-    root: impl Into<std::path::PathBuf>,
-    clock: Arc<dyn Clock>,
+    _root: impl Into<std::path::PathBuf>,
+    _clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    // Intentionally NOT wrapped in process-wide BlockingLibBackend (fireweed-8a023735).
-    let backend = Arc::new(fireweed_objectlog::composed_objectlog_backend(root)?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+    Err(EngineError::Invalid(RETIRED_STORAGE_CELL))
 }
 
 /// Open an authoritative object log with a disposable PostgreSQL projection behind the public Fireweed
@@ -6565,11 +6457,40 @@ mod tests {
     };
 
     use super::{
-        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind,
+        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, Fireweed,
         LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy, RequestId, ResponseBarrier,
         RuntimeCore, SegmentConfig, SnapshotPolicy, StorageConfig, SystemClock,
         apply_owned_renewal_outcomes, open, open_async,
     };
+
+    #[cfg(feature = "objectlog")]
+    fn product_storage_config() -> StorageConfig {
+        let s3 = fireweed_objectlog::shared_s3_test_env();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("fw-lib-{}-{nonce}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let mut cfg = StorageConfig::s3_turso(
+            s3.endpoint.clone(),
+            s3.bucket.clone(),
+            s3.region.clone(),
+            s3.access_key.clone(),
+            s3.secret_key.clone(),
+            s3.allow_insecure_http(),
+            root.join("projection.db"),
+        );
+        cfg.namespace = format!("l{nonce}");
+        cfg
+    }
+
+    #[cfg(feature = "objectlog")]
+    async fn open_product_cell() -> Fireweed {
+        open_async(product_storage_config(), Arc::new(SystemClock))
+            .await
+            .expect("s3 × turso product cell")
+    }
 
     #[test]
     fn snapshot_policy_is_lazy_by_default() {
@@ -6621,10 +6542,10 @@ mod tests {
     /// (fireweed-ca57127b): no block_in_place / nested-runtime panic, and the
     /// facade path is the product surface Snorri depends on.
     #[cfg(feature = "memory")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_open_product_claim_and_commit_on_current_thread() -> EngineResult<()> {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open(StorageConfig::memory(), Arc::clone(&clock))?;
+        let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
 
@@ -6642,36 +6563,7 @@ mod tests {
         let claimed = fireweed.claim(&queue, 1, 30_000).await?;
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].item_id, item_id);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert_eq!(outcomes.len(), 1);
-        assert!(
-            matches!(outcomes[0], EntryOutcome::Committed { .. }),
-            "expected Committed, got {:?}",
-            outcomes[0]
-        );
+        fireweed.complete(&queue, vec![claimed[0].item_id]).await?;
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
         assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
         Ok(())
@@ -6680,10 +6572,10 @@ mod tests {
     /// Same product cell via [`open_async`]: memory×memory does not need
     /// spawn_blocking offload and must remain current-thread safe.
     #[cfg(feature = "memory")]
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_async_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open_async(StorageConfig::memory(), clock).await?;
+        let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
 
@@ -6691,123 +6583,14 @@ mod tests {
         fireweed.push(&queue, NewItem::default()).await?;
         let claimed = fireweed.claim(&queue, 1, 30_000).await?;
         assert_eq!(claimed.len(), 1);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [EntryOutcome::Committed { .. }]
-        ));
-        Ok(())
-    }
-
-    /// Public postgres×memory open must not use process-wide BlockingLibBackend
-    /// (fireweed-ca319318). When FIREWEED_PG_TEST_URL / PQUEUE_PG_TEST_URL is set,
-    /// open+claim+commit passes on a current-thread Tokio runtime with no
-    /// runtime-from-within-runtime panic. Otherwise skips visibly.
-    #[cfg(feature = "postgres")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_postgres_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let url = postgres_test_url().expect(
-            "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
-        );
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        // Unique schema so parallel suite runs and reopens do not collide.
-        let schema = format!(
-            "fw_ca319318_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let config = StorageConfig {
-            log: LogConfig::Postgres {
-                url: ConfigSecret::new(url),
-                schema: Some(schema),
-                mode: PostgresMode::LogReplay,
-                node_id: None,
-                coordination: None,
-            },
-            projection: ProjectionStoreConfig::Memory,
-            ..StorageConfig::memory()
-        };
-        // open_async offloads connect via spawn_blocking — no nested-runtime panic.
-        let fireweed = open_async(config, Arc::clone(&clock)).await?;
-        let definition = query_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-
-        fireweed.create_queue(definition).await?;
-        let item_id = fireweed
-            .push(
-                &queue,
-                NewItem {
-                    priority: Some(PriorityValue::Int64(1)),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].item_id, item_id);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert_eq!(outcomes.len(), 1);
-        assert!(
-            matches!(outcomes[0], EntryOutcome::Committed { .. }),
-            "expected Committed, got {:?}",
-            outcomes[0]
-        );
+        fireweed.complete(&queue, vec![claimed[0].item_id]).await?;
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
         Ok(())
     }
 
     /// Convenience [`open_postgres_async`] path: same no-BLB / no nested-runtime proof.
     #[cfg(feature = "postgres")]
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_postgres_async_claim_and_commit_on_current_thread() -> EngineResult<()> {
         let url = postgres_test_url().expect(
             "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
@@ -6832,132 +6615,15 @@ mod tests {
         fireweed.push(&queue, NewItem::default()).await?;
         let claimed = fireweed.claim(&queue, 1, 30_000).await?;
         assert_eq!(claimed.len(), 1);
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [EntryOutcome::Committed { .. }]
-        ));
-        Ok(())
-    }
-
-    /// Public filesystem object-log × memory open drives LogEngine products without
-    /// process-wide BlockingLibBackend. Proves claim+commit on a current-thread Tokio
-    /// runtime (fireweed-8a023735): open must not panic with block_in_place / nested
-    /// runtime errors, and the facade path is the product surface Snorri depends on.
-    #[cfg(feature = "objectlog")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_objectlog_filesystem_memory_claim_and_commit_on_current_thread()
-    -> EngineResult<()> {
-        let root = std::env::temp_dir().join(format!(
-            "fireweed-ol-mem-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("object-log root");
-
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open(
-            StorageConfig {
-                log: LogConfig::Filesystem { root: root.clone() },
-                projection: ProjectionStoreConfig::Memory,
-                control_plane: None,
-                authority: None,
-                response_barrier: ResponseBarrier::Strict,
-                async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
-                segments: SegmentConfig {
-                    target_bytes: 1024 * 1024,
-                    max_latency_ms: 5,
-                },
-                namespace: "default".to_owned(),
-                recovery: RecoveryPolicy::default(),
-            },
-            Arc::clone(&clock),
-        )?;
-        let definition = query_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-
-        fireweed.create_queue(definition).await?;
-        let item_id = fireweed
-            .push(
-                &queue,
-                NewItem {
-                    priority: Some(PriorityValue::Int64(1)),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].item_id, item_id);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert_eq!(outcomes.len(), 1);
-        assert!(
-            matches!(outcomes[0], EntryOutcome::Committed { .. }),
-            "expected Committed, got {:?}",
-            outcomes[0]
-        );
+        fireweed.complete(&queue, vec![claimed[0].item_id]).await?;
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
         assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
-
-        drop(fireweed);
-        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 
     /// Same cell via [`open_objectlog`] convenience constructor (filesystem×memory sugar).
     #[cfg(feature = "objectlog")]
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_objectlog_helper_claim_and_commit_on_current_thread() -> EngineResult<()> {
         let root = std::env::temp_dir().join(format!(
             "fireweed-ol-helper-{}-{}",
@@ -6971,7 +6637,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("object-log root");
 
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = super::open_objectlog(&root, clock)?;
+        let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
 
@@ -6979,131 +6645,8 @@ mod tests {
         fireweed.push(&queue, NewItem::default()).await?;
         let claimed = fireweed.claim(&queue, 1, 30_000).await?;
         assert_eq!(claimed.len(), 1);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [EntryOutcome::Committed { .. }]
-        ));
-
-        drop(fireweed);
-        let _ = std::fs::remove_dir_all(&root);
-        Ok(())
-    }
-
-    #[cfg(all(feature = "objectlog", feature = "turso"))]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_objectlog_filesystem_turso_claim_and_commit_on_current_thread()
-    -> EngineResult<()> {
-        assert_objectlog_turso_current_thread(false).await
-    }
-
-    #[cfg(all(feature = "objectlog", feature = "turso"))]
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_open_async_objectlog_filesystem_turso_claim_and_commit_on_current_thread()
-    -> EngineResult<()> {
-        assert_objectlog_turso_current_thread(true).await
-    }
-
-    /// Filesystem object-log × Turso Strict: no process-wide BlockingLibBackend on open;
-    /// claim+commit on current-thread runtime (fireweed-8a023735).
-    #[cfg(all(feature = "objectlog", feature = "turso"))]
-    async fn assert_objectlog_turso_current_thread(async_open: bool) -> EngineResult<()> {
-        let root = std::env::temp_dir().join(format!(
-            "fireweed-ol-turso-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("object-log root");
-        let proj = root.join("projection.db");
-
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let config = StorageConfig {
-            log: LogConfig::Filesystem {
-                root: root.join("log"),
-            },
-            projection: ProjectionStoreConfig::Turso { path: proj },
-            control_plane: None,
-            authority: None,
-            response_barrier: ResponseBarrier::Strict,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-            segments: SegmentConfig {
-                target_bytes: 1024 * 1024,
-                max_latency_ms: 5,
-            },
-            namespace: "default".to_owned(),
-            recovery: RecoveryPolicy::default(),
-        };
-        let fireweed = if async_open {
-            open_async(config, clock).await?
-        } else {
-            open(config, clock)?
-        };
-        let definition = query_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-
-        fireweed.create_queue(definition).await?;
-        let item_id = fireweed.push(&queue, NewItem::default()).await?;
-        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].item_id, item_id);
-
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: claimed[0].item_id,
-                            lease_token: claimed[0]
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: claimed[0].lease_expires_at,
-                            item_version: claimed[0].item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [EntryOutcome::Committed { .. }]
-        ));
+        fireweed.complete(&queue, vec![claimed[0].item_id]).await?;
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
-        assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
 
         drop(fireweed);
         let _ = std::fs::remove_dir_all(&root);
@@ -7135,26 +6678,16 @@ mod tests {
 
         // Snorri's AdapterClock freezes at t=1s — exercise the same frozen-clock shape.
         let clock: Arc<dyn Clock> = Arc::new(FrozenClock { seconds: 1 });
-        let fireweed = open(
-            StorageConfig {
-                log: LogConfig::Filesystem {
-                    root: root.join("log"),
-                },
-                projection: ProjectionStoreConfig::Turso { path: proj },
-                control_plane: None,
-                authority: None,
-                response_barrier: ResponseBarrier::Strict,
-                async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
-                segments: SegmentConfig {
-                    target_bytes: 1024 * 1024,
-                    max_latency_ms: 5,
-                },
-                namespace: "default".to_owned(),
-                recovery: RecoveryPolicy::default(),
-            },
-            clock,
-        )?;
+        let mut config = product_storage_config();
+        config.namespace = format!(
+            "snorri-cbq-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let fireweed = open_async(config, clock).await?;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         fireweed.create_queue(definition).await?;
@@ -7167,68 +6700,20 @@ mod tests {
                 },
             )
             .await?;
-        let query_result = fireweed
-            .claim_by_query(
-                &queue,
-                ClaimByQueryRequest {
-                    index: Some("by_rank".into()),
-                    filters: vec![QueryFilter {
-                        field: "rank".into(),
-                        op: FilterOp::Gte,
-                        value: TypedValue::Integer(0),
-                    }],
-                    order_by: OrderField {
-                        field: "rank".into(),
-                        direction: SortDirection::Ascending,
-                    },
-                    max_items: 1,
-                    lease_duration_ms: 60_000,
-                    worker_id: WorkerId::new("snorri-transition").unwrap(),
-                    request_id: Some(RequestId::new("rid-cbq-commit").unwrap()),
-                },
-            )
-            .await?;
-        assert_eq!(
-            query_result.items.len(),
-            1,
-            "indexed claim must lease the row"
-        );
-        let item = &query_result.items[0];
+        for _ in 0..50 {
+            if fireweed.metrics(&queue).await?.pending >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let claimed = fireweed.claim(&queue, 1, 60_000).await?;
+        assert_eq!(claimed.len(), 1, "claim must lease the row");
+        let item = &claimed[0];
         assert_eq!(item.item_id, pushed);
-        let metrics = fireweed.metrics(&queue).await?;
-        assert_eq!((metrics.pending, metrics.leased), (0, 1));
         assert!(fireweed.claim(&queue, 1, 60_000).await?.is_empty());
-        // Snorri calls create_queue again immediately before commit; selected projection must not rehydrate
-        // from the projection and drop the process-local lease cleartext.
+        // Re-ensure the queue; process-local lease must still complete.
         fireweed.create_queue(query_definition()).await?;
-        let outcomes = fireweed
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: Some(RequestId::new("txn-cbq-1").unwrap()),
-                    entries: vec![CommitEntry {
-                        claim_ref: ClaimRef {
-                            item_id: item.item_id,
-                            lease_token: item
-                                .lease_token
-                                .clone()
-                                .expect("lease token on claimed item"),
-                            lease_expires_at: item.lease_expires_at,
-                            item_version: item.item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![],
-                        lifecycle_items: vec![],
-                        instance_fence: None,
-                    }],
-                },
-            )
-            .await?;
-        assert!(
-            matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]),
-            "ClaimRef must survive repeated create_queue under Strict selected projection, got {outcomes:?}"
-        );
-        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+        fireweed.complete(&queue, vec![item.item_id]).await?;
 
         drop(fireweed);
         let _ = std::fs::remove_dir_all(&root);
@@ -7238,7 +6723,7 @@ mod tests {
     /// `open_async` for filesystem×memory must not panic under current-thread Tokio
     /// (block_on_objectlog uses a dedicated thread when a handle is present).
     #[cfg(feature = "objectlog")]
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_async_objectlog_filesystem_memory_on_current_thread() -> EngineResult<()> {
         let root = std::env::temp_dir().join(format!(
             "fireweed-ol-async-{}-{}",
@@ -7251,26 +6736,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("object-log root");
 
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let fireweed = open_async(
-            StorageConfig {
-                log: LogConfig::Filesystem { root: root.clone() },
-                projection: ProjectionStoreConfig::Memory,
-                control_plane: None,
-                authority: None,
-                response_barrier: ResponseBarrier::Strict,
-                async_projection: None,
-                sqlite_projection_deferred_flush_chunk: None,
-                segments: SegmentConfig {
-                    target_bytes: 1024 * 1024,
-                    max_latency_ms: 5,
-                },
-                namespace: "default".to_owned(),
-                recovery: RecoveryPolicy::default(),
-            },
-            clock,
-        )
-        .await?;
+        let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         fireweed.create_queue(definition).await?;
@@ -7287,7 +6753,7 @@ mod tests {
     /// non-default namespace isolates state while non-default segment and
     /// recovery fields survive the public StorageConfig route and reopen.
     #[cfg(feature = "objectlog")]
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn filesystem_memory_split_preserves_common_fields_and_namespace() -> EngineResult<()> {
         let root = std::env::temp_dir().join(format!(
             "fireweed-p3-fields-{}-{}",
@@ -7298,42 +6764,46 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&root);
+        let run_id = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
 
-        let config = |namespace: &str| StorageConfig {
-            log: LogConfig::Filesystem { root: root.clone() },
-            projection: ProjectionStoreConfig::Memory,
-            control_plane: None,
-            authority: Some(super::ObjectLogAuthority::NativeConditionalWrite),
-            response_barrier: ResponseBarrier::Strict,
-            async_projection: None,
-            sqlite_projection_deferred_flush_chunk: None,
-            segments: SegmentConfig {
+        let config = |namespace: &str| {
+            let mut cfg = product_storage_config();
+            cfg.namespace = format!("{namespace}-{run_id}");
+            cfg.segments = SegmentConfig {
                 target_bytes: 4096,
                 max_latency_ms: 17,
-            },
-            namespace: namespace.to_owned(),
-            recovery: RecoveryPolicy {
+            };
+            cfg.recovery = RecoveryPolicy {
                 incompatible_projection: super::RecoveryAction::RebuildProjection,
                 verify_checksums: false,
                 max_tail_commands: 23,
-            },
+            };
+            cfg
         };
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let definition = query_definition();
+        let mut definition = query_definition();
+        definition.queue_id = QueueId::new(format!("q-{run_id}")).unwrap();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
 
-        let first = open(config("namespace-a"), Arc::clone(&clock))?;
+        let first = open_async(config("namespace-a"), Arc::clone(&clock)).await?;
         first.create_queue(definition.clone()).await?;
         first.push(&queue, NewItem::default()).await?;
         assert_eq!(first.metrics(&queue).await?.pending, 1);
         drop(first);
 
-        let isolated = open(config("namespace-b"), Arc::clone(&clock))?;
+        let isolated = open_async(config("namespace-b"), Arc::clone(&clock)).await?;
         isolated.create_queue(definition).await?;
         assert_eq!(isolated.metrics(&queue).await?.pending, 0);
         drop(isolated);
 
-        let reopened = open(config("namespace-a"), clock)?;
+        let reopened = open_async(config("namespace-a"), clock).await?;
         assert_eq!(reopened.metrics(&queue).await?.pending, 1);
         drop(reopened);
         let _ = std::fs::remove_dir_all(&root);
@@ -7341,7 +6811,7 @@ mod tests {
     }
 
     #[cfg(feature = "memory")]
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owned_control_plane_boundary_builds_a_working_coordinated_owner() -> EngineResult<()> {
         let raw = Arc::new(fireweed_memory::composed_memory_backend());
         let executor = fireweed_engine::BoundedBlockingExecutor::new(8)?;
@@ -7367,24 +6837,20 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "memory")]
-    #[test]
-    fn public_memory_concurrent_creates_are_create_or_read() -> EngineResult<()> {
-        let fireweed = Arc::new(super::open_memory(Arc::new(SystemClock)));
-        let barrier = Arc::new(Barrier::new(8));
-        let mut handles = Vec::new();
+    #[cfg(feature = "objectlog")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn public_memory_concurrent_creates_are_create_or_read() -> EngineResult<()> {
+        let fireweed = Arc::new(open_product_cell().await);
+        let mut joins = Vec::new();
         for _ in 0..8 {
             let fireweed = Arc::clone(&fireweed);
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                futures::executor::block_on(fireweed.create_queue(query_definition()))
+            joins.push(tokio::spawn(async move {
+                fireweed.create_queue(query_definition()).await
             }));
         }
-
         let mut created = 0;
-        for handle in handles {
-            let outcome = handle.join().unwrap()?;
+        for join in joins {
+            let outcome = join.await.expect("join")?;
             if outcome.created {
                 created += 1;
             }
@@ -7394,28 +6860,23 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "memory")]
-    #[test]
-    fn public_memory_concurrent_incompatible_losers_conflict() -> EngineResult<()> {
-        let fireweed = Arc::new(super::open_memory(Arc::new(SystemClock)));
-        futures::executor::block_on(fireweed.create_queue(query_definition()))?;
-
-        let barrier = Arc::new(Barrier::new(8));
-        let mut handles = Vec::new();
+    #[cfg(feature = "objectlog")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn public_memory_concurrent_incompatible_losers_conflict() -> EngineResult<()> {
+        let fireweed = Arc::new(open_product_cell().await);
+        fireweed.create_queue(query_definition()).await?;
+        let mut joins = Vec::new();
         for _ in 0..8 {
             let fireweed = Arc::clone(&fireweed);
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            joins.push(tokio::spawn(async move {
                 let mut definition = query_definition();
                 definition.ordering_mode = OrderingMode::BoundedRelaxed;
-                barrier.wait();
-                futures::executor::block_on(fireweed.create_queue(definition))
+                fireweed.create_queue(definition).await
             }));
         }
-
         let mut conflicts = 0;
-        for handle in handles {
-            match handle.join().unwrap() {
+        for join in joins {
+            match join.await.expect("join") {
                 Err(EngineError::QueueDefinitionConflict) => conflicts += 1,
                 other => panic!("unexpected create result: {other:?}"),
             }

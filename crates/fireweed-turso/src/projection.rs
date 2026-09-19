@@ -3576,6 +3576,18 @@ impl AsyncProjectionStore for TursoRelational {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let writer = self.writer.clone();
         async move {
+            let remembered = {
+                let tokens = self.live_tokens.lock().await;
+                claim_refs
+                    .iter()
+                    .filter_map(|claim_ref| {
+                        tokens
+                            .get(&(shard.clone(), claim_ref.item_id))
+                            .cloned()
+                            .map(|token| (claim_ref.item_id, token))
+                    })
+                    .collect::<HashMap<_, _>>()
+            };
             let connection = writer.lock().await;
             let tenant = shard.tenant_id.as_str().to_string();
             let queue = shard.queue_id.as_str().to_string();
@@ -3590,7 +3602,14 @@ impl AsyncProjectionStore for TursoRelational {
                 )
                 .await?;
                 for claim_ref in chunk {
-                    let row = rows.get(&claim_ref.item_id).ok_or(EngineError::NotFound)?;
+                    let remembered_ok =
+                        remembered.get(&claim_ref.item_id) == Some(&claim_ref.lease_token);
+                    let Some(row) = rows.get(&claim_ref.item_id) else {
+                        if !remembered_ok {
+                            return Err(EngineError::NotFound);
+                        }
+                        continue;
+                    };
                     let state = parse_state(&text(&row[0])?).map_err(storage)?;
                     if integer(&row[1])? != 0 {
                         return Err(EngineError::StaleLease);
@@ -3601,14 +3620,18 @@ impl AsyncProjectionStore for TursoRelational {
                     if integer(&row[2])? != 0 {
                         return Err(EngineError::Superseded);
                     }
-                    if state != ItemState::Leased {
+                    if !remembered_ok {
+                        if state != ItemState::Leased {
+                            return Err(EngineError::Invalid("item is not leased"));
+                        }
+                        if blob(&row[4])? != lease_hash(&claim_ref.lease_token)
+                            || matches!(row[3], Value::Null)
+                            || integer(&row[3])? < now_nanos
+                        {
+                            return Err(EngineError::StaleLease);
+                        }
+                    } else if state != ItemState::Leased && state != ItemState::Pending {
                         return Err(EngineError::Invalid("item is not leased"));
-                    }
-                    if blob(&row[4])? != lease_hash(&claim_ref.lease_token)
-                        || matches!(row[3], Value::Null)
-                        || integer(&row[3])? < now_nanos
-                    {
-                        return Err(EngineError::StaleLease);
                     }
                     if integer(&row[5])? as u64 != claim_ref.item_version {
                         return Err(EngineError::Conflict);

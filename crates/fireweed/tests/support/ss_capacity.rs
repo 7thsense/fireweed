@@ -232,29 +232,18 @@ impl Cell {
                 projection_path,
             } => {
                 std::fs::create_dir_all(log_root).expect("turso log root");
-                open(
-                    StorageConfig {
-                        log: LogConfig::Filesystem {
-                            root: log_root.clone(),
-                        },
-                        projection: ProjectionStoreConfig::Turso {
-                            path: projection_path.clone(),
-                        },
-                        control_plane: None,
-                        authority: None,
-                        response_barrier: ResponseBarrier::AsyncProjection,
-                        async_projection: Some(AsyncProjectionSpec::default()),
-                        sqlite_projection_deferred_flush_chunk: None,
-                        segments: SegmentConfig {
-                            target_bytes: 256 * 1024,
-                            max_latency_ms: 50,
-                        },
-                        namespace: "ss-phased".to_owned(),
-                        recovery: RecoveryPolicy::default(),
-                    },
-                    clock,
-                )
-                .expect("open filesystem--turso")
+                let s3 = fireweed_objectlog::shared_s3_test_env();
+                let mut cfg = StorageConfig::s3_turso(
+                    s3.endpoint.clone(),
+                    s3.bucket.clone(),
+                    s3.region.clone(),
+                    s3.access_key.clone(),
+                    s3.secret_key.clone(),
+                    s3.allow_insecure_http(),
+                    projection_path.clone(),
+                );
+                cfg.namespace = format!("ss-{}", unique_suffix());
+                open(cfg, clock).expect("open s3--turso")
             }
         }
     }

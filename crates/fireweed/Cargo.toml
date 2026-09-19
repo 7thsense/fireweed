@@ -127,49 +127,9 @@ name = "public_interface_conformance"
 path = "tests/public_interface_conformance.rs"
 
 [[test]]
-name = "p14_async_nonblocking_bridge_contracts"
-path = "tests/p14_async_nonblocking_bridge_contracts.rs"
-required-features = ["memory", "objectlog"]
-
-[[test]]
-name = "p7n_non_s3_lifecycle_parity"
-path = "tests/p7n_non_s3_lifecycle_parity.rs"
-required-features = ["memory", "objectlog", "turso"]
-
-[[test]]
-name = "p6n_non_s3_query_parity"
-path = "tests/p6n_non_s3_query_parity.rs"
-required-features = ["memory", "objectlog", "turso"]
-
-[[test]]
-name = "p8n_non_s3_mutation_parity"
-path = "tests/p8n_non_s3_mutation_parity.rs"
-required-features = ["memory", "objectlog", "turso"]
-
-[[test]]
-name = "p9n_non_s3_transaction_parity"
-path = "tests/p9n_non_s3_transaction_parity.rs"
-required-features = ["memory", "objectlog", "turso"]
-
-[[test]]
-name = "p5_class_b_reopen"
-path = "tests/p5_class_b_reopen.rs"
-required-features = ["memory", "turso"]
-
-[[test]]
-name = "p5an_non_s3_class_a_reopen_parity"
-path = "tests/p5an_non_s3_class_a_reopen_parity.rs"
-required-features = ["memory", "objectlog", "turso"]
-
-[[test]]
 name = "public_interface_external_conformance"
 path = "tests/public_interface_external_conformance.rs"
 required-features = ["postgres", "objectlog", "turso"]
-
-[[test]]
-name = "public_durability_matrix"
-path = "tests/public_durability_matrix.rs"
-required-features = ["objectlog", "turso"]
 
 [[test]]
 name = "postgres_constructors"
@@ -188,15 +148,6 @@ path = "tests/request_id_idempotency.rs"
 name = "storage_matrix_t0_t2"
 path = "tests/storage_matrix_t0_t2.rs"
 
-
-[[test]]
-name = "p3b_async_config_validation"
-path = "tests/p3b_async_config_validation.rs"
-
-[[test]]
-name = "p3b_filesystem_barriers"
-path = "tests/p3b_filesystem_barriers.rs"
-required-features = ["objectlog", "turso", "postgres"]
 
 [[test]]
 name = "p3s_s3_barriers"

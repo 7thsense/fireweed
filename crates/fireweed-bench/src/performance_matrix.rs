@@ -308,7 +308,7 @@ pub async fn run_repetition(
 mod tests {
     use std::sync::Arc;
 
-    use fireweed::open_memory;
+    use fireweed::open_product;
 
     use super::*;
     use crate::{SystemClock, all_shapes, bench_qdef, qkey};

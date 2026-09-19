@@ -99,11 +99,10 @@ storage:
       heartbeatTtlMs: 5000
       leaseTtlMs: 15000
   # Structured storage axes (isomorphic to server StorageConfig / BackendSpec).
-  # Public logs: memory | postgres | filesystem | s3
-  # Public projections: memory | turso | postgres
+  # Public product: s3 log × turso projection.
   log:
-    # Product default is filesystem (local/NAS object log).
-    backend: filesystem
+    # Product default is s3 (object-log over S3-compatible storage).
+    backend: s3
     # Filesystem root + S3 credential block for filesystem|s3 logs.
     objectLog:
       # Used when backend is filesystem (NAS-capable path ok).
@@ -122,7 +121,7 @@ storage:
       existingSecret: ""
       databaseUrlKey: database-url
   projection:
-    # Product default is turso (TD-010 / ADR-016). Public: memory | turso | postgres
+    # Product default is turso (local NVMe serving projection).
     backend: turso
     turso:
       # Pod-local path under storage.volume.mountPath (maps to FIREWEED_TURSO_PROJECTION_PATH).

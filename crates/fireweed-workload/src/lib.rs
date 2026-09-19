@@ -134,32 +134,28 @@ fn open_store_with_async_policy(
     async_projection: AsyncProjectionSpec,
 ) -> Result<Fireweed> {
     if memory {
-        return Ok(open_memory(clock));
+        return Err(fireweed::RETIRED_STORAGE_CELL.into());
     }
     std::fs::create_dir_all(root)?;
     std::fs::create_dir_all(projection_root)?;
-    Ok(open(
-        StorageConfig {
-            log: LogConfig::Filesystem {
-                root: root.join("log"),
-            },
-            projection: ProjectionStoreConfig::Turso {
-                path: projection_root.join("projection.db"),
-            },
-            control_plane: None,
-            authority: None,
-            response_barrier: ResponseBarrier::AsyncProjection,
-            async_projection: Some(async_projection),
-            sqlite_projection_deferred_flush_chunk: None,
-            segments: SegmentConfig {
-                target_bytes: 256 * 1024,
-                max_latency_ms: 5,
-            },
-            namespace: "workflow-workload".into(),
-            recovery: RecoveryPolicy::default(),
-        },
-        clock,
-    )?)
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let mut config = StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        projection_root.join("projection.db"),
+    );
+    config.response_barrier = ResponseBarrier::AsyncProjection;
+    config.async_projection = Some(async_projection);
+    config.segments = SegmentConfig {
+        target_bytes: 256 * 1024,
+        max_latency_ms: 5,
+    };
+    config.namespace = format!("workflow-workload-{}", root.display());
+    Ok(open(config, clock)?)
 }
 
 pub fn definition(name: &str) -> QueueDefinition {

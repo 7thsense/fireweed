@@ -91,7 +91,7 @@ async fn run_cell_async(
 #[tokio::test]
 async fn p8n_memory_memory_query_parity() {
     run_cell("memory--memory", false, || {
-        fireweed::open_memory(Arc::new(SystemClock))
+        fireweed::open_product(Arc::new(SystemClock))
     })
     .await;
 }

@@ -2,7 +2,7 @@
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn memory_claims_share_time_and_preserve_input_order() {
     let clock = Arc::new(ManualClock::at(17));
-    let fireweed = fireweed::open_memory(clock);
+    let fireweed = fireweed::open_product(clock);
     let a = queue("a");
     let b = queue("b");
     for (key, id) in [(&a, "a"), (&b, "b")] {

@@ -5,6 +5,9 @@
 
 #![cfg(all(feature = "objectlog", feature = "turso"))]
 
+#[path = "support/storage.rs"]
+mod storage;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -62,26 +65,13 @@ fn qdef() -> QueueDefinition {
     }
 }
 
-fn config(root: &std::path::Path) -> StorageConfig {
-    StorageConfig {
-        log: LogConfig::Filesystem {
-            root: root.join("log"),
-        },
-        projection: ProjectionStoreConfig::Turso {
-            path: root.join("projection.db"),
-        },
-        control_plane: None,
-        authority: None,
-        response_barrier: ResponseBarrier::Strict,
-        async_projection: None,
-        sqlite_projection_deferred_flush_chunk: None,
-        segments: SegmentConfig {
-            target_bytes: 256 * 1_024,
-            max_latency_ms: 50,
-        },
-        namespace: "elig-recovery".to_owned(),
-        recovery: RecoveryPolicy::default(),
-    }
+fn config(root: &std::path::Path, namespace: &str) -> StorageConfig {
+    let mut cfg = storage::product_config(root, namespace);
+    cfg.segments = SegmentConfig {
+        target_bytes: 256 * 1_024,
+        max_latency_ms: 20,
+    };
+    cfg
 }
 
 fn unique_ids(items: &[fireweed::ClaimedItem]) {
@@ -105,9 +95,12 @@ async fn reopen_after_commit_transition_lifecycle_keeps_unique_eligible_and_fres
     std::fs::create_dir_all(root.join("log")).unwrap();
     let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
     let clock = Arc::new(ManualClock(AtomicI64::new(10)));
+    let cfg = config(&root, &storage::unique_namespace("elig-recovery"));
 
     let lifecycle_ids = {
-        let fw = open(config(&root), Arc::clone(&clock) as _).expect("open filesystem--turso");
+        let fw = fireweed::open_async(cfg.clone(), Arc::clone(&clock) as _)
+            .await
+            .expect("open s3--turso");
         fw.create_queue(qdef()).await.expect("create queue");
         let mut metadata = Metadata::new();
         metadata.insert("native_transition_item", MetadataValue::String("1".into()));
@@ -164,7 +157,9 @@ async fn reopen_after_commit_transition_lifecycle_keeps_unique_eligible_and_fres
     };
 
     clock.0.store(100, Ordering::SeqCst);
-    let fw = open(config(&root), Arc::clone(&clock) as _).expect("reopen filesystem--turso");
+    let fw = fireweed::open_async(cfg, Arc::clone(&clock) as _)
+        .await
+        .expect("reopen s3--turso");
     fw.create_queue(qdef())
         .await
         .expect("re-create queue after reopen");

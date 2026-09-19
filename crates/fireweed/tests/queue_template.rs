@@ -213,7 +213,7 @@ fn template_discards_prototype_identity_and_diagnostics_are_not_identity() {
 #[tokio::test]
 async fn memory_ensure_is_exact_typed_and_field_complete() {
     let queue = key("tenant", "queue");
-    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(10)));
+    let fireweed = fireweed::open_product(Arc::new(ManualClock::at(10)));
     let first = fireweed.ensure_queue(&queue, &template()).await.unwrap();
     assert!(first.created);
     assert_eq!(first.template_name.as_deref(), Some("workers"));
@@ -252,7 +252,7 @@ async fn memory_ensure_is_exact_typed_and_field_complete() {
 #[tokio::test]
 async fn validation_and_policy_divergence_are_caller_visible() {
     let queue = key("tenant", "validation");
-    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(10)));
+    let fireweed = fireweed::open_product(Arc::new(ManualClock::at(10)));
     let mut invalid = rich_create();
     invalid.progress_bound_ms = 0;
     let invalid = QueueTemplate::new(invalid, QueueCreationPolicy::default())

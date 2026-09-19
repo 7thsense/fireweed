@@ -287,7 +287,7 @@ fn pg_url() -> Option<String> {
 #[tokio::test]
 async fn p7n_memory_memory_lifecycle() {
     run_cell("memory--memory", || {
-        fireweed::open_memory(Arc::new(SystemClock))
+        fireweed::open_product(Arc::new(SystemClock))
     })
     .await;
 }
