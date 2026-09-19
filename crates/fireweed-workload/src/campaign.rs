@@ -663,7 +663,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<Value> {
     }
     reports.sort_by_key(|s| s["shard"].as_u64());
     Ok(
-        json!({"schema":"campaign-capacity/v3","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"filesystem--turso","items":cfg.items,"cycles":cfg.cycles,
+        json!({"schema":"campaign-capacity/v3","enrichment_storage":if cfg.campaign_metadata_only {"row_metadata"} else {"payload"},"cell":"s3--turso","items":cfg.items,"cycles":cfg.cycles,
         "priority_workload":if cfg.campaign_timestamp_priority {"availability_timestamp"} else {"mixed_sequence_stress"},"physical_shards":cfg.shards,"workers_per_campaign":cfg.workers,"load_workers_per_campaign":cfg.load_workers,"campaigns":CAMPAIGNS,"batch":cfg.batch,"stage_limits":[500,200,500],"faults":cfg.faults,"includes_purge":cfg.recycle,
         "purge_batch":cfg.purge_batch.unwrap_or(8000),"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,
         "payload_bytes":cfg.payload_bytes,"scheduled_windows":WINDOWS,"resident_backlog":cfg.items,"progress_interval_ms":1000,"apply_debt_max_bytes":cfg.apply_debt_bytes.unwrap_or(AsyncProjectionSpec::default().apply_debt_max_bytes),

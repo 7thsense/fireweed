@@ -728,7 +728,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
     reports.sort_by_key(|r| r["shard"].as_u64());
     Ok(
         serde_json::json!({ "schema": "workflow-capacity/v6", "profile": format!("{:?}", cfg.profile),
-        "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
+        "cell": if cfg.memory { "memory--memory" } else { "s3--turso" },
         "items": cfg.items, "cycles": if cfg.recycle { cfg.cycles } else { 1 }, "includes_purge": cfg.recycle,
         "physical_shards": cfg.shards, "projection_root": cfg.projection_root, "workers_per_pool": cfg.workers, "load_workers_per_shard": cfg.load_workers,
         "purge_batch": cfg.purge_batch.unwrap_or(cfg.batch),

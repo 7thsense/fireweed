@@ -3,7 +3,7 @@
 # Usage:
 #   bash scripts/perf/run-million-cycle-local.sh
 #       # probe sizes (2k items), memory--memory only
-#   FIREWEED_MC_CELL=filesystem--turso bash scripts/perf/run-million-cycle-local.sh
+#   FIREWEED_MC_CELL=s3--turso bash scripts/perf/run-million-cycle-local.sh
 #   FIREWEED_MC_FULL=1 bash scripts/perf/run-million-cycle-local.sh
 #       # production 1M sizes; requires services for non-local cells
 set -euo pipefail

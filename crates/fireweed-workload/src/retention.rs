@@ -111,6 +111,6 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         reports.push(report);
     }
     Ok(
-        serde_json::json!({"schema": "retention-capacity/v1", "items_per_cycle": cfg.items, "batch": cfg.batch, "cycles": reports, "settled_wall_s": started.elapsed().as_secs_f64(), "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" }}),
+        serde_json::json!({"schema": "retention-capacity/v1", "items_per_cycle": cfg.items, "batch": cfg.batch, "cycles": reports, "settled_wall_s": started.elapsed().as_secs_f64(), "cell": if cfg.memory { "memory--memory" } else { "s3--turso" }}),
     )
 }

@@ -17,7 +17,7 @@ def qualify(report, campaign_target=10_000):
     check("source_identity", isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)))
     check("binary_identity", isinstance(binary_sha, str) and bool(re.fullmatch(r"[0-9a-f]{64}", binary_sha)))
     check("successful_correctness_run", report.get("exit_code") == 0)
-    check("filesystem_log_and_turso", result.get("cell") == "filesystem--turso")
+    check("s3_log_and_turso", result.get("cell") == "s3--turso")
     check("storage_evidence_present", bool(report.get("filesystem")))
     check("physical_sharding", result.get("physical_shards", 0) >= 2)
     for name in ("filesystem", "projection_filesystem"):

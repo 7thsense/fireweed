@@ -6,7 +6,7 @@ from workflow_capacity_gate import qualify
 class QualificationTests(unittest.TestCase):
     def baseline(self):
         return {"dirty": False, "head": "a" * 40, "binary_sha256": "b" * 64, "exit_code": 0, "filesystem": {"filesystems": [{"fstype": "btrfs"}]},
-                "result": {"schema": "primitive-capacity/v1", "cell": "filesystem--turso",
+                "result": {"schema": "primitive-capacity/v1", "cell": "s3--turso",
                            "items": 1_000_000, "physical_shards": 8, "aggregate_phases": [
                                {"phase": phase, "records": 1_000_000, "wall_window_s": 1_000_000 / 12_000, "records_per_s": 12_000} for phase in
                                ("insert", "enrich_by_key", "schedule_by_id", "claim_and_complete", "purge")]}}
@@ -73,7 +73,7 @@ class QualificationTests(unittest.TestCase):
         report["process_wall_s"] = 100
         report["projection_wal_observation"] = {"interval_ms": 100, "samples": 1000,
             "errors": [], "peak_bytes": {"shard-0": 3000, "shard-1": 3000}}
-        report["result"] = {"schema": "workflow-capacity/v6", "cell": "filesystem--turso",
+        report["result"] = {"schema": "workflow-capacity/v6", "cell": "s3--turso",
             "profile": "Mutable", "atomic_original_row_mutation": True,
             "dispatch": "shared-normal-claim", "faults": True, "includes_purge": True,
             "cycles": 3, "items": 400_000, "physical_shards": 2, "completed_lifecycles_per_s": 9500,
@@ -132,7 +132,7 @@ class QualificationTests(unittest.TestCase):
                     "process_rss_kib":1000,"projection_bytes":65536,"projection_wal_bytes":2000}
                 campaigns.append({"campaign":campaign,"cycles":[copy.deepcopy(row) for _ in range(3)]})
             shards.append({"shard":shard,"campaigns":campaigns})
-        report["result"]={"schema":"campaign-capacity/v3","enrichment_storage":"payload","payload_bytes":1024,"batch":1000,"purge_batch":8000,"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,"cell":"filesystem--turso","physical_shards":2,
+        report["result"]={"schema":"campaign-capacity/v3","enrichment_storage":"payload","payload_bytes":1024,"batch":1000,"purge_batch":8000,"lease_ms":3600000,"request_id_retention_ms":3600000,"cycle_clock_step_s":7200,"cell":"s3--turso","physical_shards":2,
             "campaigns":2,"cycles":3,"items":1_000_000,"resident_backlog":1_000_000,
             "scheduled_windows":4,"stage_limits":[500,200,500],"faults":True,"includes_purge":True,
             "progress_interval_ms":1000,"completed_lifecycles_per_s":11000,"shards":shards}

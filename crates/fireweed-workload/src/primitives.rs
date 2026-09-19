@@ -149,7 +149,7 @@ async fn run_inner(cfg: Config, root: &Path) -> Result<serde_json::Value> {
         "payload_workload": if cfg.primitive_varied_payload { "campaign_varied" } else { "repeated_padding" },
         "initial_payload_bytes": reports.iter().map(|r| r["initial_payload_bytes"].as_u64().unwrap()).sum::<u64>(),
         "payload_replacement_bytes": reports.iter().map(|r| r["payload_replacement_bytes"].as_u64().unwrap()).sum::<u64>(),
-        "cell": if cfg.memory { "memory--memory" } else { "filesystem--turso" },
+        "cell": if cfg.memory { "memory--memory" } else { "s3--turso" },
         "settled_wall_s": started.elapsed().as_secs_f64(), "aggregate_phases": aggregate_phases, "shards": reports}),
     )
 }
