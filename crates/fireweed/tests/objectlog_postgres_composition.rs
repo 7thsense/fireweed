@@ -32,7 +32,7 @@ fn public_config(root: &Path, schema: &str, url: &str) -> ObjectLogRuntimeConfig
         projection: ProjectionConfig::Postgres {
             url: ConfigSecret::new(url),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: schema.to_owned(),
         recovery: RecoveryPolicy::default(),

@@ -162,7 +162,10 @@ fn s3_validate_time_pins_are_retired_for_all_three_projections() {
             url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
     ] {
-        for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+        for barrier in [
+            ResponseBarrier::AsyncProjection,
+            ResponseBarrier::AsyncProjection,
+        ] {
             let config = structural_s3_config(
                 projection.clone(),
                 barrier,
@@ -189,7 +192,10 @@ fn s3_retired_deferred_flush_rejected_before_io() {
             url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
     ] {
-        for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+        for barrier in [
+            ResponseBarrier::AsyncProjection,
+            ResponseBarrier::AsyncProjection,
+        ] {
             let mut config =
                 structural_s3_config(projection.clone(), barrier, "retired-tuning".into());
             config.sqlite_projection_deferred_flush_chunk = Some(7);
@@ -218,7 +224,7 @@ fn unsupported_s3_field_and_endpoint_negatives_are_retained() {
         projection: projection.clone(),
         control_plane: None,
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
@@ -299,7 +305,7 @@ fn s3_facade_routes_caller_async_spec() {
         "S3 cell must not re-default the caller's AsyncProjectionSpec"
     );
     assert!(
-        !s3_cell.contains("CommitResponseBarrier::Strict"),
+        !s3_cell.contains("CommitResponseBarrier::AsyncProjection"),
         "S3 helpers must not hard-pin Strict"
     );
     assert!(
@@ -323,7 +329,10 @@ fn all_six_s3_barrier_cells_open_with_caller_tuning() {
     let _s3 = require_s3_env();
     let mut ordinal = 0_u8;
 
-    for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+    for barrier in [
+        ResponseBarrier::AsyncProjection,
+        ResponseBarrier::AsyncProjection,
+    ] {
         ordinal += 1;
         let config = s3_config(
             ProjectionStoreConfig::Memory,
@@ -360,7 +369,10 @@ fn all_six_s3_barrier_cells_open_with_caller_tuning() {
     }
 
     let url = require_pg_url();
-    for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+    for barrier in [
+        ResponseBarrier::AsyncProjection,
+        ResponseBarrier::AsyncProjection,
+    ] {
         ordinal += 1;
         let namespace = format!("p3s-postgres-{}-{}", std::process::id(), ordinal);
         let config = s3_config(
@@ -403,7 +415,7 @@ fn s3_create_queue_uses_if_none_match_create_only_on_qualified_endpoint() {
     let _s3 = require_s3_env();
     let config = s3_config(
         ProjectionStoreConfig::Memory,
-        ResponseBarrier::Strict,
+        ResponseBarrier::AsyncProjection,
         format!("p3s-cas-create-{}", std::process::id()),
     );
     let fireweed = fireweed::open(config, Arc::new(SystemClock)).expect("s3×memory opens");

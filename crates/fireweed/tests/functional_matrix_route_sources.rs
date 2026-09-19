@@ -9,7 +9,7 @@
 //! (`memory|postgres|filesystem|s3` × `memory|turso|postgres`).
 //!
 //! Leaf families:
-//! - **strict** — 12 cells, `ResponseBarrier::Strict` validate dry-run
+//! - **strict** — 12 cells, `ResponseBarrier::AsyncProjection` validate dry-run
 //! - **object_log_async** — 6 filesystem/s3 cells, `AsyncProjection` validate dry-run
 //! - **async_invalid** — 6 non-object-log cells, pre-I/O rejection dry-run
 //! - **ac_txn_dry_run** — aggregate AC-TXN-5/5A cardinality dry-runs over the same axes
@@ -134,7 +134,13 @@ fn storage(
 fn dry_run_strict(log: &str, projection: &str) {
     let root = fixture_root(&format!("strict-{log}-{projection}"));
     let tag = format!("{log}_{projection}");
-    let cfg = storage(log, projection, ResponseBarrier::Strict, &root, &tag);
+    let cfg = storage(
+        log,
+        projection,
+        ResponseBarrier::AsyncProjection,
+        &root,
+        &tag,
+    );
     cfg.validate().unwrap_or_else(|error| {
         panic!(
             "strict dry-run {} validate failed: {error}",

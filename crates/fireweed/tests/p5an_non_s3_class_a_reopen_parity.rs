@@ -563,7 +563,7 @@ mod postgres_cells {
             projection: ProjectionConfig::Postgres {
                 url: ConfigSecret::new(url),
             },
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             segments: segments(),
             namespace: format!("p5an-fs-pg-{}", std::process::id()),
             recovery: RecoveryPolicy {

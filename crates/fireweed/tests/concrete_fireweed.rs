@@ -110,7 +110,7 @@ fn role_named_object_log_configuration_rejects_retired_sqlite() {
         projection: ProjectionConfig::Sqlite {
             path: "projection.sqlite".into(),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(1024, 5).unwrap(),
         namespace: "downstream".to_string(),
         recovery: RecoveryPolicy::default(),
@@ -163,7 +163,7 @@ async fn filesystem_turso_uses_the_same_concrete_handle_and_operation_families()
             },
             control_plane: None,
             authority: None,
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {

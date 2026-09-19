@@ -330,7 +330,7 @@ async fn p7n_filesystem_turso_lifecycle() {
             projection: ProjectionStoreConfig::Turso {
                 path: root.path().join("projection.db"),
             },
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             segments: segments(),
             namespace: "p7n-filesystem-sqlite".into(),
             recovery: fireweed::RecoveryPolicy::default(),
@@ -448,7 +448,7 @@ mod postgres_cells {
             projection: ProjectionStoreConfig::Postgres {
                 url: ConfigSecret::new(url),
             },
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             segments: segments(),
             namespace: format!("p7n-fs-pg-{}", std::process::id()),
             recovery: fireweed::RecoveryPolicy::default(),

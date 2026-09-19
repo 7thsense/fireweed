@@ -6,7 +6,7 @@ use fireweed::{
 };
 
 const ASYNC_REQUIRES_OBJECT_LOG: EngineError =
-    EngineError::Invalid("async-projection-requires-object-log");
+    EngineError::Invalid("async-projection-spec-requires-object-log");
 
 fn base(log: LogConfig, projection: ProjectionStoreConfig) -> StorageConfig {
     StorageConfig {
@@ -14,7 +14,7 @@ fn base(log: LogConfig, projection: ProjectionStoreConfig) -> StorageConfig {
         projection,
         control_plane: None,
         authority: None,
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(1024, 5).unwrap(),
@@ -66,27 +66,19 @@ fn response_barrier_shape_is_explicit_and_provider_neutral() {
     let strict = filesystem(ProjectionStoreConfig::Memory, &root);
     assert_eq!(strict.validate(), Ok(()));
 
-    let mut strict_with_spec = strict.clone();
-    strict_with_spec.async_projection = Some(AsyncProjectionSpec::default());
-    strict_with_spec.segments.target_bytes = 0;
-    assert_eq!(
-        strict_with_spec.validate(),
-        Err(EngineError::Invalid(
-            "async-projection-spec-requires-async-projection-barrier"
-        ))
-    );
+    let mut with_spec = strict.clone();
+    with_spec.async_projection = Some(AsyncProjectionSpec::default());
+    assert_eq!(with_spec.validate(), Ok(()));
 
     let mut asynchronous_without_spec = strict;
     asynchronous_without_spec.response_barrier = ResponseBarrier::AsyncProjection;
-    assert_eq!(
-        asynchronous_without_spec.validate(),
-        Err(EngineError::Invalid("async-projection-spec-required"))
-    );
+    asynchronous_without_spec.async_projection = None;
+    assert_eq!(asynchronous_without_spec.validate(), Ok(()));
 }
 
 #[test]
 fn each_async_projection_bound_is_validated_before_tuple_coherence() {
-    let root = PathBuf::new();
+    let root = PathBuf::from("/p3b-bound-validation-never-opened");
     let baseline = AsyncProjectionSpec::default();
     let cases = [
         (
@@ -127,8 +119,7 @@ fn each_async_projection_bound_is_validated_before_tuple_coherence() {
     ];
 
     for (spec, reason) in cases {
-        let mut config = base(LogConfig::Memory, ProjectionStoreConfig::Memory);
-        config.response_barrier = ResponseBarrier::AsyncProjection;
+        let mut config = filesystem(ProjectionStoreConfig::Memory, &root);
         config.async_projection = Some(spec);
         assert_eq!(config.validate(), Err(EngineError::Invalid(reason)));
     }
@@ -166,7 +157,10 @@ fn retired_sqlite_deferred_flush_tuning_is_rejected_before_io() {
         turso_projection("projection.db"),
         postgres_projection(),
     ] {
-        for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+        for barrier in [
+            ResponseBarrier::AsyncProjection,
+            ResponseBarrier::AsyncProjection,
+        ] {
             for chunk in [0, 17] {
                 let mut config = filesystem(projection.clone(), &root);
                 config.response_barrier = barrier;

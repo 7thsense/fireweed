@@ -75,7 +75,7 @@ fn objectlog_storage(
         projection,
         control_plane: None,
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(262_144, 20).unwrap(),
@@ -145,15 +145,6 @@ async fn filesystem_memory_public_interface() {
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 #[tokio::test]
-async fn filesystem_turso_strict_public_interface() {
-    assert_cell("filesystem--turso--strict", true, true, |root| {
-        filesystem_turso(root, ResponseBarrier::Strict, "filesystem-turso-strict")
-    })
-    .await;
-}
-
-#[cfg(all(feature = "objectlog", feature = "turso"))]
-#[tokio::test]
 async fn filesystem_turso_async_public_interface() {
     assert_cell("filesystem--turso--async", true, true, |root| {
         filesystem_turso(
@@ -171,7 +162,7 @@ async fn filesystem_turso_projection_control_rebuilds_from_log() {
     let root = FixtureRoot::new("filesystem--turso--rebuild");
     let fireweed = filesystem_turso(
         root.path(),
-        ResponseBarrier::Strict,
+        ResponseBarrier::AsyncProjection,
         "filesystem-turso-rebuild",
     );
     let definition = fireweed::QueueDefinition {

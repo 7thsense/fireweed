@@ -1038,7 +1038,7 @@ async fn filesystem_postgres_strict_public_interface() {
         ProjectionConfig::Postgres {
             url: ConfigSecret::new(postgres_url.clone()),
         },
-        ResponseBarrier::Strict,
+        ResponseBarrier::AsyncProjection,
         namespace,
     );
     let fireweed = fireweed::open_objectlog_postgres_async(runtime.clone(), Arc::new(SystemClock))
@@ -1077,7 +1077,7 @@ fn filesystem_postgres_sync_constructor_public_interface() {
         ProjectionConfig::Postgres {
             url: ConfigSecret::new(postgres_url.clone()),
         },
-        ResponseBarrier::Strict,
+        ResponseBarrier::AsyncProjection,
         namespace,
     );
     let open = || {
@@ -1127,7 +1127,7 @@ async fn s3_postgres_strict_public_interface() {
         ProjectionConfig::Postgres {
             url: ConfigSecret::new(postgres_url.clone()),
         },
-        ResponseBarrier::Strict,
+        ResponseBarrier::AsyncProjection,
         namespace,
     );
     let fireweed = fireweed::open_objectlog_postgres_async(runtime.clone(), Arc::new(SystemClock))
@@ -1206,7 +1206,7 @@ async fn run_s3_turso(cell: &str, barrier: ResponseBarrier) {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires live S3; P10 executes the full external matrix"]
 async fn s3_turso_strict_public_interface() {
-    run_s3_turso("s3--turso--strict", ResponseBarrier::Strict).await;
+    run_s3_turso("s3--turso--strict", ResponseBarrier::AsyncProjection).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

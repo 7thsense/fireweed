@@ -795,18 +795,12 @@ async fn maybe_spawn_embedded_broker(
     }
 }
 
-/// Provider-neutral commit response barrier for the server composition root (P3v).
+/// Provider-neutral commit response barrier for the server composition root.
 ///
-/// Orthogonal to log and projection selectors. Production open paths map this enum directly into the
-/// concrete P3d filesystem helpers; env/help syntax for the same field is owned by P12a.
-///
-/// Dev/fingerprint tests may compare behavior to the facade's public response-barrier enum
-/// semantics. Production code never converts through the facade type.
+/// The product barrier is log-ack; serving apply may lag. There is no Strict
+/// serving snapshot on this surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrierSpec {
-    /// Atomic response-after-apply: success returns only after log append and projection apply complete.
-    Strict,
-    /// Eventual-apply visibility: success may return after hot-projection update with deferred durable apply.
     AsyncProjection,
 }
 
@@ -841,7 +835,7 @@ impl BackendSpec {
             log: LogSpec::Memory,
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         }
@@ -1108,61 +1102,43 @@ impl Config {
     /// All failures are typed [`EngineError::Invalid`] before any I/O — never `ConfigError`, ignore, or
     /// silent Strict coercion.
     fn validate_response_barrier(&self) -> EngineResult<()> {
-        // 1. Option ↔ barrier coherence (before any cell applicability).
-        match (self.backend.response_barrier, self.backend.async_projection) {
-            (ResponseBarrierSpec::Strict, None) => {}
-            (ResponseBarrierSpec::Strict, Some(_)) => {
+        let object_log = matches!(
+            &self.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
+                | LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+        );
+        if self.backend.async_projection.is_some() && !object_log {
+            return Err(EngineError::Invalid(
+                "async-projection-spec-requires-object-log",
+            ));
+        }
+        if let Some(spec) = self.backend.async_projection {
+            if spec.apply_lag_max_commands == 0 {
                 return Err(EngineError::Invalid(
-                    "async-projection-spec-requires-async-projection-barrier",
+                    "async projection bound apply_lag_max_commands must be > 0",
                 ));
             }
-            (ResponseBarrierSpec::AsyncProjection, None) => {
-                return Err(EngineError::Invalid("async-projection-spec-required"));
+            if spec.apply_debt_max_bytes == 0 {
+                return Err(EngineError::Invalid(
+                    "async projection bound apply_debt_max_bytes must be > 0",
+                ));
             }
-            (ResponseBarrierSpec::AsyncProjection, Some(spec)) => {
-                if spec.apply_lag_max_commands == 0 {
-                    return Err(EngineError::Invalid(
-                        "async projection bound apply_lag_max_commands must be > 0",
-                    ));
-                }
-                if spec.apply_debt_max_bytes == 0 {
-                    return Err(EngineError::Invalid(
-                        "async projection bound apply_debt_max_bytes must be > 0",
-                    ));
-                }
-                if spec.apply_queue_depth_max == 0 {
-                    return Err(EngineError::Invalid(
-                        "async projection bound apply_queue_depth_max must be > 0",
-                    ));
-                }
-                if spec.oldest_unapplied_max_ms == 0 {
-                    return Err(EngineError::Invalid(
-                        "async projection bound oldest_unapplied_max_ms must be > 0",
-                    ));
-                }
-                if spec.apply_poison_retry_threshold == 0 {
-                    return Err(EngineError::Invalid(
-                        "async projection bound apply_poison_retry_threshold must be > 0",
-                    ));
-                }
+            if spec.apply_queue_depth_max == 0 {
+                return Err(EngineError::Invalid(
+                    "async projection bound apply_queue_depth_max must be > 0",
+                ));
+            }
+            if spec.oldest_unapplied_max_ms == 0 {
+                return Err(EngineError::Invalid(
+                    "async projection bound oldest_unapplied_max_ms must be > 0",
+                ));
+            }
+            if spec.apply_poison_retry_threshold == 0 {
+                return Err(EngineError::Invalid(
+                    "async projection bound apply_poison_retry_threshold must be > 0",
+                ));
             }
         }
-
-        // 3. Cell applicability for AsyncProjection: object-log only (filesystem and S3).
-        if self.backend.response_barrier == ResponseBarrierSpec::AsyncProjection {
-            match &self.backend.log {
-                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
-                | LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }) => {}
-                LogSpec::Memory | LogSpec::Sqlite { .. } => {
-                    return Err(EngineError::Invalid("async-projection-requires-object-log"));
-                }
-                #[cfg(feature = "postgres")]
-                LogSpec::Postgres { .. } => {
-                    return Err(EngineError::Invalid("async-projection-requires-object-log"));
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -2854,23 +2830,14 @@ async fn open_objectlog_filesystem_memory_backend(
     async_projection: Option<AsyncProjectionSpec>,
 ) -> EngineResult<fireweed_objectlog::AsyncObjectLogMemoryBackend> {
     let flush = objectlog_flush_from_segment(&segment_config);
-    match response_barrier {
-        ResponseBarrierSpec::Strict => {
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::open_local_with_node_id(
-                root, flush, node_id,
-            )
-            .await
-        }
-        ResponseBarrierSpec::AsyncProjection => {
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::open_local_with_async_projection(
-                root,
-                flush,
-                node_id,
-                async_projection.expect("async projection validated before open"),
-            )
-            .await
-        }
-    }
+    let _ = response_barrier;
+    fireweed_objectlog::AsyncObjectLogMemoryBackend::open_local_with_async_projection(
+        root,
+        flush,
+        node_id,
+        async_projection.unwrap_or_default(),
+    )
+    .await
 }
 
 /// Canonical S3 object-log × in-memory projection open (P3d / P8cs / P3vs owner surface).
@@ -2912,19 +2879,13 @@ async fn open_objectlog_s3_memory_backend(
         flush,
     )
     .await?;
-    match response_barrier {
-        ResponseBarrierSpec::Strict => {
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, node_id).await
-        }
-        ResponseBarrierSpec::AsyncProjection => {
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
-                log,
-                node_id,
-                async_projection.expect("async projection validated before open"),
-            )
-            .await
-        }
-    }
+    let _ = response_barrier;
+    fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
+        log,
+        node_id,
+        async_projection.unwrap_or_default(),
+    )
+    .await
 }
 
 /// Canonical filesystem object-log × Turso projection open (TD-010 / LogEngine composition).
@@ -2998,23 +2959,14 @@ async fn open_objectlog_filesystem_postgres_backend(
     let log = fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
     let projection =
         fireweed_postgres::AsyncPostgresRelationalProjection::connect(projection_url).await?;
-    let backend = match response_barrier {
-        ResponseBarrierSpec::Strict => {
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
-                log, projection, node_id,
-            )
-            .await?
-        }
-        ResponseBarrierSpec::AsyncProjection => {
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
-                log,
-                projection,
-                node_id,
-                async_projection.expect("async projection validated before open"),
-            )
-            .await?
-        }
-    };
+    let _ = response_barrier;
+    let backend = fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
+        log,
+        projection,
+        node_id,
+        async_projection.unwrap_or_default(),
+    )
+    .await?;
     Ok(Arc::new(backend))
 }
 
@@ -3058,23 +3010,14 @@ async fn open_objectlog_s3_postgres_backend(
     .await?;
     let projection =
         fireweed_postgres::AsyncPostgresRelationalProjection::connect(projection_url).await?;
-    let backend = match response_barrier {
-        ResponseBarrierSpec::Strict => {
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
-                log, projection, node_id,
-            )
-            .await?
-        }
-        ResponseBarrierSpec::AsyncProjection => {
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
-                log,
-                projection,
-                node_id,
-                async_projection.expect("async projection validated before open"),
-            )
-            .await?
-        }
-    };
+    let _ = response_barrier;
+    let backend = fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
+        log,
+        projection,
+        node_id,
+        async_projection.unwrap_or_default(),
+    )
+    .await?;
     Ok(Arc::new(backend))
 }
 
@@ -3636,7 +3579,7 @@ mod byte_admission_wiring_tests {
         let response_barrier = if async_projection.is_some() {
             ResponseBarrierSpec::AsyncProjection
         } else {
-            ResponseBarrierSpec::Strict
+            ResponseBarrierSpec::AsyncProjection
         };
         Config::new(
             BackendSpec {
@@ -3795,7 +3738,7 @@ mod byte_admission_wiring_tests {
         let spec = AsyncProjectionSpec::new(13, 65_537, 7, 12_345, 4).expect("bounds");
 
         for barrier in [
-            ResponseBarrierSpec::Strict,
+            ResponseBarrierSpec::AsyncProjection,
             ResponseBarrierSpec::AsyncProjection,
         ] {
             let async_spec = (barrier == ResponseBarrierSpec::AsyncProjection).then_some(spec);
@@ -3814,7 +3757,7 @@ mod byte_admission_wiring_tests {
         #[cfg(feature = "postgres")]
         if let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") {
             for barrier in [
-                ResponseBarrierSpec::Strict,
+                ResponseBarrierSpec::AsyncProjection,
                 ResponseBarrierSpec::AsyncProjection,
             ] {
                 let async_spec = (barrier == ResponseBarrierSpec::AsyncProjection).then_some(spec);
@@ -3840,29 +3783,21 @@ mod byte_admission_wiring_tests {
         let root = std::env::temp_dir().join("fireweed-p3v-never-opened");
         assert!(!root.exists() || root.exists()); // path may already exist from other tests
 
-        // Strict + Some is rejected before any cell look-up.
-        let mut strict_with_spec = startup_validation_config(
+        let memory_with_spec = startup_validation_config(
             LogSpec::Memory,
             ProjectionSpec::InMemory,
             Some(AsyncProjectionSpec::default()),
         );
-        // Force Strict despite helper's coherent pairing so the error is exercised directly.
-        strict_with_spec.backend.response_barrier = ResponseBarrierSpec::Strict;
         assert_eq!(
-            strict_with_spec.validate_for_start(),
+            memory_with_spec.validate_for_start(),
             Err(EngineError::Invalid(
-                "async-projection-spec-requires-async-projection-barrier"
+                "async-projection-spec-requires-object-log"
             ))
         );
 
-        // AsyncProjection + None.
-        let mut async_without_spec =
+        let memory_without_spec =
             startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
-        async_without_spec.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
-        assert_eq!(
-            async_without_spec.validate_for_start(),
-            Err(EngineError::Invalid("async-projection-spec-required"))
-        );
+        assert_eq!(memory_without_spec.validate_for_start(), Ok(()));
 
         // Each zero bound is an exact typed Invalid before cell applicability.
         let baseline = AsyncProjectionSpec::default();
@@ -4045,7 +3980,7 @@ mod byte_admission_wiring_tests {
                     control_plane: None,
                     authority: matches!(f_log, LogConfig::Filesystem { .. } | LogConfig::S3 { .. })
                         .then_some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
-                    response_barrier: ResponseBarrier::Strict,
+                    response_barrier: ResponseBarrier::AsyncProjection,
                     async_projection: None,
                     sqlite_projection_deferred_flush_chunk: None,
                     segments: FacadeSegments::new(262_144, 20).expect("valid"),
@@ -4262,7 +4197,7 @@ mod byte_admission_wiring_tests {
                 )),
                 projection: ProjectionSpec::InMemory,
                 control_plane: ControlPlaneSpec::InProcess,
-                response_barrier: ResponseBarrierSpec::Strict,
+                response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
                 sqlite_projection_deferred_flush_chunk: None,
             },
@@ -4291,7 +4226,7 @@ mod byte_admission_wiring_tests {
                     log: LogSpec::ObjectLog(log),
                     projection: ProjectionSpec::InMemory,
                     control_plane: ControlPlaneSpec::InProcess,
-                    response_barrier: ResponseBarrierSpec::Strict,
+                    response_barrier: ResponseBarrierSpec::AsyncProjection,
                     async_projection: None,
                     sqlite_projection_deferred_flush_chunk: None,
                 },
@@ -4536,7 +4471,7 @@ mod byte_admission_wiring_tests {
             #[cfg(not(feature = "postgres"))]
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         };
@@ -4601,7 +4536,7 @@ mod byte_admission_wiring_tests {
                 &scoped,
                 segment_config,
                 0,
-                ResponseBarrierSpec::Strict,
+                ResponseBarrierSpec::AsyncProjection,
                 None,
             ))
             .expect("construct filesystem×postgres");
@@ -4645,7 +4580,7 @@ mod byte_admission_wiring_tests {
             #[cfg(not(feature = "postgres"))]
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         };
@@ -4731,7 +4666,7 @@ mod byte_admission_wiring_tests {
 
         let mut opened = 0_usize;
         for barrier in [
-            ResponseBarrierSpec::Strict,
+            ResponseBarrierSpec::AsyncProjection,
             ResponseBarrierSpec::AsyncProjection,
         ] {
             let async_spec = (barrier == ResponseBarrierSpec::AsyncProjection).then_some(spec);
@@ -5007,7 +4942,7 @@ mod class_b_memory_log_tests {
             projection,
             control_plane: None,
             authority: None,
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
             segments: segments(),

@@ -604,21 +604,9 @@ fn parse_backend(
     }
 
     let replicas = replica_count(env)?;
-    // Barrier-aware Option coherence (P3v). P12a later maps explicit env/help barrier syntax into
-    // `response_barrier`; until then HybridAsync selection is the sole env path that selects
-    // AsyncProjection, and Strict paths keep async_projection / deferred-flush unset unless the
-    // cell permits deferred-flush defaults for object-log × SQLite-family projections.
-    let response_barrier = match &projection_spec {
-        ProjectionSpec::HybridAsync { .. } => ResponseBarrierSpec::AsyncProjection,
-        _ => ResponseBarrierSpec::Strict,
-    };
-    // Always parse hybrid-async bounds so zero-threshold ConfigError fingerprints stay at from_env;
-    // only attach Some under AsyncProjection (Strict+Some is a typed EngineError at start).
+    let response_barrier = ResponseBarrierSpec::AsyncProjection;
     let thresholds = hybrid_async_thresholds(env)?;
-    let async_projection = match response_barrier {
-        ResponseBarrierSpec::AsyncProjection => Some(thresholds),
-        ResponseBarrierSpec::Strict => None,
-    };
+    let async_projection = Some(thresholds);
     let sqlite_projection_deferred_flush_chunk = None;
     Ok(BackendSpec {
         log: log_spec,
@@ -1609,8 +1597,11 @@ mod tests {
         // Default Strict composition leaves async unset (P3v Option/barrier coherence). P12a later
         // maps explicit barrier syntax; public env cannot select HybridAsync today.
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
-        assert_eq!(config.backend.response_barrier, ResponseBarrierSpec::Strict);
-        assert_eq!(config.backend.async_projection, None);
+        assert_eq!(
+            config.backend.response_barrier,
+            ResponseBarrierSpec::AsyncProjection
+        );
+        assert!(config.backend.async_projection.is_some());
         // Default projection is turso → deferred-flush is not cell-applicable.
         assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
         assert_eq!(config.validate_for_start(), Ok(()));
@@ -1641,10 +1632,13 @@ mod tests {
             ("FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK", "17"),
         ]))
         .expect("valid filesystem×sqlite env");
-        assert_eq!(config.backend.response_barrier, ResponseBarrierSpec::Strict);
         assert_eq!(
-            config.backend.async_projection, None,
-            "Strict env must not attach async_projection (P3v coherence)"
+            config.backend.response_barrier,
+            ResponseBarrierSpec::AsyncProjection
+        );
+        assert!(
+            config.backend.async_projection.is_some(),
+            "object-log env attaches async projection bounds"
         );
         assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
         assert_eq!(config.validate_for_start(), Ok(()));

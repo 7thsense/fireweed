@@ -86,7 +86,7 @@ fn composed_storage_config(inputs: &mut [String]) -> ComposedStorageConfig {
         projection: ComposedProjectionConfig::Postgres {
             url: SecretValue::new(std::mem::take(&mut inputs[5])),
         },
-        response_barrier: CommitResponseBarrier::Strict,
+        response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(8 * 1024 * 1024, 20).unwrap(),

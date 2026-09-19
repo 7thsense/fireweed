@@ -151,7 +151,7 @@ async fn postgres_turso_combo_runs_under_tokio() {
             path: sqlite_path.clone(),
         },
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     };
@@ -188,7 +188,7 @@ async fn postgres_postgres_combo_runs_under_tokio() {
         },
         projection: ProjectionSpec::Postgres { url: atomic_url },
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     };

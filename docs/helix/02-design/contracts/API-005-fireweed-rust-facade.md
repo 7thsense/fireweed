@@ -150,7 +150,8 @@ Correctness and progress requirements for the facade execution path:
    (`side_record`, `live_item`, `metrics`) may wait projection coverage.
    Ordinary item `claim` must not. Inspect `commit_capabilities`
    (`DurabilityClass::EventualApply` on native Turso) rather than
-   treating `ResponseBarrier::Strict` as a serving snapshot. Batching and
+   treating construction as a serving snapshot. `ResponseBarrier` has a
+   single value, [`ResponseBarrier::AsyncProjection`]. Batching and
    generation packing remain the fast path. Fire-and-forget mutate is
    forbidden. The durable log remains the object-log abstraction
    (`LogConfig::S3` / filesystem object-log), not a raw S3 SDK write.

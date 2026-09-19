@@ -68,7 +68,7 @@ fn config(root: &Path, schema: &str, url: &str) -> ComposedStorageConfig {
         projection: ComposedProjectionConfig::Postgres {
             url: SecretValue::new(url),
         },
-        response_barrier: CommitResponseBarrier::Strict,
+        response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
@@ -86,7 +86,7 @@ fn public_config(root: &Path, schema: &str, url: &str) -> ObjectLogRuntimeConfig
         projection: ProjectionConfig::Postgres {
             url: ConfigSecret::new(url),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: schema.to_owned(),
         recovery: RecoveryPolicy::default(),
@@ -681,7 +681,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         projection: ProjectionConfig::Postgres {
             url: ConfigSecret::new(pg_url.clone()),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: namespace.clone(),
         recovery: RecoveryPolicy::default(),

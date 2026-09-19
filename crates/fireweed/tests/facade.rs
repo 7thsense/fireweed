@@ -330,7 +330,7 @@ async fn objectlog_turso_strict_upsert_claim_commit_transition() {
         projection: ProjectionConfig::Sqlite {
             path: root.join("projection.sqlite"),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(262_144, 20).unwrap(),
         namespace: "upsert-claim-commit".into(),
         recovery: RecoveryPolicy {

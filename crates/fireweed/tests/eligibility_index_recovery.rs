@@ -72,7 +72,7 @@ fn config(root: &std::path::Path) -> StorageConfig {
         },
         control_plane: None,
         authority: None,
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig {

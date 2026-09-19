@@ -294,7 +294,7 @@ fn postgres_public_constructors_and_composed_reopen_idempotently() {
             projection: ComposedProjectionConfig::Postgres {
                 url: fireweed::SecretValue::new(url),
             },
-            response_barrier: CommitResponseBarrier::Strict,
+            response_barrier: CommitResponseBarrier::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentSettings::new(64 * 1024, 5).unwrap(),

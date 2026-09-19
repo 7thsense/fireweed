@@ -87,7 +87,10 @@ fn all_six_filesystem_barrier_cells_open_with_caller_tuning() {
     let fixture = FixtureRoot::new();
     let mut ordinal = 0_u8;
 
-    for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+    for barrier in [
+        ResponseBarrier::AsyncProjection,
+        ResponseBarrier::AsyncProjection,
+    ] {
         ordinal += 1;
         let config = filesystem_config(
             fixture.path().join(format!("memory-log-{ordinal}")),
@@ -125,7 +128,10 @@ fn all_six_filesystem_barrier_cells_open_with_caller_tuning() {
 
     let url = std::env::var("FIREWEED_PG_TEST_URL")
         .expect("FIREWEED_PG_TEST_URL is required for all six filesystem barrier cells");
-    for barrier in [ResponseBarrier::Strict, ResponseBarrier::AsyncProjection] {
+    for barrier in [
+        ResponseBarrier::AsyncProjection,
+        ResponseBarrier::AsyncProjection,
+    ] {
         ordinal += 1;
         let namespace = format!("p3b-postgres-{}-{}", std::process::id(), ordinal);
         let config = filesystem_config(
@@ -206,25 +212,17 @@ fn exact_invalid_neighbors_and_facade_routing_are_guarded() {
         "p3b-missing-spec".to_owned(),
     );
     missing_spec.async_projection = None;
-    assert_eq!(
-        missing_spec.validate(),
-        Err(EngineError::Invalid("async-projection-spec-required"))
-    );
+    assert_eq!(missing_spec.validate(), Ok(()));
 
-    let mut strict_with_spec = missing_spec;
-    strict_with_spec.response_barrier = ResponseBarrier::Strict;
-    strict_with_spec.async_projection = Some(non_default_spec());
-    assert_eq!(
-        strict_with_spec.validate(),
-        Err(EngineError::Invalid(
-            "async-projection-spec-requires-async-projection-barrier"
-        ))
-    );
+    let mut with_spec = missing_spec.clone();
+    with_spec.response_barrier = ResponseBarrier::AsyncProjection;
+    with_spec.async_projection = Some(non_default_spec());
+    assert_eq!(with_spec.validate(), Ok(()));
 
     let mut wrong_chunk = filesystem_config(
         fixture.path().join("wrong-chunk"),
         ProjectionStoreConfig::Memory,
-        ResponseBarrier::Strict,
+        ResponseBarrier::AsyncProjection,
         "p3b-wrong-chunk".to_owned(),
     );
     wrong_chunk.sqlite_projection_deferred_flush_chunk = Some(7);

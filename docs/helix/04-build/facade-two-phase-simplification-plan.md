@@ -1,10 +1,12 @@
 # Plan — Two-phase facade (acks + packed batches, not snapshots)
 
-**Status:** overlay proofs landed on this tree (filesystem × Turso
-AsyncProjection). Mutate acks the object-log; same-process `claim` fills
-unpublished continuation items without waiting Turso apply. Public reads
-still wait coverage. Matrix collapse / MinIO / remaining serving-wait cut
-stay in the peer worktree.
+**Status:** public Strict/sync serving barrier removed. The only
+`ResponseBarrier` value is `AsyncProjection`. Object-log opens always use
+the async apply coordinator (default spec when unset). Mutate still acks
+the object-log; same-process `claim` uses unpublished overlay. Public
+reads wait coverage. Planning may wait previous apply so leases/unique
+keys are visible; that is not a public Strict snapshot. Matrix collapse /
+MinIO stay in the peer worktree.
 
 **Peer worktree (do not merge blindly):**
 `/home/erik/.herdr/worktrees/fireweed/worktree-clear-stone-f732`

@@ -583,7 +583,7 @@ async fn objectlog_turso_reopen_replays_without_selector_evaluation() {
         projection: ProjectionStoreConfig::Turso {
             path: root.join("projection.db"),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(262_144, 20).unwrap(),
         namespace: "mutation-objectlog-turso".into(),
         recovery: RecoveryPolicy {

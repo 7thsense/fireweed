@@ -1040,7 +1040,7 @@ async fn scheduled_gate_profiles() -> BTreeMap<String, bool> {
     for (profile, barrier) in [
         (
             "filesystem--turso--strict",
-            fireweed::ResponseBarrier::Strict,
+            fireweed::ResponseBarrier::AsyncProjection,
         ),
         (
             "filesystem--turso--async",
