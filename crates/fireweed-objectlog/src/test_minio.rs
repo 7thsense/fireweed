@@ -2,7 +2,9 @@
 //!
 //! Reuses `FIREWEED_S3_TEST_*` when those variables already point at a live
 //! endpoint. Otherwise starts the digest-pinned MinIO binary (or `minio` on
-//! PATH) on loopback and creates a test bucket.
+//! PATH) on loopback and creates a test bucket. Object data is kept off tmpfs
+//! (`FIREWEED_MINIO_DATA`, else `/var/tmp/fireweed-test-minio-data` when `/tmp`
+//! is ram-backed) so capacity logs do not fill RAM.
 
 use crate::S3CreateOnlyPut;
 use fireweed_engine::EngineResult;
@@ -97,13 +99,21 @@ fn spawn_local_minio() -> S3TestEnv {
         access_key: ACCESS_KEY.to_owned(),
         secret_key: SECRET_KEY.to_owned(),
     };
+    let data = minio_data_dir();
     if endpoint_live(&endpoint) {
-        ensure_bucket_blocking(&env).expect("create bucket on reused MinIO");
-        return env;
+        if existing_test_minio_on_tmpfs() && !path_on_tmpfs(&data) {
+            stop_tmpfs_test_minio();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while endpoint_live(&endpoint) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(50));
+            }
+        } else {
+            ensure_bucket_blocking(&env).expect("create bucket on reused MinIO");
+            return env;
+        }
     }
 
     let bin = find_minio_binary();
-    let data = minio_data_dir();
     std::fs::create_dir_all(&data).expect("minio data dir");
 
     let mut command = Command::new(&bin);
@@ -146,7 +156,100 @@ fn find_minio_binary() -> PathBuf {
 }
 
 fn minio_data_dir() -> PathBuf {
-    std::env::temp_dir().join("fireweed-test-minio-data")
+    if let Ok(path) = std::env::var("FIREWEED_MINIO_DATA") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    let tmp = std::env::temp_dir().join("fireweed-test-minio-data");
+    if path_on_tmpfs(&tmp) {
+        return PathBuf::from("/var/tmp/fireweed-test-minio-data");
+    }
+    tmp
+}
+
+fn path_on_tmpfs(path: &Path) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut best: Option<(usize, bool)> = None;
+    for line in mounts.lines() {
+        let mut parts = line.split_whitespace();
+        let _source = parts.next();
+        let Some(target) = parts.next() else {
+            continue;
+        };
+        let Some(fstype) = parts.next() else {
+            continue;
+        };
+        let target_path = Path::new(target);
+        if canonical == target_path || canonical.starts_with(target_path) {
+            let len = target.len();
+            if best.map(|(prev, _)| len >= prev).unwrap_or(true) {
+                best = Some((len, fstype == "tmpfs" || fstype == "ramfs"));
+            }
+        }
+    }
+    best.map(|(_, tmpfs)| tmpfs).unwrap_or(false)
+}
+
+fn existing_test_minio_on_tmpfs() -> bool {
+    test_minio_pids_with_data()
+        .into_iter()
+        .any(|(_, data)| path_on_tmpfs(&data))
+}
+
+fn test_minio_pids_with_data() -> Vec<(i32, PathBuf)> {
+    let Ok(proc) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in proc.flatten() {
+        let pid = match entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        {
+            Some(pid) => pid,
+            None => continue,
+        };
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&raw);
+        if !cmdline.contains("minio") || !cmdline.contains("fireweed-test-minio-data") {
+            continue;
+        }
+        let args: Vec<&str> = cmdline
+            .split('\0')
+            .filter(|part| !part.is_empty())
+            .collect();
+        let Some(server_at) = args.iter().position(|arg| *arg == "server") else {
+            continue;
+        };
+        let Some(data) = args.get(server_at + 1) else {
+            continue;
+        };
+        found.push((pid, PathBuf::from(data)));
+    }
+    found
+}
+
+fn stop_tmpfs_test_minio() {
+    for (pid, data) in test_minio_pids_with_data() {
+        if !path_on_tmpfs(&data) {
+            continue;
+        }
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+    if let Ok(mut child) = CHILD.lock() {
+        if let Some(mut owned) = child.take() {
+            let _ = owned.kill();
+            let _ = owned.wait();
+        }
+    }
 }
 
 fn ensure_bucket_blocking(env: &S3TestEnv) -> EngineResult<()> {
