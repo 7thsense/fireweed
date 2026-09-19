@@ -534,7 +534,7 @@ fn memory_turso_cfg(root: &Path) -> StorageConfig {
     };
     cfg.namespace = format!("p5-mem-turso-{}", std::process::id());
     cfg.segments = segments();
-    cfg.response_barrier = ResponseBarrier::Strict;
+    cfg.response_barrier = ResponseBarrier::AsyncProjection;
     cfg.recovery = RecoveryPolicy::default();
     cfg
 }
@@ -550,7 +550,7 @@ fn memory_postgres_cfg(url: String) -> StorageConfig {
         ORD.fetch_add(1, Ordering::Relaxed)
     );
     cfg.segments = segments();
-    cfg.response_barrier = ResponseBarrier::Strict;
+    cfg.response_barrier = ResponseBarrier::AsyncProjection;
     cfg.recovery = RecoveryPolicy::default();
     cfg
 }

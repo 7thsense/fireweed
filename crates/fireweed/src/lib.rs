@@ -731,11 +731,10 @@ impl fmt::Debug for ComposedProjectionConfig {
 }
 
 /// The acknowledgement barrier for composed object-log compositions.
+///
+/// The product barrier is log-ack plus unpublished overlay. Serving apply may lag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitResponseBarrier {
-    /// Success requires both the authoritative manifest and durable projection.
-    Strict,
-    /// Success requires the authoritative manifest and hot projection; durable projection apply may lag.
     AsyncProjection,
 }
 
@@ -873,19 +872,13 @@ pub enum ProjectionConfig {
 
 /// When a mutating operation may return success relative to log append and projection apply.
 ///
-/// # Object-log (LogEngine) cells
-///
-/// - [`ResponseBarrier::Strict`] waits for apply before **this mutating response**
-///   on compositions that can honor it. It is not a global Pending snapshot.
-/// - [`ResponseBarrier::AsyncProjection`] returns after the log ack. Turso apply
-///   may lag; same-process `claim` can still take unpublished continuation items.
-/// - Native Turso reports [`DurabilityClass::EventualApply`] for either setting.
-///   Inspect `commit_capabilities` rather than inferring serving visibility from
-///   this enum. Public reads (`side_record`, `live_item`, `metrics`) may wait
-///   coverage; ordinary item `claim` does not.
+/// The only public barrier is [`ResponseBarrier::AsyncProjection`]: mutate acks the
+/// log; Turso apply may lag; same-process `claim` can take unpublished continuation
+/// items. There is no Strict/sync serving snapshot. Inspect `commit_capabilities`
+/// for durability class. Public reads (`side_record`, `live_item`, `metrics`) may
+/// wait coverage; ordinary item `claim` does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrier {
-    Strict,
     AsyncProjection,
 }
 
@@ -1144,8 +1137,11 @@ pub struct StorageConfig {
     pub control_plane: Option<ControlPlaneConfig>,
     /// Object-log peers only ([`LogConfig::Filesystem`], [`LogConfig::S3`]); ignored for other logs.
     pub authority: Option<ObjectLogAuthority>,
+    /// Product barrier is always async log-ack. Kept so existing struct literals compile;
+    /// the only legal value is [`ResponseBarrier::AsyncProjection`].
     pub response_barrier: ResponseBarrier,
-    /// Required only when `response_barrier` is [`ResponseBarrier::AsyncProjection`].
+    /// Object-log apply bounds. `None` uses [`AsyncProjectionSpec::default`] on
+    /// filesystem/S3 logs. Must be `None` on memory/postgres logs.
     pub async_projection: Option<AsyncProjectionSpec>,
     /// Retired compatibility field. Any supplied value is rejected before storage I/O.
     pub sqlite_projection_deferred_flush_chunk: Option<usize>,
@@ -1166,7 +1162,7 @@ impl StorageConfig {
             projection: ProjectionStoreConfig::Memory,
             control_plane: None,
             authority: None,
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {
@@ -1253,7 +1249,17 @@ impl StorageConfig {
             ));
         }
 
-        validate_response_barrier(self.response_barrier, self.async_projection)?;
+        if self.async_projection.is_some()
+            && !matches!(
+                &self.log,
+                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+            )
+        {
+            return Err(EngineError::Invalid(
+                "async-projection-spec-requires-object-log",
+            ));
+        }
+        validate_async_projection_spec(self.async_projection)?;
 
         if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
             return Err(EngineError::Invalid(
@@ -1276,23 +1282,12 @@ impl StorageConfig {
     }
 }
 
-fn validate_response_barrier(
-    response_barrier: ResponseBarrier,
+fn validate_async_projection_spec(
     async_projection: Option<AsyncProjectionSpec>,
 ) -> EngineResult<()> {
-    let spec = match (response_barrier, async_projection) {
-        (ResponseBarrier::Strict, None) => return Ok(()),
-        (ResponseBarrier::Strict, Some(_)) => {
-            return Err(EngineError::Invalid(
-                "async-projection-spec-requires-async-projection-barrier",
-            ));
-        }
-        (ResponseBarrier::AsyncProjection, None) => {
-            return Err(EngineError::Invalid("async-projection-spec-required"));
-        }
-        (ResponseBarrier::AsyncProjection, Some(spec)) => spec,
+    let Some(spec) = async_projection else {
+        return Ok(());
     };
-
     if spec.apply_lag_max_commands == 0 {
         return Err(EngineError::Invalid(
             "async projection bound apply_lag_max_commands must be > 0",
@@ -1475,7 +1470,7 @@ mod storage_config_matrix_tests {
             projection,
             control_plane: None,
             authority: None,
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
             segments: segments(),
@@ -1896,7 +1891,7 @@ mod storage_config_matrix_tests {
             projection: ProjectionConfig::Sqlite {
                 path: PathBuf::from("/data/proj.db"),
             },
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             segments: segments(),
             namespace: "ol".to_owned(),
             recovery: RecoveryPolicy::default(),
@@ -2516,13 +2511,7 @@ impl ComposedStorageConfig {
             }
             _ => {}
         }
-        validate_response_barrier(
-            match self.response_barrier {
-                CommitResponseBarrier::Strict => ResponseBarrier::Strict,
-                CommitResponseBarrier::AsyncProjection => ResponseBarrier::AsyncProjection,
-            },
-            self.async_projection,
-        )?;
+        validate_async_projection_spec(self.async_projection)?;
         if self.sqlite_projection_deferred_flush_chunk.is_some() {
             return Err(EngineError::Invalid(
                 "sqlite storage is retired; use filesystem log and turso projection",
@@ -5619,12 +5608,10 @@ fn open_filesystem_log_cell(
                             max_latency_ms: config.segments.max_latency_ms,
                         },
                     )?;
-                    let async_spec = match response_barrier {
-                        ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => config.async_projection,
-                    };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
-                        log, path, async_spec,
+                        log,
+                        path,
+                        Some(config.async_projection.unwrap_or_default()),
                     )?);
                     // Product ports are natively async (LogEngine + Turso); no process-wide BLB.
                     Ok(finish_objectlog_turso(config, clock, backend))
@@ -5775,13 +5762,10 @@ fn open_s3_log_cell(
                             max_latency_ms: config.segments.max_latency_ms,
                         },
                     )?;
-                    // Forward the caller's AsyncProjectionSpec; never re-default at the S3 boundary.
-                    let async_spec = match response_barrier {
-                        ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => config.async_projection,
-                    };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
-                        log, path, async_spec,
+                        log,
+                        path,
+                        Some(config.async_projection.unwrap_or_default()),
                     )?);
                     Ok(finish_objectlog_turso(config, clock, backend))
                 }
@@ -5849,7 +5833,7 @@ fn composed_storage_config(
     object_log: ObjectLogConfig,
     authority: ObjectLogAuthority,
     projection: ComposedProjectionConfig,
-    response_barrier: ResponseBarrier,
+    _response_barrier: ResponseBarrier,
     async_projection: Option<AsyncProjectionSpec>,
     sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
@@ -5865,10 +5849,7 @@ fn composed_storage_config(
         object_log,
         object_log_authority,
         projection,
-        response_barrier: match response_barrier {
-            ResponseBarrier::Strict => CommitResponseBarrier::Strict,
-            ResponseBarrier::AsyncProjection => CommitResponseBarrier::AsyncProjection,
-        },
+        response_barrier: CommitResponseBarrier::AsyncProjection,
         async_projection,
         sqlite_projection_deferred_flush_chunk,
         segments: SegmentSettings {
@@ -5948,7 +5929,7 @@ fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3C
 fn open_objectlog_memory_projection(
     root: PathBuf,
     authority: ObjectLogAuthority,
-    response_barrier: ResponseBarrier,
+    _response_barrier: ResponseBarrier,
     async_projection: Option<AsyncProjectionSpec>,
     segments: SegmentConfig,
     namespace: String,
@@ -5964,18 +5945,13 @@ fn open_objectlog_memory_projection(
             max_latency_ms: segments.max_latency_ms,
         },
     )?;
-    let backend = match response_barrier {
-        ResponseBarrier::Strict => fireweed_objectlog::block_on_objectlog(
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
-        )?,
-        ResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
-                log,
-                0,
-                async_projection.expect("validated async projection spec"),
-            ),
-        )?,
-    };
+    let backend = fireweed_objectlog::block_on_objectlog(
+        fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
+            log,
+            0,
+            async_projection.unwrap_or_default(),
+        ),
+    )?;
     // Intentionally NOT wrapped in process-wide BlockingLibBackend — LogEngine ports are
     // driven via ObjectLogTaskDispatcher on the process-wide multi-thread runtime
     // (fireweed-8a023735 / API-005 native-async path).
@@ -5990,15 +5966,13 @@ fn open_objectlog_memory_projection(
 fn open_s3_objectlog_memory_projection(
     provider: S3ComposedProvider,
     authority: ObjectLogAuthority,
-    response_barrier: ResponseBarrier,
+    _response_barrier: ResponseBarrier,
     async_projection: Option<AsyncProjectionSpec>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    // P3s: S3×memory now selects Strict vs AsyncProjection with the caller's
-    // AsyncProjectionSpec, reusing P3b's provider-neutral memory async pipeline.
     let _ = (authority, recovery);
     let log = open_s3_composed_object_log_engine(
         &provider,
@@ -6008,18 +5982,13 @@ fn open_s3_objectlog_memory_projection(
             max_latency_ms: segments.max_latency_ms,
         },
     )?;
-    let backend = match response_barrier {
-        ResponseBarrier::Strict => fireweed_objectlog::block_on_objectlog(
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
-        )?,
-        ResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
-            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
-                log,
-                0,
-                async_projection.expect("validated async projection spec"),
-            ),
-        )?,
-    };
+    let backend = fireweed_objectlog::block_on_objectlog(
+        fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
+            log,
+            0,
+            async_projection.unwrap_or_default(),
+        ),
+    )?;
     Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(backend),
         clock,
@@ -6233,23 +6202,14 @@ fn finish_objectlog_postgres(
             }
         }
     }
-    let backend = match config.response_barrier {
-        CommitResponseBarrier::Strict => fireweed_objectlog::block_on_objectlog(
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
-                log, projection, 0,
-            ),
-        )?,
-        CommitResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
-                log,
-                projection,
-                0,
-                config
-                    .async_projection
-                    .expect("validated async projection spec"),
-            ),
-        )?,
-    };
+    let backend = fireweed_objectlog::block_on_objectlog(
+        fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
+            log,
+            projection,
+            0,
+            config.async_projection.unwrap_or_default(),
+        ),
+    )?;
     let backend = Arc::new(backend);
     let lifecycle = ProjectionLifecycleHandle {
         inner: Arc::new(ProjectionLifecycleHandleInner {

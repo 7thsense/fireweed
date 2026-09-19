@@ -264,7 +264,7 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         log: LogSpec::Memory,
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     });
@@ -279,7 +279,7 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         log: LogSpec::Memory,
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     });
@@ -294,7 +294,7 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         log: LogSpec::Memory,
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     });
@@ -309,7 +309,7 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         log: LogSpec::Memory,
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     });
@@ -337,7 +337,7 @@ async fn p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b() {
                 log: LogSpec::Memory,
                 projection: ProjectionSpec::InMemory,
                 control_plane: ControlPlaneSpec::InProcess,
-                response_barrier: ResponseBarrierSpec::Strict,
+                response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
                 sqlite_projection_deferred_flush_chunk: None,
             });
@@ -356,7 +356,7 @@ async fn p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b() {
                 log: LogSpec::ObjectLog(ObjectLogSpec::local(log_path.clone(), segments())),
                 projection: ProjectionSpec::InMemory,
                 control_plane: ControlPlaneSpec::InProcess,
-                response_barrier: ResponseBarrierSpec::Strict,
+                response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
                 sqlite_projection_deferred_flush_chunk: None,
             });
@@ -383,7 +383,7 @@ async fn p8c_residual_class_a_non_pg_embedded_delivery_smokes() {
             log: LogSpec::ObjectLog(ObjectLogSpec::local(root.clone(), segments())),
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         });
@@ -397,7 +397,7 @@ async fn p8c_residual_class_a_non_pg_embedded_delivery_smokes() {
             log: LogSpec::ObjectLog(ObjectLogSpec::local(root.clone(), segments())),
             projection: ProjectionSpec::Turso { path: proj.clone() },
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         });
@@ -425,7 +425,7 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             },
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         });
@@ -446,7 +446,7 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             },
             projection: ProjectionSpec::Turso { path: proj.clone() },
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         });
@@ -509,7 +509,7 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             },
             projection: ProjectionSpec::Postgres { url: scoped },
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         });
@@ -527,7 +527,7 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             log: LogSpec::ObjectLog(ObjectLogSpec::local(root.clone(), segments())),
             projection: ProjectionSpec::Postgres { url: scoped },
             control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::Strict,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         });
@@ -549,7 +549,7 @@ async fn p8c_residual_class_a_http_delivery_smoke_through_spawned_task() {
         log: LogSpec::ObjectLog(ObjectLogSpec::local(log_path.clone(), segments())),
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     });

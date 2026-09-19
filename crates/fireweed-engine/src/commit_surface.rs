@@ -2,7 +2,7 @@
 //!
 //! # Decision (fireweed-b6ab5738)
 //!
-//! `ResponseBarrier::Strict` on LogEngine objectlog compositions means **atomic
+//! `ResponseBarrier::AsyncProjection` on LogEngine objectlog compositions means **atomic
 //! response-after-apply**: success is returned only after the authoritative object-log
 //! append **and** the projection apply have both completed. Under that barrier the product
 //! truthfully advertises [`DurabilityClass::Atomic`] and

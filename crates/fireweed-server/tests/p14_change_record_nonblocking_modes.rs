@@ -79,7 +79,7 @@ fn fs_backend(root: PathBuf) -> BackendSpec {
         log: LogSpec::ObjectLog(ObjectLogSpec::local(root, segments())),
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
-        response_barrier: ResponseBarrierSpec::Strict,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     }

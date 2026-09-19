@@ -1023,13 +1023,10 @@ async fn scheduled_gate_profiles() -> BTreeMap<String, bool> {
     let mut profiles = BTreeMap::new();
     let root = unique_temp_path("scheduled-gates");
     #[cfg(feature = "turso")]
-    for (profile, barrier) in [
-        ("s3--turso--strict", fireweed::ResponseBarrier::Strict),
-        (
-            "s3--turso--async",
-            fireweed::ResponseBarrier::AsyncProjection,
-        ),
-    ] {
+    for (profile, barrier) in [(
+        "s3--turso--async",
+        fireweed::ResponseBarrier::AsyncProjection,
+    )] {
         let s3 = fireweed_objectlog::shared_s3_test_env();
         let mut config = fireweed::StorageConfig::s3_turso(
             s3.endpoint.clone(),

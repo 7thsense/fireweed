@@ -113,7 +113,7 @@ fn role_named_object_log_configuration_rejects_retired_sqlite() {
         projection: ProjectionConfig::Sqlite {
             path: "projection.sqlite".into(),
         },
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         segments: SegmentConfig::new(1024, 5).unwrap(),
         namespace: "downstream".to_string(),
         recovery: RecoveryPolicy::default(),

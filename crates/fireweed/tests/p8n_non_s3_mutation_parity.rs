@@ -131,7 +131,7 @@ async fn p8n_filesystem_turso_query_parity() {
         cfg.projection = ProjectionStoreConfig::Turso {
             path: root.path().join("projection.db"),
         };
-        cfg.response_barrier = ResponseBarrier::Strict;
+        cfg.response_barrier = ResponseBarrier::AsyncProjection;
         cfg.segments = segments();
         cfg.namespace = format!("p8n-filesystem-turso-{}", std::process::id());
         fireweed::open(cfg, Arc::new(SystemClock)).expect("open filesystem×turso")
@@ -246,7 +246,7 @@ mod postgres_cells {
             projection: fireweed::ProjectionConfig::Postgres {
                 url: ConfigSecret::new(url),
             },
-            response_barrier: ResponseBarrier::Strict,
+            response_barrier: ResponseBarrier::AsyncProjection,
             segments: segments(),
             namespace: format!("p8n-fs-pg-{}", std::process::id()),
             recovery: fireweed::RecoveryPolicy::default(),

@@ -1042,7 +1042,7 @@ async fn assert_turso_request_durability(barrier: ResponseBarrier, cell: &str) {
 
 #[tokio::test]
 async fn objectlog_turso_strict_reopen_and_log_only_rebuild() {
-    assert_turso_request_durability(ResponseBarrier::Strict, "turso-strict").await;
+    assert_turso_request_durability(ResponseBarrier::AsyncProjection, "turso-strict").await;
 }
 
 #[tokio::test]

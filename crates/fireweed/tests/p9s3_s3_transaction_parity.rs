@@ -180,7 +180,7 @@ fn s3_log_config(namespace: String, projection: ProjectionStoreConfig) -> Storag
         projection,
         control_plane: None,
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
-        response_barrier: ResponseBarrier::Strict,
+        response_barrier: ResponseBarrier::AsyncProjection,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
