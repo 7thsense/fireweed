@@ -2,29 +2,37 @@
 //! # Fireweed
 //!
 //! Fireweed's ergonomic Rust embedding interface. Storage authority and projection choices are supplied
-//! only to the `open_*` construction functions and are erased behind one concrete [`Fireweed`] handle.
-//! The crate adds
-//! ergonomic verbs over them: `create_queue` / `push` / `push_batch` / `upsert` / `claim` / `complete` /
-//! `retry` / `release` / `fail` / `renew` / `reassign` / `rearm` / `purge` / `peek` / `claimed` /
-//! `discover` / `metrics` — the full worker + operator surface, each composing a single pre-validating
-//! engine port. A conceptual worker loop claims a batch, processes its items, then calls
-//! [`Fireweed::complete`], [`Fireweed::retry`], or [`Fireweed::release`] with the resulting batch of
-//! item ids:
+//! only at construction and are erased behind one concrete [`Fireweed`] handle.
+//!
+//! Mutate and discover are two phases. [`Fireweed::commit`] (and packed
+//! [`Fireweed::complete`] / [`Fireweed::retry`] / [`Fireweed::release`]) complete
+//! when **this request** is on the log: per-entry `Committed` / `Conflict` / ids.
+//! That is not a snapshot of Pending. [`Fireweed::claim`] polls currently
+//! selectable work (applied rows, plus this process's unpublished continuation
+//! items). An empty claim is a normal poll, not a failed commit. Inspect
+//! [`Fireweed::commit_capabilities`] for visibility; do not infer Turso serving
+//! from [`ResponseBarrier`] alone.
 //!
 //! ```no_run
 //! # use fireweed::{EngineResult, Fireweed, QueueKey};
 //! # async fn worker(queue: &Fireweed, key: &QueueKey) -> EngineResult<()> {
 //! loop {
 //!     let claimed = queue.claim(key, 32, 30_000).await?;
+//!     if claimed.is_empty() {
+//!         continue;
+//!     }
 //!     queue.complete(key, claimed.into_iter().map(|item| item.item_id)).await?;
 //! }
 //! # }
 //! ```
 //!
-//! Lifecycle helpers remain batch-shaped even though they accept iterators. One call has the same
-//! all-or-nothing failure behavior as [`Fireweed::ack`] and [`Fireweed::nack`]: a fenced, superseded, or
-//! non-leased member rejects the call with its structured [`EngineError`] and commits none of that batch.
-//! The older `ack`/`nack`/`discover_active_scopes` vocabulary remains supported without deprecation.
+//! `complete` / `retry` / `release` are packed writes on the same sequencer as
+//! `commit`, not a second consistency protocol. Lifecycle helpers remain
+//! batch-shaped. One call has the same all-or-nothing failure behavior as
+//! [`Fireweed::ack`] and [`Fireweed::nack`]: a fenced, superseded, or non-leased
+//! member rejects the call with its structured [`EngineError`] and commits none
+//! of that batch. The older `ack`/`nack`/`discover_active_scopes` vocabulary
+//! remains supported without deprecation.
 //!
 //! Callers depend only on this crate and never inject, name, downcast, or recover a storage backend.
 //! Errors use the structured [`EngineError`] contract.
@@ -87,17 +95,17 @@ pub use fireweed_engine::{
     BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse,
     BatchUpdateValue, ClaimByItemIdsResponse, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem,
     Clock, CommandPosition, CommitCapabilities, CommitEntryStatus, CommitRecovery,
-    ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult,
-    EntityEdit, EntityEditOperation, EntityPredicateValue, EntryRecovery, FinalizeKind, GateChange,
-    GateKeyDelta, GroupBatching, IndexHit, InstanceFence, ItemMutationOperation,
-    ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse,
-    ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
-    ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
-    LeaseGuard, LifecyclePatch, LiveItemView, OperationHandle, OperationId, OperatorAsyncAccept,
-    OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
-    OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
-    QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetainedItemView, RetryCountMode,
-    ScheduleUpdate, SelectedMutation, SideRecord, SideRecordPage, SnapshotStore,
+    ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, DurabilityClass, EngineError,
+    EngineResult, EntityEdit, EntityEditOperation, EntityPredicateValue, EntryRecovery,
+    FinalizeKind, GateChange, GateKeyDelta, GroupBatching, IndexHit, InstanceFence,
+    ItemMutationOperation, ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest,
+    ItemMutationResponse, ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate,
+    ItemMutationSnapshot, ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector,
+    ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch, LiveItemView, OperationHandle,
+    OperationId, OperatorAsyncAccept, OperatorAuditRecord, OperatorItemView, OperatorOpKind,
+    OperatorOpPayload, OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome,
+    PushDisposition, QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetainedItemView,
+    RetryCountMode, ScheduleUpdate, SelectedMutation, SideRecord, SideRecordPage, SnapshotStore,
     TimestampComparison, UpsertOutcome,
 };
 pub use operator::OPERATOR_ARCHIVED_METADATA_KEY;
@@ -867,15 +875,14 @@ pub enum ProjectionConfig {
 ///
 /// # Object-log (LogEngine) cells
 ///
-/// - [`ResponseBarrier::Strict`] is the response-after-apply setting for the memory
-///   and PostgreSQL object-log compositions. Their log and projection are separate
-///   recovery steps, even when capabilities report [`DurabilityClass::Atomic`].
-/// - [`ResponseBarrier::AsyncProjection`] allows bounded deferred projection apply.
-///   The authoritative log still determines the durable outcome.
-/// - Native Turso reports [`DurabilityClass::EventualApply`] for either setting:
-///   durable outcomes provide read coverage while the disposable SQL projection
-///   catches up. Inspect `commit_capabilities` for the selected composition rather
-///   than inferring supported transition or recovery APIs from this enum alone.
+/// - [`ResponseBarrier::Strict`] waits for apply before **this mutating response**
+///   on compositions that can honor it. It is not a global Pending snapshot.
+/// - [`ResponseBarrier::AsyncProjection`] returns after the log ack. Turso apply
+///   may lag; same-process `claim` can still take unpublished continuation items.
+/// - Native Turso reports [`DurabilityClass::EventualApply`] for either setting.
+///   Inspect `commit_capabilities` rather than inferring serving visibility from
+///   this enum. Public reads (`side_record`, `live_item`, `metrics`) may wait
+///   coverage; ordinary item `claim` does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrier {
     Strict,

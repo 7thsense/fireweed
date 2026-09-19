@@ -243,6 +243,216 @@ async fn filesystem_turso_projection_control_rebuilds_from_log() {
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
+#[tokio::test]
+async fn filesystem_turso_async_same_handle_claims_commit_continuation() {
+    let root = FixtureRoot::new("filesystem--turso--continuation");
+    let fw = filesystem_turso(
+        root.path(),
+        ResponseBarrier::AsyncProjection,
+        "filesystem-turso-continuation",
+    );
+    let definition = fireweed::QueueDefinition {
+        tenant_id: fireweed::TenantId::new("cont").unwrap(),
+        queue_id: fireweed::QueueId::new("work").unwrap(),
+        priority_model: fireweed::PriorityModel {
+            kind: fireweed::PriorityModelKind::Int64,
+            direction: fireweed::PriorityDirection::Ascending,
+            tie_breaker: fireweed::PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: fireweed::OrderingMode::Strict,
+        max_rank_error: 0,
+        progress_bound_ms: 60_000,
+        eligibility_policy: fireweed::EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: fireweed::RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: fireweed::RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
+        emit_change_records: false,
+    };
+    let q = fireweed::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert!(fw.create_queue(definition).await.unwrap().created);
+    fw.push_batch(
+        &q,
+        vec![fireweed::NewItem {
+            client_item_key: Some(fireweed::ClientItemKey::new("stage-0").unwrap()),
+            priority: Some(fireweed::PriorityValue::Int64(1)),
+            payload: Some(b"zero".to_vec().into()),
+            ..Default::default()
+        }],
+    )
+    .await
+    .unwrap();
+    let claimed = fw.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let caps = fw.commit_capabilities(&q).unwrap();
+    assert_eq!(
+        caps.durability_class,
+        fireweed::DurabilityClass::EventualApply
+    );
+    let committed = fw
+        .commit(
+            &q,
+            fireweed::CommitRequest {
+                request_id: Some(fireweed::RequestId::new("cont-1").unwrap()),
+                entries: vec![fireweed::CommitEntry {
+                    claim_ref: fireweed::ClaimRef {
+                        item_id: claimed[0].item_id,
+                        lease_token: claimed[0].lease_token.clone().unwrap(),
+                        lease_expires_at: claimed[0].lease_expires_at,
+                        item_version: claimed[0].item_version,
+                    },
+                    finalize: fireweed::FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![fireweed::NewItem {
+                        client_item_key: Some(fireweed::ClientItemKey::new("stage-1").unwrap()),
+                        priority: Some(fireweed::PriorityValue::Int64(2)),
+                        payload: Some(b"one".to_vec().into()),
+                        ..Default::default()
+                    }],
+                    instance_fence: Some(fireweed::InstanceFence {
+                        instance_key: b"inst".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        committed.as_slice(),
+        [fireweed::EntryOutcome::Committed { lifecycle_item_ids }] if lifecycle_item_ids.len() == 1
+    ));
+    let next = fw.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].client_item_key.as_str(), "stage-1");
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+#[tokio::test]
+async fn filesystem_turso_async_packed_commits_each_return_outcomes() {
+    let root = FixtureRoot::new("filesystem--turso--packed-commit");
+    let fw = filesystem_turso(
+        root.path(),
+        ResponseBarrier::AsyncProjection,
+        "filesystem-turso-packed-commit",
+    );
+    let definition = fireweed::QueueDefinition {
+        tenant_id: fireweed::TenantId::new("pack").unwrap(),
+        queue_id: fireweed::QueueId::new("work").unwrap(),
+        priority_model: fireweed::PriorityModel {
+            kind: fireweed::PriorityModelKind::Int64,
+            direction: fireweed::PriorityDirection::Ascending,
+            tie_breaker: fireweed::PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: fireweed::OrderingMode::Strict,
+        max_rank_error: 0,
+        progress_bound_ms: 60_000,
+        eligibility_policy: fireweed::EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: fireweed::RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: fireweed::RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
+        emit_change_records: false,
+    };
+    let q = fireweed::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert!(fw.create_queue(definition).await.unwrap().created);
+    fw.push_batch(
+        &q,
+        vec![
+            fireweed::NewItem {
+                client_item_key: Some(fireweed::ClientItemKey::new("a").unwrap()),
+                priority: Some(fireweed::PriorityValue::Int64(1)),
+                payload: Some(b"a".to_vec().into()),
+                ..Default::default()
+            },
+            fireweed::NewItem {
+                client_item_key: Some(fireweed::ClientItemKey::new("b").unwrap()),
+                priority: Some(fireweed::PriorityValue::Int64(2)),
+                payload: Some(b"b".to_vec().into()),
+                ..Default::default()
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let claimed = fw.claim(&q, 2, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 2);
+    let commit =
+        |item: &fireweed::ClaimedItem, rid: &str, next_key: &str, expected: u64, next: u64| {
+            fw.commit(
+                &q,
+                fireweed::CommitRequest {
+                    request_id: Some(fireweed::RequestId::new(rid).unwrap()),
+                    entries: vec![fireweed::CommitEntry {
+                        claim_ref: fireweed::ClaimRef {
+                            item_id: item.item_id,
+                            lease_token: item.lease_token.clone().unwrap(),
+                            lease_expires_at: item.lease_expires_at,
+                            item_version: item.item_version,
+                        },
+                        finalize: fireweed::FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![fireweed::NewItem {
+                            client_item_key: Some(fireweed::ClientItemKey::new(next_key).unwrap()),
+                            priority: Some(fireweed::PriorityValue::Int64(3)),
+                            payload: Some(next_key.as_bytes().to_vec().into()),
+                            ..Default::default()
+                        }],
+                        instance_fence: Some(fireweed::InstanceFence {
+                            instance_key: next_key.as_bytes().to_vec(),
+                            expected,
+                            next,
+                        }),
+                    }],
+                },
+            )
+        };
+    let (left, right) = tokio::join!(
+        commit(&claimed[0], "pack-a", "next-a", 0, 1),
+        commit(&claimed[1], "pack-b", "next-b", 0, 1),
+    );
+    for (name, result) in [("a", left), ("b", right)] {
+        let outcomes = result.unwrap_or_else(|error| panic!("{name} commit: {error}"));
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [fireweed::EntryOutcome::Committed { lifecycle_item_ids }]
+                    if lifecycle_item_ids.len() == 1
+            ),
+            "{name} outcomes: {outcomes:?}"
+        );
+    }
+    let next = fw.claim(&q, 8, 60_000).await.unwrap();
+    let keys: std::collections::HashSet<_> = next
+        .iter()
+        .map(|item| item.client_item_key.as_str().to_string())
+        .collect();
+    assert!(
+        keys.contains("next-a") && keys.contains("next-b"),
+        "packed continuations missing from claim: {keys:?}"
+    );
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 fn filesystem_turso(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
     let mut storage = objectlog_storage(
         LogConfig::Filesystem {

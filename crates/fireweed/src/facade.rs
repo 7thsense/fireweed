@@ -1237,6 +1237,9 @@ impl Fireweed {
     ) -> EngineResult<()> {
         self.inner.ack(queue, ids.into_iter().collect()).await
     }
+    /// Packed complete of leased items. This is a mutating write on the same
+    /// sequencer as [`Self::commit`], not a serving-snapshot barrier. The future
+    /// completes with this request's log outcome.
     pub async fn complete(
         &self,
         queue: &QueueKey,

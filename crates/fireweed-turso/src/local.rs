@@ -1207,6 +1207,31 @@ impl TursoRelational {
         .await
     }
 
+    /// Materialize already-selected pending rows on the serving reader.
+    /// Used by query/id claim so the response does not wait for Claim apply.
+    pub async fn materialize_pending_on_serving_reader(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+        lease_token: &LeaseToken,
+        lease_expires_at: UtcTimestamp,
+    ) -> EngineResult<Vec<ClaimedItem>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = ids.to_vec();
+        let lease_token = lease_token.clone();
+        let mut connection = self.reader.lock().await;
+        crate::projection::materialize_grouped_cohort_claimed_on(
+            &mut connection,
+            shard,
+            &ids,
+            &lease_token,
+            lease_expires_at,
+        )
+        .await
+    }
+
     pub async fn materialize_grouped_cohort_committed(
         &self,
         shard: &QueueKey,

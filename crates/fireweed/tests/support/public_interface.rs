@@ -14,7 +14,7 @@ use fireweed::{
     CommitRequest, CompoundIndexDef, CompoundIndexField, CreateQueue, DeclaredBucketSegmentRequest,
     DiscoveryGranularity, EligibilityPolicy, EngineError, FinalizeKind, Fireweed, GateKeyPolicy,
     GroupBatching, GroupByField, GroupKey, GroupedAggregateRequest, IndexDeclaration, IndexDef,
-    IndexType, ItemMutationOperation, ItemMutationOutcome, ItemMutationRequest,
+    IndexType, InstanceFence, ItemMutationOperation, ItemMutationOutcome, ItemMutationRequest,
     ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
     MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, MultiQueueClaimLimits,
     MultiQueueClaimTarget, MutationOutcome, Nack, NewItem, OrderField, OrderingMode,
@@ -2291,7 +2291,11 @@ async fn exercise_commit(
                     },
                 ],
                 lifecycle_items: vec![item("commit-continuation", 4)],
-                instance_fence: None,
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"public-instance".to_vec(),
+                    expected: 0,
+                    next: 1,
+                }),
             }],
         };
         let committed = call(cell, "commit", failures, fw.commit(&queue, request.clone())).await;
@@ -2310,6 +2314,23 @@ async fn exercise_commit(
                 matches!(outcomes.as_slice(), [fireweed::EntryOutcome::Committed { lifecycle_item_ids }] if lifecycle_item_ids.len() == 1)
             }) && committed == replayed,
             "did not commit the input, create exactly one lifecycle item and replay its outcome",
+        );
+        let continuation = call(
+            cell,
+            "claim[continuation]",
+            failures,
+            fw.claim(&queue, 8, 60_000),
+        )
+        .await
+        .unwrap_or_default();
+        check(
+            cell,
+            "claim[continuation]",
+            failures,
+            continuation
+                .iter()
+                .any(|claimed| claimed.client_item_key.as_str() == "commit-continuation"),
+            "did not claim the committed continuation item on the same handle",
         );
         let recovery = call(
             cell,
