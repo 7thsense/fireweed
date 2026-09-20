@@ -124,6 +124,72 @@ pub(crate) async fn truncate_wal_if_unpinned(
     let _ = connection.busy_timeout(busy_timeout);
 }
 
+/// Log-backed WAL is not auto-checkpointed. Admit at most two Passive
+/// checkpoints process-wide when the WAL is large so 64 stores cannot stampede
+/// the same disk as object-log PUTs. Below the hard budget, a busy cap is a skip.
+const LOG_BACKED_CHECKPOINT_TRY_BYTES: u64 = 400 * 1024 * 1024;
+const LOG_BACKED_CHECKPOINT_MUST_BYTES: u64 = 500 * 1024 * 1024;
+
+fn log_backed_checkpoint_limiter() -> &'static tokio::sync::Semaphore {
+    static LIMIT: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    LIMIT.get_or_init(|| tokio::sync::Semaphore::new(2))
+}
+
+fn wal_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+async fn run_passive_checkpoint(writer: &Mutex<Connection>) {
+    let connection = writer.lock().await;
+    if let Ok(mut rows) = connection.query("PRAGMA wal_checkpoint(PASSIVE)", ()).await {
+        while rows.next().await.ok().flatten().is_some() {}
+    }
+}
+
+pub(crate) async fn maybe_passive_checkpoint_log_backed(
+    writer: &Mutex<Connection>,
+    wal_path: Option<&Path>,
+) {
+    let Some(wal_path) = wal_path else {
+        return;
+    };
+    let Some(len) = wal_len(wal_path) else {
+        return;
+    };
+    if len < LOG_BACKED_CHECKPOINT_TRY_BYTES {
+        return;
+    }
+    let limiter = log_backed_checkpoint_limiter();
+    let permit = if len >= LOG_BACKED_CHECKPOINT_MUST_BYTES {
+        match limiter.acquire().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        }
+    } else {
+        match limiter.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => return,
+        }
+    };
+    run_passive_checkpoint(writer).await;
+    drop(permit);
+}
+
+pub(crate) async fn checkpoint_log_backed_on_close(writer: &Mutex<Connection>, database: &Path) {
+    let Some(wal_path) = sqlite_wal_path(database) else {
+        return;
+    };
+    if wal_len(&wal_path).unwrap_or(0) == 0 {
+        return;
+    }
+    let limiter = log_backed_checkpoint_limiter();
+    let Ok(permit) = limiter.acquire().await else {
+        return;
+    };
+    run_passive_checkpoint(writer).await;
+    drop(permit);
+}
+
 fn outcome_read_error(error: turso::Error) -> EngineError {
     map_pooled_reader_error(error, COMMITTED_OUTCOME_POOL_RESOURCE)
 }
@@ -3889,11 +3955,9 @@ impl AsyncProjectionStore for TursoRelational {
         // NORMAL checkpoint accounting permits native WAL restart/reuse.
         // Forced truncation discards that reusable file and churns filesystem
         // extents. Keep the bounded truncation workaround only for OFF mode.
-        let wal_path = if self.config().reuses_checkpointed_wal() {
-            None
-        } else {
-            sqlite_wal_path(self.config().path())
-        };
+        let log_backed = self.config().reuses_checkpointed_wal();
+        let wal_path = sqlite_wal_path(self.config().path());
+        let truncate_path = if log_backed { None } else { wal_path.clone() };
         let wal_min_bytes = self.wal_truncate_min_bytes;
         let busy_timeout = self.config().busy_timeout();
         async move {
@@ -3912,8 +3976,16 @@ impl AsyncProjectionStore for TursoRelational {
                 true,
             )
             .await?;
-            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), wal_min_bytes, busy_timeout)
-                .await;
+            truncate_wal_if_unpinned(
+                &writer,
+                truncate_path.as_deref(),
+                wal_min_bytes,
+                busy_timeout,
+            )
+            .await;
+            if log_backed {
+                maybe_passive_checkpoint_log_backed(&writer, wal_path.as_deref()).await;
+            }
             Ok(())
         }
     }
@@ -3935,11 +4007,9 @@ impl AsyncProjectionStore for TursoRelational {
         // NORMAL checkpoint accounting permits native WAL restart/reuse.
         // Forced truncation discards that reusable file and churns filesystem
         // extents. Keep the bounded truncation workaround only for OFF mode.
-        let wal_path = if self.config().reuses_checkpointed_wal() {
-            None
-        } else {
-            sqlite_wal_path(self.config().path())
-        };
+        let log_backed = self.config().reuses_checkpointed_wal();
+        let wal_path = sqlite_wal_path(self.config().path());
+        let truncate_path = if log_backed { None } else { wal_path.clone() };
         let wal_min_bytes = self.wal_truncate_min_bytes;
         let busy_timeout = self.config().busy_timeout();
         async move {
@@ -3958,8 +4028,16 @@ impl AsyncProjectionStore for TursoRelational {
                 false,
             )
             .await?;
-            truncate_wal_if_unpinned(&writer, wal_path.as_deref(), wal_min_bytes, busy_timeout)
-                .await;
+            truncate_wal_if_unpinned(
+                &writer,
+                truncate_path.as_deref(),
+                wal_min_bytes,
+                busy_timeout,
+            )
+            .await;
+            if log_backed {
+                maybe_passive_checkpoint_log_backed(&writer, wal_path.as_deref()).await;
+            }
             Ok(())
         }
     }
@@ -4533,7 +4611,15 @@ mod committed_pool_helper_tests {
         );
         assert!(
             projection.contains("PRAGMA wal_checkpoint(TRUNCATE)"),
-            "WAL bound is writer TRUNCATE, not PASSIVE"
+            "OFF-mode WAL bound is writer TRUNCATE"
+        );
+        assert!(
+            projection.contains("PRAGMA wal_checkpoint(PASSIVE)"),
+            "log-backed WAL is compacted with Passive, not autocheckpoint"
+        );
+        assert!(
+            apply_live.contains("maybe_passive_checkpoint_log_backed"),
+            "log-backed apply must admit Passive checkpoints without a 64-store stampede"
         );
 
         let (_, production) = compose

@@ -326,3 +326,125 @@ async fn original_row_enrichments_and_outcomes_rebuild_from_log_alone() {
     .await
     .expect("basic log-only recovery timed out");
 }
+
+const REBUILD_ITEMS: usize = 20_000;
+
+#[test]
+fn timed_rebuild_child() {
+    let Some(root) = std::env::var_os("FIREWEED_WORKLOAD_REBUILD_CHILD") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let fw = open_store_with_projection_root(
+                &root,
+                false,
+                TestClock::at(200),
+                &root.join("proj"),
+            )
+            .unwrap();
+            let q = create_queue(&fw, "timed-rebuild").await.unwrap();
+            let mut ids = Vec::with_capacity(REBUILD_ITEMS);
+            for start in (0..REBUILD_ITEMS).step_by(1000) {
+                let end = (start + 1000).min(REBUILD_ITEMS);
+                let rows: Vec<_> = (start..end).map(|id| item(id, 0, 256)).collect();
+                let pushed = fw
+                    .push_batch_with_request_id(
+                        &q,
+                        RequestId::new(format!("rebuild-load-{start}")).unwrap(),
+                        rows,
+                    )
+                    .await
+                    .unwrap();
+                ids.extend(pushed.item_ids);
+            }
+            std::fs::write(
+                root.join("oracle.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "ids": ids,
+                    "count": REBUILD_ITEMS,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::process::exit(0);
+        })
+        .await
+        .unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crash_rebuild_from_log_is_fast_and_correct() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "timed_rebuild_child", "--nocapture"])
+            .env("FIREWEED_WORKLOAD_REBUILD_CHILD", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let oracle: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.path().join("oracle.json")).unwrap())
+                .unwrap();
+        let expected: Vec<ItemId> = serde_json::from_value(oracle["ids"].clone()).unwrap();
+        assert_eq!(expected.len(), REBUILD_ITEMS);
+
+        let rebuilt_proj = root.path().join("rebuilt-proj");
+        let started = std::time::Instant::now();
+        let fw =
+            open_store_with_projection_root(root.path(), false, TestClock::at(200), &rebuilt_proj)
+                .unwrap();
+        let rebuild_s = started.elapsed().as_secs_f64();
+        let q = create_queue(&fw, "timed-rebuild").await.unwrap();
+        let metrics = fw.metrics(&q).await.unwrap();
+        eprintln!(
+            "crash_rebuild items={REBUILD_ITEMS} wall_s={rebuild_s:.3} pending={} rate={:.0}/s",
+            metrics.pending,
+            REBUILD_ITEMS as f64 / rebuild_s.max(1e-6)
+        );
+        assert_eq!(metrics.pending, REBUILD_ITEMS as u64);
+        assert_eq!(
+            (metrics.leased, metrics.complete, metrics.failed),
+            (0, 0, 0)
+        );
+        let replay = fw
+            .push_batch_with_request_id(
+                &q,
+                RequestId::new("rebuild-load-0").unwrap(),
+                (0..1000).map(|id| item(id, 0, 256)).collect(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.disposition, PushDisposition::Replayed);
+        assert_eq!(&replay.item_ids, &expected[..1000]);
+        let live = fw
+            .live_item(&q, ClientItemKey::new("r-000000000-s0").unwrap())
+            .await
+            .unwrap()
+            .expect("first item survives log-only rebuild");
+        assert_eq!(live.item_id, expected[0]);
+        let (max_s, min_rate) = if cfg!(debug_assertions) {
+            (60.0, 400.0)
+        } else {
+            (5.0, 8_000.0)
+        };
+        assert!(
+            rebuild_s < max_s,
+            "log-only rebuild of {REBUILD_ITEMS} items took {rebuild_s:.3}s; expected < {max_s}s"
+        );
+        assert!(
+            REBUILD_ITEMS as f64 / rebuild_s.max(1e-6) >= min_rate,
+            "log-only rebuild rate {:.0}/s is below {min_rate}/s",
+            REBUILD_ITEMS as f64 / rebuild_s.max(1e-6)
+        );
+    })
+    .await
+    .expect("timed crash rebuild exceeded 180s");
+}

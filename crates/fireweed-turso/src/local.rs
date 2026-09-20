@@ -637,6 +637,18 @@ impl TursoRelational {
         Self::open(TursoConfig::in_memory()).await
     }
 
+    /// Passive-checkpoint a log-backed projection so a later reopen is compact.
+    ///
+    /// Crash recovery still rebuilds from the object-log. This is for clean
+    /// process restart and idle close, not for in-load autocheckpoint.
+    pub async fn compact_idle_wal(&self) {
+        if !self.config.rebuildable_io {
+            return;
+        }
+        crate::projection::checkpoint_log_backed_on_close(self.writer.as_ref(), self.config.path())
+            .await;
+    }
+
     pub fn config(&self) -> &TursoConfig {
         &self.config
     }
@@ -3329,18 +3341,14 @@ pub(crate) async fn verify_committed_reader_settings(
 }
 
 async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Result<i64> {
+    let _ = connection;
     if !config.rebuildable_io {
         return Ok(1_000);
     }
-    // Preserve the checkpoint byte budget across new and existing page sizes.
-    // In particular, smaller pages must not halve the coalescing window.
-    let page_size = scalar_i64(connection, "PRAGMA page_size").await?;
-    if !(512..=65_536).contains(&page_size) || !(page_size as u64).is_power_of_two() {
-        return Err(TursoRelationalError::Configuration(format!(
-            "invalid projection page size {page_size}"
-        )));
-    }
-    Ok(448 * 1024 * 1024 / page_size)
+    // Log-backed projections recover from the object-log after a crash. Do not
+    // auto-checkpoint under load (that stampeded 64 stores during campaigns).
+    // Idle/close and a process-wide Passive cap bound the WAL instead.
+    Ok(0)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3353,9 +3361,9 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection
         .pragma_update("journal_mode", config.journal_mode.pragma_value())
         .await?;
-    // NORMAL lets Turso publish completed checkpoint backfills instead of
-    // rewriting them at every auto-checkpoint. The log-backed I/O adapter
-    // omits physical sync; the authoritative log alone provides durability.
+    // NORMAL still lets an explicit Passive checkpoint publish backfill.
+    // Automatic checkpoints are disabled on log-backed writers (`0` below).
+    // The log-backed I/O adapter omits physical sync; the object-log is durable.
     connection
         .pragma_update(
             "synchronous",
@@ -3814,7 +3822,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            114_688
+            0
         );
         drop(new);
         let reopened =
@@ -3825,7 +3833,7 @@ mod projection_checkpoint_config_tests {
             scalar_i64(&*reopened.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            114_688
+            0
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));
@@ -3854,7 +3862,7 @@ mod projection_checkpoint_config_tests {
                 scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                     .await
                     .unwrap(),
-                448 * 1024 * 1024 / page_size
+                0
             );
         }
         let standalone = TursoRelational::in_memory().await.unwrap();
@@ -3867,6 +3875,53 @@ mod projection_checkpoint_config_tests {
             .await
             .unwrap(),
             1_000
+        );
+    }
+
+    #[tokio::test]
+    async fn log_backed_idle_compact_materializes_without_autocheckpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("idle-compact.db");
+        let store = TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
+            .await
+            .unwrap();
+        {
+            let writer = store.writer.lock().await;
+            writer
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS compact_probe(id INTEGER PRIMARY KEY, body BLOB)",
+                    (),
+                )
+                .await
+                .unwrap();
+            writer
+                .execute("INSERT INTO compact_probe VALUES (1, zeroblob(65536))", ())
+                .await
+                .unwrap();
+        }
+        let wal_before = path.with_extension("db-wal");
+        let wal_before = if wal_before.exists() {
+            wal_before
+        } else {
+            let mut name = path.as_os_str().to_os_string();
+            name.push("-wal");
+            std::path::PathBuf::from(name)
+        };
+        assert!(
+            wal_before.exists() && wal_before.metadata().unwrap().len() > 0,
+            "log-backed writer still uses WAL"
+        );
+        let main_before = path.metadata().unwrap().len();
+        store.compact_idle_wal().await;
+        assert_eq!(
+            scalar_i64(&*store.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            path.metadata().unwrap().len() >= main_before,
+            "idle compact may publish WAL frames into the main file"
         );
     }
 }

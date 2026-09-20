@@ -374,6 +374,53 @@ fn command_kind(command: &QueueCommand) -> &'static str {
     }
 }
 
+#[cfg(feature = "objectlog")]
+async fn apply_recovery_page<P: AsyncProjectionStore>(
+    projection: &P,
+    shard: &QueueKey,
+    tail: &[(CommandPosition, CommandEnvelope)],
+) -> EngineResult<()> {
+    let apply = |slice: &[(CommandPosition, CommandEnvelope)]| {
+        let positions: Vec<_> = slice.iter().map(|(p, _)| p.clone()).collect();
+        let commands: Vec<_> = slice.iter().map(|(_, e)| e.clone()).collect();
+        AsyncProjectionStore::apply_recovery(projection, positions, commands)
+    };
+    match apply(tail).await {
+        Ok(()) => return Ok(()),
+        Err(error) if tail.len() == 1 => {
+            let kinds: Vec<_> = tail
+                .iter()
+                .map(|(position, envelope)| {
+                    format!(
+                        "{}:{:?}",
+                        position.sequence,
+                        command_kind(&envelope.command)
+                    )
+                })
+                .collect();
+            return Err(EngineError::Storage(format!(
+                "projection recover apply {}/{} commands [{}]: {error}",
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                kinds.join(", ")
+            )));
+        }
+        Err(_) => {}
+    }
+    for one in tail {
+        apply(std::slice::from_ref(one)).await.map_err(|error| {
+            EngineError::Storage(format!(
+                "projection recover apply {}/{} command {}:{}: {error}",
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                one.0.sequence,
+                command_kind(&one.1.command)
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn unpublished_has_identity(snapshot: &MutationDriverSnapshot) -> bool {
     !snapshot.client_keys.is_empty()
         || !snapshot.request_fingerprints.is_empty()
@@ -3172,17 +3219,10 @@ impl DerivedObjectLogTursoBackend {
             let high_water = self.projection.writer_recovery_high_water(&shard).await?;
             let repair_push_receipts = self.projection.has_legacy_push_fingerprints(&shard).await?;
             let mut from = None;
-            // Full rebuild on a live Turso connection cannot apply mixed
-            // Push/UpdateFields/MutateItems in one recovery transaction.
-            let page_size = if high_water.is_none() { 1 } else { 256 };
             loop {
-                let page = AsyncLogStore::read_from(
-                    self.log.as_ref(),
-                    shard.clone(),
-                    from.clone(),
-                    page_size,
-                )
-                .await?;
+                let page =
+                    AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
+                        .await?;
                 if page.entries.is_empty() {
                     break;
                 }
@@ -3210,32 +3250,7 @@ impl DerivedObjectLogTursoBackend {
                     .cloned()
                     .collect();
                 if !tail.is_empty() {
-                    let positions: Vec<_> = tail.iter().map(|(p, _)| p.clone()).collect();
-                    let commands: Vec<_> = tail.iter().map(|(_, e)| e.clone()).collect();
-                    AsyncProjectionStore::apply_recovery(
-                        self.projection.as_ref(),
-                        positions,
-                        commands,
-                    )
-                    .await
-                    .map_err(|error| {
-                        let kinds: Vec<_> = tail
-                            .iter()
-                            .map(|(position, envelope)| {
-                                format!(
-                                    "{}:{:?}",
-                                    position.sequence,
-                                    command_kind(&envelope.command)
-                                )
-                            })
-                            .collect();
-                        EngineError::Storage(format!(
-                            "projection recover apply {}/{} commands [{}]: {error}",
-                            shard.tenant_id.as_str(),
-                            shard.queue_id.as_str(),
-                            kinds.join(", ")
-                        ))
-                    })?;
+                    apply_recovery_page(self.projection.as_ref(), &shard, &tail).await?;
                 }
                 match page.next {
                     Some(next) => from = Some(next),
