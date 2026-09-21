@@ -206,6 +206,19 @@ impl Default for ObjectLogByteLimits {
     }
 }
 
+/// Same text as [`fireweed::RETIRED_STORAGE_CELL`]. The facade constant is used
+/// when that crate is linked; the literal stays identical when it is not.
+fn retired_storage_cell_message() -> &'static str {
+    #[cfg(feature = "turso-projection")]
+    {
+        fireweed::RETIRED_STORAGE_CELL
+    }
+    #[cfg(not(feature = "turso-projection"))]
+    {
+        "storage is s3 log × turso projection only; other selectors are retired"
+    }
+}
+
 fn build_objectlog_byte_budget(limits: ObjectLogByteLimits) -> EngineResult<BufferedByteBudget> {
     let mut config = BufferedByteBudgetConfig::new(limits.global).map_err(EngineError::Invalid)?;
     if let Some(tenant) = limits.tenant {
@@ -990,6 +1003,10 @@ impl Config {
     /// the response barrier owns the second slot for its later typed selector, and only then may
     /// composition/durability rules inspect the selected backend tuple.
     fn validate_for_start(&self) -> EngineResult<()> {
+        // Retired selectors fail before endpoint, barrier, or storage I/O.
+        // `start` returns here and does not assemble Memory × InMemory or any
+        // other retired family.
+        self.validate_public_storage_cell()?;
         self.validate_change_record_endpoint_syntax()?;
         self.validate_response_barrier()?;
         self.validate_change_record_sink_composition()?;
@@ -1023,6 +1040,21 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// The only public server cell is S3 object-log × Turso (ADR-024).
+    fn validate_public_storage_cell(&self) -> EngineResult<()> {
+        let s3_turso = matches!(
+            (&self.backend.log, &self.backend.projection),
+            (
+                LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }),
+                ProjectionSpec::Turso { .. }
+            )
+        );
+        if s3_turso {
+            return Ok(());
+        }
+        Err(EngineError::Invalid(retired_storage_cell_message()))
     }
 
     fn validate_change_record_endpoint_syntax(&self) -> EngineResult<()> {
@@ -3517,6 +3549,97 @@ mod byte_admission_wiring_tests {
             std::env::temp_dir().join(format!("fireweed-p3c-{tag}")),
             SegmentConfig::new(262_144, 20).expect("valid grouped segment config"),
         ))
+    }
+
+    fn validation_s3_log() -> LogSpec {
+        LogSpec::ObjectLog(ObjectLogSpec::S3 {
+            endpoint: "http://127.0.0.1:9000".to_owned(),
+            bucket: "fireweed".to_owned(),
+            region: "us-east-1".to_owned(),
+            credentials: S3CredentialSource::Static {
+                access_key_id: "akid".to_owned(),
+                secret_access_key: "secret".to_owned(),
+            },
+            segment_config: SegmentConfig::new(262_144, 20).expect("valid grouped segment config"),
+            allow_insecure_http: true,
+        })
+    }
+
+    #[test]
+    fn validate_for_start_rejects_retired_storage_cells() {
+        let retired = EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL);
+        let cases = [
+            (
+                "memory-inmemory",
+                LogSpec::Memory,
+                ProjectionSpec::InMemory,
+            ),
+            (
+                "filesystem-inmemory",
+                validation_object_log("retired-fs-mem"),
+                ProjectionSpec::InMemory,
+            ),
+            (
+                "filesystem-turso",
+                validation_object_log("retired-fs-turso"),
+                ProjectionSpec::Turso {
+                    path: PathBuf::from("/tmp/fireweed-retired-fs.turso"),
+                },
+            ),
+            (
+                "s3-inmemory",
+                validation_s3_log(),
+                ProjectionSpec::InMemory,
+            ),
+        ];
+        for (name, log, projection) in cases {
+            let config = startup_validation_config(
+                log,
+                projection,
+                Some(AsyncProjectionSpec::default()),
+            );
+            assert_eq!(config.validate_for_start(), Err(retired.clone()), "{name}");
+        }
+
+        #[cfg(feature = "postgres")]
+        {
+            let postgres_cases = [
+                (
+                    "memory-postgres",
+                    LogSpec::Memory,
+                    ProjectionSpec::Postgres {
+                        url: "postgres://localhost/fireweed".to_owned(),
+                    },
+                ),
+                (
+                    "postgres-turso",
+                    LogSpec::Postgres {
+                        url: "postgres://localhost/fireweed".to_owned(),
+                        credentials: None,
+                    },
+                    ProjectionSpec::Turso {
+                        path: PathBuf::from("/tmp/fireweed-retired-pg.turso"),
+                    },
+                ),
+            ];
+            for (name, log, projection) in postgres_cases {
+                let config = startup_validation_config(
+                    log,
+                    projection,
+                    Some(AsyncProjectionSpec::default()),
+                );
+                assert_eq!(config.validate_for_start(), Err(retired.clone()), "{name}");
+            }
+        }
+
+        let public_cell = startup_validation_config(
+            validation_s3_log(),
+            ProjectionSpec::Turso {
+                path: PathBuf::from("/tmp/fireweed-public.turso"),
+            },
+            Some(AsyncProjectionSpec::default()),
+        );
+        assert_eq!(public_cell.validate_for_start(), Ok(()));
     }
 
     #[test]
