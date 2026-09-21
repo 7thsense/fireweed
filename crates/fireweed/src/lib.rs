@@ -1233,17 +1233,8 @@ impl StorageConfig {
             ));
         }
 
-        if self.async_projection.is_some()
-            && !matches!(
-                &self.log,
-                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-            )
-        {
-            return Err(EngineError::Invalid(
-                "async-projection-spec-requires-object-log",
-            ));
-        }
-        validate_async_projection_spec(self.async_projection)?;
+        // The public cell does not invent an authority or an async spec.
+        require_s3_turso_authority_and_async_spec(self.authority.clone(), self.async_projection)?;
 
         if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
             return Err(EngineError::Invalid(
@@ -1264,6 +1255,24 @@ impl StorageConfig {
 
         Ok(())
     }
+}
+
+fn require_s3_turso_authority_and_async_spec(
+    authority: Option<ObjectLogAuthority>,
+    async_projection: Option<AsyncProjectionSpec>,
+) -> EngineResult<AsyncProjectionSpec> {
+    if authority != Some(ObjectLogAuthority::NativeConditionalWrite) {
+        return Err(EngineError::Invalid(
+            "s3 × turso requires ObjectLogAuthority::NativeConditionalWrite",
+        ));
+    }
+    let Some(spec) = async_projection else {
+        return Err(EngineError::Invalid(
+            "s3 × turso requires AsyncProjectionSpec",
+        ));
+    };
+    validate_async_projection_spec(Some(spec))?;
+    Ok(spec)
 }
 
 fn validate_async_projection_spec(
@@ -1510,6 +1519,7 @@ mod storage_config_matrix_tests {
             },
         );
         config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.async_projection = Some(AsyncProjectionSpec::default());
         config.validate().expect("s3 × turso is the public cell");
     }
 
@@ -1546,6 +1556,9 @@ mod storage_config_matrix_tests {
                     (&config.log, &config.projection),
                     (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. })
                 );
+                if product {
+                    config.async_projection = Some(AsyncProjectionSpec::default());
+                }
                 match config.validate() {
                     Ok(()) => {
                         assert!(product, "only s3 × turso may validate");
@@ -1567,6 +1580,63 @@ mod storage_config_matrix_tests {
         }
         assert_eq!(public_cells, 1);
         assert_eq!(retired_cells, 11);
+    }
+
+    #[test]
+    fn s3_turso_rejects_missing_authority_and_async_spec() {
+        let mut config = base(
+            LogConfig::S3 {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: false,
+            },
+            ProjectionStoreConfig::Turso {
+                path: PathBuf::from("/tmp/projection-turso.db"),
+            },
+        );
+        config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.async_projection = Some(AsyncProjectionSpec::default());
+        config
+            .validate()
+            .expect("s3_turso-shaped cell with both fields validates");
+
+        config.authority = None;
+        match config.validate() {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("NativeConditionalWrite"),
+                    "missing authority must name the required authority, got {msg}"
+                );
+            }
+            other => panic!("missing authority must fail closed, got {other:?}"),
+        }
+        match open(config.clone(), Arc::new(SystemClock)) {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(msg.contains("NativeConditionalWrite"), "{msg}");
+            }
+            other => panic!("open must reject a missing authority, got {other:?}"),
+        }
+
+        config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.async_projection = None;
+        match config.validate() {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("AsyncProjectionSpec"),
+                    "missing async spec must name AsyncProjectionSpec, got {msg}"
+                );
+            }
+            other => panic!("missing async spec must fail closed, got {other:?}"),
+        }
+        match open(config, Arc::new(SystemClock)) {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(msg.contains("AsyncProjectionSpec"), "{msg}");
+            }
+            other => panic!("open must reject a missing async spec, got {other:?}"),
+        }
     }
 
     /// AC: Turso default selection, all four log compositions, single-thread heartbeat.
@@ -5559,13 +5629,15 @@ fn open_s3_log_cell(
     }
     #[cfg(feature = "objectlog")]
     {
-        let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
+        let async_projection =
+            require_s3_turso_authority_and_async_spec(authority, async_projection)?;
+        let authority = ObjectLogAuthority::NativeConditionalWrite;
         match projection {
             ProjectionStoreConfig::Memory => open_s3_objectlog_memory_projection(
                 provider,
                 authority,
                 response_barrier,
-                async_projection,
+                Some(async_projection),
                 segments,
                 namespace,
                 recovery,
@@ -5579,7 +5651,7 @@ fn open_s3_log_cell(
                         authority,
                         ComposedProjectionConfig::Turso { path: path.clone() },
                         response_barrier,
-                        async_projection,
+                        Some(async_projection),
                         segments,
                         namespace.clone(),
                         recovery,
@@ -5595,7 +5667,7 @@ fn open_s3_log_cell(
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log,
                         path,
-                        Some(config.async_projection.unwrap_or_default()),
+                        Some(async_projection),
                     )?);
                     Ok(finish_objectlog_turso(config, clock, backend))
                 }
@@ -5625,7 +5697,7 @@ fn open_s3_log_cell(
                             authority,
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
-                            async_projection,
+                            Some(async_projection),
                             segments,
                             namespace,
                             recovery,
