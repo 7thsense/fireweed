@@ -136,6 +136,8 @@ projection and no storage matrix.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
+- [v0.31.31 release notes](docs/releases/v0.31.31.md) record the single
+  public cell: S3 object-log × Turso × async acknowledgement.
 - [v0.31.30 release notes](docs/releases/v0.31.30.md) cover the s3 × Turso
   capacity path, disk MinIO, and log-only projection rebuild.
 - [v0.30.0 identity note](docs/releases/v0.30.0.md) reserves package identity
