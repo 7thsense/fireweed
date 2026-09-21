@@ -47,11 +47,11 @@ fireweed-projection = { path = "../fireweed-projection", optional = true }
 tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync"], optional = true }
 
 [features]
-# Default pulls the embeddable adapters so `cargo build`/`cargo test` behave as before; a consumer who
-# wants only one backend uses e.g. `--no-default-features --features turso`. `postgres` is OPT-IN (it pulls
-# the postgres client) and is the multi-instance backend (`open_postgres` / `open_postgres_coordinated`).
-# `turso` is default-on: Turso is the public default projection (ADR-016 / TD-010).
-# rusqlite `sqlite` log/projection is retired; use filesystem log and turso projection.
+# Public construction is object-log + Turso (ADR-024). `memory` stays in the
+# default feature set only because the in-crate whitebox tests still link
+# `fireweed-memory`. It is not a public projection. New tests use Turso
+# `:memory:`. `postgres` is opt-in and is the control-plane client, not a
+# public log or projection.
 default = ["memory", "objectlog", "turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 # objectlog enables the shared Tokio reactor used by LogEngine I/O.

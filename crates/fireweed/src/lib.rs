@@ -1924,13 +1924,19 @@ mod storage_config_matrix_tests {
                     (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. })
                 );
                 if product {
-                    assert_eq!(config.validate(), Ok(()), "s3 × turso must validate");
-                    config.response_barrier = ResponseBarrier::AsyncProjection;
+                    assert_eq!(
+                        config.validate(),
+                        Err(EngineError::Invalid(
+                            "s3 × turso requires AsyncProjectionSpec"
+                        )),
+                        "s3 × turso without an async spec fails closed"
+                    );
+                    config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
                     config.async_projection = Some(AsyncProjectionSpec::default());
                     assert_eq!(
                         config.validate(),
                         Ok(()),
-                        "s3 × turso AsyncProjection must validate"
+                        "s3 × turso with authority and AsyncProjection must validate"
                     );
                 } else {
                     assert!(
@@ -2004,6 +2010,7 @@ mod storage_config_matrix_tests {
         };
         let mut unsafe_config = base(log.clone(), projection.clone());
         unsafe_config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        unsafe_config.async_projection = Some(AsyncProjectionSpec::default());
         unsafe_config.segments = SegmentConfig::new(1, 20).expect("structurally valid");
         assert_eq!(
             unsafe_config.validate(),
@@ -2015,6 +2022,7 @@ mod storage_config_matrix_tests {
 
         let mut neighboring_config = base(log, projection);
         neighboring_config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        neighboring_config.async_projection = Some(AsyncProjectionSpec::default());
         neighboring_config.segments =
             SegmentConfig::new(2, 1).expect("neighboring production shape");
         assert_eq!(neighboring_config.validate(), Ok(()));

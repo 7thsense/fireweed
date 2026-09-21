@@ -45,19 +45,36 @@ review was waiting on: accept the shipped cut (path R1).
 
 This ADR supersedes the 2026-09-17 12-cell amendment for public selectors.
 
-The public product is one cell: S3 object-log × Turso projection, named in
-the gate as **s3 log × turso projection**. `RETIRED_STORAGE_CELL` is the
-public rejection for every other selector. Callers, the server, Helm, and
-tests open that cell; they do not assemble a second product beside it.
+The public product is one cell: an object-log published to S3, a Turso
+projection, and `AsyncProjection`, named in the gate as **s3 log × turso
+projection**. Callers, the server, and Helm open that cell. There is no
+public storage matrix and no second barrier.
 
-`ResponseBarrier` has only `AsyncProjection`. There is no public `Strict`
-barrier. An empty claim on this barrier is a poll of applied projection
-rows, not a command failure and not a signal to retry the mutation.
+`ResponseBarrier` has only `AsyncProjection`. An empty claim is a poll of
+applied Turso rows, not a command failure and not a signal to retry the
+mutation.
 
-The other eleven axis pairs are retired. They are not a roadmap, not a
-deferred matrix, and not feature-gated public cells. `Strict` is not a
-roadmap item either. Restoring either would be a new decision, not the
-completion of this one.
+S3 is not a second log engine. The log engine is `fireweed-objectlog`. That
+crate has two publication adapters for one protocol: filesystem, for a single
+process on local disk, and S3, for the shared store. Filesystem publication
+is how the log protocol is tested without MinIO, and it is the code the S3
+adapter is built on. It is not a `LogConfig` a caller can select, and it is
+not a Fireweed support cell. A filesystem object-log test is not evidence
+about the public cell, and a public-cell result is not evidence about the
+filesystem adapter.
+
+The non-durable projection is Turso opened on `:memory:`
+(`TursoConfig::in_memory`). It is the same schema, SQL, and apply path as the
+file-backed projection. Tests of queue semantics and small non-durable benches
+use it. It has no WAL file, so tests of checkpoint, reopen, and rebuild use a
+temporary Turso file. The separate `InMemoryProjection` / `fireweed-memory` map is not a product
+projection and is not coverage of this cell. The `memory` Cargo feature is
+still on by default because the in-crate whitebox tests link that crate.
+New tests do not use it. Moving those tests onto Turso `:memory:` and then
+dropping the feature is cleanup, not a missing product cell.
+
+`RETIRED_STORAGE_CELL` is the fail-closed error for a selector that is not
+this cell. The name is historical. Those selectors are not a retired roadmap.
 
 Class A durability is the object log. The Turso projection is derived. It is
 rebuildable through `Fireweed::projection_control` (verify, delete, rebuild)
@@ -83,8 +100,9 @@ they do not reinstate a retired selector.
 |------|--------|
 | Positive | Vision, PRD, contracts, and the server have one storage law and one barrier to cite. |
 | Positive | Class A durability stays on the object log; Turso remains disposable and rebuildable. |
-| Negative | Memory, Postgres, and filesystem logs, and memory and Postgres projections, are not public cells. |
+| Negative | Callers cannot select a filesystem log, a memory projection, Postgres storage, or Strict. |
 | Negative | Callers cannot ask for read-your-writes via Strict. Empty claim means poll again. |
+| Neutral | Object-log filesystem publication and Turso `:memory:` stay available inside the engine for protocol tests and non-durable benches. |
 | Neutral | Older ADRs keep their historical sentences only where a later edit marks them historical. This ADR wins on current selectors. |
 
 ## Risks

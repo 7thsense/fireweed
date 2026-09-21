@@ -13,11 +13,13 @@ kind: product
 ## Public cell (ADR-024)
 
 ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
+selectors. The public product is one cell: an object-log published to S3, a
+Turso projection, and `AsyncProjection`. There is no public storage matrix.
+Filesystem publication stays inside `fireweed-objectlog` as the local adapter
+of that log. Turso `:memory:` is the non-durable form of the same projection.
+The separate in-memory map is not a product projection. Class A durability is
+the object log. Turso is rebuildable through `projection_control` and is not
+the command log.
 
 The 2026-09-17 amendment is historical. It does not define current selectors.
 Historical DDx IDs, requirement IDs, artifact names, and original measurements

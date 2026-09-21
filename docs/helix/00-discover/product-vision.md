@@ -43,20 +43,27 @@ explicit final state.
 
 ### Storage product law
 
-ADR-024 is the storage law. The public product is one cell: S3 object-log ×
-Turso projection (`s3 log × turso projection`). `ResponseBarrier` has only
-`AsyncProjection`. The other eleven axis pairs and `Strict` are not a roadmap.
-Class A durability is the object log. The Turso projection is rebuildable
-through `Fireweed::projection_control` and is not the command log. The control
-plane is not a second storage cell and is not a mandatory PostgreSQL tier.
+ADR-024 is the storage law. The public product is one cell: an object-log
+published to S3, a Turso projection, and `AsyncProjection`. There is no public
+storage matrix. Class A durability is the object log. The Turso projection is
+rebuildable through `Fireweed::projection_control` and is not the command log.
+The control plane is not a storage cell and is not a mandatory PostgreSQL tier.
+
+The log engine is `fireweed-objectlog`. Filesystem publication is an adapter
+inside that engine for one process on local disk. S3 publication is the public
+adapter. A filesystem log test is not a Fireweed support cell.
+
+Queue-semantics tests and small non-durable benches use Turso `:memory:`
+(`TursoConfig::in_memory`), the same SQL projection with no WAL file. WAL,
+reopen, and rebuild tests use a temporary Turso file. The separate
+`InMemoryProjection` map is not a product projection and is not coverage of
+this cell.
 
 A successful mutation is durable on the object log. A later claim polls applied
 Turso rows; an empty claim is a poll, not a failure of the mutation. Public
-reads may wait projection coverage. Callers do not assemble another log or
-projection. Selectors other than this cell, including retained compatibility
-names, reject before storage I/O (`RETIRED_STORAGE_CELL`). The retired
-`sqlite_projection_deferred_flush_chunk` setting is rejected when supplied; it
-is not an async-projection tuning option.
+reads may wait projection coverage. Selectors other than this cell reject
+before storage I/O (`RETIRED_STORAGE_CELL`). That error is fail-closed
+construction, not a list of products to restore.
 
 ## User Experience
 

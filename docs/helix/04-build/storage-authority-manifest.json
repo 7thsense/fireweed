@@ -2,15 +2,14 @@
   "schema_version": 1,
   "spec_id": "storage-matrix-completion-brief",
   "authority_revision": "2026-09-21-adr-024",
-  "comment": "ADR-024: public product is s3 log × turso projection; AsyncProjection only. Strict is not a required barrier.",
   "governed_documents": [
     {
       "path": "docs/helix/00-discover/product-vision.md",
-      "sha256": "2dc84fcae044aaeb066c09e7b32e190b45e19a723b5c969c91e3eafcda68d2c7"
+      "sha256": "e32c58b0150a1e7806e37299dbbd12aa96400c471c4216be124f6e24e6320746"
     },
     {
       "path": "docs/helix/01-frame/prd.md",
-      "sha256": "95ca88a61727a6d79f6501d7c976df160552e58d13cfd67efaaf044fdc90e533"
+      "sha256": "1582fb9d830404395cba00ca0c6447661fe07bdea76ad7eeabfddae05f3895b9"
     },
     {
       "path": "docs/helix/02-design/orthogonal-storage-matrix-brief.md",

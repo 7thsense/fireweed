@@ -109,10 +109,11 @@ Fireweed separates queue semantics from storage and transport:
 | Command log | Authoritative accepted history |
 | Projection | Rebuildable item, eligibility, lease, and query state |
 
-Log and projection storage are independent axes. Local development can use
-memory or a filesystem log with a Turso projection. Durable deployments can compose an object log or Postgres log
-with the projections documented in the operator guide. Unsupported pairings
-fail at startup instead of silently selecting another backend.
+The public storage cell is an object-log published to S3, a Turso projection,
+and async log acknowledgement. The log engine lives in `fireweed-objectlog`:
+filesystem publication is its local adapter, and S3 publication is the public
+adapter. Non-durable tests use Turso `:memory:`. There is no second public
+projection and no storage matrix.
 
 ## Documentation
 
@@ -126,7 +127,7 @@ fail at startup instead of silently selecting another backend.
   covers embedded construction and worker lifecycle verbs.
 - [Embedded workflow example](crates/fireweed/examples/scheduler_boundary.rs)
   composes queue templates, grouped discovery, stateless dispersion, bounded
-  multi-queue claims, and worker finalization over a filesystem log with a memory projection.
+  multi-queue claims, and worker finalization. The public open is S3 × Turso.
 - [Container runtime contract](docs/deployment/container-runtime-contract.md)
   lists runtime settings and storage profiles.
 - [Operator deployment guide](docs/deployment/operator-guide.md) covers Helm,
@@ -142,7 +143,7 @@ fail at startup instead of silently selecting another backend.
 - [v0.29.2 release notes](docs/releases/v0.29.2.md) (historical) describe Snorri
   validate-before-apply fixes and E3 TP-003 emitter scaffold.
 - [v0.23.2 release notes](docs/releases/v0.23.2.md) (historical) describe an earlier
-  public 5×3 storage matrix; current storage support is the 4×3 matrix with Turso default.
+  public 5×3 storage matrix. Current support is the single S3 × Turso cell in ADR-024.
 - [v0.23.0 release notes](docs/releases/v0.23.0.md) (historical) describe the native-S3
   authority cutover and provider-neutral E3 runner. Current S3 publication authority is
   NativeConditionalWrite only; provider brands are not product SKUs.
