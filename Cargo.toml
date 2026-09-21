@@ -26,7 +26,7 @@ exclude = ["vendor/object-log", "vendor/turso_core", "vendor/turso", "vendor/tur
 resolver = "3"
 
 [workspace.package]
-version = "0.31.31"
+version = "0.31.32"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"

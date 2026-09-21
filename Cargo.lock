@@ -1356,7 +1356,7 @@ checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
 
 [[package]]
 name = "fireweed"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-conformance"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-core"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "axon-esf",
  "postcard",
@@ -1400,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-engine"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "axon-esf",
  "base64 0.23.1",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-loadgen"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "fireweed-release",
  "serde",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-memory"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "fireweed-conformance",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-objectlog"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-postgres"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-projection"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-relational"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-release"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "serde",
  "serde_json",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-resp"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-server"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "chrono",
@@ -1561,11 +1561,11 @@ dependencies = [
 
 [[package]]
 name = "fireweed-sim-support"
-version = "0.31.31"
+version = "0.31.32"
 
 [[package]]
 name = "fireweed-turso"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "bytes",
  "fireweed-conformance",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-workload"
-version = "0.31.31"
+version = "0.31.32"
 dependencies = [
  "fireweed",
  "fireweed-objectlog",
