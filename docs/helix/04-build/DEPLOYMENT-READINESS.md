@@ -29,50 +29,35 @@ BUILD-001 release line.
 
 ### Product storage model (normative)
 
-Runtime and Helm configuration are expressed as **two storage axes** (plus
-control plane, composed but not redefined here). The product model is the
-orthogonal product of log backend × projection store — not a list of named
-deployment profiles. Typed `StorageConfig` (API-005) is the normative
-composition root for the library and the target for service/Helm configuration
-layering (`orthogonal-storage-matrix-brief`).
+ADR-024 is the deployment storage law. The public product is one cell: S3
+object-log × Turso projection. `ResponseBarrier` has only `AsyncProjection`.
+Typed `StorageConfig` (API-005), including `StorageConfig::s3_turso`, is the
+composition root for the library and the target for service/Helm configuration.
 
 | Axis | Public values | Responsibility |
 |------|---------------|----------------|
-| **Log backend** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
-| **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
+| **Log backend** | `s3` | Command append, epoch/fence authority, Class A replay |
+| **Projection** | `turso` | Serving projection, rebuildable through `projection_control`, not the command log |
 
-`filesystem` and `s3` are first-class object-log peers (same protocol: segments,
-manifest, conditional write / authority, retention). They are not test-only
-substitutes for each other. Pair strings such as `objectlog/sqlite` may appear
-in historical evidence IDs and transitional runtime wiring; they are **not**
-public product SKUs.
+Pair strings from older evidence are not public product SKUs. Other selectors
+reject before I/O.
 
-Full public matrix (15 cells). Semantics differ by durability class (Class A:
-durable log; Class B: memory log — see API-005 and ADR-013), not by a second
-architecture:
-
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| `memory` | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A |
+| Log \ Projection | `turso` |
+|------------------|---------|
+| `s3` | Class A · `AsyncProjection` · **the release cell** |
 
 ### Release storage surface (normative)
 
-The **release storage surface is this full 15-cell matrix** (typed
-`StorageConfig`, API-005 / `orthogonal-storage-matrix-brief`). A release/tag
-must not ship with a failed **required** matrix cell. The binding gate is
-`scripts/ci/storage-matrix-gate.sh` (Phase 6 of
-[`storage-matrix-completion-brief.md`](./storage-matrix-completion-brief.md)):
+The release storage surface is that one cell. A release must not ship a second
+public cell or a `Strict` barrier. `StorageConfig::s3_turso` sets
+`NativeConditionalWrite` and an `AsyncProjectionSpec`. This document does not
+claim a 10M-resident or 1000-queue pass.
 
-| Step | Command / artifact |
-|------|--------------------|
-| 15-cell T0–T2 harness | `cargo test -p fireweed --features memory,sqlite,objectlog,postgres --test storage_matrix_t0_t2` |
-| Server Class B + Class A suites | `cargo test -p fireweed-server --features postgres --lib class_b` / `sqlite_log_matrix` / `filesystem_matrix` / `s3_object_log` |
+| Step | What it checks |
+|------|----------------|
+| Public cell | `StorageConfig` accepts s3 × turso and rejects retired selectors before I/O |
+| Server | `Server::validate_for_start` uses the same retirement rule |
 | Legacy product-name ban | `bash scripts/ci/assert-no-legacy-storage-product-names.sh` |
-| Helm matrix fixtures | `bash scripts/ci/helm-gate.sh` (all 15 public cells under `charts/fireweed-queue/ci/*-values.yaml`) |
 
 Required product CI that claims the full surface sets
 `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` and provisions S3 + Postgres fixtures
@@ -95,21 +80,15 @@ rendering, and CI evidence actually cover on that revision.
 > (`v0.23.3`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The public product is the **5×3 log × projection matrix** (`StorageConfig` +
-`open` / `open_async`). Helm and env adapters are isomorphic to those axes
-(`storage.log` / `storage.projection`; public log names `memory`, `sqlite`,
-`postgres`, `filesystem`, `s3`; public projection names `memory`, `sqlite`,
-`postgres`). Legacy spellings (`objectlog`, `inmemory`, hybrid/turso projection
-select) are **not** public product SKUs: they must fail closed on public
-surfaces (`scripts/ci/assert-no-legacy-storage-product-names.sh`).
+The public product is the s3 × turso cell (ADR-024). Helm and env adapters
+must deserialize into that `StorageConfig`. Legacy spellings (`objectlog`,
+`inmemory`, hybrid, and retired log or projection names) are not public
+product SKUs: they must fail closed
+(`scripts/ci/assert-no-legacy-storage-product-names.sh`).
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| `memory` | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A |
+| Log \ Projection | `turso` |
+|------------------|---------|
+| `s3` | Class A · `AsyncProjection` |
 
 crates.io and GHCR publication are deferred by the public-preview checklist; no
 registry artifact is available until a later release explicitly publishes and
@@ -147,44 +126,23 @@ negative schema assertion; implementation work does not imply support.
 ## Production Target
 
 The production deployment target is a Kubernetes installation delivered by Helm.
-Helm `storage.*` is the deploy document for the structured log × projection
-model and must remain isomorphic to typed `StorageConfig` as that surface lands.
-Release readiness requires:
+Helm `storage.*` must deserialize to the public cell: S3 object log × Turso,
+`AsyncProjection` only (ADR-024). Release readiness requires:
 
-- chart schema and templates that expose structured log and projection axes
-  (`storage.log.backend` and `storage.projection.backend`, evolving toward the
-  five public log values including `filesystem` and `s3` and the three public
-  projection values);
-- rendered container injection for the selected cell (today:
-  `FIREWEED_LOG_BACKEND` / `FIREWEED_PROJECTION_BACKEND` and related path/URL
-  keys — adapter only, not the product definition);
-- Secret references for Postgres log and projection URLs when those axes choose
-  `postgres`;
-- object-log root or S3 endpoint/bucket configuration when the log axis is
-  `filesystem` or `s3` (legacy chart spelling may still say `objectlog` +
-  local/s3 store until the Helm isomorphic cutover);
-- SQLite projection path and persistence when the projection axis chooses
-  `sqlite`;
-- a live `kind` install smoke for every combination that the service runtime
-  claims as executable in Kubernetes.
-- release evidence that every production-claimed storage combination satisfies
-  API-001's external transaction contract under fault injection: success is
-  durable and visible, rejection has no committed effect, and unknown outcomes
-  resolve exactly once by `request_id`.
-- CI and tag releases provision a live Postgres service and run
-  `ac_txn_contract_matrix_postgres_storage_pairs` plus
-  `ac_txn_6_postgres_storage_pair_parity` with `FIREWEED_PG_TEST_URL` set, so the
-  exact `postgres/sqlite` and `postgres/postgres` rows cannot pass by skip. Each
-  job deletes both tracked JSONL outputs, reruns the tests, asserts that both
-  regenerated files are non-empty, and only then invokes the verifier. Stale
-  repository evidence cannot satisfy the live proof step.
-- `fireweed-verify-transaction-evidence` consumes the two exact-pair JSONL files
-  and requires AC-TXN-1/2/3/6 for both profiles. Missing, duplicate, failed,
-  partial, coverage-GAP, and all whole-row N/A results fail closed. Capability
-  limits may be recorded only as assertion context inside a passing AC row. The
-  standalone smoke release gate validates the repository-held snapshot;
-  freshness is an additional invariant enforced by the CI and tag-release steps
-  above.
+- chart schema and templates that select `s3` and `turso` and reject other
+  storage selectors;
+- rendered container injection for that cell (`FIREWEED_LOG_BACKEND` /
+  `FIREWEED_PROJECTION_BACKEND` and S3 endpoint settings are an adapter, not a
+  second product);
+- S3 endpoint, bucket, and conditional-write credentials for the object log;
+- a local Turso projection path that rebuilds through `projection_control`;
+- a live `kind` install smoke for that cell;
+- release evidence that the cell satisfies API-001 under fault injection:
+  success is durable on the object log, rejection has no committed effect,
+  unknown outcomes resolve by `request_id`, and an empty claim is a poll.
+
+Historical Postgres-pair JSONL verifiers are not the public cell and are not a
+pass for v0.31.30. This target does not claim a 10M-resident or 1000-queue result.
 
 The `kind` proof is the minimum release-readiness gate. It is not a substitute
 for environment-specific capacity planning, credentials, monitoring, backups, or
@@ -210,29 +168,26 @@ service names.
 
 The release CI surface must include:
 
-- **15-cell storage matrix gate** (`scripts/ci/storage-matrix-gate.sh`): binds
-  the full public `StorageConfig` matrix (T0–T2 library harness, server Class B /
-  sqlite / filesystem / s3 matrix suites, legacy product-name assert, Helm
-  15-cell fixtures). **Invoked from** `scripts/ci/release-gate.sh`
+- **Public-cell gate** (ADR-024): the release surface is s3 × turso with
+  `AsyncProjection` only. A multi-cell matrix is not the product. Historical
+  invocations of `scripts/ci/storage-matrix-gate.sh` are not this cell's
+  qualification record. **Invoked from** `scripts/ci/release-gate.sh`
   (`--skip-helm`, cargo + legacy ban on every release/tag path that runs the
   release gate, including `.github/workflows/release.yml` and
   `scripts/ci/nightly-gate.sh`) and from
   `scripts/ci/deployment-release-gate.sh` (`--skip-cargo`, Helm fixtures on the
   deployment/tag path). Default PR `ci.yml` stays thin (policy:
   `verify-github-actions-policy.sh`) and does **not** run this gate. Required
-  full-matrix jobs set `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` with live S3 +
-  Postgres fixtures; the gate fails non-zero when a required step fails or when
-  full-matrix mode is set without fixtures;
+  jobs that claim this cell provision live S3. The gate fails non-zero when a
+  required step fails or when the cell is opened without its fixture. A
+  multi-cell mode is not the product;
 - Rust quality gates: formatting, clippy, workspace tests, release-gate scripts,
   and strict verification-ledger validation;
-- Helm chart lint/render checks for every storage combination listed in the
-  chart CI values (the 15 public cells plus shared multi-replica / lakebase
-  variants under `charts/fireweed-queue/ci/`);
+- Helm chart lint/render checks for the public s3 × turso cell and the shared
+  chart variants under `charts/fireweed-queue/ci/` that still describe it;
 - a negative check that `FIREWEED_BACKEND_PROFILE` is absent from rendered Helm
   output;
-- live `kind` Helm smokes for deploy-facing cells on the public axes (log ∈
-  {memory, sqlite, postgres, filesystem, s3} × projection ∈ {memory, sqlite,
-  postgres} as claimed), including RESP `PING`, `XADD`, `XREADGROUP`, rollout
+- live `kind` Helm smoke for the public cell (s3 × turso, ADR-024), including RESP `PING`, `XADD`, `XREADGROUP`, rollout
   restart, and post-restart readback;
 - the TP-003 `AC-TXN-*` transaction-contract matrix for every production-claimed
   storage combination, including object-log crash points around segment write,
@@ -451,20 +406,15 @@ provider or provider-compatible endpoint, credentials, conditional-write
 semantics, the same transaction-contract matrix, and release evidence separate
 from the local filesystem object-log fixture.
 
-## Storage matrix fixture requirements
+## Storage fixture requirements
 
-Full 15-cell matrix evidence needs external services for axes that cannot be
-satisfied with temp dirs alone. Local developer runs may skip those cells
-(documented `eprintln!`); **required** release/product jobs must provision
-fixtures and set `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` so missing fixtures
-fail the gate rather than silently reducing coverage.
+The public cell needs an S3-compatible endpoint with native conditional write
+and a local Turso projection. Missing fixtures fail the job. They are not a
+license to open another cell. This section does not claim a 10M or 1000-queue pass.
 
-| Axis / cells | Fixture | Environment |
-|--------------|---------|-------------|
-| Local Class A/B (`memory`/`sqlite`/`filesystem` log × `memory`/`sqlite` projection) | Temp dirs only | none |
-| Any `postgres` log or projection cell | Live Postgres | `FIREWEED_PG_TEST_URL`; build with `--features postgres` |
-| `s3` × {`memory`,`sqlite`} | S3-compatible endpoint with native create-only | `FIREWEED_S3_TEST_ENDPOINT` (+ bucket/keys; see below) |
-| `s3` × `postgres` | S3 **and** Postgres | both of the above |
+| Cell | Fixture | Environment |
+|------|---------|-------------|
+| `s3` × `turso` | S3-compatible endpoint with native conditional write | `FIREWEED_S3_TEST_ENDPOINT` (+ bucket/keys; see below) |
 
 S3-compatible job contract (endpoint, bucket, keys, create-only, MinIO/Garage
 notes) is normative in
@@ -482,32 +432,15 @@ export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
 
 ## Verification Commands
 
-Release-readiness verification for the current boundary is:
+Release-readiness verification for the current boundary is the public cell
+(ADR-024), not a multi-cell matrix. Historical commands that open other
+selectors are not this contract.
 
 ```sh
-# Full public 15-cell StorageConfig matrix (library T0–T2, server suites,
-# legacy name ban, Helm fixtures). Fails non-zero on any step failure.
-# For required release CI, export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
-# and the S3/PG fixtures above first.
-bash scripts/ci/storage-matrix-gate.sh
-
-bash scripts/ci/release-gate.sh
-cargo run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
-  --evidence docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl \
-  --evidence docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
-bash scripts/ci/helm-gate.sh
-bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
-bash scripts/ci/deployment-release-gate.sh
-```
-
-Focused matrix commands (also invoked by the gate):
-
-```sh
-cargo test -p fireweed --features memory,sqlite,objectlog,postgres --test storage_matrix_t0_t2
-cargo test -p fireweed-server --features postgres --lib class_b
-cargo test -p fireweed-server --features postgres --lib sqlite_log_matrix
-cargo test -p fireweed-server --features postgres --lib filesystem_matrix
-cargo test -p fireweed-server --features postgres --lib s3_object_log
 bash scripts/ci/assert-no-legacy-storage-product-names.sh
-bash scripts/ci/helm-gate.sh
 ```
+
+The library and server tests that accept s3 × turso and reject retired
+selectors are the cell gate. They are named with the suites that land with
+ADR-024. Do not treat an older postgres or filesystem suite as a pass for
+this cell.

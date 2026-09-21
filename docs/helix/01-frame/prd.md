@@ -10,28 +10,20 @@ kind: product
 
 # Product Requirements Document
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../02-design/contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference. See [the current Rust interface](../02-design/contracts/API-005-fireweed-rust-facade.md)
+and [storage authority manifest](../04-build/storage-authority-manifest.json).
 
 ## Summary
 
@@ -43,16 +35,15 @@ lease, and claimed items are finalized as complete, failed, retryable, or
 released.
 
 fireweed is also the transaction mapping layer for this centralized state-machine
-workflow. The native interface is batch-centric, and every supported storage
-cell MUST present the same mutation, visibility, rejection, and request-replay
-contract. A successful response is visible through subsequent reads and claims;
-a rejected mutation has no committed effect; and an interrupted or timed-out
-mutation can be resolved through `request_id` without duplicating state
-transitions. Cross-process durability follows the declared log class: Class A
-persists through its durable log, while Class B persistence is limited to the
-selected projection. Storage choices may change durability class, latency,
-cost, scale envelope, and recovery time; they MUST NOT silently change
-state-machine integrity.
+workflow. The native interface is batch-centric. The public storage cell
+(ADR-024) is S3 object-log × Turso projection with `AsyncProjection` only.
+A successful mutation is durable on the object log. A later claim polls applied
+rows; an empty claim is a poll, not a failure of the mutation. A rejected
+mutation has no committed effect. An interrupted or timed-out mutation can be
+resolved through `request_id` without duplicating state transitions. Class A
+durability is the object log. Turso rebuilds through `projection_control` and
+is not the command log. Latency, cost, and recovery time MUST NOT silently
+change state-machine integrity.
 
 The product is general-purpose and may become open source. Seventh Sense is the
 first validation workload: several delivery, action, job, and connector queues
@@ -73,33 +64,24 @@ resource envelope; they are capacity observations, not host-independent pass bar
 Each measure references a recorded evidence artifact (see "Scale
 Substantiation").
 
-One important high-scale topology uses memory or SQLite serving projections
-backed by a durable filesystem or S3 object log, giving a hot serving path with
-object-store durability and queue count bounded by cluster capacity rather than
-by one database. It is one selection from the product matrix, not a separate
-profile. A Postgres log is a first-class peer with different scaling and
-operational parameters; Postgres is also a first-class projection and optional
-control-plane choice.
+The public durable cell is S3 object-log × Turso projection (ADR-024): object-store
+durability and a rebuildable serving projection. It is the product, not one row
+of a larger matrix. Retired log and projection selectors are not a roadmap.
 
 ### Storage product boundary
 
-The public product is exactly the 5×4 product of five logs (`memory`, `sqlite`,
-`postgres`, `filesystem`, `s3`) and four projections (`memory`, `sqlite`,
-`turso`, `postgres`). All 20 cells use one typed composition model and the same
-public queue surface. `filesystem` and `s3` are peer object-log providers.
-Turso is the default projection; it means the embedded/local Turso 0.7 adapter
-in ordinary WAL mode. SQLite remains a supported explicit projection and the
-differential relational reference. Public selectors do not include
-`objectlog`, `inmemory`, or Hybrid product aliases.
+The public product is one cell: S3 object log × Turso projection (ADR-024).
+`ResponseBarrier` has only `AsyncProjection`. Turso means the embedded/local
+Turso 0.7 adapter in ordinary WAL mode. It is not a default among other
+projections, and it is not a SQLite differential reference. Public selectors
+do not include `memory`, `sqlite`, `postgres`, or `filesystem` logs, `memory`
+or `postgres` projections, `objectlog`, `inmemory`, Hybrid aliases, or `Strict`.
 
-The four durable logs are Class A: the log remains authoritative after restart
-and projections recover from high-water plus tail replay. The memory log is
-Class B: after process death only a durable SQLite, Turso, or Postgres projection can
-remain, and no memory-log cell claims log rebuild, branch, read-as-of, or
-log-derived change records. The control plane is an optional composition axis,
-not a mandatory PostgreSQL dependency. Public composition is native async;
-inherently blocking adapters may isolate complete transactions behind bounded
-actors without defining a second facade or global blocking execution model.
+Class A durability is the object log. The log remains authoritative after
+restart and Turso recovers through `projection_control` (high-water plus tail
+replay). There is no public Class B cell. The control plane is not a storage
+cell and not a mandatory PostgreSQL dependency. Public composition is native
+async.
 
 ## Problem and Goals
 
@@ -135,9 +117,10 @@ queue with timestamp ordering as a first-class validation case.
 6. Operators can configure a commit-latency bound for applicable Class A logs and
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
-7. Callers can depend on one transaction contract across all 20 storage cells
-   without backend-specific choreography, while selecting the documented Class
-   A or Class B cross-process durability boundary explicitly.
+7. Callers can depend on one transaction contract on the public cell
+   (S3 object-log × Turso, `AsyncProjection` only, ADR-024) without
+   backend-specific choreography. Success is durable on the object log.
+   Claim polls applied rows.
 
 ### Success Metrics
 
@@ -148,7 +131,7 @@ queue with timestamp ordering as a first-class validation case.
 | Queue density | At least 1000 cold queues plus one designated hot queue are active concurrently; all queues become progress-eligible, the hot and cold phases complete exactly, and shared workers/connections/tasks remain bounded rather than growing per queue | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Hot queue scale | At least 10M items resident in one active queue remain writable, claimable, observable, and exactly recoverable under the declared topology | Benchmark per TP-002 E1 and E3 |
 | Core operation capacity | Throughput and p50/p95/p99 for batch push, update, claim, and finalize are published with workload, host, topology, and resource limits; pass/fail uses correctness, progress, bounded resources, and same-run degradation rather than absolute speed | Benchmark harness under representative Seventh Sense and synthetic workloads |
-| External transaction integrity | All 20 cells satisfy success/error/unknown-outcome semantics; all 16 Class A cells prove crash recovery from the durable log, while the four Class B cells prove only their declared projection-persistence boundary | Cell and durability-class conformance plus fault injection per TP-003 |
+| External transaction integrity | The public cell (s3 × turso, `AsyncProjection`, ADR-024) satisfies success/error/unknown-outcome semantics and proves crash recovery from the object log. Empty claim is a poll, not a lost mutation. This row does not record a 10M-resident or 1000-queue pass | Cell conformance plus fault injection per TP-003 on that cell |
 | Commit latency and cost dial | Applicable Class A logs publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
 | Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
@@ -282,13 +265,13 @@ priority, retry, claim, and state logic with different table shapes.
     connection per queue.
     Aggregate single-node throughput is reported for the declared node;
     multi-node deployment provides aggregate headroom.
-15. Composition-independent transaction contract: all 20 cells MUST preserve
-    the same external semantics for batch mutation
-    success, structured rejection, unknown retry resolution, idempotency replay,
-    read-your-write visibility, and claim exclusivity. Recovery from durable
-    state MUST match the selected Class A or Class B boundary. No caller may
-    need backend-specific write, flush, replay, or repair choreography to
-    preserve state-machine integrity.
+15. Transaction contract on the public cell (ADR-024): S3 object-log × Turso
+    projection and `AsyncProjection` only. Batch mutation success is durable on
+    the object log. Structured rejection has no committed effect. Unknown
+    retries resolve by `request_id`. Idempotency replay and claim exclusivity
+    hold. An empty claim polls applied rows and is not a command failure.
+    Recovery replays the object log through `projection_control`. No caller
+    needs a second cell or a `Strict` barrier.
 16. Applicable Class A log configurations MUST expose an
     operator-configurable commit-latency
     bound that controls group-commit cadence. Lower bounds reduce mutation

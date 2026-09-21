@@ -50,72 +50,62 @@ Backend = LogStore × ProjectionStore × ControlPlane
 
 | Axis | Public values | Responsibility |
 |------|---------------|----------------|
-| **Log backend** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
-| **Projection** | `memory`, `sqlite`, `turso` (default), `postgres` | Serving, claim selection, validation, apply |
-| **Control plane** | (unchanged; in-process / postgres, etc.) | Queue definitions, placement, ownership — composed but not redefined here |
+| **Log backend** | `s3` | Command append, epoch/fence authority, Class A replay (ADR-024) |
+| **Projection** | `turso` | Serving, claim selection, validation, apply; rebuildable, not the command log |
+| **Control plane** | not a storage cell | Queue definitions, placement, ownership — not a second public log or projection |
 
 There is no public “profile” product type. Pair strings may appear only in test IDs and historical
-evidence filenames. `filesystem` and `s3` are peer object-log backends (same protocol: segments,
-manifest, conditional write / authority); multi-writer still requires ownership and fencing rules.
+evidence filenames. The public log is the S3 object log (segments, manifest, conditional write /
+authority). `memory`, `sqlite`, `postgres`, and `filesystem` are not public log or projection
+selectors (ADR-024). They are not a roadmap.
 
-**Postgres** is a first-class log backend and a first-class projection backend. Feature flags or image
-builds that omit the adapter are packaging choices and must fail closed with a clear message.
-
-**Turso** is the public default projection (embedded/local Turso 0.7, ordinary WAL mode). Remote,
-sync, and MVCC Turso modes are outside this boundary. Server and Helm default projection selection
-to `turso` when unset.
+**Turso** is the public projection (embedded/local Turso 0.7, ordinary WAL mode). Remote,
+sync, and MVCC Turso modes are outside this boundary. It is not a default among other
+projections; it is the only public projection.
 
 **Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`, `objectlog`, `inmemory`,
 and combined-profile SKUs. Public env/Helm hard-reject those names. Historical Hybrid evidence is
 non-governing provenance only
 ([tp002-objectlog-hybrid-evidence.md](../perf/tp002-objectlog-hybrid-evidence.md)).
 
-### Durability classes
+### Durability
 
-| Class | Logs | Authority after restart | Client contract |
-|-------|------|-------------------------|-----------------|
-| **A — Durable log** | `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`turso` / `postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
+| Class | Log | Authority after restart | Client contract |
+|-------|-----|-------------------------|-----------------|
+| **A — Object log** | `s3` | Object log is the system of record; Turso is a rebuildable cache (`projection_control`) | Success ⇒ durable on the object log. Claim polls applied rows (`AsyncProjection`); an empty claim is not a command failure. Recovery replays the object log. `request_id` resolves ambiguity across crash |
 
-Class B is a weaker **persistence envelope**, not a second architecture. Every cell remains
-`LogStore × ProjectionStore` with append → apply → acknowledge for that class. Class B cells carry
-an explicit **semantic durability disclaimer**: durability is limited to the projection. That is the
-only Class B caveat—not incompleteness, not “development only,” and not a demoted product row.
+There is no public Class B cell.
 
-### Full matrix (12 cells) — all preview-supported
+### Public cell
 
-Every cell is a valid, preview-supported selection. Semantics differ only by durability class.
-Open via typed `StorageConfig` (`Fireweed::open` / `open_async`); server and Helm select the same pair.
-Default projection is `turso`. The rusqlite `sqlite` log and `sqlite` projection are retired.
+One cell is preview-supported (ADR-024). Open it via typed `StorageConfig`
+(`Fireweed::open` / `open_async`, including `StorageConfig::s3_turso`). Server
+and Helm select the same pair. Other selectors reject before storage I/O.
 
-| Log \ Projection | `memory` | `turso` (default) | `postgres` |
-|------------------|----------|-------------------|------------|
-| `memory` | Class B · **supported** | Class B · **supported** | Class B · **supported** |
-| `postgres` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `filesystem` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `s3` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| Log \ Projection | `turso` |
+|------------------|---------|
+| `s3` | Class A · **supported** · `AsyncProjection` only |
 
 ### Preview support posture
 
-All **12** public matrix cells are **preview-supported**. Maintainers accept correctness reports
-against the documented contract for each cell and intend configuration compatibility within the
+The public cell is **preview-supported**. Maintainers accept correctness reports
+against the documented contract for that cell and intend configuration compatibility within the
 0.x minor line (definition above).
 
-| Log backend | Projection | Durability | Preview posture |
-|-------------|------------|------------|-----------------|
-| `memory` | `memory` | Class B | **Supported** — process-local; after process death neither log nor projection remains |
-| `memory` | `turso` / `postgres` | Class B | **Supported** — durability limited to the projection; **no** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
-| `postgres` | `memory` / `turso` / `postgres` | Class A | **Supported** — first-class durable postgres log; projection as selected (`postgres` cargo feature / image packaging may omit the adapter and must fail closed) |
-| `filesystem` / `s3` | `memory` / `turso` / `postgres` | Class A | **Supported** — durable object log (filesystem and s3 are peers); projection as selected |
+| Log backend | Projection | Durability | Barrier | Preview posture |
+|-------------|------------|------------|---------|-----------------|
+| `s3` | `turso` | Class A | `AsyncProjection` | **Supported** — object log is durable; Turso rebuilds through `projection_control` |
 
-Response barriers on object-log cells are public `Strict` and `AsyncProjection` (not Hybrid product
-rows). S3 publication authority is NativeConditionalWrite only; provider brand names (including
-historical Garage notes in release history) are not product SKUs.
+The only public response barrier is `AsyncProjection`. `Strict` is not a public
+barrier. S3 publication authority is `NativeConditionalWrite`; a missing authority
+or a missing `AsyncProjectionSpec` rejects before I/O. `StorageConfig::s3_turso`
+sets both. Provider brand names (including historical Garage notes in release
+history) are not product SKUs.
 
-All preview-supported **Class A** combinations must preserve the same external transaction
-contract: successful mutations are durable and visible, rejected mutations have no durable effect,
-and ambiguous retries are resolved by request identity. Class B combinations preserve visibility
-and rejection semantics, with durability limited to the projection when that projection is durable.
+The public cell preserves one external transaction contract: successful mutations
+are durable on the object log, rejected mutations have no durable effect, and
+ambiguous retries are resolved by request identity. A following claim may be
+empty while apply lags; that is a poll, not a lost mutation.
 
 Conformance obligations by durability class:
 [storage-matrix-conformance-classes.md](../04-build/storage-matrix-conformance-classes.md).
@@ -129,7 +119,7 @@ in the public support set; it informs production claims beyond this preview boun
 Experimental surfaces are present in the repository but are not part of the public support claim
 or the public storage matrix:
 
-- Remote / sync / MVCC Turso modes (local embedded Turso WAL is public and default).
+- Remote / sync / MVCC Turso modes (local embedded Turso WAL is the public projection).
 - Non-matrix implementation knobs under durable projections may change or be removed without
   compatibility aliases.
 - Historical Hybrid product names remain internal/test-only construction paths and are hard-rejected
@@ -149,13 +139,13 @@ classified below so the preview boundary remains explicit and auditable.
 | `fireweed-engine` | Runtime substrate | Supported through the public facade and server, not promised as a standalone API. |
 | `fireweed-projection` | Runtime substrate | Supported through shipped log × projection compositions, not promised as a standalone API. |
 | `fireweed-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
-| `fireweed-objectlog` | Runtime adapter | Supported through `filesystem` / `s3` log backends above. |
-| `fireweed-sqlite` | Retired | Rusqlite log/projection adapter; not a public matrix cell. Removal in progress. |
-| `fireweed-server` | Public runtime | Supported service binary within the storage-axes boundary above. |
+| `fireweed-objectlog` | Runtime adapter | Supported through the public `s3` log above. |
+| `fireweed-sqlite` | Retired | Rusqlite log/projection adapter; not a public cell. |
+| `fireweed-server` | Public runtime | Supported service binary for the s3 × turso cell above. |
 | `fireweed-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
-| `fireweed-memory` | Runtime adapter | Supported Class B memory log and memory projection paths in the matrix. |
-| `fireweed-postgres` | Runtime adapter | Supported first-class log and projection adapter in the matrix. |
-| `fireweed-turso` | Public projection adapter | Supported default local Turso projection (embedded WAL); not a log or control-plane authority. |
+| `fireweed-memory` | Not a public cell | Historical adapter. Not a preview storage cell (ADR-024). |
+| `fireweed-postgres` | Not a public storage cell | Not a public log or projection. Not a second storage product (ADR-024). |
+| `fireweed-turso` | Public projection adapter | The public local Turso projection (embedded WAL); not a log or control-plane authority. |
 | `fireweed-conformance` | Test tooling | Contributor-facing contract tests; not a runtime product artifact. |
 | `fireweed-loadgen` | Test tooling | Load and evidence generation; no public runtime API commitment. |
 | `fireweed-release` | Release tooling | Maintainer tooling; not a runtime product artifact. |
@@ -169,9 +159,9 @@ Non-goals for this release boundary:
 - no claim that the product is a workflow engine or dependency graph engine;
 - no promise that the preview support slice will stay frozen across future releases;
 - no performance proof beyond the existing readiness and probe evidence;
-- no support for unbounded custom backends outside the 5×4 matrix;
-- no Class A recovery / branch / read-as-of claims for Class B (memory log) cells;
-- no framing of Postgres as an incomplete or deferred product family;
+- no public cell other than s3 × turso (ADR-024);
+- no Class B memory-log product and no `Strict` barrier;
+- no framing of retired selectors as a deferred product family;
 - no public Hybrid projection backends or profile SKUs;
 - no treating S3 provider brands (including historical Garage) as current product authority.
 
@@ -180,7 +170,7 @@ Non-goals for this release boundary:
 Support posture for public preview is best-effort and release-boundary limited:
 
 - supported issues are correctness regressions, schema drift, reopen/rebuild failures, and mismatches
-  with the documented preview contract (all 20 matrix cells);
+  with the documented preview contract (the s3 × turso cell, ADR-024);
 - unsupported issues include workload sizing, operator hardening, SLA requests, and deployment
   topologies outside the boundary above;
 - production support claims are deferred until the relevant release-readiness gates are explicitly
@@ -195,4 +185,4 @@ Deferred production claims include:
 - release-tier cost and multi-region failover, SLA, and capacity leadership claims.
 
 The repository contains deployment and scale evidence beyond the per-cell correctness bar. That
-evidence informs production readiness; it does not shrink or expand the public 20-cell support set.
+evidence informs production readiness; it does not add a public cell beside s3 × turso (ADR-024).

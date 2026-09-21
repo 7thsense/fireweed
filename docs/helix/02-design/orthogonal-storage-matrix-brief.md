@@ -27,16 +27,14 @@ ddx:
 
 # Orthogonal Storage Matrix — Product Brief
 
-**Status**: Accepted product intent (2026-07-28); matrix revised 2026-09-17 for SQLite retirement
-**Scope**: Public storage model, configuration layering, durability classes, and the
-work sequence that aligns code, contracts, and preview messaging.  
-**Non-scope**: Control-plane redesign, Hybrid as a public projection type,
-unbounded custom backends, remote/sync/MVCC Turso modes.
+**Status**: Historical composition note. ADR-024 is the public storage law.
+**Scope**: How an older log × projection matrix was described. It is not the
+current product.
+**Non-scope**: Restoring retired selectors, a `Strict` barrier, or remote/sync/MVCC Turso modes.
 
-This brief is the governing intent for subsequent ADR/TD/API amendments and
-implementation beads. Where it conflicts with older public wording (profile SKUs,
-`postgres/*` deferred, production ban on memory log), **this brief wins** until
-those documents are updated to match.
+ADR-024 wins wherever this brief names more than one public cell. The public
+product is S3 object-log × Turso projection. `ResponseBarrier` has only
+`AsyncProjection`. The other axis pairs and `Strict` are not a roadmap.
 
 ## 1. Historical problem
 
@@ -189,9 +187,9 @@ configuration.
 
 | Area | Aligned state | Remaining governed work |
 |------|---------------|---------------------------|
-| Product law | Vision, PRD, and this brief define axes, 12 cells, Turso as the default projection, and Class A/B | Reconcile lower ADR/TD/API copies without changing this authority |
+| Product law | ADR-024: one cell, s3 × turso, `AsyncProjection` only | This brief's older matrix is historical |
 | Config | Typed `StorageConfig` validates the matrix; server accepts canonical public names | Verify the facade and Helm/config bijection on the release revision |
-| Wiring | Composition routes cover the 12-cell matrix with explicit adapter feature requirements | Qualify each cell on the release revision; route presence alone is not runtime evidence |
+| Wiring | The public route is s3 × turso (ADR-024) | Qualify that cell; route presence alone is not runtime evidence |
 | Execution | Product composition is native async; blocking stores use bounded adapter isolation | Remove residual facade bridges only after every adapter is runtime-safe |
 | Legacy | Retired selectors are not public product values | Remove remaining prose/source residue while preserving immutable history |
 
@@ -207,7 +205,7 @@ earlier product contract.
 | **1 — Config surface** | Typed config, server/file/env adapters, Helm fields, canonical names, and migration errors are isomorphic | Typed/server canonical surface exists; facade/Helm proof remains owned downstream |
 | **2 — Composition** | Every cell opens through the one composition model and implements the complete public method surface | Native Turso and other adapter routes exist; per-method closure remains subject to release evidence |
 | **3 — Evidence** | Per-cell conformance, Class A replay, Class B projection-only recovery, and live provider fixtures fail closed | In progress; no support claim may substitute a compile-only or skipped route |
-| **4 — Preview honesty** | Preview, operator, release, and deployment claims name only evidenced behavior and its durability boundary | Normative 12-cell boundary is set; release evidence remains the claim gate |
+| **4 — Preview honesty** | Preview, operator, release, and deployment claims name only evidenced behavior and its durability boundary | ADR-024 is the boundary; absolute rates are not portable pass bars |
 
 The per-cell bar is unchanged: open through typed configuration; push → claim →
 finalize; rejection has no effect; reopen matches the class; Class A proves

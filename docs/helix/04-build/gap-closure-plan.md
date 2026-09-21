@@ -1,5 +1,9 @@
 # fireweed Gap-Closure Plan (2026-07-08, rev 2 — post-codex + root-cause)
 
+> **Historical.** The 2026-07-08 plan below is not the current queue. ADR-024
+> is the public storage cell (s3 log × turso projection, `AsyncProjection`
+> only). Do not execute this plan as the live product backlog.
+
 Restores a green, buildable, honestly-tested baseline, finishes the ADR-012 composed-backend
 architecture, then closes every outstanding vision, evidence, CI, and doc gap. Sequenced by
 dependency: Phase 0 unblocks all later phases. Each work item becomes one DDx bead with mechanical,

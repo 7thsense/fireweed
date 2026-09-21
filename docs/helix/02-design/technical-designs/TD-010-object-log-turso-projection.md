@@ -36,71 +36,63 @@ ddx:
 
 # Technical Design: TD-010 Default local Turso derived projection
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 **Contract**: API-001 | **ADR**: ADR-012, ADR-015, ADR-016, ADR-017 | **Scope**: supported native-async local projection
 
 ## Disposition
 
-This design governs the public `fireweed-turso` projection adapter. Turso is the
-default projection, while storage remains an orthogonal log × projection
-composition rather than a combined profile.
+This design governs the public `fireweed-turso` projection on the one public
+cell (ADR-024): S3 object-log × Turso. `ResponseBarrier` has only
+`AsyncProjection`. Storage is not a combined profile and not a multi-cell matrix.
 
-- Public log selectors are exactly `memory`, `sqlite`, `postgres`, `filesystem`, and `s3`.
-- Public projection selectors are exactly `memory`, `sqlite`, `turso`, and
-  `postgres`; `turso` is the default.
-- No `objectlog`, `inmemory`, `hybrid`, or combined-profile alias is supported.
+- The public log selector is `s3`.
+- The public projection selector is `turso`.
+- No `objectlog`, `inmemory`, `hybrid`, `memory`, `sqlite`, `postgres`, or
+  `filesystem` selector is a public cell. Those pairs are not a roadmap.
 - A qualifying distribution enables Turso. A build that omits the feature rejects
-  explicit or default `turso` selection as feature-unavailable before storage I/O;
-  it never silently falls back to another projection.
+  `turso` selection as feature-unavailable before storage I/O; it never silently
+  falls back to another projection.
 - The adapter consumes the provider-neutral `EngineError` and `CommitRejection` vocabulary; it
   defines no Turso-specific public error, capability, or RESP token.
-- Change-record and history capability is determined by the selected log, never
-  by Turso. A memory-log × Turso cell remains Class B; a durable-log × Turso
-  cell may expose the durable log's qualified history surface.
+- Change-record and history capability come from the object log, never from
+  Turso. Turso rebuilds through `projection_control`.
 
 ## Scope
 
-This design defines Turso Database as the supported default local, rebuildable
-relational projection across all five logs. It defines the adapter, shared
-relational substrate, recovery, failure behavior, and validation gates without
-adding a combined profile.
+This design defines Turso Database as the rebuildable local relational
+projection for the S3 object log (ADR-024). It defines the adapter, recovery,
+failure behavior, and validation gates for that cell. It does not add another
+public log or projection.
 
 In scope:
 
 - async storage-axis migration required to call a native-async projection without blocking;
-- a driver-neutral relational schema/codec/query substrate shared by SQLite and Turso;
+- the relational schema/codec/query substrate the Turso adapter uses;
 - `fireweed-turso`, pinned to Turso 0.7.2 in ordinary local WAL mode;
-- feature-gated Turso composition with memory, SQLite, Postgres, filesystem, and
-  S3 logs;
-- full relational differential, cancellation, replay, reopen, conformance, and
-  performance qualification.
+- Turso composition with the S3 object log and `AsyncProjection`;
+- cancellation, replay from the object log, reopen, rebuild through
+  `projection_control`, and conformance on that cell. This scope does not
+  claim a 10M-resident or 1000-queue pass.
 
 Out of scope:
 
 - Turso as command-log authority, control plane, remote database, or embedded replica;
-- removing SQLite as an explicit supported projection and differential reference;
+- SQLite as a supported projection or as a differential reference that blocks Turso;
+- any public cell other than s3 × turso, and any `Strict` barrier;
 - experimental Turso MVCC, sync, FTS, or remote/cloud features;
 - Niflheim changes;
 - remote, sync, embedded-replica, or MVCC Turso support.
@@ -109,8 +101,8 @@ Out of scope:
 
 **Strategy**: complete the async storage boundary from ADR-015, extract driver-neutral relational facts,
 then implement Turso directly against the async projection axis. Compose it
-with each public log. The selected log remains the command authority; a durable
-object-log manifest remains authoritative when filesystem or S3 is selected.
+with the S3 object log (ADR-024). That log remains the command authority. The
+Turso file is not the command log.
 
 **Key decisions**:
 
@@ -276,15 +268,15 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
   query bounds, and declared resource ceilings under public qualification;
   throughput and latency are compared with interleaved same-run SQLite controls
   and reported for every log composition with explicit workload and host bounds.
-- CI retains one focused/path-filtered adapter job and includes Turso in the
-  manifest-driven 20-cell matrix.
+- CI retains one focused/path-filtered adapter job for the s3 × turso cell
+  (ADR-024). It does not require a multi-cell matrix.
 
 ## Testing
 
 - [ ] **Schema/config**: exact shared schema, partial indexes, individual PRAGMA trap/readbacks.
 - [ ] **Atomicity**: lifecycle/lease/index/replay outcome plus cursor in one transaction; injected rollback.
-- [ ] **Differential**: every `QueueCommand` arm and every projection-read output equals SQLite before and
-  after reopen.
+- [ ] **Conformance**: every `QueueCommand` arm and projection-read output matches the expected public state before and
+  after reopen. A SQLite twin is not the gate (ADR-016, ADR-024).
 - [ ] **Recovery**: overlapping replay no-op, gap rejection, snapshot-tail counter restore, reset/rebuild,
   manifest-sealed-before-apply crash.
 - [ ] **Cancellation**: before append, after staging, during commit, after durable eventual append, and
@@ -326,10 +318,10 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 3. Wrap blocking SQLite/object-log/Postgres transactions and remove composition-root blocking shims.
 4. Extract the driver-neutral relational substrate with SQLite parity.
 5. Implement and differentially test `fireweed-turso`.
-6. Wire Turso through all five public log compositions, public configuration,
-   and the default-selection path; verify feature-disabled fail-closed behavior.
-7. Add focused adapter CI plus manifest-driven 20-cell correctness and
-   performance qualification.
+6. Wire Turso to the S3 object log and `AsyncProjection` (ADR-024); verify
+   feature-disabled fail-closed behavior.
+7. Add focused adapter CI for that cell. Do not treat a multi-cell matrix as
+   the qualification record, and do not claim a 10M or 1000-queue pass.
 8. Remove the remaining legacy synchronous axes after repository-wide conformance passes.
 
 **Prerequisites**: ADR-015 and ADR-016 accepted; exact Turso 0.7 probe preserved;
@@ -343,4 +335,4 @@ ADR-013 response and rebuild rules unchanged.
 | Relational extraction changes SQLite behavior | M | H | Land extraction with SQLite-only parity before Turso code. |
 | Full command corpus exposes unsupported Turso behavior | M | H | Differential or common-conformance failure blocks default/public qualification and release. |
 | Cancellation leaves waiter or transaction stranded | M | H | Owned commit and lock-wait cancellation tests. |
-| New CI work is over-scaled | M | M | Cache the focused adapter job and generate the required 20-cell matrix from one manifest. |
+| New CI work is over-scaled | M | M | Cache the focused adapter job for the one public cell (ADR-024). |

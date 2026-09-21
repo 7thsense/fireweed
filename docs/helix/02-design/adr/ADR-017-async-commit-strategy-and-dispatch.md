@@ -24,28 +24,20 @@ ddx:
 
 # ADR-017: Async composition injects commit strategy and owned-task dispatch
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
@@ -116,14 +108,15 @@ planning to an equivalent pre-dispatch prepared boundary remains optimization
 work, not permission to route the product through synchronous composition or a
 process-wide facade pool.
 
-Commit strategy and response barrier are independent construction inputs.
-`Strict` is required on every one of the 15 log-by-projection cells and does not
-return until the serving projection can satisfy the complete operation result.
-`AsyncProjection` is additionally available on the six filesystem/S3 cells: it
-may defer a durable projection, but the acknowledged result is synchronously
-visible through the serving projection and the deferred state remains bounded,
-ordered, replayable, and poison-aware. These are provider-neutral barriers, not
-additional projection selectors.
+Commit strategy and response barrier are construction inputs. ADR-024 is the
+public selector law: one cell, S3 object-log × Turso projection, and
+`ResponseBarrier` has only `AsyncProjection`. `Strict` is not a public barrier
+and is not a roadmap item. `AsyncProjection` may defer Turso apply. The
+acknowledged mutation is durable on the object log. A later claim polls applied
+rows and may be empty; that empty result is not a command failure. Deferred
+apply remains bounded, ordered, replayable, and poison-aware. The barrier is
+not an extra projection selector. Class A durability is the object log. Turso
+is rebuildable through `projection_control` and is not the command log.
 
 Immediate memory implementations may use an immediate dispatcher only when the complete typed commit
 resolves in one poll. Blocking stores dispatch one whole transaction to a bounded actor/executor. Native

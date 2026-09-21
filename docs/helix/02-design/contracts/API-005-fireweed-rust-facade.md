@@ -140,41 +140,44 @@ Correctness and progress requirements for the facade execution path:
    [async-runtime-blocking-matrix-inventory](../../04-build/async-runtime-blocking-matrix-inventory.md).
 
 5. **Two-phase mutate and discover (required).** Mutating calls
-   (`commit`, packed `complete` / `retry` / `release`, push) complete when
-   **this request** is durable on the log. They return per-entry outcomes.
-   They do not mean every worker's next `claim` sees new Pending rows.
-   `claim` polls currently selectable applied rows. Empty `claim` is a
-   normal poll, never `Conflict` for apply lag. Public reads
-   (`side_record`, `live_item`, `metrics`) may wait projection coverage.
-   Ordinary item `claim` must not. Inspect `commit_capabilities`
-   (`DurabilityClass::EventualApply` on native Turso) rather than
-   treating construction as a serving snapshot. `ResponseBarrier` has a
-   single value, [`ResponseBarrier::AsyncProjection`]. Batching and
-   generation packing remain the fast path. Fire-and-forget mutate is
-   forbidden. There is no process-local unpublished overlay. The durable
-   log remains the object-log abstraction (`LogConfig::S3` / filesystem
-   object-log), not a raw S3 SDK write.
+   (`commit`, packed `complete` / `retry` / `release`, push, `upsert`) complete
+   when **this request** is durable on the S3 object log. They return per-entry
+   outcomes. They do not mean every worker's next `claim` sees new Pending
+   rows. `claim` polls currently selectable applied rows. Empty `claim` is a
+   normal poll, never `Conflict` for apply lag and never a command failure.
+   Public reads (`side_record`, `live_item`, `metrics`) may wait projection
+   coverage. Ordinary item `claim` must not. The public cell reports
+   `DurabilityClass::EventualApply` with `atomic_transition_commit: true` and
+   still serves `upsert`. Inspect `commit_capabilities` rather than treating
+   construction as a serving snapshot. `ResponseBarrier` has a single value,
+   [`ResponseBarrier::AsyncProjection`]. The only public composition is
+   `LogConfig::S3` × Turso (ADR-024). Batching and generation packing remain
+   the fast path. Fire-and-forget mutate is forbidden. There is no
+   process-local unpublished overlay. The durable log is the S3 object log,
+   not a raw S3 SDK write and not the Turso file.
 
 ### Construction
 
-#### Normative full-matrix surface: `StorageConfig`
+#### Normative construction surface: `StorageConfig`
 
-The product storage model is the orthogonal product of log and projection
-stores (see `orthogonal-storage-matrix-brief`). **Typed `StorageConfig` is the
-normative facade construction surface** for the full 4×3 matrix. Embedders
-assemble log × projection (+ optional control-plane, segment, recovery, and
-authority fields) and open one concrete `Fireweed`.
+ADR-024 is the construction law. The only public cell is S3 object-log × Turso
+projection. `ResponseBarrier` has only `AsyncProjection`. Typed `StorageConfig`
+is the normative facade construction surface. Embedders open that one cell.
+Other log or projection selectors reject before storage I/O
+(`RETIRED_STORAGE_CELL`: `storage is s3 log × turso projection only; other selectors are retired`).
 
 ```rust
-/// Normative composition root for log × projection (+ related axes).
+/// Normative composition root. Only s3 × turso validates.
 pub struct StorageConfig {
     pub log: LogConfig,
     pub projection: ProjectionStoreConfig,
     pub control_plane: Option<ControlPlaneConfig>,
-    /// Required for object-log peers; invalid for non-object logs.
+    /// Required on the public cell: ObjectLogAuthority::NativeConditionalWrite.
+    /// Missing authority is an error. Do not fill it with unwrap_or.
     pub authority: Option<ObjectLogAuthority>,
     pub response_barrier: ResponseBarrier,
-    /// Required exactly when response_barrier is AsyncProjection.
+    /// Required. Missing AsyncProjectionSpec is an error. Do not fill it with unwrap_or.
+    /// StorageConfig::s3_turso sets authority and async_projection.
     pub async_projection: Option<AsyncProjectionSpec>,
     /// Retired compatibility field: every Some value rejects before I/O.
     pub sqlite_projection_deferred_flush_chunk: Option<usize>,
@@ -183,10 +186,9 @@ pub struct StorageConfig {
     pub recovery: RecoveryPolicy,
 }
 
-/// Four supported log values plus one rejected compatibility selector.
+/// The only public variant is S3. Other variants exist so validation can reject them.
 pub enum LogConfig {
     Memory,
-    /// Retired; validation rejects this selector before storage I/O.
     Sqlite { path: PathBuf },
     Postgres {
         url: ConfigSecret,
@@ -195,9 +197,8 @@ pub enum LogConfig {
         node_id: Option<u8>,
         coordination: Option<PostgresCoordinationConfig>,
     },
-    /// Local directory tree / NAS path object log (same protocol as S3).
     Filesystem { root: PathBuf },
-    /// S3-compatible object log.
+    /// The public log.
     S3 {
         endpoint: String,
         bucket: String,
@@ -208,17 +209,15 @@ pub enum LogConfig {
     },
 }
 
-/// Three supported projection values plus one rejected compatibility selector.
+/// The only public variant is Turso. Other variants exist so validation can reject them.
 pub enum ProjectionStoreConfig {
     Memory,
-    /// Retired; validation rejects this selector before storage I/O.
     Sqlite { path: PathBuf },
     Turso { path: PathBuf },
     Postgres { url: ConfigSecret },
 }
 
-/// Provider-neutral bounds for returning before the selected projection has
-/// applied through the committed log position.
+/// Provider-neutral bounds for apply that may lag the committed log position.
 pub struct AsyncProjectionSpec {
     pub apply_lag_max_commands: u64,
     pub apply_debt_max_bytes: u64,
@@ -228,7 +227,6 @@ pub struct AsyncProjectionSpec {
 }
 
 pub enum ResponseBarrier {
-    Strict,
     AsyncProjection,
 }
 
@@ -243,38 +241,26 @@ pub async fn open_async(
 ) -> EngineResult<Fireweed>;
 ```
 
-Every cell of the matrix is a valid selection:
+The only validating pair is `LogConfig::S3` × `ProjectionStoreConfig::Turso`:
 
-| Log \ Projection | `memory` | `turso` (default) | `postgres` |
-| --- | --- | --- | --- |
-| `memory` | yes | yes | yes |
-| `postgres` | yes | yes | yes |
-| `filesystem` | yes | yes | yes |
-| `s3` | yes | yes | yes |
+| Log \ Projection | `turso` |
+| --- | --- |
+| `s3` | yes |
 
-SQLite enum variants remain only to return an explicit migration error. They
-are not supported selections, and the removed `open_sqlite`,
-`open_sqlite_relational`, and `open_objectlog_sqlite` functions are not facade
-entrypoints. Use `StorageConfig` with a supported log and Turso projection.
+SQLite, memory, Postgres, and filesystem enum variants remain only to return an
+explicit retirement error. They are not supported selections. There is no
+public profile SKU. `StorageConfig::s3_turso` sets
+`ObjectLogAuthority::NativeConditionalWrite` and an `AsyncProjectionSpec` so
+existing callers stay valid. A hand-built config that omits either value
+rejects. Constructors do not silently substitute a projection, authority,
+barrier, or async spec (`unwrap_or` is not the contract).
 
-`Filesystem` and `S3` are first-class log backends that share the object-log
-protocol (segments, manifest, conditional write / authority, retention). They
-are not test-only substitutes for each other. There is **no** public profile
-SKU product type; pair strings may appear only in test IDs and historical
-evidence filenames.
+##### Durability
 
-##### Durability classes
-
-Semantics across matrix cells differ by **durability class**, not by a second
-architecture:
-
-| Class | Logs | Client contract (summary) |
-| --- | --- | --- |
-| **A — Durable log** | `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log; serving visibility follows the selected response barrier; recovery via high-water + tail replay when the log remains |
-| **B — Memory log** | `memory` | Success ⇒ visible in the projection; persistent projection state may survive for `turso` / `postgres`; after process death only the projection remains—no log rebuild, branch, or read-as-of from the log |
-
-Class B is a weaker persistence envelope, not “no LogStore.” Callers that need
-Class A guarantees MUST NOT select `LogConfig::Memory`.
+The public cell is Class A. Success is durable on the S3 object log. Turso
+rebuilds through `projection_control`. The cell reports
+`DurabilityClass::EventualApply` with `atomic_transition_commit: true` and
+still serves `upsert`. There is no public Class B cell and no `Strict` barrier.
 
 ##### Environment variables
 
@@ -301,23 +287,22 @@ in this fixed precedence:
 4. compiled feature availability; then
 5. durability and provider-capability requirements.
 
-`LogConfig::Filesystem` and `LogConfig::S3` require
-`ObjectLogAuthority::NativeConditionalWrite`. The configured log provider MUST
-actually supply atomic conditional create/update publication; a provider that
-cannot do so is rejected. PostgreSQL is not an object-log manifest-publication
-fallback, and projection selection never supplies publication authority.
-`authority` on a non-object log is a tuple-coherence error rather than an
-ignored field.
+The public cell (`LogConfig::S3` × Turso) requires
+`ObjectLogAuthority::NativeConditionalWrite` and `Some(AsyncProjectionSpec)`.
+A missing authority or a missing async spec rejects before I/O. Do not fill
+either with `unwrap_or`. `StorageConfig::s3_turso` sets both. The configured S3
+provider MUST actually supply atomic conditional create/update publication; a
+provider that cannot do so is rejected. PostgreSQL is not an object-log
+manifest-publication fallback, and projection selection never supplies
+publication authority. `Filesystem` and every non-`s3` log are retired
+selectors, not a second authority path.
 
-`Strict` and `AsyncProjection` are provider-neutral response policies, not
-projection variants or public product profiles. `StorageConfig::async_projection`
-must be `Some(AsyncProjectionSpec)` exactly for `AsyncProjection`, and all five
-bounds MUST be positive. Strict has 12 supported cells; AsyncProjection has six
-filesystem/S3 positive cells and six memory/PostgreSQL-log pre-I/O rejections.
-The retained `sqlite_projection_deferred_flush_chunk` field is retired: every
-supplied value, including a positive value, rejects before storage I/O for every
-projection and barrier. Constructors do not silently substitute a projection,
-authority, or barrier.
+`AsyncProjection` is the only response barrier (ADR-024). It is not a projection
+variant or a public product profile. `StorageConfig::async_projection` must be
+`Some(AsyncProjectionSpec)` with all five bounds positive. A missing spec rejects
+before I/O. The retained `sqlite_projection_deferred_flush_chunk` field is
+retired: every supplied value rejects before storage I/O. Constructors do not
+silently substitute a projection, authority, barrier, or async spec.
 
 Unsupported or mismatched configurations return a structured
 `EngineError::Invalid` or `EngineError::Unavailable` before storage I/O; no
@@ -332,52 +317,21 @@ preserve the corresponding current validation behavior. `ConfigSecret` exposes
 no plaintext accessor and its `Debug` implementation always redacts the
 contained value.
 
-#### Convenience constructors (map onto `StorageConfig`)
+#### Public constructor
 
-The release-critical convenience constructors preserve clock injection and
-return the same concrete type. Each is a **subset constructor** over
-`StorageConfig` for a common cell or object-log pairing; they are not a
-separate product model.
+The public constructor is `StorageConfig::s3_turso`, opened with `open` or
+`open_async`. It sets `ObjectLogAuthority::NativeConditionalWrite` and an
+`AsyncProjectionSpec`. It is the same cell as section 5: S3 × Turso,
+`AsyncProjection` only (ADR-024).
 
-```rust
-/// Class B: memory log × memory projection.
-pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed;
-/// Class A: filesystem object log with a default local composition.
-pub fn open_objectlog(root: impl Into<PathBuf>, clock: Arc<dyn Clock>)
-    -> EngineResult<Fireweed>;
-/// Class A: postgres log × postgres projection (common defaults).
-pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
-pub async fn open_postgres_async(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
-pub fn open_postgres_coordinated(
-    url: &str,
-    clock: Arc<dyn Clock>,
-    instance_id: OwnerId,
-    control_plane_config: ControlPlaneConfig,
-) -> EngineResult<Fireweed>;
-pub fn open_postgres_runtime(
-    config: PostgresRuntimeConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed>;
-pub async fn open_postgres_runtime_async(
-    config: PostgresRuntimeConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed>;
-/// Object-log conveniences: map `ObjectLogRuntimeConfig` → `StorageConfig`
-/// (`Local` → `LogConfig::Filesystem`, `S3Compatible` → `LogConfig::S3`).
-pub fn open_objectlog_postgres(
-    config: ObjectLogRuntimeConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed>;
-pub async fn open_objectlog_postgres_async(
-    config: ObjectLogRuntimeConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed>;
-```
+Named helpers that select any other log or projection (`open_objectlog`,
+`open_postgres`, `open_postgres_runtime`, `open_postgres_coordinated`,
+`open_objectlog_postgres`, and their async twins) are not public cells. They
+reject before storage I/O with `RETIRED_STORAGE_CELL`. They are not a second
+product model.
 
-Advanced PostgreSQL deployments may select their storage shape, schema, node
-identity, and coordination topology at the composition root. Prefer
-`LogConfig::Postgres { … }` on `StorageConfig` for new code; the types below
-remain the convenience shape used by `open_postgres_runtime*`:
+PostgreSQL log and projection types below are not public selectors (ADR-024).
+They remain only so a retired helper can reject them before I/O:
 
 ```rust
 pub enum PostgresMode { LogReplay, Relational }
@@ -396,16 +350,13 @@ pub struct PostgresRuntimeConfig {
 }
 ```
 
-These fields are construction inputs only. The resulting `Fireweed` does not
-expose the selected mode, schema, node identity, coordination topology, or
-backend objects. `open_postgres` and `open_postgres_coordinated` remain the
-convenience constructors for their common configurations.
+These fields are not a public construction surface. The resulting `Fireweed`
+does not expose a Postgres mode. `open_postgres` and `open_postgres_coordinated`
+reject before I/O.
 
-`ObjectLogRuntimeConfig` remains the structured convenience for object-log
-compositions that already name storage, authority, projection, barrier,
-segments, namespace, and recovery together. It MUST be describable as a
-mapping into `StorageConfig` (filesystem/S3 log + projection store + shared
-fields). New full-matrix work SHOULD use `StorageConfig` directly.
+`ObjectLogRuntimeConfig` is not a second public matrix. A value that is not
+S3 × Turso with `AsyncProjection`, `NativeConditionalWrite`, and an
+`AsyncProjectionSpec` rejects before I/O. New code uses `StorageConfig::s3_turso`.
 
 ```rust
 pub struct ObjectLogRuntimeConfig {
@@ -435,9 +386,7 @@ pub enum ObjectLogStorage {
     },
 }
 
-/// Convenience projection subset used by object-log constructors.
-/// Full matrix projection selection is `ProjectionStoreConfig` (includes
-/// `Memory`).
+/// Not a public projection axis. `ProjectionStoreConfig::Turso` is the public projection.
 pub enum ProjectionConfig {
     /// Retired; construction rejects this selector before I/O.
     Sqlite { path: PathBuf },
@@ -455,21 +404,18 @@ pub struct RecoveryPolicy {
 }
 ```
 
-Object storage, publication authority, and projection storage are independent
-construction axes. Local filesystem object logs require
-`NativeConditionalWrite`. S3-compatible stores require the same selector and
-are supported only when the configured provider implements atomic conditional
-publication. No PostgreSQL authority selector or fallback is public. The
-selected authority remains private after construction.
+On the public cell, publication authority and the async spec are required
+construction inputs, not independent product axes. S3 is supported only when
+the provider implements atomic conditional publication
+(`NativeConditionalWrite`). No PostgreSQL authority selector or fallback is
+public. The selected authority remains private after construction. There is
+no `Strict` rule to apply and no filesystem object-log cell to open.
 
-`ObjectLogRuntimeConfig::validate` preserves the corresponding current
-validation behavior. The retained object-log/PostgreSQL constructors require
-`ProjectionConfig::Postgres`; the retired `ProjectionConfig::Sqlite` selection
-rejects before opening either store. New object-log/Turso callers use
-`StorageConfig` with `ProjectionStoreConfig::Turso`. Convenience
-constructors use the same validation precedence and barrier semantics as
-`StorageConfig`; they do not impose a provider-specific `Strict` rule or bypass
-tuple, feature, and durability checks.
+`ObjectLogRuntimeConfig::validate` and `StorageConfig::validate` use the same
+fail-closed precedence. A missing `NativeConditionalWrite` authority or a
+missing `AsyncProjectionSpec` rejects. Retired projection selectors reject
+before I/O. Convenience constructors do not bypass that check and do not
+substitute defaults with `unwrap_or`.
 
 `EmbeddedSecret`, `EmbeddedObjectLogConfig`, `EmbeddedProjectionConfig`,
 `EmbeddedResponseBarrier`, `EmbeddedSegmentConfig`,
@@ -655,7 +601,7 @@ non-generic `Fireweed` using these operations:
 `push_batch_with_request_id`, `upsert`, `claim_with`, `claim_by_query`,
 `claim_by_query_at`, `ack`, `nack`, `commit`, `commit_capabilities`,
 `explain_commit`, `side_record`, `live_item`, `query_index_unique_typed`,
-`batch_update`, `mutate_items`, `update`, `purge`, `claimed`, `metrics`, `metrics_by_query`,
+`batch_update`, `mutate_items`, `reschedule`, `purge`, `claimed`, `metrics`, `metrics_by_query`,
 `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, and
 `declared_bucket_segment`.
 
@@ -692,7 +638,7 @@ pub async fn live_item(&self, queue: &QueueKey, key: ClientItemKey) -> EngineRes
 pub async fn query_index_unique_typed(&self, queue: &QueueKey, index: &str, values: &[serde_json::Value]) -> EngineResult<Option<IndexHit>>;
 pub async fn batch_update(&self, queue: &QueueKey, request: BatchUpdateRequest) -> EngineResult<BatchUpdateResponse>;
 pub async fn mutate_items(&self, queue: &QueueKey, request: ItemMutationRequest) -> EngineResult<ItemMutationResponse>;
-pub async fn update(&self, queue: &QueueKey, item_id: ItemId, priority: ScheduleUpdate<PriorityValue>, not_before: ScheduleUpdate<UtcTimestamp>, expected_item_version: Option<u64>) -> EngineResult<u64>;
+pub async fn reschedule(&self, queue: &QueueKey, item_id: ItemId, priority: ScheduleUpdate<PriorityValue>, not_before: ScheduleUpdate<UtcTimestamp>, expected_item_version: Option<u64>) -> EngineResult<u64>;
 pub async fn purge(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>, force: bool) -> EngineResult<u64>;
 pub async fn claimed(&self, queue: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>>;
 pub async fn metrics(&self, queue: &QueueKey) -> EngineResult<QueueMetrics>;
@@ -712,9 +658,10 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
   owned-task dispatch. API-005 binds those decisions to the single public
   `Fireweed` type and forbids treating `BlockingLibBackend` as the product
   end-state architecture.
-- `orthogonal-storage-matrix-brief` governs the public log × projection matrix
-  and durability classes; API-005 is the Rust binding of that construction
-  model via `StorageConfig`.
+- ADR-024 governs the public cell (s3 × turso, `AsyncProjection` only).
+  API-005 is the Rust binding of that construction model via `StorageConfig`.
+  `orthogonal-storage-matrix-brief` is historical composition design, not a
+  second public matrix.
 - Returning `Fireweed` is a deliberate source break from inferred
   `Fireweed<impl LibBackend>` return types. Migration guidance MUST show removal
   of downstream backend parameters.

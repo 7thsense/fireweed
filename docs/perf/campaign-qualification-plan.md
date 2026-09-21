@@ -1,6 +1,11 @@
 # Campaign qualification and performance plan
 
-## Qualified: repeated 12,500 complete campaign recipients/sec (2026-09-16)
+The 12.5k result at `49f1b6b3` is historical filesystem × turso evidence
+(2026-09-16). It is not the v0.31.30 public cell. v0.31.30 s3 × turso measured
+about 9,507 completed lifecycles/s on `bcef51f9` and is not a qualification pin.
+Absolute rates are capacity observations, not portable pass bars.
+
+## Historical: filesystem × turso 12,500 complete campaign recipients/sec (2026-09-16)
 
 **The fixed 10k target and 25% stretch target are both achieved in repeated
 canonical qualification.** Clean source `49f1b6b3b5f9c8ad9cdb4a8da8e5306fab135707`,
@@ -87,8 +92,10 @@ fix; neither establishes that device latency can never limit the system. No SSD,
 TRIM, mount, quota, kernel or workflow-gate changes were used for this optimization.
 
 Reproduce with `CARGO_BUILD_JOBS=8 bash scripts/perf/qualify-workflow-capacity.sh NEW_DIR`.
-Keep builds, tests and measured workloads serial as in this evidence. The next
-release can use this qualified code; no release or push is part of this result.
+Keep builds, tests and measured workloads serial as in this evidence. This
+filesystem × turso result stays attributed to `49f1b6b3`. It is not a
+qualification pin for v0.31.30 s3 × turso, and the absolute rate is not a
+portable pass bar.
 
 Evidence: `fireweed-idle-wait-qualified-manifest.json` archives **33** raw reports,
 device samples/summaries, public-test output, serial runner logs, the completion

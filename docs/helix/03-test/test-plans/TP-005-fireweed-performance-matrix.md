@@ -25,28 +25,20 @@ ddx:
 
 # TP-005: Fireweed performance matrix
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../../02-design/contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 ## Testing strategy
 
@@ -93,7 +85,7 @@ recovery, or exact-tag release requirements.
 | `recovery` | Close, reopen, rebuild, and verify durable state | Only among cells with the same recovery contract | Host-bound recovery record |
 | `maintenance` | Verify, delete, and rebuild disposable projections | Only among cells exposing `projection_control()` | Host-bound maintenance record |
 | `smoke` | Fast runner and schema validation | No | None |
-| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through all 20 cells | No; each cell is reported independently | P0 fixed-work functionality plus host-bound timing observations |
+| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M on `s3--turso` when that run exists | No | Host-bound timing only. This plan does not claim that run for v0.31.30, and it is not a 10M-resident pass |
 
 ### Settled lifecycle and microbatch qualification contract
 
@@ -173,34 +165,22 @@ release performance threshold for its declared, attested topology.
 
 ### Matrix
 
-Each cell identifier is the canonical `log--projection` pair. A full run has
-exactly 20 required rows; a missing service is a qualification failure, not a
-conditional pass or silent skip.
+The register is one cell, `s3--turso` (ADR-024). A missing S3 service is a
+qualification failure for that cell, not permission to substitute another pair.
 
-| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
-| --- | --- | --- | --- | --- |
-| `memory` | `memory--memory` | `memory--sqlite` | `memory--turso` | `memory--postgres` |
-| `sqlite` | `sqlite--memory` | `sqlite--sqlite` | `sqlite--turso` | `sqlite--postgres` |
-| `postgres` | `postgres--memory` | `postgres--sqlite` | `postgres--turso` | `postgres--postgres` |
-| `filesystem` | `filesystem--memory` | `filesystem--sqlite` | `filesystem--turso` | `filesystem--postgres` |
-| `s3` | `s3--memory` | `s3--sqlite` | `s3--turso` | `s3--postgres` |
+| Log \ Projection | `turso` |
+| --- | --- |
+| `s3` | `s3--turso` |
 
-Every row constructs through `open(StorageConfig)` or `open_async(StorageConfig)`
-and performs identical fixed work. Convenience constructors may be measured as
-additional aliases only after configuration equivalence is proved; they do not
-add cells or replace a canonical row. Retired profile names and Hybrid selectors
-are absent from the result count. Omitted/default projection construction must
-be proved equivalent to the canonical `turso` row for each log.
+The row constructs through `open(StorageConfig)` or `open_async(StorageConfig)`
+(`StorageConfig::s3_turso`). Retired selectors are not rows. This matrix does
+not claim a 10M-resident or 1000-queue result.
 
 ### Response-barrier classes
 
-The runner assigns every result to exactly one class. It prints values from all
-classes together but computes comparative verdicts only inside a class.
-
 | Class | Rows | Success boundary |
 | --- | --- | --- |
-| `Strict` | All 20 cells | The selected projection has applied the accepted effect before success. |
-| `AsyncProjection` | Every cell whose explicit TP-003 AC-TXN-5A disposition is valid | The class authority and replay-resolvable serving state satisfy success while selected-projection lag remains within `AsyncProjectionSpec`; an invalid durability tuple is a pre-I/O configuration result, not a benchmark skip. |
+| `AsyncProjection` | `s3--turso` only | The object log has the command. Claim polls applied Turso rows and may be empty. That empty claim is not a failure. Lag stays within `AsyncProjectionSpec` or the cell fails closed. |
 
 Cross-class ratios are descriptive only and carry `comparison_status =
 "different_success_boundary"`. Async rows report the timed response boundary
@@ -241,7 +221,7 @@ before warm-up.
 | Contract | 100% of matrix cell IDs, evidence fields, and failure semantics | P0 |
 | Integration | Every configured cell constructs through API-005 and reconciles exact state | P0 |
 | Performance | Five measured repetitions per common-path workload after warm-up | P0 |
-| Targeted lifecycle | Exact 1M/500K/1M cycle with recorded phase durations on all 20 cells | P0 |
+| Targeted lifecycle | 1M/500K/1M cycle on `s3--turso` only if a run is recorded. Not claimed for v0.31.30. Not a 10M pass | P0 when run |
 | Recovery | Every durable configured cell reopens and reconciles exact state | P0 |
 | Maintenance | Every configured disposable-projection cell verifies and rebuilds | P0 |
 | Smoke | One small repetition over local cells for developer feedback | P1 |
@@ -288,7 +268,7 @@ percentiles.
 
 | Metric | Target | Minimum | Enforcement |
 | --- | --- | --- | --- |
-| Full-tier matrix cells completed | Exact canonical 20-cell register | 20/20; zero skips | Runner exits non-zero |
+| Public cell completed | `s3--turso` (ADR-024) | that cell; zero silent substitution | Runner exits non-zero |
 | Common operations per cell/shape | append, claim, finalize | 100% | Semantic verifier |
 | Accepted/claimed/finalized reconciliation | exact | exact | Runner and verifier |
 | Measured repetitions | 5 | 5 | Semantic verifier |
@@ -298,7 +278,7 @@ percentiles.
 | Environment provenance | complete required fields | 100% | Semantic verifier |
 | Source provenance | clean pushed commit | exact | Launch wrapper and verifier |
 | Secret leakage | zero credential values | zero | Redaction test and evidence scan |
-| Million-cycle functionality | insert + `batch_update` + `live_items` on all 20 cells | 100%, zero `Unavailable` | Runner exits non-zero |
+| Million-cycle functionality | insert + `batch_update` + `live_items` on `s3--turso` if recorded | not claimed for v0.31.30 | Do not invent a pass |
 | Million-cycle phase observations | insert, modify, and read+verify duration | recorded for all three phases in every cell; no TP-005 ceiling | Semantic verifier |
 | Million-cycle reopen | exact class-appropriate final digest/capability boundary after close/reopen | 100% | Runner and semantic verifier |
 
@@ -409,14 +389,12 @@ remove the row's common or reopen work.
 
 ### External-service isolation and tier semantics
 
-`smoke` runs only memory, SQLite, and filesystem-log cells, only the `minimal`
-shape, 512 items, batch 64, one warm-up, and one measured repetition. Its
-verifier expects exactly eight samples per operation and never applies the full
-tier's repetition or sample counts. It is always non-authoritative. `full`
-requires attested live PostgreSQL and S3 services and all 20 matrix cells;
-missing configuration or attestation exits before creating storage. A supplied
-but unreachable service is `failed`, never `not_configured`. A future `local` tier
-may omit external cells but cannot call itself full.
+`smoke` is a non-authoritative developer loop. It is not a second public cell.
+`full` requires an attested S3 service and the `s3--turso` cell (ADR-024).
+Missing configuration or attestation exits before creating storage. A supplied
+but unreachable service is `failed`, never `not_configured`. Absolute rates
+from either tier are capacity observations, not portable pass bars. This plan
+does not claim a 10M or 1000-queue result.
 
 The full run executes on a provisioned qualification runner with isolated local
 paths plus reachable PostgreSQL and S3-compatible services. Before any cell
@@ -477,9 +455,8 @@ document contains:
   exact enabled features/rustflags, build profile, and benchmark lockfile hash;
 - workload parameters, seed, cell order per repetition, shape definitions, and
   redacted service topology;
-- all 20 canonical cells plus every response-barrier disposition, with passed
-  or failed status and a reason; full-tier `not_configured`, `unsupported`, and
-  skipped rows are invalid;
+- the `s3--turso` cell and `AsyncProjection`, with passed or failed status and
+  a reason; full-tier `not_configured`, `unsupported`, and skipped rows are invalid;
 - raw request durations, per-repetition totals, derived summaries, exact
   reconciliation counts, recovery results, and maintenance results;
 - PostgreSQL provider/version, durability settings, isolation capability,
@@ -534,7 +511,7 @@ output are recorded; raw output is retained separately after value redaction.
 | Requirement source | Primary layer | Blocking evidence |
 | --- | --- | --- |
 | API-005 opaque facade | Contract/integration | All cells are constructed publicly and timed through `Fireweed` |
-| ADR-001 durability classes | Performance matrix | Every canonical composition is classified and all 20 cells execute |
+| ADR-024 public cell | Performance matrix | `s3--turso` with `AsyncProjection` is the only row |
 | ADR-012 orthogonal composition | Matrix completeness | Public embedding log, projection, and barrier choices are explicit; control-plane/topology variants remain TP-002 scope |
 | TD-001 shared semantics | Common protocol | Exact accepted/claimed/finalized reconciliation for every row |
 | TP-002 evidence honesty | Evidence verifier | Host-bound claims, exact revision, raw samples, and no silent skips |
@@ -584,8 +561,8 @@ output are recorded; raw output is retained separately after value redaction.
 **Known boundaries**: This baseline is single-caller and does not establish
 saturation capacity, multi-client fairness, multi-node scaling, or certification
 of every S3 provider. Those require distinct workload IDs or remain governed by
-TP-002. Functional support is nevertheless complete: all 20 public cells must
-run here, while provider certification remains outside scope.
+TP-002. The public cell is `s3--turso` (ADR-024). Provider certification
+remains outside scope. Absolute rates are not portable pass bars.
 
 ## Build handoff
 
@@ -606,8 +583,8 @@ scripts/perf/verify-fireweed-matrix.sh \
 **Priority**: Evidence contract and verifier first; public-facade common path;
 local cells; provisioned PostgreSQL/S3 cells; recovery and maintenance.
 
-**Blocking gate**: The full matrix refuses missing PostgreSQL or S3
-configuration/attestation; all 20 cells execute with zero skips; exact reconciliation, async
+**Blocking gate**: The public cell refuses missing S3 configuration. `s3--turso`
+executes with zero silent substitution. Exact reconciliation, async
 catch-up, recovery, maintenance, and cleanup pass; the verifier independently
 recomputes the artifact and comparison labels; the sidecar matches; and no
 credential value is present.
@@ -615,8 +592,7 @@ credential value is present.
 ## Review checklist
 
 - [ ] Every API-005-supported storage/projection/barrier composition is present.
-- [ ] Full-tier registry is exactly 20/20 with zero skips; missing live services
-      fail before timing.
+- [ ] The register is `s3--turso` only (ADR-024). A missing S3 service fails before timing.
 - [ ] Common-path measurements use identical operations and workload parameters.
 - [ ] Comparisons never cross response-barrier classes.
 - [ ] Setup, recovery, maintenance, and cleanup are excluded from common timing.

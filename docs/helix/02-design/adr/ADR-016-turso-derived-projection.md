@@ -43,20 +43,15 @@ Turso operating mode.
 
 ## Decision
 
-Turso Database in `fireweed-turso` is a supported public relational projection
-adapter and the default projection selected when an embedder, service, or
-deployment does not specify another projection. The canonical projection axis
-is `memory | turso | postgres`; all three projections compose with the four
-public logs `memory | postgres | filesystem | s3`, giving 12 supported cells.
-The rusqlite SQLite log and projection are retired. Retained compatibility
-selectors and any supplied `sqlite_projection_deferred_flush_chunk` value are
-rejected before storage I/O; they are not additional supported matrix cells.
-
-Turso is derived and rebuildable. It is never the authoritative command log,
-retention authority, or control plane. Durability and replay capability are
-determined by the selected log under ADR-012/ADR-013. With the Class B memory
-log, only the persisted Turso projection may survive process death, and that
-cell does not acquire log-history semantics.
+ADR-024 supersedes the multi-projection public axis in this Decision. Turso
+Database in `fireweed-turso` is the public relational projection, composed only
+with the S3 object log. `ResponseBarrier` has only `AsyncProjection`. The other
+axis pairs and `Strict` are not a roadmap. Class A durability is the object
+log. Turso is rebuildable through `projection_control` and is not the command
+log, the retention authority, or the control plane. The rusqlite SQLite log and
+projection are retired. Retained compatibility selectors and any supplied
+`sqlite_projection_deferred_flush_chunk` value are rejected before storage I/O;
+they are not additional cells. There is no public Class B cell.
 
 The supported boundary is embedded/local `turso = 0.7.2`, pinned with default
 features disabled and using ordinary WAL. Remote databases, embedded replicas,
@@ -94,7 +89,7 @@ retain their original SQLite/Turso identities.
 | Positive | Fireweed's default relational projection is genuinely native async and implements the common projection contract. |
 | Positive | The public matrix remains orthogonal: selecting Turso does not select or redefine the log. |
 | Negative | Turso is pre-1.0 and its compatibility surface must be re-probed on every upgrade. |
-| Negative | Cold builds are materially larger; focused Turso qualification remains useful even though all 12 cells require release evidence. |
+| Negative | Cold builds are materially larger; focused Turso qualification remains useful on the one public cell (ADR-024). |
 | Neutral | Retained native replay tests compare Turso instances; independent behavioral assertions prevent treating same-engine agreement as an independent differential proof. |
 
 ## Risks
@@ -112,7 +107,7 @@ retain their original SQLite/Turso identities.
 | Success Metric | Review Trigger |
 |----------------|----------------|
 | Supported commands satisfy expected state and native replay/reopen parity | Any image, query, cursor, lease, or index divergence; same-engine equality alone is insufficient. |
-| Turso passes the common projection suite and all four log compositions | Any backend-specific semantic repair or skipped supported matrix cell. |
+| Turso passes the common projection suite on the s3 × turso cell (ADR-024) | Any backend-specific semantic repair or a second public cell. |
 | Default public configuration resolves to `turso`; retired SQLite selections and deferred-flush values reject before I/O | Default drift, accepted retired selection, or feature-dependent silent fallback. |
 | No reactor blocking under Turso load | Single-thread heartbeat stalls. |
 | Turso version remains exactly the probed version | Dependency update or feature expansion. |

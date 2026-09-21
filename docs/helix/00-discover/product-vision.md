@@ -13,8 +13,8 @@ ddx:
 
 fireweed is a batch-centric state-machine queue engine for applications that need
 ordered, recoverable work execution at scale. It provides one external
-transaction contract across an interchangeable log-by-projection storage
-matrix: accepted mutations are visible at the selected response barrier,
+transaction contract on one storage cell (ADR-024): accepted mutations are
+durable on the object log at the `AsyncProjection` barrier,
 rejected mutations have no committed effect, and ambiguous retries are resolved
 by request identity rather than by caller-side storage choreography. Durability
 after process death follows the selected log class instead of being overstated
@@ -43,29 +43,20 @@ explicit final state.
 
 ### Storage product law
 
-The public storage product is exactly four log backends (`memory`, `postgres`,
-`filesystem`, `s3`) crossed with three projections (`memory`, `turso`,
-`postgres`): 12 supported cells assembled through one typed composition model.
-Native embedded Turso is the default serving projection. The rusqlite `sqlite`
-log and `sqlite` projection are retired; local durable serving is object-log × Turso
-(or postgres). The control plane is a separate optional topology choice,
-not a mandatory PostgreSQL tier or a bundled storage product. Public product paths
-use native-async composition; a blocking store may be isolated behind a bounded
-adapter actor without changing that public execution model.
+ADR-024 is the storage law. The public product is one cell: S3 object-log ×
+Turso projection (`s3 log × turso projection`). `ResponseBarrier` has only
+`AsyncProjection`. The other eleven axis pairs and `Strict` are not a roadmap.
+Class A durability is the object log. The Turso projection is rebuildable
+through `Fireweed::projection_control` and is not the command log. The control
+plane is not a second storage cell and is not a mandatory PostgreSQL tier.
 
-Logs define the cross-process durability class. `postgres`,
-`filesystem`, and `s3` logs are Class A: the durable log is authoritative and a
-projection can be rebuilt by high-water plus tail replay. The `memory` log is
-Class B: after process death only a durable projection can remain, so the
-product makes no log-rebuild, branch, read-as-of, or log-derived change-record
-claim for those three cells. Filesystem and S3 are peer implementations of the
-same object-log protocol; Postgres remains first-class as a log and as a
-projection. The matrix contains nine Class A cells and three Class B cells.
-
-`Strict` is valid across all 12 cells. `AsyncProjection` is valid for the six
-filesystem/S3 log cells; the six memory/Postgres log cells reject that barrier
-before storage I/O. The retired `sqlite_projection_deferred_flush_chunk`
-setting is rejected when supplied; it is not an async-projection tuning option.
+A successful mutation is durable on the object log. A later claim polls applied
+Turso rows; an empty claim is a poll, not a failure of the mutation. Public
+reads may wait projection coverage. Callers do not assemble another log or
+projection. Selectors other than this cell, including retained compatibility
+names, reject before storage I/O (`RETIRED_STORAGE_CELL`). The retired
+`sqlite_projection_deferred_flush_chunk` setting is rejected when supplied; it
+is not an async-projection tuning option.
 
 ## User Experience
 
@@ -89,9 +80,9 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 | Bounded progress guarantees | Relaxed priority ordering can scale without starving eligible work |
 | Durable execution lifecycle | Work remains recoverable across worker and process failures |
 | Batch and group-aware claims | Workers can efficiently satisfy downstream API batch constraints |
-| Composition-independent transaction integrity | All 12 cells preserve commit, visibility, rejection, and idempotency semantics; restart recovery follows the cell's explicit Class A or Class B boundary |
+| Composition-independent transaction integrity | The public cell (ADR-024) preserves commit, rejection, and request-id replay; restart recovery replays the object log into Turso through `projection_control`. Empty claim is a poll, not a lost mutation |
 | Tunable durability economics | Operators can configure the object-log segment size target and maximum flush latency to trade batching delay against request cost and batch density |
-| Independent serving and durability choices | Operators select log durability independently from memory, Turso, or Postgres serving projections without adopting a separate product profile |
+| One durable cell | Operators run S3 object-log durability with a rebuildable Turso projection (ADR-024). That pairing is the product, not one row of a larger matrix |
 
 ## Success Definition
 
@@ -99,7 +90,7 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 |-----------|------------|
 | Priority correctness | Claims follow the queue's configured priority and progress contract |
 | Durable execution safety | No accepted item is lost or concurrently held by multiple active claims |
-| Transaction contract | Every supported cell satisfies the same mutation, visibility, rejection, and request-replay contract; Class A success survives through the durable log, while Class B persistence is limited to the selected projection |
+| Transaction contract | The public cell satisfies one mutation, rejection, and request-replay contract. Class A success survives on the object log. Claim polls applied rows under `AsyncProjection` |
 | Scale readiness | Hot queues with 10M resident items remain writable, claimable, observable, and exactly recoverable under ordinary concurrent load. Horizontal deployments distribute **queues across independent owner nodes** while preserving queue-global progress, claim safety, and bounded shared resources. A node exercises at least 1000 concurrently active queues without lost or duplicate work. Same-run baseline/load comparisons detect material degradation; absolute rates and latency percentiles are capacity evidence tied to the declared host and topology, never portable release bars. Substantiated by TP-002 E1 single-deployment, E2 cross-queue and density, and E3 object-log evidence. |
 | Seventh Sense validation | Timestamp-ascending delivery queues meet Seventh Sense scheduling, idempotency, batch, and latency requirements |
 

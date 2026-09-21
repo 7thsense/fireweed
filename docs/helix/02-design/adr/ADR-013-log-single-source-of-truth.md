@@ -54,15 +54,21 @@ explicit Class B product intent; this amendment aligns ADR-013 with that brief.
 
 ## Decision
 
-CQRS composition is universal: every supported cell is still
-`LogStore × ProjectionStore` (ADR-012), with append → apply → acknowledge for the selected
-durability class. There is no architecture that drops `LogStore` and runs projection-only.
+ADR-024 is the public selector law. The public product is one cell: S3
+object-log × Turso projection. `ResponseBarrier` has only `AsyncProjection`.
+The other axis pairs and `Strict` are not a roadmap. Class A durability is the
+object log. Turso is rebuildable through `projection_control` and is not the
+command log.
+
+CQRS composition on that cell is still `LogStore × ProjectionStore` (ADR-012),
+with append → apply → acknowledge. There is no architecture that drops
+`LogStore` and runs projection-only.
 
 Durability semantics split by class:
 
 ### Class A — Durable log is the single source of truth
 
-**Applies when log is `sqlite`, `postgres`, `filesystem`, or `s3`.**
+**Applies to the public cell (ADR-024): the `s3` object log.** Other logs are not public selectors.
 
 **The durable command log is the single, authoritative system of record for every queue. All
 projections — including the relational family (`fireweed_items` and peers) — are rebuildable, disposable
@@ -86,31 +92,11 @@ via high-water + tail replay; `request_id` resolves ambiguity across crash.
 Class A rules for projections, recovery, branch, read-as-of, and change-record-from-log are unchanged
 by this amendment relative to the original ADR-013 stance.
 
-### Class B — Memory log (explicit weaker durability class)
+### Class B
 
-**Applies when log is `memory` (paired with any public projection: `memory`, `sqlite`, or `postgres`).**
-
-Class B is a weaker **persistence envelope**, not a second architecture and not “no LogStore”:
-
-1. **`LogStore` still exists** for in-process command ordering, fencing, and the append → apply
-   path while the process is alive.
-2. **After process death, only the projection remains.** There is no durable log to replay; recovery
-   cannot rebuild the projection from the log.
-3. **Unavailable under Class B:** log rebuild / crash-recovery-from-log, branch-at-position (TD-009),
-   read-as-of-position (TD-009), and change-record emission from a durable log tail (TD-008).
-4. **Client contract:** success ⇒ visible in the serving projection; durable **iff** the projection
-   itself is durable (`sqlite` / `postgres`). A `memory` × `memory` cell loses both log and
-   projection on process death.
-5. **Must be explicitly selectable** via the public configuration surface (typed `StorageConfig` /
-   Helm axes — see the matrix brief). Configuration MUST NOT silently substitute a no-op or absent
-   log; operators and embedders choose `log=memory` knowingly.
-6. **Must not claim Class A guarantees.** Docs, preview claims, and conformance must not market
-   Class B cells as log-rebuildable, branchable, or change-record-complete from log.
-
-**Commit ordering (Class B):** (1) append to the in-process `LogStore` (ordering/fence authority for
-the live process), (2) apply to the serving projection, (3) acknowledge only after projection
-visibility. The response barrier still holds for the live process; cross-restart durability is
-projection-only.
+There is no public Class B cell (ADR-024). Memory-log pairings are retired
+and are not a roadmap. The historical definition is recorded after this
+Decision and does not add a selector.
 
 ### Silent null-log remains forbidden
 
@@ -142,6 +128,41 @@ relational projection):
 
 Under Class B with a relational projection, the projection may still persist applied state, but
 post-restart authority is projection-only; Class A rebuild-from-log claims do not apply.
+
+## Historical Class B definition (not a public cell)
+
+Historical only. ADR-024 does not restore these pairings.
+
+### Class B — not a public cell (ADR-024)
+
+There is no public Class B cell. Memory-log pairings are retired and are not a
+roadmap. The bullets below record the historical Class B definition only so
+later sentences in this Decision can point at it; they do not add a selector.
+
+**Historical definition, not a public pairing.**
+
+Class B is a weaker **persistence envelope**, not a second architecture and not “no LogStore”:
+
+1. **`LogStore` still exists** for in-process command ordering, fencing, and the append → apply
+   path while the process is alive.
+2. **After process death, only the projection remains.** There is no durable log to replay; recovery
+   cannot rebuild the projection from the log.
+3. **Unavailable under Class B:** log rebuild / crash-recovery-from-log, branch-at-position (TD-009),
+   read-as-of-position (TD-009), and change-record emission from a durable log tail (TD-008).
+4. **Client contract:** success ⇒ visible in the serving projection; durable **iff** the projection
+   itself is durable (`sqlite` / `postgres`). A `memory` × `memory` cell loses both log and
+   projection on process death.
+5. **Must be explicitly selectable** via the public configuration surface (typed `StorageConfig` /
+   Helm axes — see the matrix brief). Configuration MUST NOT silently substitute a no-op or absent
+   log; operators and embedders choose `log=memory` knowingly.
+6. **Must not claim Class A guarantees.** Docs, preview claims, and conformance must not market
+   Class B cells as log-rebuildable, branchable, or change-record-complete from log.
+
+**Commit ordering (Class B):** (1) append to the in-process `LogStore` (ordering/fence authority for
+the live process), (2) apply to the serving projection, (3) acknowledge only after projection
+visibility. The response barrier still holds for the live process; cross-restart durability is
+projection-only.
+
 
 ## Derived implementation work
 
