@@ -135,8 +135,8 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
-- [v0.31.29 release notes](docs/releases/v0.31.29.md) cover live Turso
-  projection verify/delete/rebuild on object-log cells.
+- [v0.31.30 release notes](docs/releases/v0.31.30.md) cover the s3 × Turso
+  capacity path, disk MinIO, and log-only projection rebuild.
 - [v0.30.0 identity note](docs/releases/v0.30.0.md) reserves package identity
   `0.30.0` ahead of candidate-source freeze (not a cut tag by itself).
 - [v0.29.2 release notes](docs/releases/v0.29.2.md) (historical) describe Snorri
