@@ -221,15 +221,9 @@
   "help_parser_bijections": {
     "log": {
       "help_values": [
-        "memory",
-        "postgres",
-        "filesystem",
         "s3"
       ],
       "parser_values": [
-        "memory",
-        "postgres",
-        "filesystem",
         "s3"
       ],
       "rejected_legacy_values": [
@@ -239,14 +233,10 @@
     },
     "projection": {
       "help_values": [
-        "memory",
-        "turso",
-        "postgres"
+        "turso"
       ],
       "parser_values": [
-        "memory",
-        "turso",
-        "postgres"
+        "turso"
       ],
       "rejected_legacy_values": [
         "inmemory",
