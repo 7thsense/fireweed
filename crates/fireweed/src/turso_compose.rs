@@ -355,7 +355,6 @@ fn identity_for_generation(
     snapshot
 }
 
-#[cfg(feature = "objectlog")]
 fn command_kind(command: &QueueCommand) -> &'static str {
     match command {
         QueueCommand::CreateQueue(_) => "CreateQueue",
@@ -374,7 +373,6 @@ fn command_kind(command: &QueueCommand) -> &'static str {
     }
 }
 
-#[cfg(feature = "objectlog")]
 async fn apply_recovery_page<P: AsyncProjectionStore>(
     projection: &P,
     shard: &QueueKey,
@@ -1866,9 +1864,50 @@ macro_rules! impl_turso_product_ports {
             }
             fn hydrate_projection_for_ownership(
                 &self,
-                _shard: &QueueKey,
+                shard: &QueueKey,
             ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-                std::future::ready(Ok(()))
+                let shard = shard.clone();
+                async move {
+                    let high_water = self.projection.writer_recovery_high_water(&shard).await?;
+                    let mut from = high_water.clone();
+                    loop {
+                        let page = AsyncLogStore::read_from(
+                            self.log.as_ref(),
+                            shard.clone(),
+                            from.clone(),
+                            256,
+                        )
+                        .await?;
+                        if page.entries.is_empty() {
+                            break;
+                        }
+                        for (_, env) in &page.entries {
+                            for item_id in &env.item_ids {
+                                self.counters.observe(&shard, *item_id);
+                            }
+                        }
+                        let tail: Vec<_> = page
+                            .entries
+                            .iter()
+                            .filter(|(position, _)| {
+                                high_water.as_ref().is_none_or(|hw| {
+                                    position.backend_epoch > hw.backend_epoch
+                                        || (position.backend_epoch == hw.backend_epoch
+                                            && position.sequence > hw.sequence)
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        if !tail.is_empty() {
+                            apply_recovery_page(self.projection.as_ref(), &shard, &tail).await?;
+                        }
+                        match page.next {
+                            Some(next) => from = Some(next),
+                            None => break,
+                        }
+                    }
+                    Ok(())
+                }
             }
             fn current_epoch(
                 &self,
@@ -7681,6 +7720,137 @@ mod cohort_expiry_tests {
         assert!(
             rendered.contains("Failed"),
             "CohortExpired must fail the incomplete member, rows={rendered}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ownership_hydrate_tests {
+    use fireweed_core::{
+        ClientItemKey, EligibilityPolicy, ItemId, Metadata, OrderingMode, PriorityDirection,
+        PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition,
+        QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    };
+    use fireweed_engine::{
+        AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore,
+        ProjectionRead, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    };
+
+    use super::*;
+
+    fn queue() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("hydrate").unwrap(),
+            queue_id: QueueId::new("tail").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn tail_push() -> CommandEnvelope {
+        let item_id = ItemId::mint(1, 0, 99);
+        CommandEnvelope {
+            command_id: CommandId::new("hydrate-tail"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: ClientItemKey::new("hydrate-tail").unwrap(),
+                    item_id,
+                    priority: Some(PriorityValue::Int64(1)),
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: Default::default(),
+                    metadata: Metadata::default(),
+                    cohort_size: None,
+                    gate_keys: Vec::new(),
+                    index_fields: Default::default(),
+                    entity_document: None,
+                }],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(2, 0).unwrap(),
+        }
+    }
+
+    /// A projection that already applied the prefix must replay only the log tail.
+    #[tokio::test]
+    async fn hydrate_projection_replays_log_tail_after_high_water() {
+        let backend = assemble_memory_log_turso_in_memory().expect("turso :memory:");
+        let definition = queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        ControlPlaneStore::create_queue(&backend, definition)
+            .await
+            .unwrap();
+        PushPort::push(
+            &backend,
+            &shard,
+            vec![PushSpec::default()],
+            UtcTimestamp::new(1, 0).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        let before = ProjectionRead::metrics(&backend, &shard).await.unwrap();
+        assert_eq!(before.pending, 1, "the product push is already in Turso");
+        let epoch = ControlPlaneStore::current_epoch(&backend, &shard)
+            .await
+            .unwrap();
+        AsyncLogStore::append(
+            backend.log_store().as_ref(),
+            shard.clone(),
+            vec![tail_push()],
+            epoch,
+        )
+        .await
+        .unwrap();
+        let still = ProjectionRead::metrics(&backend, &shard).await.unwrap();
+        assert_eq!(
+            still.pending, 1,
+            "a log-only append must not apply itself"
+        );
+
+        ControlPlaneStore::hydrate_projection_for_ownership(&backend, &shard)
+            .await
+            .unwrap();
+        let hydrated = ProjectionRead::metrics(&backend, &shard).await.unwrap();
+        assert_eq!(
+            hydrated.pending, 2,
+            "hydration must apply the log tail past the projection high-water"
+        );
+
+        ControlPlaneStore::hydrate_projection_for_ownership(&backend, &shard)
+            .await
+            .unwrap();
+        let twice = ProjectionRead::metrics(&backend, &shard).await.unwrap();
+        assert_eq!(
+            twice.pending, 2,
+            "a second hydration must not apply the same tail again"
         );
     }
 }
