@@ -1532,7 +1532,8 @@ where
             {
                 self.counters.observe(&shard, item_id);
             }
-            let mut from = None;
+            // Commands at or before the projection high-water are already in Turso.
+            let mut from = high_water.clone();
             loop {
                 let page =
                     AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
@@ -1935,6 +1936,41 @@ macro_rules! impl_turso_product_ports {
                         expected_epoch,
                     })
                     .await
+                }
+            }
+
+            /// One log append for the whole ordered batch. Awaiting each item
+            /// would seal a separate S3 object per command.
+            fn push_ordered_independent(
+                &self,
+                shard: &QueueKey,
+                items: Vec<PushSpec>,
+                now: UtcTimestamp,
+                expected_epoch: Option<u64>,
+            ) -> impl std::future::Future<Output = Vec<EngineResult<ItemId>>> + Send {
+                async move {
+                    let count = items.len();
+                    if count > fireweed_engine::MAX_ORDERED_INDEPENDENT_PUSH_ITEMS {
+                        return vec![
+                            Err(EngineError::Invalid(
+                                "ordered independent push exceeds bounded item limit",
+                            ));
+                            count
+                        ];
+                    }
+                    if count == 0 {
+                        return Vec::new();
+                    }
+                    match self.push(shard, items, now, expected_epoch).await {
+                        Ok(ids) if ids.len() == count => ids.into_iter().map(Ok).collect(),
+                        Ok(_) => vec![
+                            Err(EngineError::Storage(
+                                "ordered push returned a different number of ids".into(),
+                            ));
+                            count
+                        ],
+                        Err(error) => vec![Err(error); count],
+                    }
                 }
             }
         }
@@ -2625,13 +2661,15 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                 Some(coordinator) => Some(coordinator.reserve(shard.clone(), &commands).await?),
                 None => None,
             };
+            // A full generation is not a reason to PUT. Eight small commands
+            // are not an S3 object. Seal early only for the local filesystem,
+            // where a PUT is a file rename, or when the append is already huge.
             let force_seal = (log.uses_local_filesystem()
                 && matches!(
                     append_admission,
                     AppendAdmissionClass::SharedSelectionLive
                         | AppendAdmissionClass::KeyedPermitLive
                 ))
-                || commands.len() >= CLAIM_GENERATION_MAX_REQUESTS
                 || commands
                     .iter()
                     .map(|envelope| {
@@ -3218,7 +3256,11 @@ impl DerivedObjectLogTursoBackend {
                 .await?;
             let high_water = self.projection.writer_recovery_high_water(&shard).await?;
             let repair_push_receipts = self.projection.has_legacy_push_fingerprints(&shard).await?;
-            let mut from = None;
+            if let Some(item_id) = self.projection.recovery_counter_high_water(&shard).await? {
+                self.counters.observe(&shard, item_id);
+            }
+            // Commands at or before the projection high-water are already in Turso.
+            let mut from = high_water.clone();
             loop {
                 let page =
                     AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)

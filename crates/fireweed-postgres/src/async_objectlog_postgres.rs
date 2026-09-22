@@ -649,6 +649,38 @@ impl PushPort for AsyncObjectLogPostgresBackend {
             .await
             .map_err(Self::map_push)
     }
+
+    /// One append for the whole batch so a pipeline does not seal one object per item.
+    async fn push_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> Vec<EngineResult<ItemId>> {
+        let count = items.len();
+        if count > fireweed_engine::MAX_ORDERED_INDEPENDENT_PUSH_ITEMS {
+            return vec![
+                Err(EngineError::Invalid(
+                    "ordered independent push exceeds bounded item limit",
+                ));
+                count
+            ];
+        }
+        if count == 0 {
+            return Vec::new();
+        }
+        match self.push(shard, items, now, expected_epoch).await {
+            Ok(ids) if ids.len() == count => ids.into_iter().map(Ok).collect(),
+            Ok(_) => vec![
+                Err(EngineError::Storage(
+                    "ordered push returned a different number of ids".into(),
+                ));
+                count
+            ],
+            Err(error) => vec![Err(error); count],
+        }
+    }
 }
 
 impl ClaimPort for AsyncObjectLogPostgresBackend {

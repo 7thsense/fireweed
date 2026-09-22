@@ -120,7 +120,9 @@ type MetadataPermits = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 /// LogEngine linger never sees a second produce. Ports that call
 /// [`ObjectLogEngineStore::packed_append`] bypass that permit and wait here.
 const PACK_TARGET_BYTES: usize = 4 * 1024 * 1024;
-const PACK_MAX_BATCHES: usize = 8;
+/// Safety cap only. Sealing every handful of commands makes one S3 object per
+/// request. The byte target and linger decide a real seal.
+const PACK_MAX_BATCHES: usize = 4_096;
 /// Gather window for concurrent produces. Seal immediately once a full window
 /// is waiting; otherwise wait this long for more callers to join the PUT.
 const PACK_LINGER: Duration = Duration::from_millis(20);
@@ -1828,6 +1830,17 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 .as_ref()
                 .map(|p| p.sequence.saturating_add(1))
                 .unwrap_or(0);
+            let retained_from = self
+                .engine
+                .sequencer()
+                .log_start_offset(&partition_key(&shard))
+                .map_err(store_err)?;
+            if (from_seq as i64) < retained_from {
+                return Err(EngineError::Storage(
+                    "object-log history before the retained tail is in the projection, not the manifest index"
+                        .into(),
+                ));
+            }
             let batches = self
                 .engine
                 .fetch(&partition_key(&shard), from_seq as i64, 4 * 1024 * 1024)
