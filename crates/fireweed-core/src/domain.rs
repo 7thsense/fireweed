@@ -917,8 +917,7 @@ pub struct CreateQueue {
     /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a fireweed name.
     /// Empty = no typed indexes. Must not overlap `secondary_indexes` by name.
     pub typed_indexes: Vec<QueueIndex>,
-    // Whether this queue emits change records to the history sink. Default-on so operators get
-    // history unless they explicitly opt out per queue.
+    // Retained for stored definitions. Emission is off. History is the command log.
     pub emit_change_records: bool,
 }
 
@@ -958,8 +957,7 @@ pub struct QueueDefinition {
     /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
     #[serde(default)]
     pub typed_indexes: Vec<QueueIndex>,
-    // Whether this queue emits change records to the niflheim history sink. Default-on so operators
-    // get history unless they explicitly opt out per queue.
+    // Retained for stored definitions. Emission is off. History is the command log.
     #[serde(default = "default_emit_change_records")]
     pub emit_change_records: bool,
 }
@@ -969,7 +967,7 @@ fn default_terminal_retention_ms() -> u64 {
 }
 
 fn default_emit_change_records() -> bool {
-    true
+    false
 }
 
 #[derive(Debug, Clone, PartialEq)]

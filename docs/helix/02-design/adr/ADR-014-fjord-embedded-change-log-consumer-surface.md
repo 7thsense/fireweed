@@ -68,6 +68,8 @@ by git tag.)
 
 ## Decision
 
+**Superseded for the record payload.** The derived `ChangeRecord` changelog is retired. History is the command log. A Kafka fetch of topic `tenant.queue` returns one record per committed command: the offset is the command sequence, the key is `backend_epoch:sequence`, and the value is the command envelope. Fjord does not keep a second log of lifecycle notices, and a queue commit does not append to Fjord. Finding one item is still a scan of that queue. Consumer-group state stays in Fjord and is not written into the command log.
+
 fireweed **embeds fjord** — the sibling Kafka-protocol log system over object storage — to provide
 the change-log Kafka consumer surface in-process. fireweed owns the interface; no external broker
 deployment is required for another system to consume the change log.

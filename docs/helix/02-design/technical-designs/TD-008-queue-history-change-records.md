@@ -146,6 +146,8 @@ advance re-emits; the receiver dedupes.
 design; the S3 client is hand-rolled SigV4), the niflheim sink is a lean hand-rolled POST over the
 existing tokio `net` stack. No heavy SDK.
 
+**Superseded.** Do not emit `ChangeRecord`. The command log is the history. A consumer that wants it reads that log, or fetches it through Fjord as one Kafka record per command. The schema below is the retired notice and is not an item index.
+
 ## Which transitions emit
 
 Every mutating `QueueCommand` in an eligible Class A cell is in the durable log

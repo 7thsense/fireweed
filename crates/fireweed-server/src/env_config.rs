@@ -536,7 +536,7 @@ fn queue_definition(tenant: &str, queue: &str) -> Result<QueueDefinition, Config
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
-        emit_change_records: true,
+        emit_change_records: false,
     })
 }
 

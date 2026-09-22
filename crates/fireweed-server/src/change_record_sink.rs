@@ -509,6 +509,72 @@ fn change_record_headers(record: &fireweed_engine::ChangeRecord) -> Vec<(&'stati
 /// `heimq_broker::storage::RecordBatchView::from_bytes` decodes and `FjordLog::append` stores. Each record
 /// carries the ADR-014 "Normative consumer contract" shape: key `"{item_id}:{backend_epoch}:{sequence}"`,
 /// the pinned `fireweed-*` headers, and the TD-008 `ChangeRecord` JSON as the payload.
+/// One committed command, encoded as one Kafka record. The offset is the
+/// command sequence. The value is the command envelope. This is the history
+/// stream. It is not a [`fireweed_engine::ChangeRecord`].
+pub struct CommandLogKafkaRecord {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub backend_epoch: u64,
+    pub sequence: u64,
+    pub command_kind: String,
+    pub envelope_json: Vec<u8>,
+}
+
+pub fn encode_command_log_batch(records: &[CommandLogKafkaRecord]) -> EngineResult<Vec<u8>> {
+    let mut kafka_records = Vec::with_capacity(records.len());
+    for record in records {
+        let key = format!("{}:{}", record.backend_epoch, record.sequence);
+        let mut headers = IndexMap::new();
+        for (name, value) in [
+            ("fireweed-tenant-id", record.tenant_id.as_bytes().to_vec()),
+            ("fireweed-queue-id", record.queue_id.as_bytes().to_vec()),
+            (
+                "fireweed-backend-epoch",
+                record.backend_epoch.to_string().into_bytes(),
+            ),
+            (
+                "fireweed-sequence",
+                record.sequence.to_string().into_bytes(),
+            ),
+            (
+                "fireweed-command-kind",
+                record.command_kind.as_bytes().to_vec(),
+            ),
+        ] {
+            headers.insert(
+                StrBytes::from_string(name.to_string()),
+                Some(Bytes::from(value)),
+            );
+        }
+        kafka_records.push(Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            producer_id: -1,
+            producer_epoch: -1,
+            timestamp_type: TimestampType::Creation,
+            offset: i64::try_from(record.sequence).unwrap_or(i64::MAX),
+            sequence: i32::try_from(record.sequence).unwrap_or(i32::MAX),
+            timestamp: -1,
+            key: Some(Bytes::from(key.into_bytes())),
+            value: Some(Bytes::from(record.envelope_json.clone())),
+            headers,
+        });
+    }
+    let mut buf = BytesMut::new();
+    RecordBatchEncoder::encode(
+        &mut buf,
+        &kafka_records,
+        &RecordEncodeOptions {
+            version: 2,
+            compression: Compression::None,
+        },
+    )
+    .map_err(|e| EngineError::Storage(format!("encode command-log batch: {e}")))?;
+    Ok(buf.to_vec())
+}
+
 fn encode_change_record_batch(records: &[fireweed_engine::ChangeRecord]) -> EngineResult<Vec<u8>> {
     let mut kafka_records = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
@@ -1145,21 +1211,11 @@ pub(crate) fn spawn_change_record_emitter_if_enabled<B>(
 where
     B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
 {
-    if !config.enabled {
-        return Ok(None);
-    }
-    let queues = enabled_boot_queues(queues);
-    if queues.is_empty() {
-        return Ok(None);
-    }
-    change_record_sink_requires_durable_cursor(backend.as_ref())?;
-    let sink = build_change_record_sink(config, log)?;
-    Ok(Some(spawn_change_record_emitter(
-        backend,
-        sink,
-        queues,
-        config.clone(),
-    )))
+    // The derived changelog is retired. History is the command log, read by
+    // Kafka fetch. Do not append a second copy, even if a queue still has the
+    // stored flag set.
+    let _ = (backend, queues, config, log);
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1177,49 +1233,15 @@ where
     FHttp: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
     FExternal: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
 {
-    if !config.enabled {
-        return Ok(None);
-    }
-    let queues = enabled_boot_queues(queues);
-    if queues.is_empty() {
-        return Ok(None);
-    }
-    let sink = match config.mode() {
-        ChangeRecordSinkMode::Embedded => build_embedded_sink(config)?,
-        ChangeRecordSinkMode::Http => build_http_sink(config)?,
-        ChangeRecordSinkMode::ExternalKafka => build_external_sink(config)?,
-        ChangeRecordSinkMode::Disabled => {
-            return Err(EngineError::Invalid(
-                "change record sink is disabled in config",
-            ));
-        }
-    };
-    let tick_interval = config.tick_interval;
-    let batch_size = config.batch_size;
-    Ok(Some(fireweed_resp::spawn_governed(async move {
-        let mut tick = tokio::time::interval(tick_interval);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let emit_backend = Arc::clone(&backend);
-            let emit_sink = Arc::clone(&sink);
-            let emit_queues = queues.clone();
-            match tokio::task::spawn_blocking(move || {
-                emit_change_record_tick(
-                    emit_backend.as_ref(),
-                    emit_sink.as_ref(),
-                    &emit_queues,
-                    batch_size,
-                )
-            })
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => eprintln!("[change-record] emission tick failed: {e}"),
-                Err(e) => eprintln!("[change-record] emission task failed: {e}"),
-            }
-        }
-    })))
+    let _ = (
+        backend,
+        queues,
+        config,
+        build_embedded_sink,
+        build_http_sink,
+        build_external_sink,
+    );
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1519,13 +1541,15 @@ mod tests {
                 }
             },
         )
-        .expect("emitter should start")
-        .expect("enabled config with emit-change-record queues should spawn");
+        .expect("emitter decision");
+        assert!(
+            handle.is_none(),
+            "derived change records are not emitted; history is the command log"
+        );
 
-        assert_eq!(embedded_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(embedded_calls.load(Ordering::SeqCst), 0);
         assert_eq!(http_calls.load(Ordering::SeqCst), 0);
         assert_eq!(external_calls.load(Ordering::SeqCst), 0);
-        handle.abort();
     }
 
     struct MutableControlPlane {
@@ -1717,6 +1741,28 @@ mod tests {
             item_id: None,
             ..with_item.clone()
         };
+
+        let batch = encode_command_log_batch(&[CommandLogKafkaRecord {
+            tenant_id: "tenant-a".into(),
+            queue_id: "queue-a".into(),
+            backend_epoch: 4,
+            sequence: 11,
+            command_kind: "push".into(),
+            envelope_json: br#"{"command":"push","item":1}"#.to_vec(),
+        }])
+        .expect("encode command log");
+        let view = heimq_broker::storage::RecordBatchView::from_bytes(&batch)
+            .expect("decode command-log batch");
+        let record = view.records().next().expect("one command");
+        assert_eq!(view.base_offset() + i64::from(record.offset_delta), 11);
+        assert_eq!(
+            record.value.map(|b| b.as_ref().to_vec()),
+            Some(br#"{"command":"push","item":1}"#.to_vec())
+        );
+        assert_eq!(
+            record.key.map(|b| b.as_ref().to_vec()),
+            Some(b"4:11".to_vec())
+        );
 
         assert_eq!(change_record_key(&with_item), "17:9:3");
         assert_eq!(change_record_key(&without_item), ":9:3");
