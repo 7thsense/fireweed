@@ -20,28 +20,26 @@ ddx:
 
 # Test Plan: TP-002 Scale Substantiation
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../../02-design/contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
+`10000` and `12500` are non-portable capacity observations for a named cell and
+commit, not product pass bars. The campaign plan states the same rule: the
+12.5k result stays attributed to filesystem × Turso at `49f1b6b3` (2026-09-16)
+and is not a qualification pin; v0.31.30 s3 × Turso (~9507 on `bcef51f9`) is
+not a qualification pin. A miss of those script gates is not a product failure.
+
 
 ## Scope
 
@@ -85,8 +83,8 @@ The two v1 scale envelopes both deliver and both substantiate:
 
 | Envelope | Deployment shape | Delivered by | Evidence record |
 |----------|------------------|--------------|-----------------|
-| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | PostgreSQL log × PostgreSQL projection reference cell (TD-002) | **E1** vs the portable progress/capacity contract **E0** |
-| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + cross-queue distribution (ADR-008) + S3 log with each public projection (TD-004) | **E2** (cross-queue scale-out) and **E3** (object-log latency/cost + recovery) |
+| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | public cell `s3--turso` (ADR-024) | **E1** vs the portable progress/capacity contract **E0**. No 10M pass is claimed for v0.31.30 |
+| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + the public cell `s3--turso` (ADR-024) | **E2** and **E3** on that cell. No 1000-queue pass is claimed for v0.31.30 |
 
 ## Scale Evidence Records
 
@@ -136,10 +134,9 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > prebuilt-image path — `SKIP_BUILD=1` + `FIREWEED_E2_IMAGE` — which is a packaging
 > detail only; the binaries, backend, cluster topology, and load are identical to
 > the source-build path.) These absolute rates and ratios remain topology-bound
-> capacity evidence; current release qualification applies the portable E0/E2
-> correctness, progress, resource, and same-run comparison bars below. Because
-> that historical run covered only the SQLite projection, it does not by itself
-> qualify the current three-projection E2 register.
+> capacity evidence on a retired SQLite projection. That run is historical. It
+> does not qualify the public cell. The E2 register is `s3--turso` (ADR-024).
+> This plan does not claim a 10M-resident or 1000-queue pass on that cell.
 
 `scripts/release/build-governed-evidence-bundle.sh` stages explicitly named E0,
 E1, E2 cross-owner, E2 density, E2 failover/routing, and E3 producer outputs for
@@ -266,8 +263,10 @@ extrapolated to other hosts or required to equal 1000 times a per-queue number.
 
 ### E1 — Tier-1 single-deployment envelope (pass/fail)
 
-Cell: `postgres` log × `postgres` projection (TD-002). Deployment: one attested
-PostgreSQL service, one queue owned by one node.
+Cell: `s3` log × `turso` projection (ADR-024). Deployment: one attested S3
+object log and a local Turso projection, one queue owned by one node. A 10M
+resident set is the target below. This plan does not record that pass on
+v0.31.30.
 
 | Parameter | Value |
 |-----------|-------|
@@ -287,14 +286,12 @@ PostgreSQL service, one queue owned by one node.
 Mechanism: per-queue ownership (TD-003) + cross-queue distribution (ADR-008) —
 many queues spread across many owner nodes; each queue is a single-owner,
 single-hop claim (no intra-queue sharding, no scatter-gather).
-**S3 log × every public projection is required** for headline horizontal
-evidence. The E2 register therefore contains `s3--memory`, `s3--sqlite`, and
-`s3--postgres`, all under the same portable work/progress/resource bars and an
-attested provider with native conditional publication. Filesystem-log cells may
-run as local protocol controls. The E1 PostgreSQL reference cell MAY run as a
-comparator but does not on its own satisfy E2 (per ADR-001 Scale Claim Scoping).
-Missing S3 or PostgreSQL infrastructure is a failed qualification prerequisite,
-not a skipped or reduced E2 matrix.
+The E2 register is the public cell `s3--turso` (ADR-024), under the portable
+work/progress/resource bars and an attested provider with native conditional
+publication. Retired projections are not extra register rows. Missing S3
+infrastructure is a failed qualification prerequisite, not a skipped cell.
+The 1000-queue density row is a target. This plan does not record that pass
+on v0.31.30.
 
 | Parameter | Value |
 |-----------|-------|
@@ -330,13 +327,13 @@ avoidable reads exceed 70% and absolute modeled gain exceeds 50 ms, but relative
 11.69%, below 20%. The observed authority-head history amplification is a new
 design input for constant-time head access and async bounded-parallel tail recovery.
 
-Cells: `filesystem` and `s3` logs × `memory`, `sqlite`, and `postgres`
-projections (six TD-004 cells), evaluated against the portable E0 contract.
-The filesystem rows are local protocol controls; S3 rows use the live attested
-provider. This section is the sole home for governed wall-clock release
-thresholds. TP-003/TP-004 correctness uses fixed work and exact outcomes;
-TP-005 timing remains host-bound observation unless an E3 row explicitly adopts
-its metric on this controlled topology.
+Cell: `s3--turso` (ADR-024), evaluated against the portable E0 contract on a
+live attested S3 provider. This section is the sole home for governed
+wall-clock release thresholds on that cell. TP-003/TP-004 correctness uses
+fixed work and exact outcomes on the same cell. TP-005 timing remains
+host-bound observation unless an E3 row explicitly adopts its metric on this
+controlled topology. Rebuild of a 10M-item projection is a target, not a
+recorded pass on v0.31.30.
 
 | Parameter | Value |
 |-----------|-------|
@@ -351,8 +348,8 @@ its metric on this controlled topology.
 
 ### Recurrence under scale (representative envelopes)
 
-Run recurrence under the E1 PostgreSQL reference cell and all three required E2
-S3 projection cells. TP-003/TP-004 own the common 15-cell correctness matrix;
+Run recurrence under the public cell `s3--turso` (ADR-024) for both envelopes.
+TP-003/TP-004 own correctness on that cell;
 these scale rows substantiate that recurring/never-terminal items participate in
 both deployment envelopes without special handling (recurring items participate
 in the per-queue local oldest-eligible computation like any item).
@@ -372,11 +369,11 @@ P0 items are referenced by name (not number) to stay robust to PRD renumbering.
 | PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 and E2 preserve exact outcomes, queue-global progress, and bounded resources while distributing queues across owners. Throughput and latency remain declared-topology capacity evidence. |
 | PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density uses fixed work (at least 1,000 cold queues plus one hot queue) on an attested live S3 row. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Concrete producer commands and topology values are evidence inputs, not permanent provider contracts. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
-| TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery across six object-log cells; commit-latency-bound sweep; native conditional current-epoch fencing; providers without it fail configuration before I/O. |
+| TD-004 object-log backend | TD-010 / ADR-024 | E3 latency/cost/recovery on `s3--turso`; commit-latency-bound sweep; native conditional current-epoch fencing; providers without it fail configuration before I/O. No 10M pass is claimed here. |
 | Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |
 | TD-006 client routing | TD-006 / TD-003 | A wrong-node command is `-MOVED`-redirected to the queue's owner and converges in one hop; a stale/misrouted write is fenced, never corrupting state. |
-| Recurrence under scale (D4) | TD-001 / TD-002 / TD-004 | Recurrence scale passes in the E1 reference cell and all three required E2 S3 projection cells: high-frequency rearm, idle inventory bound, queue-local purge under load. |
-| Shared backend conformance | TD-001 / TP-003 / TP-004 | All 15 log × projection cells pass the same core/transaction surface with Class A/Class B recovery assertions and zero silent skips before scale evidence may qualify a subset. |
+| Recurrence under scale (D4) | TD-001 / ADR-024 | Recurrence scale is specified on `s3--turso`: high-frequency rearm, idle inventory bound, queue-local purge under load. Not claimed as a v0.31.30 pass. |
+| Shared backend conformance | TD-001 / TP-003 / TP-004 / ADR-024 | The public cell passes the core/transaction surface with object-log recovery and zero silent skips before scale evidence may qualify it. |
 
 ## Named Test Suites
 
@@ -487,12 +484,11 @@ claim MUST NOT be substantiated by the E1 PostgreSQL reference cell alone.
 - Cross-owner throughput and efficiency are published capacity observations, not
   universal bars. Release qualification uses the portable E0/E2 contract and
   never waits for an operator to select a machine-speed threshold.
-- Attested live S3 remains required for E2, including memory, SQLite, and
-  PostgreSQL projections. The E1 reference cell may be recorded as a comparator
-  but cannot qualify the horizontal envelope by itself.
-- TP-003/TP-004 require all 15 functional cells with zero skips before E1–E3
-  performance/scale evidence can qualify their governed subsets. Missing live
-  S3 or PostgreSQL fails closed on the provisioned runner.
+- Attested live S3 remains required for E2 on `s3--turso` (ADR-024). Retired
+  projections are not register rows.
+- TP-003/TP-004 require that cell with zero skips before E1–E3 evidence can
+  qualify it. Missing live S3 fails closed. A 10M or 1000-queue figure is not
+  a recorded pass for v0.31.30.
 
 The queue-density target is **at least 1000 cold queues plus one hot queue on one
 node**. Every queue meets its progress contract, all lifecycle counts reconcile,

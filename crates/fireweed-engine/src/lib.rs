@@ -138,7 +138,7 @@ pub use compose::{
     DetachedRetentionOutcome, DetachedRetentionRequest, DetachedTrimWatermark, ExpiredLeaseCursor,
     ExpiredLeasePage, InProcessControlPlane, ItemMutationPlan, LogLineageIdentity, LogStore,
     PlannedBatchUpdate, ProjectionStore, RecoveryStart, RichClaimSelection, batch_update_body_hash,
-    claim_by_item_ids_body_hash, claim_by_query_body_hash, commit_body_hash,
+    batch_claim_body_hash, claim_by_item_ids_body_hash, claim_by_query_body_hash, commit_body_hash,
     definition_page_from_sorted_rows, definition_page_from_storage_rows, item_mutation_fingerprint,
     max_position, outcome_entry_from_recovery, outcomes_from_recovery, plan_batch_update,
     plan_batch_update_pipelined, push_body_hash, push_items_fingerprint_sha256,

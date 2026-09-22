@@ -18,28 +18,20 @@ ddx:
 
 # Contract
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 **Contract ID**: API-001
 **Type**: native command contract (transport-neutral)
@@ -95,9 +87,12 @@ following externally visible guarantees:
 2. Each queue exposes a serializable mutation history for all accepted queue
    state transitions. Claims, leases, finalization, eligibility changes, and
    idempotency replay are interpreted against that history.
-3. A successful mutating response means the accepted effects are durable and
-   visible to later reads, claims, idempotency replays, and recovery from durable
-   state.
+3. A successful mutating response means the accepted effects are durable on the
+   object log (ADR-024) and recoverable by replaying that log. Idempotency
+   replays return the recorded result. On `AsyncProjection`, a later ordinary
+   claim polls applied rows and may be empty; that empty claim is a poll, not
+   a failure of the mutation and not proof the command was lost. Public reads
+   may wait projection coverage.
 4. A structured envelope rejection means no item in that envelope is durably
    committed. A per-item rejection means that item has no durable effect while
    other accepted items in the same batch follow normal success semantics.
@@ -107,36 +102,32 @@ following externally visible guarantees:
    execution when it did not commit. It MUST NOT duplicate a state-machine
    transition.
 6. Local projections, caches, segment buffering, manifest publication, and log
-   replay are internal mechanisms. They MUST NOT expose read-after-success gaps,
-   duplicate active leases, lost accepted items, or backend-specific recovery
-   instructions to callers.
+   replay are internal mechanisms. They MUST NOT expose duplicate active leases,
+   lost accepted items, or backend-specific recovery instructions to callers.
+   Apply lag on `AsyncProjection` is visible only as an empty ordinary claim
+   (a poll) or as a public read that waits for coverage. It is not a command
+   failure.
 
 ### Storage-composition invariance
 
-The complete API-001 operation surface applies to every supported
-`StorageConfig` log × projection tuple. A storage cell is releasable only when
-it implements every method and preserves the same request and response shapes;
-returning a backend-specific `unavailable` for a normally supported operation
-is not method parity. Projection maintenance is an optional control capability,
-not permission to omit a data-plane method.
+The complete API-001 operation surface applies to the public cell: S3 object-log
+× Turso projection (ADR-024). `ResponseBarrier` has only `AsyncProjection`.
+That cell is releasable only when it implements every method and preserves the
+same request and response shapes; returning `unavailable` for a normally
+supported operation is not method parity. Projection maintenance
+(`projection_control`) is the rebuild path for Turso. It is not permission to
+omit a data-plane method, and Turso is not the command log.
 
-Storage selection changes only the documented durability envelope:
+Class A durability is the object log. It preserves history and can rebuild the
+disposable Turso projection from the log. There is no public Class B cell.
 
-- **Class A** uses a durable log (`sqlite`, `postgres`, `filesystem`, or `s3`).
-  It preserves history and can rebuild a disposable projection from the log.
-- **Class B** uses the memory log. A durable selected projection can preserve
-  the latest serving state across restart, but there is no retained log from
-  which to rebuild, branch, or answer read-as-of/history requests. A binding
-  MUST report that history capability as absent rather than fabricate it.
-
-Both classes otherwise preserve this contract's request-id replay, per-item and
-envelope outcomes, lease fencing, deterministic ordering, poison/fail-closed
-behavior, and backpressure semantics. In particular, a retryable capacity or
-commit-pressure outcome remains safe to retry with the same `request_id`, and
-an unknown commit outcome is resolved through the same replay contract rather
-than by selecting or exposing a backend-specific recovery route. A poisoned or
-lag-bound projection MUST fail closed before it can serve inconsistent reads or
-claims.
+The cell preserves this contract's request-id replay, per-item and envelope
+outcomes, lease fencing, deterministic ordering, poison/fail-closed behavior,
+and backpressure semantics. A retryable capacity or commit-pressure outcome
+remains safe to retry with the same `request_id`, and an unknown commit outcome
+is resolved through the same replay contract rather than by a backend-specific
+recovery route. A poisoned or lag-bound projection MUST fail closed before it
+can serve inconsistent reads. Ordinary claim stays a poll: empty is not failure.
 
 Typed construction is outside the data plane. Endpoint, barrier, tuple,
 feature, and durability validation completes before storage I/O, so a
@@ -454,7 +445,7 @@ already-leased items even after a gate later closes.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
-| `BatchClaim` | operation | yes | MUST atomically lease up to `max_items` eligible items. | Empty success is allowed. |
+| `BatchClaim` | operation | yes | MUST atomically lease up to `max_items` eligible items that the projection has applied. | On `AsyncProjection`, empty success is a poll, not a command failure. |
 | `request_id` | string | yes | MUST provide envelope idempotency for claim retries. Duplicate claim requests within retention MUST return the same claimed set while leases are active. | Claim retry safety. |
 | `worker_id` | string | yes | MUST identify the claiming worker or consumer group member for observability. | Not an auth principal. |
 | `max_items` | integer | yes | MUST be greater than 0 and no more than queue/deployment max claim batch size. | Upper bound, not guarantee. |

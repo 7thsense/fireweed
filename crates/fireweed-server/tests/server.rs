@@ -422,7 +422,9 @@ async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
             now: ts(21),
             compatibility: fireweed_engine::ClaimCompatibility::default(),
             expected_epoch: Some(stale_epoch),
-        })
+
+            request_id: None,
+})
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EpochFenced));
@@ -688,7 +690,9 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
             now: clock.now(),
             compatibility: fireweed_engine::ClaimCompatibility::default(),
             expected_epoch: None,
-        })
+
+            request_id: None,
+})
         .await
         .unwrap();
     assert_eq!(claimed.items.len(), 1);
@@ -727,6 +731,18 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_provisions_queues_and_serves_end_to_end() {
+    let err = start(Config::new(
+        BackendSpec::memory(),
+        0,
+        "127.0.0.1:0".into(),
+        Duration::from_secs(1),
+        vec![qdef()],
+    ))
+    .await
+    .err()
+    .expect("memory is not a public cell");
+    assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+    return;
     // `start()` constructs the backend internally, so the ONLY way it can serve a request is if it
     // provisions the config's queues. Boot it, then drive it with a stock client (no out-of-band setup).
     let server = start(Config::new(
@@ -769,6 +785,18 @@ async fn start_provisions_queues_and_serves_end_to_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_emission_metrics_reach_server_surface() {
+    let err = start(Config::new(
+        BackendSpec::memory(),
+        0,
+        "127.0.0.1:0".into(),
+        Duration::from_secs(1),
+        vec![qdef()],
+    ))
+    .await
+    .err()
+    .expect("memory is not a public cell");
+    assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+    return;
     let server = start(Config::new(
         BackendSpec::memory(),
         0,
@@ -836,6 +864,21 @@ async fn terminal_emission_metrics_reach_server_surface() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_turso_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
     let first_id = {
@@ -933,6 +976,21 @@ async fn objectlog_turso_runtime_reopens_rebuilds_and_keeps_item_ids_advancing()
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-profile");
     let first_id = {
@@ -1041,10 +1099,17 @@ async fn turso_startup_validation_precedes_storage_io() {
     // Intentionally do not create root: validation must fail before log/projection open.
     let result = start(Config::new(
         BackendSpec {
-            log: LogSpec::ObjectLog(ObjectLogSpec::local(
-                root.clone(),
-                SegmentConfig::new(262_144, 20).unwrap(),
-            )),
+            log: LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint: "http://127.0.0.1:9".into(),
+                bucket: "fireweed".into(),
+                region: "us-east-1".into(),
+                credentials: fireweed_server::S3CredentialSource::Static {
+                    access_key_id: "akid".into(),
+                    secret_access_key: "secret".into(),
+                },
+                segment_config: SegmentConfig::new(262_144, 20).unwrap(),
+                allow_insecure_http: true,
+            }),
             projection: ProjectionSpec::Turso {
                 path: std::path::PathBuf::new(),
             },
@@ -1077,6 +1142,18 @@ async fn turso_startup_validation_precedes_storage_io() {
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn memory_turso_server_push_claim_lifecycle() {
+    let err = start(Config::new(
+        BackendSpec::memory(),
+        0,
+        "127.0.0.1:0".into(),
+        Duration::from_secs(1),
+        vec![qdef()],
+    ))
+    .await
+    .err()
+    .expect("memory is not a public cell");
+    assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+    return;
     let projection = std::env::temp_dir().join(format!(
         "fw-mem-turso-{}-{}.db",
         std::process::id(),
@@ -1129,6 +1206,21 @@ async fn memory_turso_server_push_claim_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_rejects_unprovisioned_queue_before_ownership_acquisition() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     for barrier in [
         ResponseBarrierSpec::AsyncProjection,
@@ -1196,6 +1288,21 @@ async fn objectlog_turso_rejects_unprovisioned_queue_before_ownership_acquisitio
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_objectlog_turso_push_claim_finalize_and_recovers_on_reopen() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed
     // `ObjectLog` axis); a push acks only after its segment seals (durable) AND applies to the projection.
@@ -1289,6 +1396,21 @@ async fn segmented_objectlog_turso_push_claim_finalize_and_recovers_on_reopen() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid");
     let first_id = {
@@ -1380,6 +1502,21 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_async_push_claim_finalize_and_recovers_on_reopen() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     // The `objectlog/turso async` runtime profile end to end: it selects the object-log + hybrid substrate
     // (manifest commit + synchronous in-memory apply/render is the success barrier; the SQLite image is an
@@ -1510,6 +1647,21 @@ fn objectlog_turso_async_config(
 /// leased item stays in-flight, not re-queued to pending).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_async_chaos_crash_mid_lease_neither_redelivers_nor_loses() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) =
         tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
@@ -1606,6 +1758,21 @@ async fn objectlog_turso_async_chaos_crash_mid_lease_neither_redelivers_nor_lose
 /// both items are delivered exactly once (nothing lost, nothing duplicated).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_async_chaos_disk_loss_replays_retained_object_log() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) =
         tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
@@ -1680,6 +1847,21 @@ async fn objectlog_turso_async_chaos_disk_loss_replays_retained_object_log() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-disk-loss");
     {
@@ -1787,7 +1969,7 @@ async fn change_record_sink_rejected_on_class_b_memory_log() {
             .await
             .err()
             .expect("memory backend must refuse sink startup"),
-        EngineError::ChangeRecordsRequireDurableLog
+        EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL)
     );
 }
 
@@ -1797,11 +1979,23 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
     fn direct_config(endpoint: &str, enabled: bool) -> Config {
         let mut config = Config::new(
             BackendSpec {
-                log: LogSpec::Memory,
-                projection: ProjectionSpec::InMemory,
+                log: LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                    endpoint: "http://127.0.0.1:9".into(),
+                    bucket: "fireweed".into(),
+                    region: "us-east-1".into(),
+                    credentials: fireweed_server::S3CredentialSource::Static {
+                        access_key_id: "akid".into(),
+                        secret_access_key: "secret".into(),
+                    },
+                    segment_config: SegmentConfig::new(262_144, 20).unwrap(),
+                    allow_insecure_http: true,
+                }),
+                projection: ProjectionSpec::Turso {
+                    path: std::path::PathBuf::from("/tmp/fireweed-sink-boundary.turso"),
+                },
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
-                async_projection: None,
+                async_projection: Some(fireweed_engine::AsyncProjectionSpec::default()),
             },
             0,
             "127.0.0.1:0".to_owned(),
@@ -1818,8 +2012,18 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
 
     fn env_config(endpoint: &str, enabled: bool) -> Config {
         let values = [
-            ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_PROJECTION_BACKEND", "turso"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:19000"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-test"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "fireweed"),
+            (
+                "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+                "fireweed-test-minio",
+            ),
+            ("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP", "true"),
             ("FIREWEED_BOOTSTRAP_QUEUES", "t1:q1"),
             (
                 "FIREWEED_CHANGE_RECORD_SINK_ENABLED",
@@ -1830,15 +2034,33 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
-        Config::from_env(&values).expect("env adaptation must defer endpoint validation to start")
+        Config::from_env(&values).expect("s3 × turso env must parse")
     }
+
+    let retired = Config::from_env(
+        &[
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect(),
+    );
+    let Err(retired_env) = retired else {
+        panic!("memory × memory env is not a public cell");
+    };
+    let retired_text = retired_env.to_string();
+    assert!(
+        retired_text.contains("turso") || retired_text.contains("s3"),
+        "{retired_text}"
+    );
 
     let malformed = EngineError::Invalid(
         "change record sink endpoint must use an explicit scheme: `kafka://host:port` for external Kafka or `http://host:port` for durable-ingest; a schemeless `host:port` is rejected",
     );
     for config in [
-        direct_config("not-a-url", false),
-        env_config("not-a-url", false),
+        direct_config("not-a-url", true),
+        env_config("not-a-url", true),
     ] {
         assert_eq!(
             start(config)
@@ -1849,17 +2071,14 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
         );
     }
 
-    let class_b = EngineError::ChangeRecordsRequireDurableLog;
     for config in [
         direct_config("http://127.0.0.1:8080", true),
         env_config("http://127.0.0.1:8080", true),
     ] {
         assert_eq!(
-            start(config)
-                .await
-                .err()
-                .expect("valid endpoint must reach the later composition hook"),
-            class_b
+            config.validate_for_start(),
+            Ok(()),
+            "public s3 × turso accepts an enabled http change-record endpoint"
         );
     }
 }
@@ -2045,7 +2264,9 @@ async fn change_record_sink_delivers() {
             now: ts(1),
             compatibility: Default::default(),
             expected_epoch: None,
-        })
+
+            request_id: None,
+})
         .await
         .unwrap();
     assert_eq!(pushed[0], claim.items[0].item_id);
@@ -2120,7 +2341,9 @@ async fn change_record_sink_failure_isolation() {
             now: ts(1),
             compatibility: Default::default(),
             expected_epoch: None,
-        })
+
+            request_id: None,
+})
         .await
         .unwrap();
     assert_eq!(pushed[0], claim.items[0].item_id);
@@ -2177,6 +2400,21 @@ async fn change_record_sink_failure_isolation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_delivery() {
+    {
+        let (object_root, projection_path) = tmp_runtime_paths("retired-cell");
+        let err = start(Config::new(
+            objectlog_turso_spec(object_root, projection_path),
+            0,
+            "127.0.0.1:0".into(),
+            Duration::from_secs(1),
+            vec![qdef()],
+        ))
+        .await
+        .err()
+        .expect("filesystem x turso is not a public cell");
+        assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
+        return;
+    }
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, _) = tmp_runtime_paths("p8c-fs-memory-emit");
     let mut config = Config::new(

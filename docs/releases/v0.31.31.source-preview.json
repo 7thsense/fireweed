@@ -1,0 +1,9 @@
+{
+  "schema": "fireweed.source-preview-release.v1",
+  "version": "0.31.31",
+  "measured_source": "80baba7ef52a9952253a25938d86405d549807f1",
+  "claims": {
+    "governed_product_ready": false,
+    "signed": false
+  }
+}

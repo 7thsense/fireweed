@@ -9,28 +9,20 @@ ddx:
 
 # TP-004: Fireweed facade and Snorri acceptance
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../../02-design/contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 ## Testing strategy
 
@@ -50,11 +42,11 @@ release artifacts, and runtime-hardening work not exposed by API-005
 | Level | Coverage target | Priority |
 | --- | --- | --- |
 | Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden retired Rust names | P0 |
-| Fireweed integration | The same capability-complete operation suite succeeds through all 15 `StorageConfig` cells | P0 |
+| Fireweed integration | The same capability-complete operation suite succeeds on `s3--turso` (ADR-024) | P0 |
 | Atomic item mutation | Addressed and selector mutation, dry-run, CAS, lease rejection/match/invalidation, lifecycle transitions, purge, schedule/caller-data/gate/field/entity edits, atomic rollback, and exact replay pass through every supported constructor | P0 |
-| Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through all 15 canonical cells; convenience constructors prove equivalent mapping | P0 |
+| Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 on `s3--turso` if a run is recorded. Not claimed for v0.31.30. Not a 10M pass | P0 when run |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
-| Live provider integration | S3 × each public projection, including PostgreSQL-backed rows, runs on a provisioned qualification runner with provider capability attestation and zero skips | P0 |
+| Live provider integration | `s3--turso` runs on a provisioned qualification runner with provider capability attestation and zero skips. No 1000-queue pass is claimed | P0 |
 | Published-source consumption | Snorri resolves the tagged public `7thsense/fireweed` repository rather than a workspace-internal crate | P0 |
 | Existing backend suites | No regression in each selected cell's current semantic tests | P0 |
 
@@ -97,10 +89,10 @@ not a requirement to preserve old executable names:
 ## Fireweed gates
 
 1. A downstream fixture depends only on package `fireweed`.
-2. The fixture constructs the exact five-log × three-projection matrix through
-   `StorageConfig` and assigns all 15 results to the same concrete `Fireweed`
-   type. The route registry rejects a missing, duplicate, ignored, or silently
-   skipped cell.
+2. The fixture constructs the public cell, `s3` × `turso` (ADR-024), through
+   `StorageConfig` and assigns that result to the concrete `Fireweed` type.
+   Other selectors reject before I/O. The route registry rejects a missing or
+   silently substituted cell.
 3. The fixture names every API-005 input/output type required by Snorri without
    depending on `fireweed-core` or `fireweed-engine`.
 4. Compile-fail fixtures reject attempts to construct with a raw backend or use
@@ -204,7 +196,7 @@ contract IDs rather than an implementation test filename:
 
 | ID | Required semantics |
 | --- | --- |
-| `SNORRI-MATRIX-LIFECYCLE` | Complete public push/claim/finalize/query/mutation surface through every one of the 15 cells. |
+| `SNORRI-MATRIX-LIFECYCLE` | Complete public push/claim/finalize/query/mutation surface on `s3--turso` (ADR-024). Not a multi-cell suite, and not a 10M or 1000-queue claim. |
 | `SNORRI-REOPEN` | Class A log recovery and Class B projection-only reopen produce their exact documented state. |
 | `SNORRI-PROJECTION-REBUILD` | Every capability-bearing disposable projection verifies, deletes, rebuilds, and returns the same item/image digest. |
 | `SNORRI-RETRY-ONCE` | Response loss and same-`request_id` retry converge to exactly one transition; conflicting body fails. |
@@ -277,12 +269,12 @@ attested runner; no governed row may be skipped there.
 
 Historical release records for Fireweed `v0.21.0` and Snorri `v0.11.0` remain
 useful provenance for the former provider-specific routes. They do not qualify
-the current 15-cell contract; current qualification requires a fresh revision-
+the current s3 × turso contract (ADR-024); current qualification requires a fresh revision-
 bound provider attestation and the zero-skip semantic-ID matrix above.
 
 ## Build handoff
 
-**Priority**: contract fixtures → forwarding closure → 15-cell Fireweed matrix →
+**Priority**: contract fixtures → forwarding closure → s3 × turso Fireweed cell →
 Snorri matrix → attested live-provider matrix → public GitHub tag/release →
 tagged-source repeat
 **Blocking gate**: every P0 row above passes against one recorded Fireweed

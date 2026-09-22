@@ -1,163 +1,149 @@
 {
   "schema_version": 1,
   "spec_id": "storage-matrix-completion-brief",
-  "authority_revision": "2026-09-17-sqlite-retired",
+  "authority_revision": "2026-09-21-adr-024",
   "governed_documents": [
     {
       "path": "docs/helix/00-discover/product-vision.md",
-      "sha256": "6f461d72a95b7060b3a92382b68bcc657cfcd1f6a0f2a0f6dfe1cd86125f48c0"
+      "sha256": "e32c58b0150a1e7806e37299dbbd12aa96400c471c4216be124f6e24e6320746"
     },
     {
       "path": "docs/helix/01-frame/prd.md",
-      "sha256": "4b91c34554ea11fb6f506b726671c12791cb479c5834f7f1052b9d0d92e08d48"
+      "sha256": "1582fb9d830404395cba00ca0c6447661fe07bdea76ad7eeabfddae05f3895b9"
     },
     {
       "path": "docs/helix/02-design/orthogonal-storage-matrix-brief.md",
-      "sha256": "60f5d16311a0aec444f26187091dcc7ffacaeead741267baa161e0a47ed01233"
+      "sha256": "3bf36771f5e3c6be4f8e310a40af941c87f1ce3ab8a1d9cd15c86aae3173c4db"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-002-auth-tenancy-and-storage-isolation.md",
-      "sha256": "5864504592044909a273357ff04ac001413446c9e02ce16014c12425857dadfd"
+      "sha256": "1c0f5f102aff5250026947f7e964111b3fe1da3c247990a41b8ea770201788ac"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-008-queue-as-shard-unit-and-projection-families.md",
-      "sha256": "f2419650472b8189067cd47c6a61cae6447dc6239443b6ed8bd1049ab012336a"
+      "sha256": "0334f29c1be2be5bbbebe4f444cd4780550bee6afcdbde1143bc0654f3ecb0de"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md",
-      "sha256": "16bee25412751b5a92221a70433792206363647e4de3b396e1898f3c1d7f1b0f"
+      "sha256": "b094c19d3097ebffbbaf7145322ed41f0a72424ae17d7235e87d0c324f92a013"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-014-fjord-embedded-change-log-consumer-surface.md",
-      "sha256": "e31481490bff751aaf3ca51ce1697f837889e0acd7a2afda36a532fca9382471"
+      "sha256": "50d94c33110be4123dcec712aff54d7c46cb071cc206f7ac3aed3cd12863b539"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-015-full-async-storage-boundaries.md",
-      "sha256": "c31d7ce76d1bb98a0c336743132482697421e622d7978195c7a7c8948a6a3934"
+      "sha256": "074aa70958afa9b3f813cd354b90688dbfc1619cd919a12166dd28a2f2a124f5"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-016-turso-derived-projection.md",
-      "sha256": "d8617b7015dd3f8f91eec60743e11524982f3dd62b3e8bfc3d3dd8c36861d00c"
+      "sha256": "fe5ec9d3048ddc972b19d49640bae3ae71f2012ad30f79f4327392fc125328eb"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-017-async-commit-strategy-and-dispatch.md",
-      "sha256": "3b4946560e37809ca0002f152ca03bdc32b1f12f733095665ac63a28d78db1f9"
+      "sha256": "747c8d9074bc2178136b729cba99f69cef3799d91d999f4ddc0d3e8d1f8eb178"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md",
-      "sha256": "850ca80f72938223f8da91343ac1916e002aaacf99f987228969b6cb1f988aa0"
+      "sha256": "fea25b07fa7ef5b73bd8f1d0d19d975a1b785cf04e413ae834a798550eaaf801"
     },
     {
       "path": "docs/helix/02-design/contracts/API-001-native-client-interface.md",
-      "sha256": "164790549ff878f404e31db1de78a0f58798e0cfc7c4fc2ae61529fbb81d18d1"
+      "sha256": "6c928b2091e5a37baea859cf3c1732d5a671885619c0b1e7a61bd714da069ede"
     },
     {
       "path": "docs/helix/02-design/contracts/API-002-operator-repair-contract.md",
-      "sha256": "8f9e9a1d1c9cdf789a405b8cde008d0b2002c293c894f53755e1f8e13d8285b6"
+      "sha256": "6b9808606824f4662a18f91c9b135f123c53385e3ed222624a7c2361f773c48e"
     },
     {
       "path": "docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md",
-      "sha256": "9ed8560b2cdf4e28dbbdf854aa133845fd13d06f069d988a33ae2a52af8974c7"
+      "sha256": "8226b069f4b8176f20f113c50f32a2b69dd2b9ec4996822b69a31e62df13813a"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md",
-      "sha256": "a5fcc18c7092d821f41c808a6e7df84c4ef44c317d7df6c65549041f3602194f"
+      "sha256": "ba03fa3dfc2c1706f8b9991e5ab6b42eab91f36007568bf40588a42146f8a2f3"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-003-sharding-and-shard-ownership.md",
-      "sha256": "f6a5f16e28b83022102ec0e7da6b6488ef153c77cbdef174a6bcaa3d746cfbe9"
+      "sha256": "013c846675f972b332eeb0dd61dd1f7e2a065eb993edbae4aab86e7bd88d7d1a"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md",
-      "sha256": "1e417c3a92096457b830a4269437d044aa990ed7653cc4848e170a89ed104956"
+      "sha256": "76244dca074595a42caebbd75e7edda8062b2eed933e0a1dc69c6574d0647734"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-006-resp-wire-adapter.md",
-      "sha256": "1079f03f3de7412606e9b26668fe3cae52e58cbaf9f72ec2cec56bf0b7314eb6"
+      "sha256": "4b42ce7233284dde3fd9bd57ad4873ec8a1e51390bddae4d1a7db86850e709d3"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md",
-      "sha256": "280bb467228227589f402651787511cd9d3bc2372526c7aae5a05c836c60b2f6"
+      "sha256": "1e5cd64728ae157dd8979dfa92e9d222b17bf595f6dc3d51202c48af93817e46"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md",
-      "sha256": "311801f5591e70b00eb5fb04951d71b762068de9187c22b81e497ba1988ed76c"
+      "sha256": "ef43a97f6264a4808f0c5a978c3c8ce6f8756adb2d41e6c656f0b9143ca7dbda"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md",
-      "sha256": "fcd9083b84edebc0dc3c3bb224e0684f80ded97d69e86110996478ccd72d21ab"
+      "sha256": "69bede34d40ad25f64db613fb17a1a2a2827201aaf63aa6dd9e4a259a7bce37e"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-002-scale-substantiation.md",
-      "sha256": "84b9e8f176475f75ef25443551389ef872bd043ae98e42323c4ddfa6b5959a76"
+      "sha256": "3c09fae20725cdd00e80a499f2207cc9b9098d2cf44155cec110389c1fa61592"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md",
-      "sha256": "bd5555ad02d442e6917111b140afdeb580c8f247f78a85414f24a7bff7c5d96d"
+      "sha256": "cefd0d3cf7497952e1368ed89170c3a77fed98ee0c85201e5b77c1767045a54e"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md",
-      "sha256": "9d9af1cc214db16803c64b38375ddbd5dcedc2c20b15defd36093a5903e18578"
+      "sha256": "1988334216d89cd6d775ecabe1e9babb901ded0aeaa33c260224782aedaba734"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-005-fireweed-performance-matrix.md",
-      "sha256": "b94a176846ab45d8ef6a1f140c47db9d24eba32eaf7b15ebbd6124be9173a5da"
+      "sha256": "39c0d09ce0e94e44657ea35b6087898133d86cc2b3e251f761b43ceab50b51fb"
     }
   ],
   "canonical_axes": {
     "logs": [
-      "memory",
-      "postgres",
-      "filesystem",
       "s3"
     ],
     "projections": [
-      "memory",
-      "turso",
-      "postgres"
+      "turso"
     ],
     "control_planes": [
       "in_process",
       "postgres"
     ],
     "cell_id_separator": "--",
-    "required_cell_count": 12,
+    "required_cell_count": 1,
     "profile_skus_are_public": false
   },
   "durability": {
     "class_a_logs": [
-      "postgres",
-      "filesystem",
       "s3"
     ],
-    "class_b_logs": [
-      "memory"
-    ],
-    "class_a_cell_count": 9,
-    "class_b_cell_count": 3,
+    "class_b_logs": [],
+    "class_a_cell_count": 1,
+    "class_b_cell_count": 0,
     "history_requires_class_a": true,
     "silent_null_log_forbidden": true
   },
   "response_barriers": {
     "strict": {
       "public_name": "Strict",
-      "applicable_logs": [
-        "memory",
-        "postgres",
-        "filesystem",
-        "s3"
-      ],
-      "required_cell_count": 12
+      "applicable_logs": [],
+      "required_cell_count": 0,
+      "note": "ADR-024: Strict is not a public barrier and is not a roadmap item."
     },
     "async_projection": {
       "public_name": "AsyncProjection",
       "spec_type": "AsyncProjectionSpec",
       "applicable_logs": [
-        "filesystem",
         "s3"
       ],
-      "required_positive_cell_count": 6,
-      "required_pre_io_rejection_count": 6,
+      "required_positive_cell_count": 1,
+      "required_pre_io_rejection_count": 0,
       "bounds": [
         "apply_lag_max_commands",
         "apply_debt_max_bytes",
@@ -234,15 +220,9 @@
   "help_parser_bijections": {
     "log": {
       "help_values": [
-        "memory",
-        "postgres",
-        "filesystem",
         "s3"
       ],
       "parser_values": [
-        "memory",
-        "postgres",
-        "filesystem",
         "s3"
       ],
       "rejected_legacy_values": [
@@ -252,14 +232,10 @@
     },
     "projection": {
       "help_values": [
-        "memory",
-        "turso",
-        "postgres"
+        "turso"
       ],
       "parser_values": [
-        "memory",
-        "turso",
-        "postgres"
+        "turso"
       ],
       "rejected_legacy_values": [
         "inmemory",
@@ -271,14 +247,14 @@
     },
     "response_barrier": {
       "help_values": [
-        "strict",
         "async-projection"
       ],
       "parser_values": [
-        "strict",
         "async-projection"
       ],
-      "rejected_legacy_values": []
+      "rejected_legacy_values": [
+        "strict"
+      ]
     }
   },
   "delivery_contract": {

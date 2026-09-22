@@ -2355,7 +2355,7 @@ pub async fn claimed_item_shape_whole_cohort_omits_per_item_lease_token<B: Confo
                 ..Default::default()
             },
             ..claim_req(10, 500, 100)
-        })
+})
         .await
         .unwrap();
     assert_eq!(claimed.items.len(), 3);

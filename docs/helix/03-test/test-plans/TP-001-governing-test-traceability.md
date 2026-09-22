@@ -40,28 +40,20 @@ ddx:
 
 # Test Plan: TP-001 Governing Test Traceability
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../../02-design/contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 ## Scope
 
@@ -98,7 +90,7 @@ queue's persisted progress contract.
 | Layer | Location | Purpose |
 |-------|----------|---------|
 | Core unit | `crates/fireweed-core/src/**`, `crates/fireweed-engine/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, version rules, and the engine's decision helpers + dependency-direction guard. |
-| Backend conformance | `crates/fireweed-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executes against all 15 canonical `StorageConfig` log × projection cells. It includes backend-independent transaction-contract scenarios (success-visible, rejection-no-effect, unknown-outcome replay), durability-class-specific reopen, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. Required routes fail rather than silently skip when a fixture or feature is absent. |
+| Backend conformance | `crates/fireweed-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executes against the public cell `s3--turso` (ADR-024). It includes transaction-contract scenarios (object-log durability, rejection-no-effect, unknown-outcome replay, empty claim as a poll), reopen from the object log, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. Required routes fail rather than silently skip when a fixture or feature is absent. |
 | Postgres integration | `crates/fireweed-postgres/tests/**` | The durable-log postgres adapter (TD-004 template) against a real DB, env-gated on `FIREWEED_PG_TEST_URL`: the full conformance suite + a reconnect/durability replay test. |
 | Wire (RESP) integration | `crates/fireweed-resp/tests/**` | End-to-end over real TCP with an off-the-shelf `redis` client: XADD/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM/XLEN/XDEL/XINFO, error tokens, and Invariant-1/2 reconcile (ADR-007 RESP face). |
 | Library (facade) integration | `crates/fireweed/tests/**` | The ergonomic Rust library face: every verb (push/claim/ack/nack/fail/renew/reassign/rearm/purge/peek/claimed/metrics) over real backends. |
@@ -145,10 +137,10 @@ queue's persisted progress contract.
 | API-001 auth | API-001 / ADR-002 | Principal authorized for tenant A cannot access tenant B routes or storage-backed data. |
 | API-001 claimed-item response shape | API-001 | Every `BatchClaim` result returns the documented field set (`item_id`, `client_item_key`, `item_version`, `lease_token`, `lease_expires_at`, `priority`); conditional fields (`not_before`, `group_key`, `payload`, `metadata`, `gate_keys`) are present/omitted per the rules; `gate_keys` appear only on `gate_keys=dynamic` queues; `whole_cohort` results omit the per-item `lease_token`; the shared conformance now re-claims after `update_fields` and verifies the current `fields` map in the claimed-item shape. |
 | API-003 workload integration profile | API-003 / API-001 / API-002 | The scheduled-batch-delivery profile maps producer/worker/finalize obligations onto native primitives; finalize maps only to the five outcomes (`complete`/`fail`/`retry`/`release`/`rearm`); the downstream-rate non-goal is preserved (caller-driven pacing only); archive/retention defers to API-002. Anchored by `product_workflow_scheduled_action_delivery_e2e`. |
-| TD-001 durability | TD-001 / API-005 | After success, Class A recovers the command and projection state from its durable log. Class B reopens from the selected projection only: SQLite/Postgres preserves latest state; memory preserves nothing across process death. Tests must prove that exact boundary and reject log-history claims for every Class B row. |
-| Public storage matrix | API-005 / orthogonal-storage-matrix-brief | Enumerate exactly 15 canonical cells: `memory`, `sqlite`, `postgres`, `filesystem`, and `s3` logs × `memory`, `sqlite`, and `postgres` projections. Every row opens, runs lifecycle and transaction assertions, and reports a result. Missing fixture, disabled required feature, ignored test, or unregistered cell is a failure, not a skip. |
-| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-008 | Every cell passes the shared conformance suite before it is selectable: the **core** class (substrate-independent behavior incl. ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress) binds all 20 cells; the **Class A log** class (replay/snapshot+tail/segment-commit as applicable) binds the 12 durable-log cells; the **Class B projection-persistence** class binds the three memory-log cells and proves that no log-history capability is claimed. All four public projection implementations are held behaviorally identical by this suite. |
-| Response barriers | API-005 / TD-004 | `Strict` and `AsyncProjection(AsyncProjectionSpec)` are policy axes independent of projection identity. AC-TXN-5 and AC-TXN-5A exercise their success, poison, order, backpressure, and unknown-outcome boundaries. Each of the 20 cells has an explicit barrier disposition; an unsupported durability tuple must fail typed configuration validation before I/O and never disappear as a skipped test. |
+| TD-001 durability | TD-001 / API-005 / ADR-024 | After success, the object log recovers the command. Turso rebuilds through `projection_control` and is not the command log. There is no public Class B row. |
+| Public storage cell | API-005 / ADR-024 | The only cell is `s3--turso`. It opens, runs lifecycle and transaction assertions, and reports a result. A retired selector must fail before I/O. Missing fixture, disabled required feature, or ignored test is a failure, not a skip. |
+| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-024 | The public cell passes the shared conformance suite before it is selectable: ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress, and object-log replay. |
+| Response barriers | API-005 / ADR-024 | The only barrier is `AsyncProjection`. AC-TXN-5A is the gate. `Strict` is not a disposition. A missing async spec fails validation before I/O. |
 | TD-002 Postgres fencing | TD-002 | Stale `assignment_epoch` appends are rejected; current epoch appends succeed. |
 | TD-002 Postgres locking | TD-002 | `FOR UPDATE SKIP LOCKED` claim tests prove single active lease under concurrent workers. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment (target vs active owner), durable epoch fence at acquire, stale-epoch append reject, graceful drain without loss/duplication, interrupted-drain single-writer safety, reassignment recovery from snapshot + log tail, per-queue local progress, and stalled/unowned-queue visibility. |
@@ -168,7 +160,7 @@ Implementation beads should create or extend these suites:
 - `core_eligibility_precedence_tests`
 - `core_recurrence_rearm_tests`
 - `storage_conformance_durability_tests`
-- `storage_matrix_transaction_contract_tests` (exact 20-cell registry; zero
+- `storage_matrix_transaction_contract_tests` (`s3--turso` only; zero
   missing, ignored, or fixture-skipped rows)
 - `storage_conformance_claim_tests`
 - `storage_conformance_progress_tests`
@@ -234,7 +226,7 @@ are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass ba
 except `external_transaction_contract_matrix_tests`, whose acceptance bars are the
 AC-TXN rows in TP-003 §3.10. Historical
 `docs/perf/evidence/tp003-ac-txn-matrix*.jsonl` records predate the canonical
-20-cell register and cannot by themselves qualify the current matrix.
+older register and cannot by themselves qualify `s3--turso` (ADR-024).
 
 ## Performance Evidence
 

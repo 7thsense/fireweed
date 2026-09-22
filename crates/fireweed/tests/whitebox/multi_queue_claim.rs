@@ -13,7 +13,7 @@ use fireweed_engine::{
     AcquireOutcome, InMemoryControlPlane, OwnerEndpointAdvertisement, OwnerResolution,
     QueueControlPlane, QueueLease,
 };
-use fireweed_memory::{ManualClock, composed_memory_backend};
+use crate::ManualClock;
 
 fn definition(queue_id: &str) -> QueueDefinition {
     QueueDefinition {
@@ -170,7 +170,7 @@ impl QueueControlPlane for RecordingControlPlane {
 
 #[tokio::test]
 async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let cp = Arc::new(RecordingControlPlane::new());
     let a = queue("a");

@@ -14,28 +14,20 @@ ddx:
 
 # Architecture Decision Record
 
-## Storage retirement amendment (2026-09-17)
+## Public cell (ADR-024)
 
-This amendment supersedes older storage-selector, matrix-count, differential-reference,
-and deferred-flush statements below. The supported product is four logs
-(`memory`, `postgres`, `filesystem`, `s3`) × three projections
-(`memory`, `turso`, `postgres`): **12 cells**, with native Turso 0.7.2 local
-ordinary-WAL as the default projection. Nine cells have durable Class A logs;
-the three memory-log cells are Class B. Reopen may reuse persisted Class B
-projection state, but that grants no durable-log guarantee or log-derived history.
-Strict covers all 12 cells. AsyncProjection has six filesystem/S3 positives and
-six non-object-log pre-I/O rejections; its five explicit bounds remain positive.
+ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
+selectors. The public product is one cell: S3 object-log × Turso projection
+(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
 
-SQLite log/projection selectors and every supplied retired
-`sqlite_projection_deferred_flush_chunk` value reject before storage I/O.
-Disabled adapter features never cause silent fallback. The retired SQLite adapter
-is not a current differential reference: native replay pairs compare Turso
-instances, with independent expected-state/public-conformance assertions required
-in addition. See [the current Rust interface](../contracts/API-005-fireweed-rust-facade.md) and
-[storage authority manifest](../../04-build/storage-authority-manifest.json). Historical DDx IDs, requirement IDs,
-artifact names and original measurements retain their identity; older SQLite
-recipes and matrix counts below do not define current selectors or qualify the
-12-cell product.
+The 2026-09-17 amendment is historical. It does not define current selectors.
+Historical DDx IDs, requirement IDs, artifact names, and original measurements
+retain their identity. SQLite selectors stay retired and are not a differential
+reference.
+
 
 **ADR ID**: ADR-012
 **Title**: The backend is the orthogonal product `LogStore × ProjectionStore × optional ControlPlane`
@@ -84,40 +76,122 @@ delegate to the selected log, projection, and optional control-plane ports.
 Adapter-specific types may exist where I/O mechanics differ, but they do not
 define a second public method surface or a per-pair product contract.
 
-### The axes
+### The axes (ADR-024)
 
-| Axis | Responsibility | Options |
+ADR-024 supersedes the 2026-09-17 public-selector amendment and every earlier
+public-selector count in this Decision. The public product is one cell: S3
+object-log × Turso projection. `ResponseBarrier` has only `AsyncProjection`.
+The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
+is the object log. Turso is rebuildable through `projection_control` and is
+not the command log.
+
+| Axis | Responsibility | Public value |
 |---|---|---|
-| **`LogStore`** | command ordering and the **epoch/fence authority** (co-located with the log, TD-003); Class A also owns durable replay, snapshots, and command high-water | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
-| **`ProjectionStore`** | the materialized read model: full read/query/validation/apply and snapshot/recovery surface | `memory`, `sqlite`, `turso`, `postgres`; `turso` is the default |
-| **`ControlPlane`** | optional queue definitions plus placement/membership/owner leases when the topology needs them | in-process, Postgres, or another separately qualified implementation |
+| **`LogStore`** | command ordering and the epoch/fence authority; Class A durable replay | `s3` |
+| **`ProjectionStore`** | rebuildable serving projection | `turso` |
+| **`ControlPlane`** | optional definitions and placement; not a storage cell | not a public log or projection |
 
-The closed public set is the exact 5×4 product. Public `turso` means the
-embedded/local Turso 0.7 adapter in ordinary WAL mode; remote, sync, and MVCC
-modes are outside the decision boundary. SQLite remains a supported explicit
-projection and the differential relational reference.
+The closed public set is that one cell. There is no public Class B cell.
 
-| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
-|---|---|---|---|---|
-| `memory` | Class B | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A | Class A |
+### Response barrier
 
-Class A logs are durable authorities and projections are rebuildable by
-high-water plus tail replay. Class B's memory log is process-local; after
-process death only a durable SQLite/Postgres projection may remain, and no
-Class B cell claims log replay, branch, read-as-of, or log-derived history.
+The only public response barrier is `AsyncProjection`. `Strict` is not a
+public barrier and is not a roadmap item. Empty claim is a poll of applied
+rows, not a command failure.
 
-### Strict and asynchronous projection barriers
+### Robustness is a **checked invariant**, not a per-backend property
 
-The public response-barrier values are `Strict` and `AsyncProjection`; they are
-execution characteristics, not projection backends or product profiles.
-`Strict` is required across all 20 cells. `AsyncProjection` is additionally
-applicable to the eight filesystem/S3 object-log cells. The public log names are
-`filesystem` and `s3`, and the public projection names are `memory`, `sqlite`,
-`turso`, and `postgres`.
+Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
+TD-001 conformance suite (`fireweed-conformance`). The suite is the contract; composition is the mechanism.
+This ADR's Phase 1 proves the principle by re-expressing two existing monoliths as compositions and running
+the *identical* shared suite against them.
+
+### Where the epoch lives
+
+The epoch is the **fence authority** and is **co-located with the `LogStore`** (`current_epoch` /
+`acquire_epoch` / fenced `append`), because that is where both monoliths keep it: `MemoryBackend` in
+`LogData.epoch`, `SqliteBackend` in the row store. `ComposedBackend`'s `impl ControlPlaneStore` therefore
+**splits**: queue-definition methods delegate to `C`, while `current_epoch`/`acquire_epoch` delegate to `L`.
+This is a deliberate refinement of ADR-008's "pluggable control plane" sketch: for a postgres-*native*
+control plane that owns the epoch *transactionally*, the `LogStore` facet forwards its epoch methods into
+the control plane's transaction (Phase 3+). The split keeps the common (memory/sqlite/objectlog) case honest
+without a phantom epoch store.
+
+### The atomic write seam (the crux): separate **and** unified transactional stores
+
+> **Supersession note (ADR-015, 2026-07-18):** the atomicity requirements and separate/unified substrate
+> distinction below remain governing history. The synchronous closure and standard-mutex realization are
+> superseded. Typed backend-owned async commit operations and explicit whole-transaction adapters now
+> realize this seam; TD-001 is normative for cancellation and suspension rules.
+
+`Backend::write(f)` runs one unit of work: `f(&mut dyn LogWriter, &mut dyn ProjectionWriter)`, where the
+closure appends commands and applies them, and the two effects commit **together**. There are two physical
+realizations, and the composition must serve both **without forcing a phantom second write**:
+
+1. **Separate-store path** (memory, sqlite-log-replay, objectlog, postgres-log). The log substrate and the
+   projection substrate are **disjoint fields under one lock**. `ComposedBackend` owns
+   `Mutex<Inner<L, P>>`; `write` destructures `Inner { log, projection, .. }` into two disjoint `&mut`
+   faces and hands them to the closure. Atomicity = *one lock held for the whole UoW* (memory) or
+   *durable-first ordering with an infallible, pre-validated in-memory apply* (sqlite). This is exactly the
+   model both monoliths already use; `ComposedBackend` just makes it generic. **This path is implemented in
+   this ADR's Phase 1.**
+
+2. **Unified-transactional path** (sqlite-relational, postgres-relational / `postgres_native`). Here
+   append+apply are **one DB transaction**: the command-log row and the projection mutation commit
+   together. (As originally written this bullet called the relational projection "log-optional and
+   DB-authoritative"; ADR-013 retired both properties — the log is mandatory and the projection is a
+   rebuildable cache. What survives is the *mechanism*: one transaction, no separate two-phase log
+   write.) The two-face closure must *not* be coerced into a
+   split log write. The composition handles this by routing the UoW through a **single choke point**,
+   `ComposedBackend::commit_locked(inner, shard, env, expected_epoch)`, which is the only place that
+   sequences `epoch-resolve → fence → log.append → projection.apply`. For a unified store this choke point
+   calls **one** transactional method that does append+apply atomically in one transaction (`append`
+   reserves the synthetic `CommandPosition` / stages the command intent; `apply` performs the relational
+   mutation; both target the same open transaction; `commit` flushes it). Because every orchestration port
+   funnels through `commit_locked`, swapping the separate path for the unified path touches exactly one
+   function.
+
+   The disjoint-borrow obstacle (the closure wants `&mut log` **and** `&mut projection` simultaneously, but a
+   unified store is one object / one transaction) is resolved by treating the log substrate of a unified
+   store as a **disjoint logical facet of the same transaction** — a position counter / staged-command
+   buffer that lives beside the projection rows in the one DB transaction. The two `&mut dyn` faces then
+   borrow disjoint *parts* of the transaction wrapper, identically to how the separate path borrows disjoint
+   *fields* of `Inner`. **No two-phase log write is introduced** — append and apply remain one
+   transaction. (As originally written this said "no phantom log row is written: the `append` facet only
+   mints the position"; ADR-013 supersedes that half — the log is mandatory and the relational family
+   must be rebuildable from it, so the `append` facet MUST durably persist the command envelope as a real
+   log row *inside the same transaction* as the projection mutation. What stands is that no separate,
+   second-phase log write exists.)
+
+   Proposed trait support (Phase 3, specified now so the shape is fixed): `LogStore` and `ProjectionStore`
+   each expose the substrate behind `&mut self` write methods and `&self` reads, so a *single* type may
+   implement **both** axes over one transaction (`impl LogStore + ProjectionStore for RelationalStore`).
+   `ComposedBackend<RelationalStore, RelationalStore, RelationalControl>` then composes the relational
+   backend with the log and projection facets being the *same* value, and `commit_locked` recognizes the
+   unified case via a `LogStore::transaction_mode() -> TxnMode { Separate, Unified }` discriminator. This
+   keeps the headline `ComposedBackend<L, P, C>` signature for both paths.
+
+### Object-safety / zero-cost
+
+`ComposedBackend` is **generic** over its axes (monomorphized, zero-cost) — the engine never needs
+`dyn LogStore`. The two writer faces handed to the UoW closure remain `&mut dyn LogWriter` /
+`&mut dyn ProjectionWriter` (object-safe, unchanged from the existing `Backend` port), so the conformance
+`commit` helper and `append_at_epoch` keep working verbatim.
+
+### Supersession of ADR-008
+
+This supersedes ADR-008's framing of storage as **two distinct projection families**. The families are
+retained as the **`ProjectionStore` axis** (in-memory vs relational) and as the TD-001 conformance
+**capability classes** (core / log-replay / relational-reconnect), but they are no longer backend *kinds*:
+they are one axis of a three-axis product, and "fused vs split" is precisely the `Separate`/`Unified`
+write-seam distinction above. ADR-008's keystone decisions (queue as the unit of sharding; per-queue
+ownership; epoch fencing) are unchanged.
+
+## Historical hybrid lineage (not current selectors)
+
+The notes below are historical design lineage for retired `objectlog/hybrid-*`
+spellings and a SQLite projection. They are not this Decision and they do not
+define current selectors. ADR-024 is the public cell.
 
 The remainder of this subsection preserves the design lineage under its former
 internal `objectlog/hybrid-*` terminology. Those spellings are not accepted
@@ -239,94 +313,6 @@ snapshot promotion, and retention frontier advancement remain disabled until
 ordered batching, lineage validation, and outcome retention are back within
 budget.
 
-### Robustness is a **checked invariant**, not a per-backend property
-
-Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
-TD-001 conformance suite (`fireweed-conformance`). The suite is the contract; composition is the mechanism.
-This ADR's Phase 1 proves the principle by re-expressing two existing monoliths as compositions and running
-the *identical* shared suite against them.
-
-### Where the epoch lives
-
-The epoch is the **fence authority** and is **co-located with the `LogStore`** (`current_epoch` /
-`acquire_epoch` / fenced `append`), because that is where both monoliths keep it: `MemoryBackend` in
-`LogData.epoch`, `SqliteBackend` in the row store. `ComposedBackend`'s `impl ControlPlaneStore` therefore
-**splits**: queue-definition methods delegate to `C`, while `current_epoch`/`acquire_epoch` delegate to `L`.
-This is a deliberate refinement of ADR-008's "pluggable control plane" sketch: for a postgres-*native*
-control plane that owns the epoch *transactionally*, the `LogStore` facet forwards its epoch methods into
-the control plane's transaction (Phase 3+). The split keeps the common (memory/sqlite/objectlog) case honest
-without a phantom epoch store.
-
-### The atomic write seam (the crux): separate **and** unified transactional stores
-
-> **Supersession note (ADR-015, 2026-07-18):** the atomicity requirements and separate/unified substrate
-> distinction below remain governing history. The synchronous closure and standard-mutex realization are
-> superseded. Typed backend-owned async commit operations and explicit whole-transaction adapters now
-> realize this seam; TD-001 is normative for cancellation and suspension rules.
-
-`Backend::write(f)` runs one unit of work: `f(&mut dyn LogWriter, &mut dyn ProjectionWriter)`, where the
-closure appends commands and applies them, and the two effects commit **together**. There are two physical
-realizations, and the composition must serve both **without forcing a phantom second write**:
-
-1. **Separate-store path** (memory, sqlite-log-replay, objectlog, postgres-log). The log substrate and the
-   projection substrate are **disjoint fields under one lock**. `ComposedBackend` owns
-   `Mutex<Inner<L, P>>`; `write` destructures `Inner { log, projection, .. }` into two disjoint `&mut`
-   faces and hands them to the closure. Atomicity = *one lock held for the whole UoW* (memory) or
-   *durable-first ordering with an infallible, pre-validated in-memory apply* (sqlite). This is exactly the
-   model both monoliths already use; `ComposedBackend` just makes it generic. **This path is implemented in
-   this ADR's Phase 1.**
-
-2. **Unified-transactional path** (sqlite-relational, postgres-relational / `postgres_native`). Here
-   append+apply are **one DB transaction**: the command-log row and the projection mutation commit
-   together. (As originally written this bullet called the relational projection "log-optional and
-   DB-authoritative"; ADR-013 retired both properties — the log is mandatory and the projection is a
-   rebuildable cache. What survives is the *mechanism*: one transaction, no separate two-phase log
-   write.) The two-face closure must *not* be coerced into a
-   split log write. The composition handles this by routing the UoW through a **single choke point**,
-   `ComposedBackend::commit_locked(inner, shard, env, expected_epoch)`, which is the only place that
-   sequences `epoch-resolve → fence → log.append → projection.apply`. For a unified store this choke point
-   calls **one** transactional method that does append+apply atomically in one transaction (`append`
-   reserves the synthetic `CommandPosition` / stages the command intent; `apply` performs the relational
-   mutation; both target the same open transaction; `commit` flushes it). Because every orchestration port
-   funnels through `commit_locked`, swapping the separate path for the unified path touches exactly one
-   function.
-
-   The disjoint-borrow obstacle (the closure wants `&mut log` **and** `&mut projection` simultaneously, but a
-   unified store is one object / one transaction) is resolved by treating the log substrate of a unified
-   store as a **disjoint logical facet of the same transaction** — a position counter / staged-command
-   buffer that lives beside the projection rows in the one DB transaction. The two `&mut dyn` faces then
-   borrow disjoint *parts* of the transaction wrapper, identically to how the separate path borrows disjoint
-   *fields* of `Inner`. **No two-phase log write is introduced** — append and apply remain one
-   transaction. (As originally written this said "no phantom log row is written: the `append` facet only
-   mints the position"; ADR-013 supersedes that half — the log is mandatory and the relational family
-   must be rebuildable from it, so the `append` facet MUST durably persist the command envelope as a real
-   log row *inside the same transaction* as the projection mutation. What stands is that no separate,
-   second-phase log write exists.)
-
-   Proposed trait support (Phase 3, specified now so the shape is fixed): `LogStore` and `ProjectionStore`
-   each expose the substrate behind `&mut self` write methods and `&self` reads, so a *single* type may
-   implement **both** axes over one transaction (`impl LogStore + ProjectionStore for RelationalStore`).
-   `ComposedBackend<RelationalStore, RelationalStore, RelationalControl>` then composes the relational
-   backend with the log and projection facets being the *same* value, and `commit_locked` recognizes the
-   unified case via a `LogStore::transaction_mode() -> TxnMode { Separate, Unified }` discriminator. This
-   keeps the headline `ComposedBackend<L, P, C>` signature for both paths.
-
-### Object-safety / zero-cost
-
-`ComposedBackend` is **generic** over its axes (monomorphized, zero-cost) — the engine never needs
-`dyn LogStore`. The two writer faces handed to the UoW closure remain `&mut dyn LogWriter` /
-`&mut dyn ProjectionWriter` (object-safe, unchanged from the existing `Backend` port), so the conformance
-`commit` helper and `append_at_epoch` keep working verbatim.
-
-### Supersession of ADR-008
-
-This supersedes ADR-008's framing of storage as **two distinct projection families**. The families are
-retained as the **`ProjectionStore` axis** (in-memory vs relational) and as the TD-001 conformance
-**capability classes** (core / log-replay / relational-reconnect), but they are no longer backend *kinds*:
-they are one axis of a three-axis product, and "fused vs split" is precisely the `Separate`/`Unified`
-write-seam distinction above. ADR-008's keystone decisions (queue as the unit of sharding; per-queue
-ownership; epoch fencing) are unchanged.
-
 ## Historical phased rollout
 
 The phases below record how the original synchronous design was introduced.
@@ -360,7 +346,12 @@ evidence work are tracked by the storage-matrix completion brief.
 - **−** Until Phase 2/3/5 the monoliths and the compositions coexist; the compositions are the proving
   ground, the monoliths remain wired, so the gate stays green throughout.
 
-## Decision note (2026-07-08, DDx B3.6): retain `SqliteRelationalBackend` after composed parity
+## Historical note (2026-07-08, DDx B3.6)
+
+Historical. ADR-024 and ADR-016 retire SQLite as a public selector and as a
+differential reference. The following record does not reinstate it and does
+not define current selectors.
+
 
 **Decision.** `SqliteRelationalBackend` (the monolithic DB-authoritative sqlite relational backend,
 `crates/fireweed-sqlite/src/relational.rs:4165`) is **retained**, not retired, at this time. This closes DDx

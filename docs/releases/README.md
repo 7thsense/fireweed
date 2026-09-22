@@ -36,7 +36,7 @@ planning, but they do not decide the release verdict. The configured
 under load, not a host-performance bar, and remains release-significant.
 
 Versioned files in this directory describe release candidates and already-cut
-releases. Once a release is cut, its note is immutable. Fireweed v0.31.30
+releases. Once a release is cut, its note is immutable. Fireweed v0.31.32
 is the current source-preview candidate. v0.20.0 is the first renamed public
 preview release; v0.19.6 and earlier retain
 the retired identity as immutable release and audit history under ADR-023. This
@@ -78,13 +78,13 @@ revision="$(git rev-parse HEAD)"
 dist="$(mktemp -d)/source-preview-dist"
 bash scripts/release/build-source-preview-artifacts.sh \
   --out "$dist" \
-  --version 0.31.30 \
+  --version 0.31.32 \
   --revision "$revision" \
   --expected-source "$revision" --expected-remote origin --expected-ref "$revision" \
   --builder "local:$(id -un)"
 bash scripts/release/verify-source-preview-artifacts.sh \
   --dist "$dist" \
-  --version 0.31.30 \
+  --version 0.31.32 \
   --revision "$revision"
 ```
 

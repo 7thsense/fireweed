@@ -17,6 +17,11 @@ ddx:
 
 # Fireweed v0.24.0 Public Preview Checklist
 
+**v0.31.30.** This pin is a source preview, unsigned, not P20pr. The rows
+below stay the historical v0.24.0 checklist. This note does not mark unchecked
+rows as passed. The public cell for the pin is s3 × turso with
+`AsyncProjection` only (ADR-024).
+
 ## Release Scope
 
 - Component: Fireweed Queue source repository and Rust embedding facade

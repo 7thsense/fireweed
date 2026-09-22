@@ -17,7 +17,7 @@ use fireweed_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use fireweed_memory::{ManualClock, composed_memory_backend};
+use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -63,7 +63,7 @@ fn item(priority: i64) -> NewItem {
 #[tokio::test]
 async fn same_request_id_same_body_replays_without_a_second_append() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
@@ -91,7 +91,7 @@ async fn same_request_id_same_body_replays_without_a_second_append() {
 #[tokio::test]
 async fn same_request_id_different_body_conflicts() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
@@ -120,7 +120,7 @@ async fn same_request_id_different_body_conflicts() {
 #[tokio::test]
 async fn retry_after_retention_window_is_a_fresh_push() {
     let clock = Arc::new(ManualClock::at(0));
-    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), clock.clone());
     let q = qkey();
     // Short retention so a clock advance crosses the expiry boundary.
     fireweed.create_queue(qdef(1_000)).await.unwrap();
@@ -153,7 +153,7 @@ async fn retry_after_retention_window_is_a_fresh_push() {
 #[tokio::test]
 async fn distinct_request_ids_each_append() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
@@ -176,7 +176,7 @@ async fn distinct_request_ids_each_append() {
 #[tokio::test]
 async fn batch_push_reports_fresh_then_replayed_disposition() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();

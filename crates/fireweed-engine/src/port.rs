@@ -731,6 +731,9 @@ pub struct ClaimRequest {
     /// (behaviour-preserving). The epoch MUST be the value cached at `acquire_queue_lease`, never re-read
     /// from `current_epoch` (re-reading defeats the fence).
     pub expected_epoch: Option<u64>,
+    /// API-001 claim envelope id. `None` selects a fresh lease. A second claim with the same id
+    /// and body returns the same leased set while those leases are active.
+    pub request_id: Option<RequestId>,
 }
 
 impl ClaimRequest {

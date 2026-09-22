@@ -21,7 +21,7 @@ use fireweed_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use fireweed_memory::{ManualClock, composed_memory_backend};
+use crate::ManualClock;
 use serde_json::json;
 
 fn qkey() -> QueueKey {
@@ -116,7 +116,7 @@ fn claim_ref(item: &fireweed::ClaimedItem) -> ClaimRef {
 /// and the indexed continuation must therefore commit (or reject) together.
 #[tokio::test]
 async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_continuation() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     let mut definition = qdef(60_000);
@@ -213,7 +213,7 @@ async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_con
 #[tokio::test]
 async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
@@ -271,7 +271,7 @@ async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
 /// the lifecycle item is ordinary claimable work.
 #[tokio::test]
 async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     fireweed.create_queue(qdef(60_000)).await.unwrap();
@@ -342,7 +342,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
     // Wrong lease token.
     {
         let fireweed = RuntimeCore::new(
-            Arc::new(composed_memory_backend()),
+            Arc::new(crate::turso_memory_backend()),
             Arc::new(ManualClock::at(0)),
         );
         let q = qkey();
@@ -381,7 +381,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
     // Wrong item_version.
     {
         let fireweed = RuntimeCore::new(
-            Arc::new(composed_memory_backend()),
+            Arc::new(crate::turso_memory_backend()),
             Arc::new(ManualClock::at(0)),
         );
         let q = qkey();
@@ -423,7 +423,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 #[tokio::test]
 async fn commit_request_id_replays_conflicts_and_expires() {
     let clock = Arc::new(ManualClock::at(0));
-    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), clock.clone());
     let q = qkey();
     fireweed.create_queue(qdef(1_000)).await.unwrap();
 
@@ -562,7 +562,7 @@ async fn direct_objectlog_commit_is_available_and_observable() {
 /// leased, fence unchanged); a NON-MONOTONIC `next <= expected` rejects `Invalid`.
 #[tokio::test]
 async fn commit_advances_validates_and_rejects_instance_fence() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     fireweed.create_queue(qdef(60_000)).await.unwrap();
@@ -677,7 +677,7 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 #[tokio::test]
 async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
@@ -721,7 +721,7 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
 #[tokio::test]
 async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_work() {
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();

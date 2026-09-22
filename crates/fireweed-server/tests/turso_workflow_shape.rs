@@ -67,8 +67,9 @@ fn turso_workflow_qualifies_the_public_default_projection() {
         "must run the facade Turso matrix"
     );
     assert!(
-        wf.contains("storage_matrix_t0_t2_all_twelve_cells"),
-        "must run the 12-cell storage matrix (local Turso rows never skip)"
+        wf.contains("s3_turso_is_the_public_env_cell")
+            || wf.contains("turso_projection_is_the_public_env_default"),
+        "must run the public s3 × turso cell, not a 12-cell matrix"
     );
     assert!(
         wf.contains("fireweed-turso") && wf.contains("--features local"),

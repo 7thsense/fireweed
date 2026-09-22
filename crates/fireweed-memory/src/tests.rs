@@ -904,7 +904,7 @@ async fn finalize_fences_superseded_owner_epoch() {
             eligibility_time: None,
             expected_epoch: None,
             ..claim_req(10, 500, 10)
-        })
+})
         .await
         .unwrap();
     let id = claimed.items[0].item_id;

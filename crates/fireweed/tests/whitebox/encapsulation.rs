@@ -18,7 +18,7 @@ use fireweed::{
     QueueCreationPolicy, QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RetryPolicy,
     SecretValue, SegmentSettings, TenantId,
 };
-use fireweed_memory::ManualClock;
+use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())

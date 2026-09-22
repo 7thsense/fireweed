@@ -260,25 +260,22 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     )
     logs = unique_strings(axes["logs"], "canonical_axes.logs")
     projections = unique_strings(axes["projections"], "canonical_axes.projections")
-    require(logs == ["memory", "postgres", "filesystem", "s3"], "log axis drift")
-    require(
-        projections == ["memory", "turso", "postgres"],
-        "projection axis drift",
-    )
+    require(logs == ["s3"], "log axis drift")
+    require(projections == ["turso"], "projection axis drift")
     require(
         axes["control_planes"] == ["in_process", "postgres"],
         "control-plane axis drift",
     )
     require(axes["cell_id_separator"] == "--", "cell separator drift")
     cells = {f"{log}--{projection}" for log in logs for projection in projections}
-    require(len(cells) == axes["required_cell_count"] == 12, "matrix must contain 12 cells")
+    require(len(cells) == axes["required_cell_count"] == 1, "matrix must contain the s3 × turso cell")
     require(axes["profile_skus_are_public"] is False, "profile SKUs cannot be public")
 
     durability = document["durability"]
-    require(durability["class_a_logs"] == logs[1:], "Class A log set drift")
-    require(durability["class_b_logs"] == ["memory"], "Class B log set drift")
-    require(durability["class_a_cell_count"] == 9, "Class A cell count drift")
-    require(durability["class_b_cell_count"] == 3, "Class B cell count drift")
+    require(durability["class_a_logs"] == ["s3"], "Class A log set drift")
+    require(durability["class_b_logs"] == [], "Class B log set drift")
+    require(durability["class_a_cell_count"] == 1, "Class A cell count drift")
+    require(durability["class_b_cell_count"] == 0, "Class B cell count drift")
     require(durability["history_requires_class_a"] is True, "history must require Class A")
     require(durability["silent_null_log_forbidden"] is True, "silent null log forbidden")
 
@@ -286,14 +283,14 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     strict = barriers["strict"]
     async_projection = barriers["async_projection"]
     deferred = barriers["sqlite_projection_deferred_flush"]
-    require(strict["applicable_logs"] == logs, "Strict applicability drift")
-    require(strict["required_cell_count"] == 12, "Strict count drift")
+    require(strict["applicable_logs"] == [], "Strict applicability drift")
+    require(strict["required_cell_count"] == 0, "Strict count drift")
     require(
-        async_projection["applicable_logs"] == ["filesystem", "s3"],
+        async_projection["applicable_logs"] == ["s3"],
         "AsyncProjection applicability drift",
     )
-    require(async_projection["required_positive_cell_count"] == 6, "async positive count")
-    require(async_projection["required_pre_io_rejection_count"] == 6, "async rejection count")
+    require(async_projection["required_positive_cell_count"] == 1, "async positive count")
+    require(async_projection["required_pre_io_rejection_count"] == 0, "async rejection count")
     require(
         len(unique_strings(async_projection["bounds"], "AsyncProjectionSpec.bounds")) == 5,
         "AsyncProjectionSpec must have five bounds",

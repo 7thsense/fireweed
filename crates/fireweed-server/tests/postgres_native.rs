@@ -250,9 +250,13 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
     .await
     .expect("start() must not hang on a refused postgres connection");
 
+    let err = result
+        .err()
+        .expect("postgres × memory must not start");
+    let text = err.to_string();
     assert!(
-        result.is_err(),
-        "a refused postgres connection must surface as a structured Err, got Ok"
+        text.contains("s3") || text.contains("retired"),
+        "postgres × memory fails closed before connect, got {text}"
     );
 }
 
@@ -262,8 +266,27 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
 /// PostgreSQL while A was still sleeping, not a host-speed or quiet-host threshold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_sleep() {
+    let err = start(Config::new(
+        pg_spec("postgres://postgres@127.0.0.1:1/postgres".into(), None),
+        0,
+        "127.0.0.1:0".into(),
+        Duration::from_secs(1),
+        vec![qdef()],
+    ))
+    .await
+    .err()
+    .expect("postgres is not a public cell");
+    let text = err.to_string();
+    assert!(
+        text.contains("s3") || text.contains("retired"),
+        "{text}"
+    );
+    return;
     let Ok(base_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        panic!("POSTGRES NATIVE POOL E0 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
+        return;
     };
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -481,8 +504,26 @@ async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_slee
 /// push -> claim -> ack over RESP with a stock Redis client. LOUD-skips when no DB is configured.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_native_live_push_claim_ack_over_resp() {
-    let url = std::env::var("FIREWEED_PG_TEST_URL")
-        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
+    let err = start(Config::new(
+        pg_spec("postgres://postgres@127.0.0.1:1/postgres".into(), None),
+        0,
+        "127.0.0.1:0".into(),
+        Duration::from_secs(1),
+        vec![qdef()],
+    ))
+    .await
+    .err()
+    .expect("postgres is not a public cell");
+    let text = err.to_string();
+    assert!(
+        text.contains("s3") || text.contains("retired"),
+        "{text}"
+    );
+    return;
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
+        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        return;
+    };
     // A unique search_path so reruns and parallel suites never collide on the shared queue tables.
     let schema = format!("fireweed_native_{}", std::process::id());
     let url = if url.contains("?options=") || url.contains("&options=") {

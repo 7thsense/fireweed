@@ -125,6 +125,68 @@ pub struct ActiveScopeDiscovery {
 #[cfg(test)]
 extern crate self as fireweed;
 
+/// Controllable clock for in-crate tests. Not a public projection.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ManualClock {
+    seconds: std::sync::atomic::AtomicI64,
+}
+
+#[cfg(test)]
+impl ManualClock {
+    pub(crate) fn at(seconds: i64) -> Self {
+        Self {
+            seconds: std::sync::atomic::AtomicI64::new(seconds),
+        }
+    }
+
+    pub(crate) fn set(&self, seconds: i64) {
+        self.seconds
+            .store(seconds, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+impl fireweed_engine::Clock for ManualClock {
+    fn now(&self) -> fireweed_core::UtcTimestamp {
+        fireweed_core::UtcTimestamp::new(
+            self.seconds.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+        )
+        .expect("valid timestamp")
+    }
+}
+
+#[cfg(test)]
+pub(crate) type TursoMemoryBackend = turso_compose::AtomicTursoBackend<
+    fireweed_engine::InProcessLogStore<fireweed_projection::MemoryLog>,
+>;
+
+#[cfg(test)]
+pub(crate) fn turso_memory_backend() -> TursoMemoryBackend {
+    turso_compose::assemble_memory_log_turso_in_memory().expect("turso :memory: projection")
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+pub(crate) fn open_objectlog_turso_files(
+    log_root: &std::path::Path,
+    projection_path: &std::path::Path,
+) -> turso_compose::DerivedObjectLogTursoBackend {
+    std::fs::create_dir_all(log_root).expect("object-log root");
+    if let Some(parent) = projection_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("turso projection parent");
+    }
+    let log = fireweed_objectlog::block_on_objectlog(fireweed_objectlog::ObjectLogEngineStore::open_local(
+        log_root.to_path_buf(),
+        fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
+    ))
+    .expect("open local object log");
+    turso_compose::assemble_objectlog_turso(log, projection_path.to_path_buf(), None)
+        .expect("object log × turso file")
+}
+
 #[cfg(test)]
 #[path = "../tests/whitebox/active_scope_routing.rs"]
 mod test_active_scope_routing;
@@ -1233,17 +1295,8 @@ impl StorageConfig {
             ));
         }
 
-        if self.async_projection.is_some()
-            && !matches!(
-                &self.log,
-                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-            )
-        {
-            return Err(EngineError::Invalid(
-                "async-projection-spec-requires-object-log",
-            ));
-        }
-        validate_async_projection_spec(self.async_projection)?;
+        // The public cell does not invent an authority or an async spec.
+        require_s3_turso_authority_and_async_spec(self.authority.clone(), self.async_projection)?;
 
         if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
             return Err(EngineError::Invalid(
@@ -1264,6 +1317,24 @@ impl StorageConfig {
 
         Ok(())
     }
+}
+
+fn require_s3_turso_authority_and_async_spec(
+    authority: Option<ObjectLogAuthority>,
+    async_projection: Option<AsyncProjectionSpec>,
+) -> EngineResult<AsyncProjectionSpec> {
+    if authority != Some(ObjectLogAuthority::NativeConditionalWrite) {
+        return Err(EngineError::Invalid(
+            "s3 × turso requires ObjectLogAuthority::NativeConditionalWrite",
+        ));
+    }
+    let Some(spec) = async_projection else {
+        return Err(EngineError::Invalid(
+            "s3 × turso requires AsyncProjectionSpec",
+        ));
+    };
+    validate_async_projection_spec(Some(spec))?;
+    Ok(spec)
 }
 
 fn validate_async_projection_spec(
@@ -1510,6 +1581,7 @@ mod storage_config_matrix_tests {
             },
         );
         config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.async_projection = Some(AsyncProjectionSpec::default());
         config.validate().expect("s3 × turso is the public cell");
     }
 
@@ -1546,6 +1618,9 @@ mod storage_config_matrix_tests {
                     (&config.log, &config.projection),
                     (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. })
                 );
+                if product {
+                    config.async_projection = Some(AsyncProjectionSpec::default());
+                }
                 match config.validate() {
                     Ok(()) => {
                         assert!(product, "only s3 × turso may validate");
@@ -1567,6 +1642,63 @@ mod storage_config_matrix_tests {
         }
         assert_eq!(public_cells, 1);
         assert_eq!(retired_cells, 11);
+    }
+
+    #[test]
+    fn s3_turso_rejects_missing_authority_and_async_spec() {
+        let mut config = base(
+            LogConfig::S3 {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: false,
+            },
+            ProjectionStoreConfig::Turso {
+                path: PathBuf::from("/tmp/projection-turso.db"),
+            },
+        );
+        config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.async_projection = Some(AsyncProjectionSpec::default());
+        config
+            .validate()
+            .expect("s3_turso-shaped cell with both fields validates");
+
+        config.authority = None;
+        match config.validate() {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("NativeConditionalWrite"),
+                    "missing authority must name the required authority, got {msg}"
+                );
+            }
+            other => panic!("missing authority must fail closed, got {other:?}"),
+        }
+        match open(config.clone(), Arc::new(SystemClock)) {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(msg.contains("NativeConditionalWrite"), "{msg}");
+            }
+            other => panic!("open must reject a missing authority, got {other:?}"),
+        }
+
+        config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        config.async_projection = None;
+        match config.validate() {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(
+                    msg.contains("AsyncProjectionSpec"),
+                    "missing async spec must name AsyncProjectionSpec, got {msg}"
+                );
+            }
+            other => panic!("missing async spec must fail closed, got {other:?}"),
+        }
+        match open(config, Arc::new(SystemClock)) {
+            Err(EngineError::Invalid(msg)) => {
+                assert!(msg.contains("AsyncProjectionSpec"), "{msg}");
+            }
+            other => panic!("open must reject a missing async spec, got {other:?}"),
+        }
     }
 
     /// AC: Turso default selection, all four log compositions, single-thread heartbeat.
@@ -1854,13 +1986,19 @@ mod storage_config_matrix_tests {
                     (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. })
                 );
                 if product {
-                    assert_eq!(config.validate(), Ok(()), "s3 × turso must validate");
-                    config.response_barrier = ResponseBarrier::AsyncProjection;
+                    assert_eq!(
+                        config.validate(),
+                        Err(EngineError::Invalid(
+                            "s3 × turso requires AsyncProjectionSpec"
+                        )),
+                        "s3 × turso without an async spec fails closed"
+                    );
+                    config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
                     config.async_projection = Some(AsyncProjectionSpec::default());
                     assert_eq!(
                         config.validate(),
                         Ok(()),
-                        "s3 × turso AsyncProjection must validate"
+                        "s3 × turso with authority and AsyncProjection must validate"
                     );
                 } else {
                     assert!(
@@ -1934,6 +2072,7 @@ mod storage_config_matrix_tests {
         };
         let mut unsafe_config = base(log.clone(), projection.clone());
         unsafe_config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        unsafe_config.async_projection = Some(AsyncProjectionSpec::default());
         unsafe_config.segments = SegmentConfig::new(1, 20).expect("structurally valid");
         assert_eq!(
             unsafe_config.validate(),
@@ -1945,6 +2084,7 @@ mod storage_config_matrix_tests {
 
         let mut neighboring_config = base(log, projection);
         neighboring_config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        neighboring_config.async_projection = Some(AsyncProjectionSpec::default());
         neighboring_config.segments =
             SegmentConfig::new(2, 1).expect("neighboring production shape");
         assert_eq!(neighboring_config.validate(), Ok(()));
@@ -3070,6 +3210,9 @@ pub struct ClaimAt {
     pub lease_time: Option<UtcTimestamp>,
     /// API-001 compatibility options, as for [`Fireweed::claim_with`].
     pub compatibility: ClaimCompatibility,
+    /// API-001 claim envelope id. A second [`Fireweed::claim_at`] with the same id returns the
+    /// same leased set while those leases are active. [`Fireweed::claim`] leaves this unset.
+    pub request_id: Option<RequestId>,
 }
 
 const MAX_MULTI_QUEUE_CLAIM_TARGETS: usize = 16;
@@ -3138,6 +3281,12 @@ impl ClaimAt {
     /// Attach API-001 compatibility options (group batching / whole cohort / …).
     pub fn compatibility(mut self, compatibility: ClaimCompatibility) -> Self {
         self.compatibility = compatibility;
+        self
+    }
+
+    /// Attach the API-001 claim `request_id`. A repeat returns the same lease.
+    pub fn request_id(mut self, request_id: RequestId) -> Self {
+        self.request_id = Some(request_id);
         self
     }
 }
@@ -4060,9 +4209,10 @@ impl<B: LibBackend> RuntimeCore<B> {
             lease_expires_at: add_millis(lease_time, request.lease_ms),
             now: lease_time,
             eligibility_time: request.eligibility_time,
-            compatibility: request.compatibility,
+            compatibility: request.compatibility.clone(),
             // Sole-owner: None (never fences). Coordinated owner: the cached acquire-time fence epoch.
             expected_epoch,
+            request_id: request.request_id.clone(),
         };
         let r = self.backend.claim(req).await;
         self.note(queue, r)
@@ -5559,13 +5709,15 @@ fn open_s3_log_cell(
     }
     #[cfg(feature = "objectlog")]
     {
-        let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
+        let async_projection =
+            require_s3_turso_authority_and_async_spec(authority, async_projection)?;
+        let authority = ObjectLogAuthority::NativeConditionalWrite;
         match projection {
             ProjectionStoreConfig::Memory => open_s3_objectlog_memory_projection(
                 provider,
                 authority,
                 response_barrier,
-                async_projection,
+                Some(async_projection),
                 segments,
                 namespace,
                 recovery,
@@ -5579,7 +5731,7 @@ fn open_s3_log_cell(
                         authority,
                         ComposedProjectionConfig::Turso { path: path.clone() },
                         response_barrier,
-                        async_projection,
+                        Some(async_projection),
                         segments,
                         namespace.clone(),
                         recovery,
@@ -5595,7 +5747,7 @@ fn open_s3_log_cell(
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log,
                         path,
-                        Some(config.async_projection.unwrap_or_default()),
+                        Some(async_projection),
                     )?);
                     Ok(finish_objectlog_turso(config, clock, backend))
                 }
@@ -5625,7 +5777,7 @@ fn open_s3_log_cell(
                             authority,
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
-                            async_projection,
+                            Some(async_projection),
                             segments,
                             namespace,
                             recovery,
@@ -6378,9 +6530,12 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_postgres_async_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let url = postgres_test_url().expect(
-            "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
-        );
+        let Some(url) = postgres_test_url() else {
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
+            return Ok(());
+        };
         // Isolate via URL query? Prefer schema-bearing open_postgres_runtime_async-equivalent
         // by using a dedicated DB name suffix is hard; use open_async with schema instead when
         // available. open_postgres_async uses the default schema — unique queue id avoids clash.
@@ -6599,7 +6754,7 @@ mod tests {
     #[cfg(feature = "memory")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owned_control_plane_boundary_builds_a_working_coordinated_owner() -> EngineResult<()> {
-        let raw = Arc::new(fireweed_memory::composed_memory_backend());
+        let raw = Arc::new(crate::turso_memory_backend());
         let executor = fireweed_engine::BoundedBlockingExecutor::new(8)?;
         let control_plane = Arc::new(InMemoryControlPlane::default());
         let fireweed = RuntimeCore::with_owned_control_plane_executor(
@@ -6677,7 +6832,7 @@ mod tests {
     -> EngineResult<()> {
         // BoundedBlockingExecutor (adapter-private offload used by postgres coordinated
         // opens) must not force Fireweed drop to join an in-flight blocking job.
-        let raw = Arc::new(fireweed_memory::composed_memory_backend());
+        let raw = Arc::new(crate::turso_memory_backend());
         let executor = fireweed_engine::BoundedBlockingExecutor::new(1)?;
         let blocker_executor = executor.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -6897,7 +7052,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_by_query_at_uses_explicit_times_and_bypasses_clock() -> EngineResult<()> {
-        let backend = Arc::new(fireweed_memory::composed_memory_backend());
+        let backend = Arc::new(crate::turso_memory_backend());
         let setup = RuntimeCore::new(Arc::clone(&backend), Arc::new(SystemClock));
         setup.create_queue(query_definition()).await?;
         let shard = fireweed_engine::QueueKey::new(
@@ -6942,7 +7097,7 @@ mod tests {
             ClaimByItemIdsDisposition, ClaimByItemIdsRequest, RequestId, WorkerId,
         };
 
-        let backend = Arc::new(fireweed_memory::composed_memory_backend());
+        let backend = Arc::new(crate::turso_memory_backend());
         let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
         fireweed.create_queue(query_definition()).await?;
         let shard = fireweed_engine::QueueKey::new(
@@ -7012,7 +7167,7 @@ mod tests {
 
     #[tokio::test]
     async fn facade_enforces_persisted_push_and_claim_batch_limits() -> EngineResult<()> {
-        let backend = Arc::new(fireweed_memory::composed_memory_backend());
+        let backend = Arc::new(crate::turso_memory_backend());
         let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
         let mut definition = query_definition();
         definition.max_push_batch_size = 2;

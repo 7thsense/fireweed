@@ -37,6 +37,12 @@ until it becomes an operations framework.
 
 ## Decision
 
+ADR-024 is the storage law for this facade. The public product is one cell:
+S3 object-log × Turso projection. `ResponseBarrier` has only `AsyncProjection`.
+The other axis pairs and `Strict` are not a roadmap. Class A durability is the
+object log. Turso is rebuildable through `projection_control` and is not the
+command log.
+
 ### One concrete handle
 
 The supported Rust entry point is a concrete, non-generic `Fireweed` type.
@@ -71,9 +77,8 @@ bridge after adapters are runtime-safe. Dual public types and re-exporting
 
 ### Optional controls describe optional authority, not ordinary projection use
 
-Memory, SQLite, and object-log profiles all use projections to serve queue
-reads. The optional value therefore cannot mean "this runtime has a
-projection." What is optional is authority to perform destructive or recovery
+The public cell uses a Turso projection to serve queue reads (ADR-024). The
+optional value therefore cannot mean "this runtime has a projection." What is optional is authority to perform destructive or recovery
 maintenance on a disposable projection.
 
 `Fireweed` exposes that authority through:

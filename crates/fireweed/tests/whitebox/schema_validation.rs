@@ -16,9 +16,8 @@ use fireweed_core::{
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_engine::QueueKey;
-use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
+use crate::ManualClock;
 use serde_json::json;
 
 fn qkey() -> QueueKey {
@@ -73,9 +72,9 @@ fn typed_def() -> QueueDefinition {
     }
 }
 
-fn make() -> RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>> {
+fn make() -> RuntimeCore<crate::TursoMemoryBackend> {
     RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     )
 }

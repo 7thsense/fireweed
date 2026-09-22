@@ -15,8 +15,7 @@ use fireweed_core::{
     PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
     RetryPolicy, TenantId,
 };
-use fireweed_engine::AsyncLogReplayBackend;
-use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
+use crate::ManualClock;
 use serde_json::{Value, json};
 
 fn qkey() -> fireweed::QueueKey {
@@ -128,8 +127,8 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
     parts.iter().map(|p| p.as_bytes().to_vec()).collect()
 }
 
-async fn new_fireweed() -> RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>> {
-    let backend = Arc::new(composed_memory_backend());
+async fn new_fireweed() -> RuntimeCore<crate::TursoMemoryBackend> {
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);
     fireweed.create_queue(queue_definition()).await.unwrap();
@@ -672,7 +671,7 @@ async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_quer
 /// UTF-8 were silently mangled; the new length-prefix encoding is byte-exact.
 #[tokio::test]
 async fn secondary_indexes_untyped_index_is_byte_exact_for_invalid_utf8() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);
 

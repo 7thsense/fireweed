@@ -12,7 +12,7 @@ use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
 };
-use fireweed_memory::{ManualClock, composed_memory_backend};
+use crate::ManualClock;
 
 fn queue(tenant: &str, queue: &str) -> QueueKey {
     QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
@@ -69,7 +69,7 @@ fn stamped(queue: &QueueKey, scopes: Vec<ActiveScope>) -> ActiveScopeDiscovery {
 async fn queue_definition_accessor_reads_memory_and_durable_policy() {
     let q = queue("tenant", "queue");
     let memory = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     memory.create_queue(definition(&q, 12_345)).await.unwrap();
