@@ -1492,6 +1492,14 @@ pub enum RequestOutcome {
     ItemMutation {
         response_payload: String,
     },
+    /// Durable replay payload for API-001 `BatchClaim`. Same lease-token rules as
+    /// [`Self::ClaimByQuery`]: a repeated `request_id` returns this set while the leases are active.
+    BatchClaim {
+        item_ids: Vec<ItemId>,
+        lease_token: LeaseToken,
+        #[serde(default)]
+        worker_id: Option<WorkerId>,
+    },
     /// Durable replay payload for API-004 ClaimByQuery. The clear lease token is part of the response and
     /// must be returned unchanged on same-body request-id replay while the recorded leases remain active.
     ClaimByQuery {

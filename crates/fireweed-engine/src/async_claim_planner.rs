@@ -7,7 +7,13 @@
 
 use std::sync::Arc;
 
-use fireweed_core::{ItemId, QueueDefinition};
+use fireweed_core::{ItemId, QueueDefinition, UtcTimestamp};
+
+fn lease_duration_ms(now: UtcTimestamp, expires: UtcTimestamp) -> u64 {
+    let start = now.seconds.saturating_mul(1000) + i64::from(now.nanoseconds) / 1_000_000;
+    let end = expires.seconds.saturating_mul(1000) + i64::from(expires.nanoseconds) / 1_000_000;
+    end.saturating_sub(start).max(0) as u64
+}
 
 use crate::{
     AsyncClaimPlan, AsyncClaimPlanner, AsyncControlPlane, AsyncLogStore, AsyncProjectionStore,
@@ -124,11 +130,24 @@ where
                     authority_first: false,
                 }),
             };
+            let lease_ms = lease_duration_ms(request.now, request.lease_expires_at);
             let envelope = CommandEnvelope {
                 command_id: ids.next_command_id(),
-                request_id: None,
-                request_fingerprint: None,
-                request_outcome: None,
+                request_id: request.request_id.clone(),
+                request_fingerprint: request.request_id.as_ref().map(|_| {
+                    crate::batch_claim_body_hash(
+                        request.max_items,
+                        lease_ms,
+                        &request.compatibility,
+                    )
+                }),
+                request_outcome: request.request_id.as_ref().map(|_| {
+                    crate::RequestOutcome::BatchClaim {
+                        item_ids: item_ids.clone(),
+                        lease_token: request.lease_token.clone(),
+                        worker_id: Some(request.worker_id.clone()),
+                    }
+                }),
                 item_ids: item_ids.clone(),
                 command,
                 // Command payload CRC calculation remains the log codec's responsibility. Every existing
@@ -522,6 +541,7 @@ mod tests {
                 ..ClaimCompatibility::default()
             },
             expected_epoch,
+            request_id: None,
         }
     }
 

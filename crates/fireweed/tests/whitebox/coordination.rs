@@ -19,7 +19,7 @@ use fireweed_core::{
 use fireweed_engine::{
     Clock, ControlPlaneConfig, EngineError, InMemoryControlPlane, QueueControlPlane, QueueKey,
 };
-use fireweed_memory::{ManualClock, composed_memory_backend};
+use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -105,7 +105,7 @@ fn query_request(request_id: &str) -> ClaimByQueryRequest {
 /// real (epoch >= 1) lease, not the degenerate sole-owner path.
 #[tokio::test]
 async fn coordinated_owner_acquires_and_operates() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
@@ -135,7 +135,7 @@ async fn coordinated_owner_acquires_and_operates() {
 /// TD-003 data-path fail-closed).
 #[tokio::test]
 async fn superseded_owner_is_fenced_on_data_path() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
@@ -198,7 +198,7 @@ async fn superseded_owner_is_fenced_on_data_path() {
 
 #[tokio::test]
 async fn superseded_owner_is_fenced_on_api004_mutation_and_query_claim() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
@@ -254,7 +254,7 @@ async fn superseded_owner_is_fenced_on_api004_mutation_and_query_claim() {
 /// coordinated handle reports `Mine` for the queues it owns and `Unowned` before any acquire.
 #[tokio::test]
 async fn ownership_value_form() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
 
     // Sole-owner handle: always Mine.
@@ -286,7 +286,7 @@ async fn ownership_value_form() {
 /// refuses a NEW claim with a retryable `Unavailable`, but keeps serving in-flight ops (finalize) + pushes.
 #[tokio::test]
 async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));

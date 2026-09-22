@@ -9,21 +9,48 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
+fn with_public_s3(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    let mut values = env(&[
+        ("FIREWEED_LOG_BACKEND", "s3"),
+        ("FIREWEED_PROJECTION_BACKEND", "turso"),
+        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+        ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
+        ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
+        ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+        ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "production-access"),
+        (
+            "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+            "production-secret",
+        ),
+    ]);
+    for (key, value) in pairs {
+        values.insert((*key).to_string(), (*value).to_string());
+    }
+    values
+}
+
 #[test]
 fn fireweed_environment_is_authoritative() {
-    let config = Config::from_env(&env(&[
+    let error = Config::from_env(&env(&[
         ("FIREWEED_LOG_BACKEND", "memory"),
         ("FIREWEED_PROJECTION_BACKEND", "memory"),
         ("FIREWEED_LISTEN_ADDR", "127.0.0.1:7001"),
     ]))
-    .expect("Fireweed environment names must parse");
-    assert_eq!(config.listen, "127.0.0.1:7001");
-    assert!(matches!(config.backend.log, LogSpec::Memory));
+    .err()
+    .expect("memory × memory is not a public cell");
+    let text = error.to_string();
+    assert!(
+        text.contains("retired") || text.contains("s3") || text.contains("turso"),
+        "{text}"
+    );
 }
 
 #[test]
 fn public_config_errors_name_the_fireweed_namespace() {
-    let Err(error) = Config::from_env(&env(&[("FIREWEED_BOOTSTRAP_QUEUES", "missing-colon")]))
+    let Err(error) = Config::from_env(&with_public_s3(&[(
+        "FIREWEED_BOOTSTRAP_QUEUES",
+        "missing-colon",
+    )]))
     else {
         panic!("invalid Fireweed configuration must fail closed");
     };
@@ -40,8 +67,10 @@ fn service_help_advertises_only_fireweed_runtime_names() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(stdout.starts_with("fireweed-service\n"));
     assert!(stdout.contains("FIREWEED_LISTEN_ADDR"));
-    assert!(stdout.contains("FIREWEED_LOG_BACKEND=memory|postgres|filesystem|s3"));
-    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|turso|postgres"));
+    assert!(stdout.contains("FIREWEED_LOG_BACKEND=s3"));
+    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=turso"));
+    assert!(!stdout.contains("FIREWEED_LOG_BACKEND=memory|postgres|filesystem|s3"));
+    assert!(!stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|turso|postgres"));
     assert!(
         stdout
             .contains("FIREWEED_TURSO_PROJECTION_PATH=/var/lib/fireweed/fireweed-projection.turso")
@@ -66,7 +95,7 @@ fn fireweed_service_binary_runs_the_fireweed_help() {
 
 #[test]
 fn postgres_control_plane_env_selects_typed_shared_authority() {
-    let config = Config::from_env(&env(&[
+    let config = Config::from_env(&with_public_s3(&[
         ("FIREWEED_CONTROL_PLANE", "postgres"),
         ("FIREWEED_REPLICA_COUNT", "3"),
         ("FIREWEED_OWNER_ID", "fireweed-7f4c9d8b-owner-a"),
@@ -96,7 +125,7 @@ fn postgres_control_plane_env_selects_typed_shared_authority() {
 #[test]
 fn postgres_control_plane_missing_dsn_fails_closed() {
     for dsn in [None, Some("")] {
-        let mut values = env(&[("FIREWEED_CONTROL_PLANE", "postgres")]);
+        let mut values = with_public_s3(&[("FIREWEED_CONTROL_PLANE", "postgres")]);
         if let Some(dsn) = dsn {
             values.insert(
                 "FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL".into(),
@@ -118,7 +147,7 @@ fn postgres_control_plane_missing_dsn_fails_closed() {
 
 #[test]
 fn postgres_control_plane_boundary_rejects_inprocess_for_multiple_replicas() {
-    let Err(error) = Config::from_env(&env(&[
+    let Err(error) = Config::from_env(&with_public_s3(&[
         ("FIREWEED_CONTROL_PLANE", "inprocess"),
         ("FIREWEED_REPLICA_COUNT", "2"),
         ("FIREWEED_OWNER_ID", "replica-a"),
@@ -139,7 +168,7 @@ fn postgres_control_plane_invalid_ttls_fail_closed() {
         ("FIREWEED_CONTROL_PLANE_HEARTBEAT_TTL_MS", "invalid"),
         ("FIREWEED_CONTROL_PLANE_LEASE_TTL_MS", "0"),
     ] {
-        let mut values = env(&[
+        let mut values = with_public_s3(&[
             ("FIREWEED_CONTROL_PLANE", "postgres"),
             (
                 "FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL",
@@ -204,7 +233,7 @@ fn s3_env_builds_typed_shared_profile() {
 
 #[test]
 fn every_s3_projection_accepts_postgres_publication_authority() {
-    for projection in ["memory", "turso"] {
+    for projection in ["turso"] {
         let config = Config::from_env(&env(&[
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -236,17 +265,27 @@ fn every_s3_projection_accepts_postgres_publication_authority() {
     }
 }
 
-/// `FIREWEED_LOG_BACKEND=s3` pairs with public projections memory and sqlite;
-/// postgres when the `postgres` feature is on.
+/// `FIREWEED_LOG_BACKEND=s3` pairs only with the public Turso projection.
 #[test]
 fn first_class_s3_log_backend_pairs_with_memory_and_turso() {
-    for (projection, extra) in [
-        ("memory", None),
+    let memory = Config::from_env(&env(&[
+        ("FIREWEED_LOG_BACKEND", "s3"),
+        ("FIREWEED_PROJECTION_BACKEND", "memory"),
+        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+        ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
+        ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
+        ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+        ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "production-access"),
         (
-            "turso",
-            Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
+            "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+            "production-secret",
         ),
-    ] {
+    ]));
+    assert!(memory.is_err(), "s3 × memory is retired");
+    for (projection, extra) in [(
+        "turso",
+        Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
+    )] {
         let mut pairs = vec![
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -275,8 +314,6 @@ fn first_class_s3_log_backend_pairs_with_memory_and_turso() {
 #[cfg(feature = "postgres")]
 #[test]
 fn first_class_s3_log_backend_pairs_with_postgres_projection() {
-    use fireweed_server::ProjectionSpec;
-
     let config = Config::from_env(&env(&[
         ("FIREWEED_LOG_BACKEND", "s3"),
         ("FIREWEED_PROJECTION_BACKEND", "postgres"),
@@ -294,15 +331,13 @@ fn first_class_s3_log_backend_pairs_with_postgres_projection() {
             "production-secret",
         ),
     ]))
-    .expect("s3×postgres must parse");
-    assert!(matches!(
-        config.backend.log,
-        LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
-    ));
-    assert!(matches!(
-        config.backend.projection,
-        ProjectionSpec::Postgres { .. }
-    ));
+    .err()
+    .expect("s3 × postgres is not a public cell");
+    let text = config.to_string();
+    assert!(
+        text.contains("turso") || text.contains("retired") || text.contains("s3"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -329,27 +364,28 @@ fn filesystem_env_rejects_s3_variables() {
         ("FIREWEED_OBJECT_LOG_S3_BUCKET", "must-not-be-ignored"),
     ]));
     let Err(error) = result else {
-        panic!("shared-store settings must not silently fall back to local");
+        panic!("filesystem is not a public log");
     };
     assert!(
-        error
-            .0
-            .contains("refusing to ignore shared S3 configuration")
+        error.0.contains("s3") || error.0.contains("filesystem") || error.0.contains("retired"),
+        "{}",
+        error.0
     );
 }
 
 #[test]
 fn filesystem_profile_is_explicitly_single_replica() {
-    let config = Config::from_env(&env(&[
+    let error = Config::from_env(&env(&[
         ("FIREWEED_LOG_BACKEND", "filesystem"),
         ("FIREWEED_OBJECT_LOG_ROOT", "/tmp/fireweed-local-only"),
     ]))
-    .expect("explicit local profile");
-    let LogSpec::ObjectLog(spec) = config.backend.log else {
-        panic!("expected object-log spec");
-    };
-    assert!(!spec.is_shared());
-    assert!(matches!(spec, ObjectLogSpec::LocalFilesystem { .. }));
+    .err()
+    .expect("filesystem is not a public cell");
+    let text = error.to_string();
+    assert!(
+        text.contains("s3") || text.contains("retired") || text.contains("filesystem"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -376,7 +412,7 @@ fn postgres_control_plane_multireplica_advertise_address_fails_closed() {
 
 #[test]
 fn owner_identity_multireplica_requires_and_preserves_full_width_id() {
-    let mut values = env(&[
+    let mut values = with_public_s3(&[
         ("FIREWEED_CONTROL_PLANE", "postgres"),
         ("FIREWEED_REPLICA_COUNT", "2"),
         ("FIREWEED_ADVERTISE_ADDR", "10.0.0.12:8080"),
@@ -420,7 +456,7 @@ fn owner_identity_multireplica_requires_and_preserves_full_width_id() {
 
 #[test]
 fn owner_identity_single_replica_derives_node_owner() {
-    let config = Config::from_env(&env(&[("FIREWEED_NODE_ID", "23")]))
+    let config = Config::from_env(&with_public_s3(&[("FIREWEED_NODE_ID", "23")]))
         .expect("single-replica configuration remains valid");
     assert_eq!(config.node_id, 23);
     assert_eq!(config.owner_id.as_str(), "node-23");

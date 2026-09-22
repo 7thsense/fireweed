@@ -41,6 +41,15 @@ pub const COMMITTED_OUTCOME_POOL_SIZE: usize = 8;
 pub const COMMITTED_DRIVER_POOL_RESOURCE: &str = "committed driver read pool";
 pub const COMMITTED_OUTCOME_POOL_RESOURCE: &str = "committed outcome read pool";
 
+/// A non-terminal cohort row the reclaim tick may turn into `CohortExpired`.
+#[derive(Debug, Clone)]
+pub struct FormingCohort {
+    pub shard: QueueKey,
+    pub group_key: GroupKey,
+    pub cohort_created_at: i64,
+    pub first_eligible_at: Option<i64>,
+}
+
 /// Exact Turso release qualified by this adapter.
 pub const TURSO_SUPPORTED_VERSION: &str = "0.7.2";
 /// Public mode boundary. Remote, sync, embedded-replica, and MVCC modes are not qualified.
@@ -1480,6 +1489,50 @@ impl TursoRelational {
     pub async fn query(&self, sql: impl AsRef<str>, params: Vec<Value>) -> Result<Vec<OwnedRow>> {
         let connection = self.reader.lock().await;
         collect_rows(&connection, sql.as_ref(), params).await
+    }
+
+    /// Forming or complete cohorts that a reclaim tick may expire.
+    pub async fn forming_cohorts(&self) -> EngineResult<Vec<FormingCohort>> {
+        let rows = self
+            .query(
+                "SELECT tenant_id, queue_id, group_key, cohort_created_at, first_eligible_at \
+                 FROM fireweed_cohorts WHERE state IN ('forming','complete') \
+                 ORDER BY tenant_id, queue_id, group_key",
+                vec![],
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let mut cohorts = Vec::with_capacity(rows.len());
+        for row in rows {
+            let Value::Text(tenant) = &row.values[0] else {
+                return Err(EngineError::Storage("cohort tenant".into()));
+            };
+            let Value::Text(queue) = &row.values[1] else {
+                return Err(EngineError::Storage("cohort queue".into()));
+            };
+            let Value::Text(group) = &row.values[2] else {
+                return Err(EngineError::Storage("cohort group".into()));
+            };
+            let Value::Integer(created) = row.values[3] else {
+                return Err(EngineError::Storage("cohort created".into()));
+            };
+            let first = match row.values[4] {
+                Value::Null => None,
+                Value::Integer(value) => Some(value),
+                _ => return Err(EngineError::Storage("cohort first eligible".into())),
+            };
+            cohorts.push(FormingCohort {
+                shard: QueueKey::new(
+                    TenantId::new(tenant.clone()).map_err(|e| EngineError::Storage(e.to_string()))?,
+                    QueueId::new(queue.clone()).map_err(|e| EngineError::Storage(e.to_string()))?,
+                ),
+                group_key: GroupKey::new(group.clone())
+                    .map_err(|e| EngineError::Storage(e.to_string()))?,
+                cohort_created_at: created,
+                first_eligible_at: first,
+            });
+        }
+        Ok(cohorts)
     }
 
     /// Delete one recovered Claim outbox row after the envelope is on the log.

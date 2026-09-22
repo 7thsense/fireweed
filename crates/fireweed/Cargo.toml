@@ -47,12 +47,12 @@ fireweed-projection = { path = "../fireweed-projection", optional = true }
 tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync"], optional = true }
 
 [features]
-# Public construction is object-log + Turso (ADR-024). `memory` stays in the
-# default feature set only because the in-crate whitebox tests still link
-# `fireweed-memory`. It is not a public projection. New tests use Turso
-# `:memory:`. `postgres` is opt-in and is the control-plane client, not a
+# Public construction is object-log + Turso (ADR-024). Whitebox tests use
+# Turso `:memory:` (`TursoConfig::in_memory`), not `fireweed-memory`.
+# `memory` stays available as an opt-in crate feature and is not a public
+# projection. `postgres` is opt-in and is the control-plane client, not a
 # public log or projection.
-default = ["memory", "objectlog", "turso"]
+default = ["objectlog", "turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 # objectlog enables the shared Tokio reactor used by LogEngine I/O.
 objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
@@ -67,6 +67,9 @@ fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"
 # The postgres-constructor smoke test drives the sync postgres client via a non-tokio executor.
 postgres = "0.19"
+# Integration tests use ManualClock. The memory feature stays off by default;
+# this dev-dependency is not a public projection.
+fireweed-memory = { path = "../fireweed-memory" }
 
 [[test]]
 name = "transition_entry_validation"

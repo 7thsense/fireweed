@@ -2030,7 +2030,9 @@ mod tests {
                 eligibility_time: None,
                 compatibility: ClaimCompatibility::default(),
                 expected_epoch: None,
-            })
+
+                request_id: None,
+})
             .await
             .unwrap();
         assert_eq!(claimed.items.len(), 1);
@@ -2212,7 +2214,9 @@ mod tests {
                 eligibility_time: None,
                 compatibility: ClaimCompatibility::default(),
                 expected_epoch: None,
-            })
+
+                request_id: None,
+})
             .await
             .unwrap();
         assert_eq!(claimed.items.len(), 1);

@@ -1820,6 +1820,23 @@ fn push_body_hash_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<Bo
     Ok(BodyHash(h.finish()))
 }
 
+/// Body fingerprint for API-001 `BatchClaim` (`request_id` excluded).
+pub fn batch_claim_body_hash(
+    max_items: usize,
+    lease_ms: u64,
+    compatibility: &crate::ClaimCompatibility,
+) -> u64 {
+    use sha2::{Digest, Sha256};
+
+    let canonical = format!("{max_items}|{lease_ms}|{compatibility:?}");
+    let digest = Sha256::digest(canonical.as_bytes());
+    u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )
+}
+
 /// Body fingerprint for API-004 ClaimByQuery (request_id excluded). Shared with async log-replay.
 pub fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<BodyHash> {
     use sha2::{Digest, Sha256};

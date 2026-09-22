@@ -39,6 +39,12 @@ Historical DDx IDs, requirement IDs, artifact names, and original measurements
 retain their identity. SQLite selectors stay retired and are not a differential
 reference.
 
+`10000` and `12500` are non-portable capacity observations for a named cell and
+commit, not product pass bars. The campaign plan states the same rule: the
+12.5k result stays attributed to filesystem × Turso at `49f1b6b3` (2026-09-16)
+and is not a qualification pin; v0.31.30 s3 × Turso (~9507 on `bcef51f9`) is
+not a qualification pin. A miss of those script gates is not a product failure.
+
 
 ## Testing strategy
 

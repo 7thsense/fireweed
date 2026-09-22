@@ -58,6 +58,7 @@ fn claim(compatibility: ClaimCompatibility, max_items: usize) -> ClaimRequest {
         now: ts(100),
         compatibility,
         expected_epoch: None,
+        request_id: None,
     }
 }
 

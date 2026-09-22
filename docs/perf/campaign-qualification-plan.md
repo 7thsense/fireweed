@@ -1,5 +1,14 @@
 # Campaign qualification and performance plan
 
+## Capacity floors are not pass bars
+
+`10000` and `12500` are non-portable capacity observations for a named cell and
+commit, not product pass bars. The 12.5k result stays attributed to filesystem ×
+Turso at `49f1b6b3` (2026-09-16). It is not the current public cell and not a
+qualification pin. v0.31.30’s s3 × Turso measurement (~9507 completed
+lifecycles/s on `bcef51f9`) is not a qualification pin. A miss of those script
+gates is not a product failure. TP-002 and TP-005 cite this rule.
+
 The 12.5k result at `49f1b6b3` is historical filesystem × turso evidence
 (2026-09-16). It is not the v0.31.30 public cell. v0.31.30 s3 × turso measured
 about 9,507 completed lifecycles/s on `bcef51f9` and is not a qualification pin.

@@ -27,5 +27,8 @@ fn direct_config_construction_owns_tuning_on_backend_spec() {
         ResponseBarrierSpec::AsyncProjection
     );
     assert_eq!(config.backend.async_projection, Some(async_spec));
-    assert_eq!(config.validate_for_start(), Ok(()));
+    assert_eq!(
+        config.validate_for_start(),
+        Err(EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL))
+    );
 }

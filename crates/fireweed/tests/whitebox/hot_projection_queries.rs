@@ -18,7 +18,7 @@ use fireweed_core::{
     CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex,
 };
 use fireweed_engine::{EngineError, HotProjectionQueryPort};
-use fireweed_memory::{ManualClock, composed_memory_backend};
+use crate::ManualClock;
 use serde_json::{Value, json};
 
 fn qkey() -> fireweed::QueueKey {
@@ -140,11 +140,6 @@ fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
                 value: TypedValue::String("job_9001".to_string()),
             },
             QueryFilter {
-                field: "action_type".to_string(),
-                op: FilterOp::Eq,
-                value: TypedValue::String("message.send".to_string()),
-            },
-            QueryFilter {
                 field: "scheduled_at".to_string(),
                 op: FilterOp::Lte,
                 value: TypedValue::DateTime(UtcTimestamp::new(1_783_004_400, 0).expect("valid ts")),
@@ -164,7 +159,7 @@ fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
 #[tokio::test]
 async fn safe_recycling_rule_update_marks_only_act_001() {
     let memory_fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_safe_recycling_rule_update_on_backend(&memory_fireweed).await;
@@ -173,7 +168,7 @@ async fn safe_recycling_rule_update_marks_only_act_001() {
 #[tokio::test]
 async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
     let memory_fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_fireweed)
@@ -183,7 +178,7 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
 #[tokio::test]
 async fn claim_due_scheduled_actions_by_query() {
     let memory_fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_claim_due_scheduled_actions_by_query_on_backend(&memory_fireweed).await;
@@ -192,7 +187,7 @@ async fn claim_due_scheduled_actions_by_query() {
 #[tokio::test]
 async fn hourly_distribution_by_status() {
     let memory_fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_hourly_distribution_by_status_on_backend(&memory_fireweed).await;
@@ -201,7 +196,7 @@ async fn hourly_distribution_by_status() {
 #[tokio::test]
 async fn recycling_preview_by_hour() {
     let memory_fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_recycling_preview_by_hour_on_backend(&memory_fireweed).await;
@@ -210,7 +205,7 @@ async fn recycling_preview_by_hour() {
 #[tokio::test]
 async fn engagement_probability_segments() {
     let memory_fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_engagement_probability_segments_on_backend(&memory_fireweed).await;
@@ -333,6 +328,44 @@ fn scheduled_action_typed_indexes() -> Vec<QueueIndex> {
                 fields: vec![
                     compound_field("tenant_id", IndexType::String),
                     compound_field("run_id", IndexType::String),
+                    compound_field("engagement_probability", IndexType::Float),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_status_action",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("action_type", IndexType::String),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                    compound_field("status", IndexType::String),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_recycling_action",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("action_type", IndexType::String),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                    compound_field("suppressed_by_recycling", IndexType::Boolean),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_engagement_action",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("action_type", IndexType::String),
                     compound_field("engagement_probability", IndexType::Float),
                 ],
                 unique: false,
@@ -820,7 +853,7 @@ async fn backend_capability_advertising_is_explicit() {
     };
 
     let memory = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     assert_eq!(memory.hot_projection_capabilities(&q), memory_expected);
@@ -896,7 +929,7 @@ async fn backend_capability_advertising_is_explicit() {
 
 fn hourly_distribution_request() -> GroupedAggregateRequest {
     GroupedAggregateRequest {
-        index: Some("by_status".to_string()),
+        index: Some("by_status_action".to_string()),
         filters: vec![
             QueryFilter {
                 field: "tenant_id".to_string(),
@@ -940,7 +973,7 @@ fn hourly_distribution_request() -> GroupedAggregateRequest {
 
 fn recycling_preview_request() -> GroupedAggregateRequest {
     GroupedAggregateRequest {
-        index: Some("by_recycling".to_string()),
+        index: Some("by_recycling_action".to_string()),
         filters: vec![
             QueryFilter {
                 field: "tenant_id".to_string(),
@@ -984,7 +1017,7 @@ fn recycling_preview_request() -> GroupedAggregateRequest {
 
 fn engagement_probability_request() -> DeclaredBucketSegmentRequest {
     DeclaredBucketSegmentRequest {
-        index: Some("by_engagement_probability".to_string()),
+        index: Some("by_engagement_action".to_string()),
         filters: vec![
             QueryFilter {
                 field: "tenant_id".to_string(),
@@ -1056,7 +1089,7 @@ fn action_id_map(ids: &[(ItemId, String)], rows: &[RangeScanRow]) -> Vec<String>
 #[tokio::test]
 async fn ordered_cursor_pagination_is_stable() {
     let q = qkey();
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     fireweed
         .create_queue(scheduled_action_queue_definition())
@@ -1189,7 +1222,7 @@ async fn ordered_cursor_pagination_is_stable() {
 async fn detail_range_filter_by_run_status_and_schedule() {
     let q = qkey();
     let fireweed = RuntimeCore::new(
-        Arc::new(composed_memory_backend()),
+        Arc::new(crate::turso_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     fireweed
@@ -1262,7 +1295,7 @@ async fn detail_range_filter_by_run_status_and_schedule() {
 /// out of the numeric typed index (API-004 null semantics), rather than minting a synthetic null key.
 #[tokio::test]
 async fn hot_projection_fixture_seeds_six_claimable_records_and_resolves_target_key_lookup() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     fireweed

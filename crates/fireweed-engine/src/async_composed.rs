@@ -3231,6 +3231,7 @@ mod tests {
             eligibility_time: None,
             compatibility: ClaimCompatibility::default(),
             expected_epoch: Some(1),
+            request_id: None,
         }
     }
 

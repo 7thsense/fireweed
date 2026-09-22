@@ -673,7 +673,9 @@ mod contention_mapping_tests {
             eligibility_time: None,
             compatibility: ClaimCompatibility::default(),
             expected_epoch: Some(1),
-        };
+
+            request_id: None,
+};
         let first = ItemId::mint(1, 1, 1);
         let second = ItemId::mint(1, 1, 2);
         let item = |id: ItemId, seq: u8| ClaimedItem {
@@ -1619,6 +1621,9 @@ where
     }
 
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        if let Some(replayed) = replay_recorded_batch_claim(self.projection.as_ref(), &request).await? {
+            return Ok(replayed);
+        }
         self.engine.claim(request).await.map_err(map_claim)
     }
 
@@ -2182,13 +2187,16 @@ macro_rules! impl_turso_product_ports {
                 now: UtcTimestamp,
             ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
                 async move {
-                    tick_turso_expired_leases(
+                    let mut report = tick_turso_expired_leases(
                         Arc::clone(&self.projection),
                         Arc::clone(&self.control),
                         self,
                         now,
                     )
-                    .await
+                    .await?;
+                    report.cohorts_expired +=
+                        expire_incomplete_cohorts(self, self.projection.as_ref(), now).await?;
+                    Ok(report)
                 }
             }
         }
@@ -3008,6 +3016,9 @@ pub struct DerivedObjectLogTursoBackend {
     fence_admission: SelectionFenceAdmission,
     generation_joins: GenerationJoins,
     claim_work_ids: Arc<AtomicU64>,
+    /// Same-process API-001 claim replay. Apply may still be in flight when the
+    /// caller retries, so the leased set is remembered before Turso publishes it.
+    claim_replays: Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>,
     /// This process owns the Turso writer. Item Claim SELECT and the FIFO
     /// rowid floor are sequenced here so the next generation can read the
     /// following slice without waiting for apply.
@@ -3120,6 +3131,7 @@ impl DerivedObjectLogTursoBackend {
             fence_admission,
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
             claim_work_ids: Arc::new(AtomicU64::new(1)),
+            claim_replays: Arc::new(Mutex::new(HashMap::new())),
             claim_select: Arc::new(tokio::sync::Mutex::new(())),
             drivers,
         };
@@ -4386,12 +4398,26 @@ impl DerivedObjectLogTursoBackend {
             folded
                 .leased_ids
                 .extend(claimed.items.iter().map(|item| item.item_id));
+            let item_ids: Vec<_> = claimed.items.iter().map(|item| item.item_id).collect();
+            let lease_ms = batch_claim_lease_ms(request.now, request.lease_expires_at);
             let envelope = CommandEnvelope {
                 command_id: self.ids.next_command_id(),
-                request_id: None,
-                request_fingerprint: None,
-                request_outcome: None,
-                item_ids: claimed.items.iter().map(|item| item.item_id).collect(),
+                request_id: request.request_id.clone(),
+                request_fingerprint: request.request_id.as_ref().map(|_| {
+                    fireweed_engine::batch_claim_body_hash(
+                        request.max_items,
+                        lease_ms,
+                        &request.compatibility,
+                    )
+                }),
+                request_outcome: request.request_id.as_ref().map(|_| {
+                    fireweed_engine::RequestOutcome::BatchClaim {
+                        item_ids: item_ids.clone(),
+                        lease_token: request.lease_token.clone(),
+                        worker_id: Some(request.worker_id.clone()),
+                    }
+                }),
+                item_ids,
                 command: QueueCommand::Claim(ClaimCommand {
                     item_ids: claimed.items.iter().map(|item| item.item_id).collect(),
                     lease_token: request.lease_token.clone(),
@@ -4415,7 +4441,56 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
+    async fn replay_batch_claim(&self, request: &ClaimRequest) -> EngineResult<Option<Claimed>> {
+        let Some(request_id) = &request.request_id else {
+            return Ok(None);
+        };
+        let fingerprint = fireweed_engine::batch_claim_body_hash(
+            request.max_items,
+            batch_claim_lease_ms(request.now, request.lease_expires_at),
+            &request.compatibility,
+        );
+        if let Some((stored, claimed)) = self
+            .claim_replays
+            .lock()
+            .expect("claim replay")
+            .get(&(request.shard.clone(), request_id.clone()))
+            .cloned()
+        {
+            if stored != fingerprint {
+                return Err(EngineError::RequestIdConflict);
+            }
+            if claimed
+                .items
+                .iter()
+                .any(|item| item.lease_expires_at <= request.now)
+            {
+                return Err(EngineError::RequestExpired);
+            }
+            return Ok(Some(claimed));
+        }
+        replay_recorded_batch_claim(self.projection.as_ref(), request).await
+    }
+
+    fn remember_batch_claim(&self, request: &ClaimRequest, claimed: &Claimed) {
+        let Some(request_id) = &request.request_id else {
+            return;
+        };
+        let fingerprint = fireweed_engine::batch_claim_body_hash(
+            request.max_items,
+            batch_claim_lease_ms(request.now, request.lease_expires_at),
+            &request.compatibility,
+        );
+        self.claim_replays.lock().expect("claim replay").insert(
+            (request.shard.clone(), request_id.clone()),
+            (fingerprint, claimed.clone()),
+        );
+    }
+
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        if let Some(replayed) = self.replay_batch_claim(&request).await? {
+            return Ok(replayed);
+        }
         // WholeGroup / SameGroupKey / WholeCohort stay exclusive. A lone
         // `group_key` filter is still exclusive too: packed realize does not
         // yet honor that filter, so sending it down `drive_candidate_mutation`
@@ -4423,12 +4498,16 @@ impl DerivedObjectLogTursoBackend {
         if request.compatibility != ClaimCompatibility::default() {
             return self.dispatch_grouped_cohort_claim(request).await;
         }
+        let remembered = request.clone();
         let work = MutationGenerationWork::Claim {
             id: self.claim_work_ids.fetch_add(1, Ordering::Relaxed),
             request,
         };
         match self.drive_candidate_mutation(work).await? {
-            MutationGenerationMemberOutcome::Claim { claimed, .. } => Ok(claimed),
+            MutationGenerationMemberOutcome::Claim { claimed, .. } => {
+                self.remember_batch_claim(&remembered, &claimed);
+                Ok(claimed)
+            }
             MutationGenerationMemberOutcome::Rejected(error) => Err(error),
             MutationGenerationMemberOutcome::Push(_)
             | MutationGenerationMemberOutcome::PushAccepted
@@ -5181,6 +5260,106 @@ impl_turso_commit_transition!(DerivedObjectLogTursoBackend);
 // Sync open helpers used by the facade matrix dispatch
 // ---------------------------------------------------------------------------
 
+async fn expire_incomplete_cohorts<B>(
+    backend: &B,
+    projection: &TursoRelational,
+    now: UtcTimestamp,
+) -> EngineResult<u64>
+where
+    B: Backend + ControlPlaneStore,
+{
+    let now_n = now.seconds.saturating_mul(1_000_000_000) + i64::from(now.nanoseconds);
+    let mut expired = 0u64;
+    for cohort in projection.forming_cohorts().await? {
+        let definition = ControlPlaneStore::queue_definition(backend, &cohort.shard).await?;
+        let Some(bound_ms) = definition
+            .cohort_policy
+            .as_ref()
+            .and_then(|policy| policy.completion_bound_ms)
+        else {
+            continue;
+        };
+        let start = cohort
+            .first_eligible_at
+            .map(|first| cohort.cohort_created_at.min(first))
+            .unwrap_or(cohort.cohort_created_at);
+        let deadline = start.saturating_add((bound_ms as i64).saturating_mul(1_000_000));
+        if deadline > now_n {
+            continue;
+        }
+        let epoch = ControlPlaneStore::current_epoch(backend, &cohort.shard).await?;
+        let envelope = CommandEnvelope {
+            command_id: fireweed_engine::CommandId::new(format!("cohort-expired-{now_n}-{expired}")),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: Vec::new(),
+            command: QueueCommand::CohortExpired(fireweed_engine::CohortExpiredCommand {
+                group_key: cohort.group_key,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Backend::commit_raw(
+            backend,
+            RawCommitRequest::new(cohort.shard, vec![envelope], epoch),
+        )
+        .await?;
+        expired += 1;
+    }
+    Ok(expired)
+}
+
+fn batch_claim_lease_ms(now: UtcTimestamp, expires: UtcTimestamp) -> u64 {
+    let start = now.seconds.saturating_mul(1000) + i64::from(now.nanoseconds) / 1_000_000;
+    let end = expires.seconds.saturating_mul(1000) + i64::from(expires.nanoseconds) / 1_000_000;
+    end.saturating_sub(start).max(0) as u64
+}
+
+async fn replay_recorded_batch_claim(
+    projection: &TursoRelational,
+    request: &ClaimRequest,
+) -> EngineResult<Option<Claimed>> {
+    let Some(request_id) = &request.request_id else {
+        return Ok(None);
+    };
+    let fingerprint = fireweed_engine::batch_claim_body_hash(
+        request.max_items,
+        batch_claim_lease_ms(request.now, request.lease_expires_at),
+        &request.compatibility,
+    );
+    let Some(receipt) = projection
+        .server_query_claim_replay(
+            &request.shard,
+            "claim",
+            request_id,
+            fingerprint,
+            request.now,
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let ids: Vec<ItemId> = serde_json::from_value(receipt["item_ids"].clone())
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let token: LeaseToken = serde_json::from_value(receipt["lease_token"].clone())
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let items =
+        AsyncProjectionStore::render_claimed(projection, request.shard.clone(), ids.clone())
+            .await?;
+    if items.len() != ids.len()
+        || items.iter().any(|item| {
+            item.lease_expires_at <= request.now || item.lease_token.as_ref() != Some(&token)
+        })
+    {
+        return Err(EngineError::RequestExpired);
+    }
+    Ok(Some(Claimed {
+        items,
+        ..Claimed::default()
+    }))
+}
+
 pub fn assemble_memory_log_turso(
     projection_path: PathBuf,
 ) -> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_projection::MemoryLog>>> {
@@ -5188,6 +5367,21 @@ pub fn assemble_memory_log_turso(
     let log = InProcessLogStore::new(fireweed_projection::MemoryLog::new());
     block_on_turso(async move {
         AtomicTursoBackend::assemble(log, projection, projection_path, 0).await
+    })
+}
+
+/// Non-durable Turso projection (`TursoConfig::in_memory`) over an in-process log.
+/// Not a public cell. Whitebox tests use this instead of `InMemoryProjection`.
+pub fn assemble_memory_log_turso_in_memory(
+) -> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_projection::MemoryLog>>> {
+    let projection = block_on_turso(async {
+        TursoRelational::open(TursoConfig::in_memory())
+            .await
+            .map_err(|e| EngineError::Storage(e.to_string()))
+    })?;
+    let log = InProcessLogStore::new(fireweed_projection::MemoryLog::new());
+    block_on_turso(async move {
+        AtomicTursoBackend::assemble(log, projection, PathBuf::from(":memory:"), 0).await
     })
 }
 
@@ -6438,7 +6632,9 @@ mod s3c_activation {
                     eligibility_time: None,
                     compatibility: ClaimCompatibility::default(),
                     expected_epoch: None,
-                })
+
+                    request_id: None,
+})
                 .await
                 .unwrap();
             assert_eq!(claimed.items.len(), 2);
@@ -6789,7 +6985,9 @@ mod s3c_activation {
                 eligibility_time: None,
                 compatibility: ClaimCompatibility::default(),
                 expected_epoch: None,
-            })
+
+                request_id: None,
+})
             .await
             .unwrap();
         assert_eq!(item_claimed.items.len(), 1);
@@ -6825,7 +7023,9 @@ mod s3c_activation {
                     ..ClaimCompatibility::default()
                 },
                 expected_epoch: None,
-            })
+
+                request_id: None,
+})
             .await
             .unwrap();
         assert_eq!(grouped.items.len(), 1);
@@ -7319,7 +7519,9 @@ mod s8c_outbox_migration {
                 eligibility_time: None,
                 compatibility: ClaimCompatibility::default(),
                 expected_epoch: None,
-            })
+
+                request_id: None,
+})
             .await
             .unwrap();
         assert_eq!(live.items.len(), 1);
@@ -7339,5 +7541,104 @@ mod s8c_outbox_migration {
         assert_eq!(recovered.metrics(&shard).await.unwrap().complete, 1);
         drop(recovered);
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod cohort_expiry_tests {
+    use super::*;
+    use fireweed_core::{
+        CohortOnIncomplete, CohortPolicy, EligibilityPolicy, OrderingMode, PriorityDirection,
+        PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+        RecurrencePolicy, RetryPolicy, TenantId,
+    };
+    use fireweed_engine::{PushPort, PushSpec, ReclaimDriver};
+
+    fn cohort_queue() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("cohort").unwrap(),
+            queue_id: QueueId::new("callbacks").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: Some(CohortPolicy {
+                enabled: true,
+                completion_bound_ms: Some(1_000),
+                on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+                max_cohort_size: None,
+            }),
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    /// Incomplete cohort expiry is produced on the Turso projection, not by a postgres sweep.
+    #[tokio::test]
+    async fn cohort_expired_on_governing_cell() {
+        let backend = assemble_memory_log_turso_in_memory().expect("turso :memory:");
+        let definition = cohort_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        ControlPlaneStore::create_queue(&backend, definition)
+            .await
+            .unwrap();
+        let now = UtcTimestamp::new(1_000, 0).unwrap();
+        PushPort::push(
+            &backend,
+            &shard,
+            vec![PushSpec {
+                group_key: Some(fireweed_core::GroupKey::new("cb-1").unwrap()),
+                cohort_size: Some(2),
+                ..PushSpec::default()
+            }],
+            now,
+            None,
+        )
+        .await
+        .unwrap();
+        let later = UtcTimestamp::new(1_002, 0).unwrap();
+        let report = ReclaimDriver::tick(&backend, later).await.unwrap();
+        assert!(
+            report.cohorts_expired >= 1,
+            "tick must produce CohortExpired, report={report:?}"
+        );
+        let rows = backend
+            .projection()
+            .query(
+                "SELECT state FROM fireweed_cohorts WHERE group_key='cb-1'",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "cohort row");
+        let failed = backend
+            .projection()
+            .query(
+                "SELECT lifecycle_state FROM fireweed_items WHERE group_key='cb-1'",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let rendered = format!("{failed:?}");
+        assert!(
+            rendered.contains("Failed"),
+            "CohortExpired must fail the incomplete member, rows={rendered}"
+        );
     }
 }

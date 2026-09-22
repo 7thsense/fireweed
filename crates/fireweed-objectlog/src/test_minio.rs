@@ -8,6 +8,7 @@
 
 use crate::S3CreateOnlyPut;
 use fireweed_engine::EngineResult;
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -50,13 +51,85 @@ pub fn shared_s3_test_env() -> &'static S3TestEnv {
 }
 
 fn init_s3_test_env() -> S3TestEnv {
-    if let Some(env) = env_from_process_environment() {
-        if endpoint_live(&env.endpoint) {
-            ensure_bucket_blocking(&env).expect("create bucket on provided S3 endpoint");
-            return env;
+    match env_from_process_environment() {
+        Some(env) => {
+            if !endpoint_live(&env.endpoint) {
+                panic!(
+                    "FIREWEED_S3_TEST_ENDPOINT={} is unset as a live listener. \
+                     This is test setup, not a product S3 dispatch failure.",
+                    env.endpoint
+                );
+            }
+            if !minio_health_live(&env.endpoint) {
+                panic!(
+                    "FIREWEED_S3_TEST_ENDPOINT={} is a foreign listener, not MinIO. \
+                     Refusing a generic S3 dispatch failure.",
+                    env.endpoint
+                );
+            }
+            ensure_bucket_or_explain(&env);
+            env
+        }
+        None => {
+            let local = format!("http://127.0.0.1:{DEFAULT_PORT}");
+            if endpoint_live(&local) && !minio_health_live(&local) {
+                panic!(
+                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} is a foreign listener, \
+                     not the expected MinIO. Refusing a generic S3 dispatch failure."
+                );
+            }
+            spawn_local_minio()
         }
     }
-    spawn_local_minio()
+}
+
+fn ensure_bucket_or_explain(env: &S3TestEnv) {
+    if let Err(error) = ensure_bucket_blocking(env) {
+        let endpoint_named = std::env::var("FIREWEED_S3_TEST_ENDPOINT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let who = match endpoint_named {
+            Some(endpoint) => format!("FIREWEED_S3_TEST_ENDPOINT={endpoint}"),
+            None => format!(
+                "FIREWEED_S3_TEST_ENDPOINT is unset; listener {} is not the expected MinIO \
+                 (credentials {ACCESS_KEY})",
+                env.endpoint
+            ),
+        };
+        panic!(
+            "{who} rejected the test bucket setup (wrong credentials or not MinIO). \
+             This is test setup, not a product S3 dispatch failure. Underlying: {error}"
+        );
+    }
+}
+
+fn minio_health_live(endpoint: &str) -> bool {
+    let url = endpoint.trim().trim_end_matches('/');
+    let host_port = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let Ok(mut addrs) = host_port.to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let host = host_port.split('/').next().unwrap_or(host_port);
+    let request = format!("GET /minio/health/live HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0_u8; 256];
+    let Ok(n) = stream.read(&mut buf) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&buf[..n]);
+    text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200")
 }
 
 fn env_from_process_environment() -> Option<S3TestEnv> {
@@ -108,7 +181,7 @@ fn spawn_local_minio() -> S3TestEnv {
                 thread::sleep(Duration::from_millis(50));
             }
         } else {
-            ensure_bucket_blocking(&env).expect("create bucket on reused MinIO");
+            ensure_bucket_or_explain(&env);
             return env;
         }
     }
@@ -128,15 +201,25 @@ fn spawn_local_minio() -> S3TestEnv {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("failed to spawn minio at {}: {error}", bin.display()));
+    let child = command.spawn().unwrap_or_else(|error| {
+        panic!(
+            "FIREWEED_S3_TEST_ENDPOINT is unset and MinIO could not be started from {}: {error}. \
+             This is test setup, not a product S3 dispatch failure.",
+            bin.display()
+        )
+    });
     *CHILD.lock().expect("minio child mutex") = Some(child);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if endpoint_live(&endpoint) {
-            ensure_bucket_blocking(&env).expect("create bucket on spawned MinIO");
+            if !minio_health_live(&endpoint) {
+                panic!(
+                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} did not become MinIO. \
+                     Refusing a generic S3 dispatch failure."
+                );
+            }
+            ensure_bucket_or_explain(&env);
             return env;
         }
         thread::sleep(Duration::from_millis(50));

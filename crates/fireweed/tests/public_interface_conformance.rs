@@ -452,6 +452,89 @@ async fn filesystem_turso_async_packed_commits_each_return_outcomes() {
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
+#[tokio::test]
+async fn claim_request_id_replay_returns_the_same_lease() {
+    let root = FixtureRoot::new("claim-replay");
+    let fireweed = filesystem_turso(
+        root.path(),
+        ResponseBarrier::AsyncProjection,
+        "claim-replay",
+    )
+    .await;
+    let definition = fireweed::QueueDefinition {
+        tenant_id: fireweed::TenantId::new("replay").unwrap(),
+        queue_id: fireweed::QueueId::new("claim").unwrap(),
+        priority_model: fireweed::PriorityModel {
+            kind: fireweed::PriorityModelKind::Int64,
+            direction: fireweed::PriorityDirection::Ascending,
+            tie_breaker: fireweed::PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: fireweed::OrderingMode::Strict,
+        max_rank_error: 0,
+        progress_bound_ms: 60_000,
+        eligibility_policy: fireweed::EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: fireweed::RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: fireweed::RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
+        emit_change_records: false,
+    };
+    let queue = fireweed::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert!(fireweed.create_queue(definition).await.unwrap().created);
+    fireweed
+        .push_batch(
+            &queue,
+            vec![
+                fireweed::NewItem {
+                    client_item_key: Some(fireweed::ClientItemKey::new("a").unwrap()),
+                    priority: Some(fireweed::PriorityValue::Int64(1)),
+                    ..fireweed::NewItem::default()
+                },
+                fireweed::NewItem {
+                    client_item_key: Some(fireweed::ClientItemKey::new("b").unwrap()),
+                    priority: Some(fireweed::PriorityValue::Int64(2)),
+                    ..fireweed::NewItem::default()
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let request_id = fireweed::RequestId::new("claim-replay-1").unwrap();
+    let first = fireweed
+        .claim_at(
+            &queue,
+            fireweed::ClaimAt::new(1, 60_000).request_id(request_id.clone()),
+        )
+        .await
+        .unwrap();
+    let second = fireweed
+        .claim_at(
+            &queue,
+            fireweed::ClaimAt::new(1, 60_000).request_id(request_id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1, "first claim leases one item");
+    assert_eq!(
+        second.len(),
+        1,
+        "replay returns the same leased set, not a second item"
+    );
+    assert_eq!(first[0].item_id, second[0].item_id);
+    assert_eq!(first[0].lease_token, second[0].lease_token);
+    assert_eq!(fireweed.metrics(&queue).await.unwrap().leased, 1);
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
 async fn filesystem_turso(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
     let s3 = fireweed_objectlog::shared_s3_test_env();
     let mut storage = StorageConfig::s3_turso(

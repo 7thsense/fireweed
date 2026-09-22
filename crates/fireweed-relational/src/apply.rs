@@ -31,6 +31,7 @@ pub const SQLITE_BIND_CAP: usize = 900;
 fn bind_chunk_size(per_row: usize, extra: usize) -> usize {
     (SQLITE_BIND_CAP.saturating_sub(extra) / per_row.max(1)).max(1)
 }
+const IDEMPOTENCY_OPERATION_CLAIM: &str = "claim";
 const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
 const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
 const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
@@ -351,6 +352,43 @@ pub fn persist_request_outcome_sql(
             request_expires_at(queues, shard, envelope.created_at)?,
             false,
         );
+    }
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::BatchClaim {
+            item_ids,
+            lease_token,
+            worker_id,
+        }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) {
+        let response = serde_json::to_string(&serde_json::json!({
+            "item_ids": item_ids,
+            "lease_token": lease_token,
+            "worker_id": worker_id,
+        }))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        persist_request_row(
+            tx,
+            shard,
+            IDEMPOTENCY_OPERATION_CLAIM,
+            request_id.as_str(),
+            fingerprint.to_be_bytes().to_vec(),
+            response,
+            position,
+            envelope.created_at,
+            ts_nanos(match envelope.command {
+                QueueCommand::Claim(ref claim) if !item_ids.is_empty() => claim.lease_expires_at,
+                _ => envelope.created_at,
+            })
+            .max(request_expires_at(queues, shard, envelope.created_at)?),
+            true,
+        )?;
+        return Ok(());
     }
     if let (
         Some(request_id),
