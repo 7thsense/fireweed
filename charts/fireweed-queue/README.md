@@ -81,7 +81,19 @@ storage:
     backend: turso
     turso:
       path: /var/lib/fireweed/projection/projection.turso
+  volume:
+    localNvme:
+      enabled: true
+      hostPath: /mnt/nvme/fireweed
+persistence:
+  enabled: false
 ```
+
+The Turso file is mounted from node-local NVMe (`hostPath`
+`/mnt/nvme/fireweed`, one subdirectory per pod). Mount that disk on the node
+before install. A networked persistent volume is opt-in
+(`persistence.enabled=true` and `storage.volume.localNvme.enabled=false`).
+The projection is rebuilt from the log if the node disk is lost.
 
 The chart renders:
 
@@ -124,6 +136,9 @@ storage:
 persistence:
   enabled: false
 ```
+
+Each pod's Turso file is a subdirectory of the node NVMe mount
+(`/mnt/nvme/fireweed`), not a shared persistent volume.
 
 Each pod publishes its Kubernetes `metadata.uid` as the full-width
 `FIREWEED_OWNER_ID` and its pod IP as `FIREWEED_ADVERTISE_ADDR`;

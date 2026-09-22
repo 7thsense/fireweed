@@ -42,8 +42,14 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "fireweed-queue.fullname" . }}-config
-          {{- if or (gt (int .Values.replicaCount) 1) (eq (include "fireweed-queue.logIsS3" .) "true") (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") .Values.storage.lakebase.enabled (eq .Values.storage.controlPlane.backend "postgres") }}
+          {{- if or (gt (int .Values.replicaCount) 1) (eq (include "fireweed-queue.logIsS3" .) "true") (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") .Values.storage.lakebase.enabled (eq .Values.storage.controlPlane.backend "postgres") (eq (include "fireweed-queue.volumeIsLocalNvme" .) "true") }}
           env:
+            {{- if eq (include "fireweed-queue.volumeIsLocalNvme" .) "true" }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
             {{- if gt (int .Values.replicaCount) 1 }}
             - name: POD_IP
               valueFrom:
@@ -152,6 +158,9 @@ spec:
           volumeMounts:
             - name: storage
               mountPath: {{ .Values.storage.volume.mountPath | quote }}
+              {{- if eq (include "fireweed-queue.volumeIsLocalNvme" .) "true" }}
+              subPathExpr: $(POD_NAME)
+              {{- end }}
           {{- end }}
       {{- if eq (include "fireweed-queue.needsLocalVolume" .) "true" }}
       volumes:
@@ -159,6 +168,10 @@ spec:
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "fireweed-queue.storagePvcName" . }}
+          {{- else if eq (include "fireweed-queue.volumeIsLocalNvme" .) "true" }}
+          hostPath:
+            path: {{ .Values.storage.volume.localNvme.hostPath | quote }}
+            type: DirectoryOrCreate
           {{- else }}
           emptyDir: {}
           {{- end }}

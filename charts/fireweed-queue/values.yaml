@@ -131,9 +131,14 @@ storage:
       databaseUrlKey: database-url
   volume:
     mountPath: /var/lib/fireweed/projection
+    # Node-local NVMe for the rebuildable Turso file. A networked persistent
+    # volume is opt-in (persistence.enabled) and mutually exclusive with this.
+    localNvme:
+      enabled: true
+      hostPath: /mnt/nvme/fireweed
 
 persistence:
-  enabled: true
+  enabled: false
   existingClaim: ""
   storageClass: ""
   accessModes:

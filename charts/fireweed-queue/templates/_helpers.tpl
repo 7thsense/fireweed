@@ -108,6 +108,14 @@ True when the pod needs a local data volume (filesystem log or durable local pro
 {{- end -}}
 
 {{/*
+Node-local NVMe hostPath for the projection volume. Persistent volumes are
+opt-in and mutually exclusive. With both off, the volume is an emptyDir.
+*/}}
+{{- define "fireweed-queue.volumeIsLocalNvme" -}}
+{{- and (eq (include "fireweed-queue.needsLocalVolume" .) "true") .Values.storage.volume.localNvme.enabled (not .Values.persistence.enabled) -}}
+{{- end -}}
+
+{{/*
 Fail closed when a multi-replica deployment is not using a replica-safe shared
 profile. Local filesystem object-log storage stays single-replica only.
 
@@ -115,13 +123,16 @@ Durability/control-plane rules (not a hard-coded SQLite projection):
   log=s3 (shared durable command log)
   controlPlane=postgres (ownership)
   projection is pod-local rebuildable (turso)
-  persistence.enabled=false (emptyDir so each pod keeps a private projection image)
+  persistence.enabled=false (each pod keeps a private projection on local NVMe or emptyDir)
 */}}
 {{- define "fireweed-queue.validateReplicaProfile" -}}
 {{- $replicas := int .Values.replicaCount -}}
 {{- $s3Log := eq (include "fireweed-queue.logIsS3" .) "true" -}}
 {{- $localProj := eq (include "fireweed-queue.projectionIsPodLocalRebuildable" .) "true" -}}
 {{- $shared := and $s3Log (eq .Values.storage.controlPlane.backend "postgres") $localProj -}}
+{{- if and .Values.persistence.enabled .Values.storage.volume.localNvme.enabled -}}
+{{- fail "persistence.enabled and storage.volume.localNvme.enabled are mutually exclusive; local NVMe is the default and a persistent volume is opt-in" -}}
+{{- end -}}
 {{- if gt $replicas 1 -}}
 {{- if not $shared -}}
 {{- fail "replicaCount > 1 requires storage.log.backend=s3, storage.controlPlane.backend=postgres, a pod-local rebuildable projection (turso), and persistence.enabled=false" -}}

@@ -240,7 +240,9 @@ assert_memory_log_contract() {
     assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
     assert_projection_path_contract "$rendered" "$projection"
     if [[ "$projection" == "turso" ]]; then
-        assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC for durable local projection"
+        assert_contains "$rendered" 'hostPath:' "node-local NVMe for the Turso projection"
+        assert_contains "$rendered" 'path: /mnt/nvme/fireweed' "default NVMe host path"
+        assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "networked PVC is opt-in"
         assert_contains "$rendered" 'name: storage' "storage volume for durable local projection"
     fi
     assert_no_fixture_credentials "$rendered" "memory/${projection} rendered manifest"
@@ -254,7 +256,9 @@ assert_filesystem_cell_contract() {
     assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "filesystem"' "filesystem log axis"
     assert_contains "$rendered" "FIREWEED_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "filesystem object-log root"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'hostPath:' "node-local NVMe for the local volume"
+    assert_contains "$rendered" 'path: /mnt/nvme/fireweed' "default NVMe host path"
+    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "networked PVC is opt-in"
     assert_contains "$rendered" 'name: storage' "storage volume"
     assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "filesystem volume mount"
     assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy objectlog store env on first-class filesystem"
@@ -310,7 +314,9 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_not_contains "$rendered" 'FIREWEED_OWNER_ID:' "static shared owner identity"
     assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT' "shared object-log root"
     assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "shared PVC"
-    assert_contains "$rendered" 'emptyDir: {}' "pod-local projection volume"
+    assert_contains "$rendered" 'hostPath:' "pod-local NVMe projection volume"
+    assert_contains "$rendered" 'path: /mnt/nvme/fireweed' "default NVMe host path"
+    assert_contains "$rendered" 'subPathExpr: $(POD_NAME)' "per-pod NVMe subdirectory"
     assert_no_fixture_credentials "$rendered" "shared S3/postgres rendered manifest"
 }
 
@@ -325,7 +331,9 @@ assert_postgres_contract() {
     assert_contains "$rendered" 'secretKeyRef:' "postgres Secret reference"
     assert_projection_path_contract "$rendered" "$projection"
     if [[ "$projection" == "turso" ]]; then
-        assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC for durable local projection"
+        assert_contains "$rendered" 'hostPath:' "node-local NVMe for the Turso projection"
+        assert_contains "$rendered" 'path: /mnt/nvme/fireweed' "default NVMe host path"
+        assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "networked PVC is opt-in"
         assert_contains "$rendered" 'name: storage' "storage volume for durable local projection"
     fi
     assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
@@ -459,7 +467,10 @@ helm_defaults_to_turso_projection() {
     assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "s3"' "default log axis"
     assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "turso"' "default projection axis"
     assert_contains "$rendered" 'FIREWEED_TURSO_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.turso"' "default turso path in ConfigMap"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "default PVC for turso projection"
+    assert_contains "$rendered" 'hostPath:' "default node-local NVMe for the Turso projection"
+    assert_contains "$rendered" 'path: /mnt/nvme/fireweed' "default NVMe host path"
+    assert_contains "$rendered" 'subPathExpr: $(POD_NAME)' "per-pod NVMe subdirectory"
+    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "networked PVC is not the default"
     assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "default volume mount"
     assert_no_fixture_credentials "$rendered" "default turso render"
     rm -f "$rendered" "$values_default"
@@ -566,7 +577,8 @@ main() {
     fi
     assert_contains "$scaled_turso" 'FIREWEED_PROJECTION_BACKEND: "turso"' "multi-replica turso projection"
     assert_contains "$scaled_turso" 'FIREWEED_TURSO_PROJECTION_PATH:' "multi-replica turso path"
-    assert_contains "$scaled_turso" 'emptyDir: {}' "pod-local emptyDir for multi-replica turso"
+    assert_contains "$scaled_turso" 'hostPath:' "pod-local NVMe for multi-replica turso"
+    assert_contains "$scaled_turso" 'subPathExpr: $(POD_NAME)' "per-pod NVMe subdirectory"
     rm -f "$scaled_turso"
 
     echo "--- helm package ---"

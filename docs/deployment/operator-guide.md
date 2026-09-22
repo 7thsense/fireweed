@@ -188,7 +188,8 @@ Use with `storage.controlPlane.backend=postgres` for multi-replica ownership
 and atomic create-only publication authority when the S3 implementation lacks
 that primitive. Pair with a rebuildable local projection
 (`storage.projection.backend=turso`, `persistence.enabled=false`) so each pod
-rebuilds from the shared log.
+rebuilds from the shared log. The Turso file lives on node-local NVMe
+(`storage.volume.localNvme.hostPath`, default `/mnt/nvme/fireweed`).
 
 Object-log authority is **`NativeConditionalWrite` only**. The endpoint must
 **enforce** create-only PutObject (`If-None-Match: *` / equivalent). Open fails
@@ -289,8 +290,8 @@ chart only renders Secret references.
 
 The deployment spans three failure domains: S3 holds durable log objects,
 Postgres owns atomic object publication plus shared leases and fencing, and each
-pod holds only a rebuildable Turso projection in `emptyDir`. Losing a pod or
-its local volume triggers a projection rebuild. Losing access to S3 or Postgres
+pod holds only a rebuildable Turso projection on node-local NVMe. Losing a pod or
+its local disk triggers a projection rebuild. Losing access to S3 or Postgres
 is an availability event and must fail closed; neither another pod nor its local
 projection file substitutes for those shared authorities. Spread replicas across
 nodes or zones according to the availability policy of the S3 and Postgres

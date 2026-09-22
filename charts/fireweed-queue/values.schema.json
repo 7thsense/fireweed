@@ -495,12 +495,30 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "mountPath"
+            "mountPath",
+            "localNvme"
           ],
           "properties": {
             "mountPath": {
               "type": "string",
               "minLength": 1
+            },
+            "localNvme": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "enabled",
+                "hostPath"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "hostPath": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
             }
           }
         }

@@ -32,7 +32,8 @@ variants on top of that matrix.
 renders `FIREWEED_OBJECT_LOG_S3_*`,
 `FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL`, and `FIREWEED_ADVERTISE_ADDR` from the pod
 IP, uses `replicaCount=3`, and keeps pod-local rebuildable projections
-(`turso`) private via `emptyDir` rather than a shared RWO PVC.
+(`turso`) private on node-local NVMe (`hostPath` `/mnt/nvme/fireweed`, one
+subdirectory per pod) rather than a shared RWO PVC.
 Multi-replica validation uses durability/control-plane rules (shared S3 log +
 postgres ownership + pod-local projection), not a hard-coded SQLite projection.
 The PostgreSQL DSN is both the shared queue control plane and the atomic
