@@ -24,8 +24,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fireweed::{
-    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_memory, open_objectlog,
-    open_postgres_runtime,
+    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_objectlog,
+    open_postgres_runtime, open_product,
 };
 use fireweed_bench::{
     FLOOR_ITEMS_PER_HR, FLOOR_ITEMS_PER_SEC, OpStats, Shape, SystemClock, all_shapes, bench_qdef,
@@ -254,7 +254,7 @@ where
 
 async fn run_memory(cfg: &Config) {
     run_shapes(cfg, "memory", LOG_FAMILY, true, || {
-        open_memory(Arc::new(SystemClock))
+        open_product(Arc::new(SystemClock))
     })
     .await;
     if cfg.has("recovery") {
@@ -471,7 +471,7 @@ async fn report_recovery(
 async fn density(cfg: &Config) {
     println!("\nqueue density (single node, memory backend, minimal shape):");
     let shape = all_shapes()[0]; // minimal
-    let fireweed = open_memory(Arc::new(SystemClock));
+    let fireweed = open_product(Arc::new(SystemClock));
     let cold_each = 100u64;
     let create_start = Instant::now();
     for i in 0..cfg.queues {

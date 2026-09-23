@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use fireweed::{
-    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_memory, open_objectlog,
-    open_postgres_runtime,
+    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_objectlog,
+    open_postgres_runtime, open_product,
 };
 use fireweed_bench::open_log_turso;
 use fireweed_bench::{Shape, SystemClock, all_shapes, bench_qdef, lifecycle, qkey};
@@ -64,7 +64,7 @@ fn run_one(backend: &str, fireweed: &Fireweed, shape: &Shape, supports_update: b
 #[test]
 fn lifecycle_over_shapes_memory() {
     for shape in all_shapes() {
-        let fireweed = open_memory(Arc::new(SystemClock));
+        let fireweed = open_product(Arc::new(SystemClock));
         run_one("memory", &fireweed, &shape, true);
     }
 }
@@ -94,15 +94,9 @@ fn lifecycle_over_shapes_objectlog() {
 
 #[test]
 fn lifecycle_over_shapes_postgres_log() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
+        "FIREWEED_PG_TEST_URL required for lifecycle_over_shapes_postgres_log (fail-closed live postgres; no LOUD skip)",
+    );
     for shape in all_shapes() {
         let schema = format!(
             "fireweed_e2e_log_{}_{}",
@@ -127,15 +121,9 @@ fn lifecycle_over_shapes_postgres_log() {
 
 #[test]
 fn lifecycle_over_shapes_postgres_relational() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
+        "FIREWEED_PG_TEST_URL required for lifecycle_over_shapes_postgres_relational (fail-closed live postgres; no LOUD skip)",
+    );
     for shape in all_shapes() {
         let schema = format!(
             "fireweed_e2e_rel_{}_{}",

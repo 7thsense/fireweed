@@ -18,7 +18,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use fireweed::{NewItem, open_memory};
+use fireweed::{NewItem, open_product};
 use fireweed_core::{
     EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
@@ -81,7 +81,7 @@ fn run_owner(
     items_per_queue: u64,
     batch: usize,
 ) -> Vec<f64> {
-    let fireweed = open_memory(Arc::new(SysClock));
+    let fireweed = open_product(Arc::new(SysClock));
     futures::executor::block_on(async {
         let mut per_queue_rates = Vec::with_capacity(queues_per_owner);
         for qi in 0..queues_per_owner {

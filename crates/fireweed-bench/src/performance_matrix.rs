@@ -318,7 +318,7 @@ mod tests {
         let shape = all_shapes()[0];
         let queue = qkey("matrix-unit");
         let result = futures::executor::block_on(run_repetition(
-            &open_memory(Arc::new(SystemClock)),
+            &open_product(Arc::new(SystemClock)),
             bench_qdef("bench", "matrix-unit", &shape),
             queue,
             &shape,
