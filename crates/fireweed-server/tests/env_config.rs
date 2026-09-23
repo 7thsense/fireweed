@@ -232,7 +232,8 @@ fn s3_env_builds_typed_shared_profile() {
 
 #[test]
 fn every_s3_projection_accepts_postgres_publication_authority() {
-    for projection in ["turso"] {
+    {
+        let projection = "turso";
         let config = Config::from_env(&env(&[
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -281,10 +282,11 @@ fn first_class_s3_log_backend_pairs_with_memory_and_turso() {
         ),
     ]));
     assert!(memory.is_err(), "s3 × memory is retired");
-    for (projection, extra) in [(
-        "turso",
-        Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
-    )] {
+    {
+        let (projection, extra) = (
+            "turso",
+            Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
+        );
         let mut pairs = vec![
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),

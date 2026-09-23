@@ -140,11 +140,6 @@ fn kafka_sink() -> ChangeRecordSinkConfig {
     }
 }
 
-#[cfg_attr(feature = "external-kafka", allow(dead_code))]
-#[cfg(not(feature = "external-kafka"))]
-const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
-     the default in-process embedded surface needs no endpoint";
-
 fn pg_url() -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
@@ -193,25 +188,6 @@ async fn drop_schema(url: &str, schema: &str) {
         }
     })
     .await;
-}
-
-async fn redis_xadd(addr: std::net::SocketAddr) {
-    let client = redis::Client::open(format!("redis://{addr}")).expect("redis url");
-    let mut con = client
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::new()
-                .set_response_timeout(Some(Duration::from_secs(10))),
-        )
-        .await
-        .expect("redis connect");
-    let _: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(1)
-        .query_async(&mut con)
-        .await
-        .expect("XADD");
 }
 
 async fn smoke_embedded_cell(mut config: Config, cell: &str) {
@@ -528,7 +504,7 @@ async fn p8c_residual_class_a_http_delivery_smoke_through_spawned_task() {
     let text = err.to_string();
     assert!(text.contains("s3") || text.contains("retired"), "{text}");
     let _ = std::fs::remove_dir_all(&log_path);
-    let _ = acceptor;
+    acceptor.abort();
 }
 
 // ── Per-axis cursor lifecycle fixtures (synthetic durable-log, no catalog replay) ─

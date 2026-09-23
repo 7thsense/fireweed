@@ -15,10 +15,7 @@ use fireweed::{
     SelectedMutation, SystemClock, TenantId, UtcTimestamp,
 };
 #[cfg(feature = "objectlog")]
-use fireweed::{
-    LogConfig, ObjectLogAuthority, ProjectionStoreConfig, RecoveryAction, RecoveryPolicy,
-    ResponseBarrier, SegmentConfig, StorageConfig,
-};
+use fireweed::{RecoveryAction, RecoveryPolicy};
 
 fn ts(seconds: i64) -> UtcTimestamp {
     UtcTimestamp::new(seconds, 0).unwrap()

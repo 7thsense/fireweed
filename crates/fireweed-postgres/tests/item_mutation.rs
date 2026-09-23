@@ -227,8 +227,14 @@ fn exact_replay_survives_reopen_and_unindexed_selector_is_authoritative() {
 
 #[test]
 fn invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_nothing() {
-    let url =
-        pg_url("invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_nothing");
+    let Some(url) =
+        pg_url("invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_nothing")
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
+        return;
+    };
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();

@@ -3061,6 +3061,9 @@ type ObjectLogEngine = AsyncComposedBackend<
 
 #[cfg(feature = "objectlog")]
 type GenerationJoins = Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>;
+/// Same-process claim replays keyed by request id: the claim work id and its leased set.
+#[cfg(feature = "objectlog")]
+type ClaimReplays = Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>;
 #[cfg(all(feature = "objectlog", test))]
 type MetricsSnapshotHook = Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>;
 
@@ -3097,7 +3100,7 @@ pub struct DerivedObjectLogTursoBackend {
     claim_work_ids: Arc<AtomicU64>,
     /// Same-process API-001 claim replay. Apply may still be in flight when the
     /// caller retries, so the leased set is remembered before Turso publishes it.
-    claim_replays: Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>,
+    claim_replays: ClaimReplays,
     /// This process owns the Turso writer. Item Claim SELECT and the FIFO
     /// rowid floor are sequenced here so the next generation can read the
     /// following slice without waiting for apply.

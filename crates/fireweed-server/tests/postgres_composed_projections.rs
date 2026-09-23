@@ -89,42 +89,6 @@ async fn drop_schema(url: &str, schema: &str) {
     .await;
 }
 
-async fn push_claim_finalize_over_resp(addr: std::net::SocketAddr) {
-    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-
-    let produced: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(7)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-
-    let reply: redis::streams::StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(reply.keys[0].ids.len(), 1, "claim returns the pushed item");
-    assert_eq!(reply.keys[0].ids[0].id, produced);
-
-    let acked: i64 = redis::cmd("XACK")
-        .arg("t1:q1")
-        .arg("g")
-        .arg(&produced)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(acked, 1, "finalize (ack) commits the claimed item");
-}
-
 /// Composed postgres-log + sqlite-projection backend, driven end to end under a real Tokio runtime: proves
 /// the `spawn_blocking` + whole-operation boundary covers this combo the same way it covers postgres/inmemory
 /// (no reactor-thread panic on the sync postgres `connect`/`recover`).

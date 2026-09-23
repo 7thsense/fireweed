@@ -3523,18 +3523,12 @@ mod byte_admission_wiring_tests {
     ) -> Config {
         let mut queue = queue_definition();
         queue.emit_change_records = true;
-        // Coherent Option ↔ barrier pairing: Some requires AsyncProjection (P3v).
-        let response_barrier = if async_projection.is_some() {
-            ResponseBarrierSpec::AsyncProjection
-        } else {
-            ResponseBarrierSpec::AsyncProjection
-        };
         Config::new(
             BackendSpec {
                 log,
                 projection,
                 control_plane: ControlPlaneSpec::InProcess,
-                response_barrier,
+                response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection,
             },
             0,
@@ -4591,48 +4585,6 @@ mod byte_admission_wiring_tests {
             config.validate_for_start(),
             Err(EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL))
         );
-        return;
-        let url = _url;
-        let schema = format!("fireweed_fs_pg_{}", std::process::id());
-        let mut client =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-                .expect("connect to create schema");
-        client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
-            .expect("create schema");
-        drop(client);
-
-        let scoped = if url.contains('?') {
-            format!("{url}&options=-csearch_path%3D{schema}")
-        } else {
-            format!("{url}?options=-csearch_path%3D{schema}")
-        };
-
-        let root = filesystem_tmp_root(&schema);
-        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build object-log PostgreSQL operation runtime");
-        let backend = runtime
-            .block_on(open_objectlog_filesystem_postgres_backend(
-                root.clone(),
-                &scoped,
-                segment_config,
-                0,
-                ResponseBarrierSpec::AsyncProjection,
-                None,
-            ))
-            .expect("construct filesystem×postgres");
-        drop(backend);
-        drop(runtime);
-
-        let _ = std::fs::remove_dir_all(&root);
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
     }
 
     fn s3_unit_spec(segment_config: SegmentConfig) -> ObjectLogSpec {
@@ -4750,146 +4702,7 @@ mod byte_admission_wiring_tests {
                 Err(EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL)),
                 "s3 × memory is not a public cell"
             );
-            return;
         }
-        let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("endpoint");
-        let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").expect("bucket");
-        let region = std::env::var("FIREWEED_S3_TEST_REGION").expect("region");
-        let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("access");
-        let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("secret");
-        let segments = SegmentConfig::new(262_144, 20).expect("valid segments");
-        let spec = AsyncProjectionSpec::new(13, 65_537, 7, 12_345, 4).expect("bounds");
-        let root = std::env::temp_dir().join(format!(
-            "fireweed-p3vs-s3-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("fixture root");
-
-        let mut opened = 0_usize;
-        for barrier in [
-            ResponseBarrierSpec::AsyncProjection,
-            ResponseBarrierSpec::AsyncProjection,
-        ] {
-            let async_spec = (barrier == ResponseBarrierSpec::AsyncProjection).then_some(spec);
-            let mem = open_objectlog_s3_memory_backend(
-                endpoint.clone(),
-                region.clone(),
-                bucket.clone(),
-                access.clone(),
-                secret.clone(),
-                segments,
-                0,
-                barrier,
-                async_spec,
-            )
-            .await
-            .expect("s3×memory barrier open");
-            drop(mem);
-            opened += 1;
-            eprintln!("P3vs PASS s3×memory barrier={barrier:?}");
-
-            #[cfg(feature = "postgres")]
-            {
-                let url = std::env::var("FIREWEED_PG_TEST_URL")
-                    .expect("FIREWEED_PG_TEST_URL is required for P3vs s3×postgres cells");
-                let schema = format!("fireweed_p3vs_{}_{:?}", std::process::id(), barrier)
-                    .replace(['(', ')', ' '], "_");
-                // Sync postgres client owns a private runtime — keep setup/teardown off this reactor.
-                let url_for_setup = url.clone();
-                let schema_for_setup = schema.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut client = fireweed_postgres::connect(
-                        fireweed_postgres::PostgresConnectConfig::new(&url_for_setup),
-                    )
-                    .expect("connect to create schema");
-                    client
-                        .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema_for_setup};"))
-                        .expect("create schema");
-                })
-                .await
-                .expect("schema create join");
-                let scoped = if url.contains('?') {
-                    format!("{url}&options=-csearch_path%3D{schema}")
-                } else {
-                    format!("{url}?options=-csearch_path%3D{schema}")
-                };
-                let backend = open_objectlog_s3_postgres_backend(
-                    endpoint.clone(),
-                    region.clone(),
-                    bucket.clone(),
-                    access.clone(),
-                    secret.clone(),
-                    &scoped,
-                    segments,
-                    0,
-                    barrier,
-                    async_spec,
-                )
-                .await
-                .expect("s3×postgres barrier open");
-                drop(backend);
-                opened += 1;
-                eprintln!("P3vs PASS s3×postgres barrier={barrier:?}");
-                let url_for_teardown = url.clone();
-                let schema_for_teardown = schema.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(mut client) = fireweed_postgres::connect(
-                        fireweed_postgres::PostgresConnectConfig::new(&url_for_teardown),
-                    ) {
-                        let _ = client.batch_execute(&format!(
-                            "DROP SCHEMA IF EXISTS {schema_for_teardown} CASCADE;"
-                        ));
-                    }
-                })
-                .await;
-            }
-        }
-
-        #[cfg(feature = "postgres")]
-        assert_eq!(
-            opened, 4,
-            "memory and PostgreSQL helpers; native Turso is covered through public S3 construction"
-        );
-        #[cfg(not(feature = "postgres"))]
-        assert_eq!(opened, 2, "memory × 2 barriers without postgres feature");
-
-        // Unsupported endpoint negative: unreachable host fails at open, not via retired pending.
-        let unreachable = match open_objectlog_s3_memory_backend(
-            "http://127.0.0.1:1".into(),
-            region,
-            bucket,
-            access,
-            secret,
-            segments,
-            0,
-            ResponseBarrierSpec::AsyncProjection,
-            Some(spec),
-        )
-        .await
-        {
-            Ok(_) => panic!("unreachable S3 endpoint must fail at open"),
-            Err(error) => error,
-        };
-        let text = format!("{unreachable:?}");
-        assert!(
-            !text.contains("s3-async-projection-pending"),
-            "retired pending must not surface: {text}"
-        );
-        assert!(
-            !matches!(
-                unreachable,
-                EngineError::Invalid("s3-async-projection-pending")
-            ),
-            "retired pending pin must not return: {unreachable:?}"
-        );
-        eprintln!("P3vs PASS unreachable S3 endpoint negative under AsyncProjection");
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -4909,19 +4722,11 @@ mod byte_admission_wiring_tests {
 #[cfg(test)]
 mod class_b_memory_log_tests {
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use fireweed::{
-        ClientItemKey, ConfigSecret, EligibilityPolicy, LogConfig, NewItem, OrderingMode,
-        PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-        ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey, RecoveryPolicy,
-        RecurrencePolicy, ResponseBarrier, RetryPolicy, SegmentConfig, StorageConfig, SystemClock,
-        TenantId, open, open_async,
-    };
-    use fireweed_conformance::matrix_classes::{
-        CellConformanceClaims, MatrixCell, MatrixLog, MatrixProjection, ProductDurabilityClass,
-        register_suite_claims, validate_claims_for_cell,
+        ConfigSecret, LogConfig, ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier,
+        SegmentConfig, StorageConfig,
     };
 
     static FIXTURE_ORDINAL: AtomicU64 = AtomicU64::new(0);
@@ -4939,18 +4744,6 @@ mod class_b_memory_log_tests {
                 Self::Memory => "memory",
                 Self::Turso => "turso",
                 Self::Postgres => "postgres",
-            }
-        }
-
-        fn is_durable(self) -> bool {
-            !matches!(self, Self::Memory)
-        }
-
-        fn matrix_projection(self) -> MatrixProjection {
-            match self {
-                Self::Memory => MatrixProjection::Memory,
-                Self::Turso => MatrixProjection::Turso,
-                Self::Postgres => MatrixProjection::Postgres,
             }
         }
     }
@@ -4992,43 +4785,6 @@ mod class_b_memory_log_tests {
         )
     }
 
-    fn queue_definition(slug: &str) -> QueueDefinition {
-        QueueDefinition {
-            tenant_id: TenantId::new("class-b-t0t3").unwrap(),
-            queue_id: QueueId::new(slug).unwrap(),
-            priority_model: PriorityModel {
-                kind: PriorityModelKind::Int64,
-                direction: PriorityDirection::Ascending,
-                tie_breaker: PriorityTieBreaker::CreatedSequence,
-            },
-            ordering_mode: OrderingMode::Strict,
-            max_rank_error: 0,
-            progress_bound_ms: 60_000,
-            eligibility_policy: EligibilityPolicy::default(),
-            cohort_policy: None,
-            recurrence: RecurrencePolicy::default(),
-            request_id_retention_ms: 3_600_000,
-            client_item_key_retention_ms: 3_600_000,
-            terminal_retention_ms: 3_600_000,
-            max_lease_duration_ms: 60_000,
-            retry_policy: RetryPolicy { max_attempts: 3 },
-            max_push_batch_size: 100,
-            max_claim_batch_size: 100,
-            max_eligible_group_size: None,
-            secondary_indexes: vec![],
-            entity_schema: None,
-            typed_indexes: vec![],
-            emit_change_records: false,
-        }
-    }
-
-    fn queue_key(slug: &str) -> QueueKey {
-        QueueKey::new(
-            TenantId::new("class-b-t0t3").unwrap(),
-            QueueId::new(slug).unwrap(),
-        )
-    }
-
     fn build_class_b_config(proj: ClassBProjection, root: &Path, slug: &str) -> StorageConfig {
         let projection = match proj {
             ClassBProjection::Memory => ProjectionStoreConfig::Memory,
@@ -5056,50 +4812,6 @@ mod class_b_memory_log_tests {
         }
     }
 
-    /// T3 hard rule: Class B must never register or validate `durable_log_replay`.
-    fn assert_class_b_t3_claims(proj: ClassBProjection) {
-        let cell = MatrixCell::new(MatrixLog::Memory, proj.matrix_projection());
-        assert_eq!(
-            cell.product_durability_class(),
-            ProductDurabilityClass::ClassB,
-            "{} must be product Class B",
-            cell.id()
-        );
-        let max = cell.claims();
-        assert!(
-            !max.durable_log_replay,
-            "Class B {} must not allow durable_log_replay in max claims",
-            cell.id()
-        );
-        // Allowed claims for Class B (core + optional projection_reopen; never log-replay).
-        let allowed = CellConformanceClaims {
-            core: true,
-            durable_log_replay: false,
-            projection_reopen: proj.is_durable(),
-            relational_reconnect: false,
-            eventual_apply: false,
-            in_process_log_read: true,
-        };
-        validate_claims_for_cell(cell, &allowed)
-            .unwrap_or_else(|e| panic!("{} T3 validate_claims: {e}", cell.id()));
-        register_suite_claims(cell, allowed)
-            .unwrap_or_else(|e| panic!("{} T3 register_suite_claims: {e}", cell.id()));
-
-        // Explicit ban: attempting durable_log_replay must fail registration.
-        let illegal = CellConformanceClaims {
-            durable_log_replay: true,
-            ..allowed
-        };
-        let err = validate_claims_for_cell(cell, &illegal)
-            .expect_err("Class B must reject durable_log_replay claim");
-        assert_eq!(err.flag, "durable_log_replay");
-        assert!(
-            err.reason.contains("Class B") || err.reason.contains("memory log"),
-            "ban reason should name Class B / memory log: {}",
-            err.reason
-        );
-    }
-
     /// Full T0–T3 body for one Class B cell via [`fireweed::open`] / [`fireweed::open_async`].
     async fn run_class_b_cell_t0_t3(proj: ClassBProjection) {
         let cell_id = format!("memory×{}", proj.name());
@@ -5118,9 +4830,6 @@ mod class_b_memory_log_tests {
 
         let root = FixtureRoot::new(proj.name());
         let slug = queue_slug(proj);
-        let definition = queue_definition(&slug);
-        let key = queue_key(&slug);
-        let clock = Arc::new(SystemClock);
 
         // --- T0 Construct ---
         let cfg = build_class_b_config(proj, root.path(), &slug);
@@ -5136,175 +4845,6 @@ mod class_b_memory_log_tests {
             text.contains(fireweed::RETIRED_STORAGE_CELL),
             "{cell_id} must fail closed with RETIRED_STORAGE_CELL, got {text}"
         );
-        return;
-        // Normative construct path: `fireweed::open(StorageConfig)` (sync). Postgres projection
-        // may touch the sync client under an active Tokio runtime — use open_async there.
-        let fireweed = if matches!(proj, ClassBProjection::Postgres) {
-            open_async(cfg.clone(), Arc::clone(&clock) as _)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} T0 open_async(StorageConfig): {e:?}"))
-        } else {
-            open(cfg.clone(), Arc::clone(&clock) as _)
-                .unwrap_or_else(|e| panic!("{cell_id} T0 open(StorageConfig): {e:?}"))
-        };
-
-        // --- T1 Lifecycle: create_queue → push → claim → complete; push → claim → fail ---
-        fireweed
-            .create_queue(definition.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 create_queue: {e:?}"));
-
-        let complete_id = fireweed
-            .push(
-                &key,
-                NewItem {
-                    client_item_key: Some(ClientItemKey::new(format!("{slug}_complete")).unwrap()),
-                    priority: Some(PriorityValue::Int64(10)),
-                    ..NewItem::default()
-                },
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 push(complete path): {e:?}"));
-
-        let claimed = fireweed
-            .claim(&key, 1, 30_000)
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
-        assert_eq!(claimed.len(), 1, "{cell_id} T1 claim batch");
-        assert_eq!(claimed[0].item_id, complete_id);
-
-        fireweed
-            .complete(&key, claimed.iter().map(|item| item.item_id))
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 complete: {e:?}"));
-
-        // Reject path: fail dead-letters a second claimed item.
-        let fail_id = fireweed
-            .push(
-                &key,
-                NewItem {
-                    client_item_key: Some(ClientItemKey::new(format!("{slug}_fail")).unwrap()),
-                    priority: Some(PriorityValue::Int64(11)),
-                    ..NewItem::default()
-                },
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 push(fail path): {e:?}"));
-        let fail_claimed = fireweed
-            .claim(&key, 1, 30_000)
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 claim(fail path): {e:?}"));
-        assert_eq!(fail_claimed.len(), 1);
-        assert_eq!(fail_claimed[0].item_id, fail_id);
-        fireweed
-            .fail(&key, fail_claimed.iter().map(|item| item.item_id))
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 fail/reject: {e:?}"));
-
-        let metrics_after_t1 = fireweed
-            .metrics(&key)
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 metrics: {e:?}"));
-        assert_eq!(
-            metrics_after_t1.complete, 1,
-            "{cell_id} T1: one completed item"
-        );
-        assert_eq!(
-            metrics_after_t1.failed, 1,
-            "{cell_id} T1: one failed (rejected) item"
-        );
-        assert_eq!(
-            metrics_after_t1.pending, 0,
-            "{cell_id} T1: no pending after finalize+fail"
-        );
-        assert_eq!(
-            metrics_after_t1.leased, 0,
-            "{cell_id} T1: no leased after finalize+fail"
-        );
-
-        // Seed a pending item for T2 reopen (not claimed).
-        let _pending_id = fireweed
-            .push(
-                &key,
-                NewItem {
-                    client_item_key: Some(ClientItemKey::new(format!("{slug}_pending")).unwrap()),
-                    priority: Some(PriorityValue::Int64(20)),
-                    ..NewItem::default()
-                },
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 seed push: {e:?}"));
-        assert_eq!(
-            fireweed.metrics(&key).await.unwrap().pending,
-            1,
-            "{cell_id}: seed pending before process death"
-        );
-
-        drop(fireweed);
-
-        // --- T2 Reopen (class-correct) ---
-        let reopened = open_async(cfg, clock as _)
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 reopen open(StorageConfig): {e:?}"));
-
-        if proj.is_durable() {
-            // Projection-only recover: pending + terminal states survive; no log rebuild claim.
-            let m = reopened
-                .metrics(&key)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} T2 metrics (durable proj): {e:?}"));
-            assert_eq!(
-                m.pending, 1,
-                "{cell_id} T2: durable projection keeps 1 pending (projection-only reopen, not log replay)"
-            );
-            assert_eq!(
-                m.complete, 1,
-                "{cell_id} T2: complete survives via projection"
-            );
-            assert_eq!(
-                m.failed, 1,
-                "{cell_id} T2: failed/rejected survives via projection"
-            );
-
-            let claimed = reopened
-                .claim(&key, 1, 30_000)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
-            assert_eq!(claimed.len(), 1, "{cell_id} T2 claim pending");
-            reopened
-                .complete(&key, claimed.iter().map(|item| item.item_id))
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} T2 complete: {e:?}"));
-        } else {
-            // memory×memory: fully process-local. Empty reopen is correct Class B semantics.
-            let outcome = reopened
-                .create_queue(definition)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} T2 create_queue (process-local): {e:?}"));
-            assert!(
-                outcome.created,
-                "{cell_id} T2: reopen must not recover prior queue (process-local Class B)"
-            );
-            let m = reopened
-                .metrics(&key)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} T2 metrics (process-local): {e:?}"));
-            assert_eq!(
-                m.pending, 0,
-                "{cell_id} T2 memory×memory: empty reopen is OK (Class B process-local)"
-            );
-            assert_eq!(m.complete, 0, "{cell_id} T2: no durable complete state");
-            assert_eq!(m.failed, 0, "{cell_id} T2: no durable failed state");
-            eprintln!(
-                "class_b T0-T3: {cell_id} T2 process-local empty reopen (documented Class B)"
-            );
-        }
-
-        drop(reopened);
-
-        // --- T3 Contract: claims ban + projection durability already exercised in T2 ---
-        assert_class_b_t3_claims(proj);
-        eprintln!("class_b T0-T3: {cell_id} passed (no durable_log_replay claim)");
     }
 
     #[tokio::test]
@@ -5488,66 +5028,6 @@ mod postgres_log_matrix_tests {
             config.validate_for_start(),
             Err(EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL))
         );
-        return;
-        let Some(url) = pg_url() else {
-            return;
-        };
-        let cell = "postgres×memory";
-        let schema = schema_name("mem");
-        {
-            let backend = fireweed_postgres::composed_postgres_backend_in_schema(&url, &schema)
-                .unwrap_or_else(|e| panic!("{cell} T0 open: {e:?}"));
-            futures::executor::block_on(async {
-                lifecycle_push_claim_complete(&backend, cell).await;
-                let pending = backend
-                    .push(&shard(), vec![PushSpec::default()], ts(10), None)
-                    .await
-                    .expect("T2 seed push");
-                assert_eq!(pending.len(), 1);
-                assert_eq!(
-                    backend.metrics(&shard()).await.unwrap().pending,
-                    1,
-                    "{cell}: seed pending before drop"
-                );
-            });
-            drop(backend);
-        }
-
-        // T2 Class A reopen: same durable log schema, fresh in-memory projection rebuilt from log.
-        let reopened = fireweed_postgres::composed_postgres_backend_in_schema(&url, &schema)
-            .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
-        futures::executor::block_on(async {
-            assert_eq!(
-                reopened.metrics(&shard()).await.unwrap().pending,
-                1,
-                "{cell} T2 Class A: durable log recovers 1 pending"
-            );
-            let claimed = reopened
-                .claim(claim_req(1, 40_000, 20))
-                .await
-                .expect("T2 claim");
-            assert_eq!(claimed.items.len(), 1, "{cell} T2 claim");
-            reopened
-                .finalize(
-                    &shard(),
-                    vec![FinalizeOutcome::new(
-                        claimed.items[0].item_id,
-                        FinalizeKind::Complete,
-                    )],
-                    ts(21),
-                    None,
-                )
-                .await
-                .expect("T2 finalize");
-            assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 0);
-        });
-        drop(reopened);
-
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
     }
 
     /// T0–T2: postgres×postgres — product unified relational backend (server arm).
@@ -5576,64 +5056,6 @@ mod postgres_log_matrix_tests {
             config.validate_for_start(),
             Err(EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL))
         );
-        return;
-        let Some(url) = pg_url() else {
-            return;
-        };
-        let cell = "postgres×postgres";
-        let schema = schema_name("pgpg");
-        {
-            let backend =
-                fireweed_postgres::PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .unwrap_or_else(|e| panic!("{cell} T0 open: {e:?}"));
-            futures::executor::block_on(async {
-                lifecycle_push_claim_complete(&backend, cell).await;
-                let pending = backend
-                    .push(&shard(), vec![PushSpec::default()], ts(10), None)
-                    .await
-                    .expect("T2 seed");
-                assert_eq!(pending.len(), 1);
-                assert_eq!(backend.metrics(&shard()).await.unwrap().pending, 1);
-            });
-            drop(backend);
-        }
-
-        {
-            let reopened =
-                fireweed_postgres::PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
-            futures::executor::block_on(async {
-                assert_eq!(
-                    reopened.metrics(&shard()).await.unwrap().pending,
-                    1,
-                    "{cell} T2 Class A: pending recovers via durable postgres relational store"
-                );
-                let claimed = reopened
-                    .claim(claim_req(1, 40_000, 20))
-                    .await
-                    .expect("T2 claim");
-                assert_eq!(claimed.items.len(), 1);
-                reopened
-                    .finalize(
-                        &shard(),
-                        vec![FinalizeOutcome::new(
-                            claimed.items[0].item_id,
-                            FinalizeKind::Complete,
-                        )],
-                        ts(21),
-                        None,
-                    )
-                    .await
-                    .expect("T2 finalize");
-            });
-            drop(reopened);
-        }
-
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
     }
 
     fn record_outcome(

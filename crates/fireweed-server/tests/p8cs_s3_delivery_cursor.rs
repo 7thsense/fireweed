@@ -510,39 +510,6 @@ async fn p8cs_s3_memory_http_delivery_smoke_through_spawned_task() {
     .expect("s3 × memory is not a public cell");
     let text = err.to_string();
     assert!(text.contains("s3") || text.contains("retired"), "{text}");
-    return;
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let acceptor = tokio::spawn(accept_one_http_ok(listener));
-
-    let def = qdef_named("p8cs", &unique_tag("http"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let mut config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
-        },
-        vec![def],
-    );
-    config.change_record_sink = http_sink(port);
-    let server = start(config)
-        .await
-        .expect("s3×memory HTTP delivery must start");
-    redis_xadd(server.addr(), &stream).await;
-
-    tokio::time::timeout(Duration::from_secs(10), acceptor)
-        .await
-        .expect("HTTP sink must receive at least one delivery from the spawned emitter")
-        .expect("acceptor join");
-
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

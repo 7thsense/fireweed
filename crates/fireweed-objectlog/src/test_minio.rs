@@ -328,11 +328,11 @@ fn stop_tmpfs_test_minio() {
         }
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }
-    if let Ok(mut child) = CHILD.lock() {
-        if let Some(mut owned) = child.take() {
-            let _ = owned.kill();
-            let _ = owned.wait();
-        }
+    if let Ok(mut child) = CHILD.lock()
+        && let Some(mut owned) = child.take()
+    {
+        let _ = owned.kill();
+        let _ = owned.wait();
     }
 }
 
