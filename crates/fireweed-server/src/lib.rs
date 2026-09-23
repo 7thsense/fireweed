@@ -4554,15 +4554,6 @@ mod byte_admission_wiring_tests {
     #[cfg(feature = "postgres")]
     #[test]
     fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
-        let Some(_url) = std::env::var("FIREWEED_PG_TEST_URL")
-            .ok()
-            .filter(|url| !url.is_empty())
-        else {
-            eprintln!(
-                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-            );
-            return;
-        };
         let config = Config::new(
             BackendSpec {
                 log: LogSpec::ObjectLog(ObjectLogSpec::local(
@@ -4816,18 +4807,6 @@ mod class_b_memory_log_tests {
     async fn run_class_b_cell_t0_t3(proj: ClassBProjection) {
         let cell_id = format!("memory×{}", proj.name());
 
-        if matches!(proj, ClassBProjection::Postgres)
-            && std::env::var("FIREWEED_PG_TEST_URL")
-                .ok()
-                .filter(|url| !url.is_empty())
-                .is_none()
-        {
-            eprintln!(
-                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-            );
-            return;
-        }
-
         let root = FixtureRoot::new(proj.name());
         let slug = queue_slug(proj);
 
@@ -4942,16 +4921,9 @@ mod postgres_log_matrix_tests {
             .expect("authorize run-owned TP-003 output")
     }
 
-    fn pg_url() -> Option<String> {
-        match std::env::var("FIREWEED_PG_TEST_URL") {
-            Ok(url) if !url.is_empty() => Some(url),
-            _ => {
-                eprintln!(
-                    "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-                );
-                None
-            }
-        }
+    fn pg_url() -> String {
+        std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
     }
 
     fn schema_name(prefix: &str) -> String {

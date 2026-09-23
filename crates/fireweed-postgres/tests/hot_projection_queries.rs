@@ -109,15 +109,8 @@ fn assert_commit_transition_is_supported(backend: &PostgresRelationalBackend) {
 
 #[test]
 fn hot_projection_capabilities_are_explicit() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
     let backend = PostgresBackend::connect_in_schema(&url, &fresh_schema())
         .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
@@ -141,15 +134,8 @@ fn hot_projection_capabilities_are_explicit() {
 
 #[test]
 fn filtered_lifecycle_metrics_conformance() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
     futures::executor::block_on(async {
         fireweed_conformance::scenarios::filtered_lifecycle_metrics_are_exact_and_read_only(|| {
@@ -167,15 +153,8 @@ fn filtered_lifecycle_metrics_conformance() {
 
 #[test]
 fn read_as_of_unavailable_relational() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
     let relational = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
         .expect("connect postgres-relational (is FIREWEED_PG_TEST_URL a live DB?)");
@@ -206,15 +185,8 @@ fn read_as_of_unavailable_relational() {
 
 #[test]
 fn commit_transition_capabilities_are_explicit() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
     let postgres = PostgresBackend::connect_in_schema(&url, &fresh_schema())
         .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");

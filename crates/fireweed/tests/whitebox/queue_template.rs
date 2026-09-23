@@ -254,15 +254,8 @@ async fn durable_public_constructors_reopen_idempotently() {
 #[cfg(feature = "postgres")]
 #[test]
 fn postgres_public_constructors_and_composed_reopen_idempotently() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

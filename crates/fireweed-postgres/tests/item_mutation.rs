@@ -17,17 +17,10 @@ use fireweed_engine::{
 };
 use fireweed_postgres::PostgresRelationalBackend;
 
-fn pg_url(test: &str) -> Option<String> {
+fn pg_url(test: &str) -> String {
     let _ = test;
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            eprintln!(
-                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-            );
-            None
-        }
-    }
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 fn fresh_schema() -> String {
@@ -114,13 +107,7 @@ fn selector_request(request_id: &str, evaluated_at: i64) -> ItemMutationRequest 
 
 #[test]
 fn exact_replay_survives_reopen_and_unindexed_selector_is_authoritative() {
-    let Some(url) = pg_url("exact_replay_survives_reopen_and_unindexed_selector_is_authoritative")
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = pg_url("exact_replay_survives_reopen_and_unindexed_selector_is_authoritative");
     let schema = fresh_schema();
     let shard = fireweed_conformance::shard();
     let request = selector_request("pg-mutation-replay", 10);
@@ -227,14 +214,8 @@ fn exact_replay_survives_reopen_and_unindexed_selector_is_authoritative() {
 
 #[test]
 fn invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_nothing() {
-    let Some(url) =
-        pg_url("invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_nothing")
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url =
+        pg_url("invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_nothing");
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
@@ -303,12 +284,7 @@ fn invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_not
 
 #[test]
 fn lease_invalidation_clears_durable_and_live_lease_state_once() {
-    let Some(url) = pg_url("lease_invalidation_clears_durable_and_live_lease_state_once") else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = pg_url("lease_invalidation_clears_durable_and_live_lease_state_once");
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();

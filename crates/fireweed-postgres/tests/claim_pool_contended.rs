@@ -45,15 +45,8 @@ fn claim_req(max: usize, worker: &str, now: i64) -> ClaimRequest {
 
 #[test]
 fn claim_pool_concurrent_workers_partition_items_via_skip_locked() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     // 4 claim connections so two workers never share one SYNC client Mutex for claim.
     let backend = Arc::new(
