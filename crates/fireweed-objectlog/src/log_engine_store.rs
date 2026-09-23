@@ -2764,9 +2764,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Epoch is checked under the queue permit. The permit is dropped before the PUT.
+    /// Queue metadata permit, then drop, then `engine.produce`. There is no
+    /// store-wide produce lock left to invert against that permit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn objectlog_metadata_permit_covers_every_produce_path() {
+    async fn objectlog_metadata_produce_lock_order_is_global() {
         let production = production_source();
         let produce_immediate = between(
             production,

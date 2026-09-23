@@ -116,7 +116,7 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 
 ### S0 settlement-aware same-SHA controls
 
-S3a landed: metadata-permit→produce-lock is the terminal object-log produce suffix, with permit-held high-water and append/epoch-acquire/emission-cursor wait counters. No new rate row.
+S3a landed, then the store-wide produce lock was removed. The terminal order is the queue metadata permit, dropped before `engine.produce`, so a second produce can join the seal. Append, epoch-acquire, and emission-cursor waits are still recorded. No new rate row.
 
 Post-S3a/S3r/S7/S3p N=10k `filesystem--turso` inflight=8 on `sindri` (`1787891324`, SHA after those slices plus Class-S BeforePosition abort): settled P1 1122/s, P2 14512/s, P3 9839/s, P4 664/s. T1/T2 remain unmet. P4 is retrying `object-log-append-pre-position` Backpressure.
 
