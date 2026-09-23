@@ -21,8 +21,7 @@ use bytes::Bytes;
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
     AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, ProjectionSnapshot, QueueKey,
-    SnapshotRef,
+    DurabilityClass, EngineError, EngineResult, ProjectionSnapshot, QueueKey, SnapshotRef,
 };
 use object_log::{
     BlobStore, Durability, FlushConfig, LocalBlobStore, LogEngine, ManifestSequencer,
@@ -32,6 +31,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::s3_create_only::S3CreateOnlyPut;
+
+fn fresh_writer_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("fw{nanos:x}{n:x}")
+}
 
 fn store_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(e.to_string())
@@ -284,8 +293,6 @@ impl LockWaitCounters {
     }
 }
 
-
-
 struct LocalEngineRegistration {
     engine: Weak<LocalEngine>,
     epochs: Weak<EpochCache>,
@@ -437,11 +444,12 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let sequencer = ManifestSequencer::open(Arc::clone(&blob), "fwmeta/manifest/")
             .await
             .map_err(store_err)?;
-        let candidate = Arc::new(LogEngine::new(
+        let candidate = Arc::new(LogEngine::new_with_writer(
             Arc::clone(&blob),
             Arc::new(sequencer),
             flush,
             "fwlog/",
+            fresh_writer_id(),
         ));
         let candidate_epochs = Arc::new(Mutex::new(HashMap::new()));
         let candidate_high_water = Arc::new(Mutex::new(HashMap::new()));
@@ -661,11 +669,12 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ManifestSequencer::open(Arc::clone(&blob), format!("{meta_prefix}manifest/"))
                 .await
                 .map_err(store_err)?;
-        let engine = Arc::new(LogEngine::new(
+        let engine = Arc::new(LogEngine::new_with_writer(
             Arc::clone(&blob),
             Arc::new(sequencer),
             flush,
             data_prefix,
+            fresh_writer_id(),
         ));
         let store_tag = store_tag_for_authority(&definition_authority);
         let store = Self {
@@ -695,7 +704,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
     }
 }
 
-impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
+impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     /// Local filesystem appends can prioritize dependent-call latency without
     /// changing the object packing policy of remote blob stores.
     pub fn uses_local_filesystem(&self) -> bool {
@@ -962,6 +971,13 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
     }
 
     async fn store_epoch(&self, shard: &QueueKey, epoch: u64) -> EngineResult<()> {
+        let partition = partition_key(shard);
+        let expected = epoch.saturating_sub(1);
+        let sequencer = Arc::clone(self.engine.sequencer());
+        tokio::task::spawn_blocking(move || sequencer.fence_epoch(&partition, expected, epoch))
+            .await
+            .map_err(|error| store_err(format!("epoch fence task failed: {error}")))?
+            .map_err(store_err)?;
         let pk = partition_key(shard).0;
         self.epochs.lock().expect("epochs").insert(pk, epoch);
         self.put_json(&self.epoch_key(shard), &EpochDoc { epoch })
@@ -1329,12 +1345,13 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             let produce_started = Instant::now();
             let outcome = self
                 .engine
-                .produce(
+                .produce_at_epoch(
                     partition_key(shard),
                     payload,
                     record_count,
                     (),
                     Durability::Sequenced,
+                    expected_epoch,
                 )
                 .await
                 .map_err(store_err)?;
@@ -2767,7 +2784,9 @@ mod tests {
         let drop_idx = produce_immediate
             .find("drop(metadata)")
             .expect("produce_immediate must drop the queue permit before the object PUT");
-        let produce_idx = produce_immediate.find(".produce(").unwrap();
+        let produce_idx = produce_immediate
+            .find(".produce_at_epoch(")
+            .expect("produce_immediate must call engine.produce_at_epoch");
         let high_water_idx = produce_immediate.find("advance_high_water_held(").unwrap();
         assert!(
             permit_lock_idx < epoch_check_idx
@@ -2801,10 +2820,12 @@ mod tests {
         assert_eq!(
             production
                 .lines()
-                .filter(|line| line.contains(".produce(") && !line.contains("produce_immediate"))
+                .filter(|line| {
+                    line.contains(".produce_at_epoch(") && !line.contains("produce_immediate")
+                })
                 .count(),
             1,
-            "engine.produce must exist only inside produce_immediate"
+            "engine.produce_at_epoch must exist only inside produce_immediate"
         );
 
         let held = between(
@@ -3118,7 +3139,9 @@ mod tests {
             .expect("other shard produce")
             .unwrap()
             .unwrap();
-        let driver_batch = driver_outcome.apply_batch.expect("driver publishes its commands");
+        let driver_batch = driver_outcome
+            .apply_batch
+            .expect("driver publishes its commands");
         assert_eq!(driver_batch.commands.len(), 2);
         let follower_batch = follower_outcome
             .apply_batch
@@ -3265,8 +3288,14 @@ mod tests {
             let log = Arc::clone(&log);
             let shard = shard.clone();
             handles.push(tokio::spawn(async move {
-                log.packed_append_owned(shard, vec![pause_env(&format!("post-{i}"))], epoch, None, i == 2)
-                    .await
+                log.packed_append_owned(
+                    shard,
+                    vec![pause_env(&format!("post-{i}"))],
+                    epoch,
+                    None,
+                    i == 2,
+                )
+                .await
             }));
         }
         let mut post_errors = 0;

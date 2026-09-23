@@ -2226,8 +2226,8 @@ dependencies = [
 
 [[package]]
 name = "object-log"
-version = "0.3.2"
-source = "git+https://github.com/7thsense/object-log.git?tag=v0.3.2#8961edf4d89bd235ba004a8bcee5239c3ef85aad"
+version = "0.3.3"
+source = "git+https://github.com/7thsense/object-log.git?tag=v0.3.3#e79b4f4ef1b23d9d5a9c4c4586ede92ecb6ecb31"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
