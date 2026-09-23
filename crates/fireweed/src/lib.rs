@@ -125,66 +125,74 @@ pub struct ActiveScopeDiscovery {
 #[cfg(test)]
 extern crate self as fireweed;
 
-/// Controllable clock for in-crate tests. Not a public projection.
+/// In-crate test fixtures. They exist only under `cfg(test)`, so no downstream crate can name them.
 #[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct ManualClock {
-    seconds: std::sync::atomic::AtomicI64,
-}
+mod test_support {
+    /// Controllable clock for in-crate tests. Not a public projection.
+    #[derive(Debug)]
+    pub(crate) struct ManualClock {
+        seconds: std::sync::atomic::AtomicI64,
+    }
 
-#[cfg(test)]
-impl ManualClock {
-    pub(crate) fn at(seconds: i64) -> Self {
-        Self {
-            seconds: std::sync::atomic::AtomicI64::new(seconds),
+    impl ManualClock {
+        pub(crate) fn at(seconds: i64) -> Self {
+            Self {
+                seconds: std::sync::atomic::AtomicI64::new(seconds),
+            }
+        }
+
+        pub(crate) fn set(&self, seconds: i64) {
+            self.seconds
+                .store(seconds, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    pub(crate) fn set(&self, seconds: i64) {
-        self.seconds
-            .store(seconds, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-impl fireweed_engine::Clock for ManualClock {
-    fn now(&self) -> fireweed_core::UtcTimestamp {
-        fireweed_core::UtcTimestamp::new(self.seconds.load(std::sync::atomic::Ordering::SeqCst), 0)
+    impl fireweed_engine::Clock for ManualClock {
+        fn now(&self) -> fireweed_core::UtcTimestamp {
+            fireweed_core::UtcTimestamp::new(
+                self.seconds.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+            )
             .expect("valid timestamp")
+        }
     }
-}
 
-#[cfg(test)]
-pub(crate) type TursoMemoryBackend = turso_compose::AtomicTursoBackend<
-    fireweed_engine::InProcessLogStore<fireweed_projection::MemoryLog>,
->;
+    pub(crate) type TursoMemoryBackend = crate::turso_compose::AtomicTursoBackend<
+        fireweed_engine::InProcessLogStore<fireweed_projection::MemoryLog>,
+    >;
 
-#[cfg(test)]
-pub(crate) fn turso_memory_backend() -> TursoMemoryBackend {
-    turso_compose::assemble_memory_log_turso_in_memory().expect("turso :memory: projection")
+    pub(crate) fn turso_memory_backend() -> TursoMemoryBackend {
+        crate::turso_compose::assemble_memory_log_turso_in_memory()
+            .expect("turso :memory: projection")
+    }
+
+    #[cfg(feature = "objectlog")]
+    pub(crate) fn open_objectlog_turso_files(
+        log_root: &std::path::Path,
+        projection_path: &std::path::Path,
+    ) -> crate::turso_compose::DerivedObjectLogTursoBackend {
+        std::fs::create_dir_all(log_root).expect("object-log root");
+        if let Some(parent) = projection_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).expect("turso projection parent");
+        }
+        let log = fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::ObjectLogEngineStore::open_local(
+                log_root,
+                fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
+            ),
+        )
+        .expect("open local object log");
+        crate::turso_compose::assemble_objectlog_turso(log, projection_path.to_path_buf(), None)
+            .expect("object log × turso file")
+    }
 }
 
 #[cfg(all(test, feature = "objectlog"))]
-pub(crate) fn open_objectlog_turso_files(
-    log_root: &std::path::Path,
-    projection_path: &std::path::Path,
-) -> turso_compose::DerivedObjectLogTursoBackend {
-    std::fs::create_dir_all(log_root).expect("object-log root");
-    if let Some(parent) = projection_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).expect("turso projection parent");
-    }
-    let log = fireweed_objectlog::block_on_objectlog(
-        fireweed_objectlog::ObjectLogEngineStore::open_local(
-            log_root,
-            fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
-        ),
-    )
-    .expect("open local object log");
-    turso_compose::assemble_objectlog_turso(log, projection_path.to_path_buf(), None)
-        .expect("object log × turso file")
-}
+pub(crate) use test_support::open_objectlog_turso_files;
+#[cfg(test)]
+pub(crate) use test_support::{ManualClock, TursoMemoryBackend, turso_memory_backend};
 
 #[cfg(test)]
 #[path = "../tests/whitebox/active_scope_routing.rs"]
@@ -6157,12 +6165,9 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_postgres_async_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let Some(url) = postgres_test_url() else {
-            eprintln!(
-                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-            );
-            return Ok(());
-        };
+        let url = postgres_test_url().expect(
+            "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
+        );
         // Isolate via URL query? Prefer schema-bearing open_postgres_runtime_async-equivalent
         // by using a dedicated DB name suffix is hard; use open_async with schema instead when
         // available. open_postgres_async uses the default schema — unique queue id avoids clash.
