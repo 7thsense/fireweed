@@ -6220,7 +6220,7 @@ mod tests {
             expected_epoch: None,
 
             request_id: None,
-});
+        });
         futures::executor::block_on(claim).expect("claim observed terminal item");
 
         let finalize = backend.finalize(

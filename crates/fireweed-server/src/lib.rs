@@ -3569,11 +3569,7 @@ mod byte_admission_wiring_tests {
     fn validate_for_start_rejects_retired_storage_cells() {
         let retired = EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL);
         let cases = [
-            (
-                "memory-inmemory",
-                LogSpec::Memory,
-                ProjectionSpec::InMemory,
-            ),
+            ("memory-inmemory", LogSpec::Memory, ProjectionSpec::InMemory),
             (
                 "filesystem-inmemory",
                 validation_object_log("retired-fs-mem"),
@@ -3586,18 +3582,11 @@ mod byte_admission_wiring_tests {
                     path: PathBuf::from("/tmp/fireweed-retired-fs.turso"),
                 },
             ),
-            (
-                "s3-inmemory",
-                validation_s3_log(),
-                ProjectionSpec::InMemory,
-            ),
+            ("s3-inmemory", validation_s3_log(), ProjectionSpec::InMemory),
         ];
         for (name, log, projection) in cases {
-            let config = startup_validation_config(
-                log,
-                projection,
-                Some(AsyncProjectionSpec::default()),
-            );
+            let config =
+                startup_validation_config(log, projection, Some(AsyncProjectionSpec::default()));
             assert_eq!(config.validate_for_start(), Err(retired.clone()), "{name}");
         }
 
@@ -4294,7 +4283,10 @@ mod byte_admission_wiring_tests {
             local_error,
             EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL)
         );
-        assert!(!root.exists(), "retired rejection must run before filesystem I/O");
+        assert!(
+            !root.exists(),
+            "retired rejection must run before filesystem I/O"
+        );
 
         let s3_error = tokio::time::timeout(
             Duration::from_millis(100),

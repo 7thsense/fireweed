@@ -32,7 +32,9 @@ fn pg_url(test: &str) -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
             None
         }
     }
@@ -97,7 +99,9 @@ fn claim_request(shard: &QueueKey, token: &str, now: i64) -> ClaimRequest {
 #[test]
 fn batch_update_is_set_based_at_sizes_1_100_and_1000() {
     let Some(url) = pg_url("batch_update_is_set_based_at_sizes_1_100_and_1000") else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     for size in [1_usize, 100, 1_000] {
@@ -159,8 +163,11 @@ fn batch_update_is_set_based_at_sizes_1_100_and_1000() {
 
 #[test]
 fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
-    let Some(url) = pg_url("batch_update_preserves_order_and_idempotency_across_mixed_outcomes") else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = pg_url("batch_update_preserves_order_and_idempotency_across_mixed_outcomes")
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();
@@ -346,7 +353,9 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
 #[test]
 fn disabled_gate_update_is_invalid_without_aborting_valid_sibling() {
     let Some(url) = pg_url("disabled_gate_update_is_invalid_without_aborting_valid_sibling") else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();
@@ -399,8 +408,11 @@ fn disabled_gate_update_is_invalid_without_aborting_valid_sibling() {
 
 #[test]
 fn stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay() {
-    let Some(url) = pg_url("stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay") else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = pg_url("stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay")
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();

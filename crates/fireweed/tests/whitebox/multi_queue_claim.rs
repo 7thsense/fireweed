@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::ManualClock;
 use fireweed::{
     ClaimAt, Clock, ControlPlaneConfig, EngineError, EngineResult, MultiQueueClaimLimits,
     MultiQueueClaimTarget, NewItem, OrderingMode, OwnerId, Ownership, PriorityDirection,
@@ -13,7 +14,6 @@ use fireweed_engine::{
     AcquireOutcome, InMemoryControlPlane, OwnerEndpointAdvertisement, OwnerResolution,
     QueueControlPlane, QueueLease,
 };
-use crate::ManualClock;
 
 fn definition(queue_id: &str) -> QueueDefinition {
     QueueDefinition {

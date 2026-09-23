@@ -49,7 +49,9 @@ fn require_pg_url() -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
             None
         }
     }
@@ -581,7 +583,9 @@ async fn s3_turso_strict_public_interface_lifecycle() {
 async fn s3_postgres_strict_p7_method_parity() {
     let _s3 = require_s3_env();
     let Some(pg) = require_pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let ns = unique_ns("s3-postgres");

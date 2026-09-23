@@ -48,7 +48,8 @@ fn require_p1s_s3() -> Option<(String, String, String, String, String)> {
         );
         return None;
     };
-    let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let region =
+        std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
     let Some(access) = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
         .ok()
         .filter(|value| !value.is_empty())
@@ -204,9 +205,7 @@ fn production_s3_config_parses_public_s3_memory_and_turso_cells() {
         "memory",
         "t1:s3--memory",
     );
-    let error = Config::from_env(&env)
-        .err()
-        .expect("s3×memory is retired");
+    let error = Config::from_env(&env).err().expect("s3×memory is retired");
     assert!(
         error.to_string().contains("turso") || error.to_string().contains("retired"),
         "{error}"

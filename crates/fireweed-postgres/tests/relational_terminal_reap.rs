@@ -90,8 +90,13 @@ fn terminal_position(url: &str, schema: &str, item_id: &str) -> CommandPosition 
 
 #[test]
 fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema("in");
@@ -144,8 +149,13 @@ fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
 
 #[test]
 fn terminal_reap_opt_out_ignores_cursor() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema("out");

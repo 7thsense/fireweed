@@ -45,8 +45,13 @@ fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
 
 #[test]
 fn reap_waits_for_emission_cursor_on_opted_in_queue() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema("in");
@@ -101,8 +106,13 @@ fn reap_waits_for_emission_cursor_on_opted_in_queue() {
 
 #[test]
 fn reap_ignores_emission_cursor_for_opted_out_queue() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema("out");

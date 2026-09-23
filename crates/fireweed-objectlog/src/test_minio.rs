@@ -120,7 +120,8 @@ fn minio_health_live(endpoint: &str) -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let host = host_port.split('/').next().unwrap_or(host_port);
-    let request = format!("GET /minio/health/live HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET /minio/health/live HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }

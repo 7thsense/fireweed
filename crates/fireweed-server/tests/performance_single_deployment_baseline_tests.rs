@@ -964,8 +964,13 @@ fn production_wrapper_batches_10k_through_native_ports() {
 
 #[test]
 fn performance_single_deployment_baseline_tests() {
-    let Some(observer_url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(observer_url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     // A designated PERF environment may emit RELEASE-tier evidence. Without it, this is a SMOKE lane that

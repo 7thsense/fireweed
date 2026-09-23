@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::ManualClock;
 use fireweed::{
     BoundedMutationRequest, Bytes, ClaimByQueryRequest, ClaimRef, CommitEntry, CommitRequest,
     CommitResponseBarrier, ComposedProjectionConfig, ComposedStorageConfig, CompoundIndexDef,
@@ -24,7 +25,6 @@ use fireweed::{
     TenantId, TypedValue, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::DurabilityClass;
-use crate::ManualClock;
 use fireweed_objectlog::segmented::S3BlobStore;
 use postgres::{Client, NoTls};
 
@@ -789,8 +789,13 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn asynchronous_open_is_safe_inside_tokio() {
-    let Some(url) = runtime_env("PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = runtime_env("PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let (root, schema) = unique_fixture("tokio_async_open");

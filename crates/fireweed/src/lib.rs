@@ -149,11 +149,8 @@ impl ManualClock {
 #[cfg(test)]
 impl fireweed_engine::Clock for ManualClock {
     fn now(&self) -> fireweed_core::UtcTimestamp {
-        fireweed_core::UtcTimestamp::new(
-            self.seconds.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-        )
-        .expect("valid timestamp")
+        fireweed_core::UtcTimestamp::new(self.seconds.load(std::sync::atomic::Ordering::SeqCst), 0)
+            .expect("valid timestamp")
     }
 }
 
@@ -178,10 +175,12 @@ pub(crate) fn open_objectlog_turso_files(
     {
         std::fs::create_dir_all(parent).expect("turso projection parent");
     }
-    let log = fireweed_objectlog::block_on_objectlog(fireweed_objectlog::ObjectLogEngineStore::open_local(
-        log_root.to_path_buf(),
-        fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
-    ))
+    let log = fireweed_objectlog::block_on_objectlog(
+        fireweed_objectlog::ObjectLogEngineStore::open_local(
+            log_root.to_path_buf(),
+            fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
+        ),
+    )
     .expect("open local object log");
     turso_compose::assemble_objectlog_turso(log, projection_path.to_path_buf(), None)
         .expect("object log × turso file")

@@ -22,7 +22,9 @@ fn pg_url(test: &str) -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
             None
         }
     }
@@ -112,8 +114,11 @@ fn selector_request(request_id: &str, evaluated_at: i64) -> ItemMutationRequest 
 
 #[test]
 fn exact_replay_survives_reopen_and_unindexed_selector_is_authoritative() {
-    let Some(url) = pg_url("exact_replay_survives_reopen_and_unindexed_selector_is_authoritative") else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = pg_url("exact_replay_survives_reopen_and_unindexed_selector_is_authoritative")
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();
@@ -181,7 +186,7 @@ fn exact_replay_survives_reopen_and_unindexed_selector_is_authoritative() {
                 expected_epoch: None,
 
                 request_id: None,
-})
+            })
             .await
             .unwrap();
         assert_eq!(
@@ -293,7 +298,9 @@ fn invalid_request_rolls_back_items_gates_and_idempotency_and_dry_run_writes_not
 #[test]
 fn lease_invalidation_clears_durable_and_live_lease_state_once() {
     let Some(url) = pg_url("lease_invalidation_clears_durable_and_live_lease_state_once") else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();
@@ -324,7 +331,7 @@ fn lease_invalidation_clears_durable_and_live_lease_state_once() {
                 expected_epoch: None,
 
                 request_id: None,
-})
+            })
             .await
             .unwrap();
 

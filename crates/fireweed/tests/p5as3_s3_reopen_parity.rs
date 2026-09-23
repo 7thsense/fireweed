@@ -60,7 +60,9 @@ fn require_pg_url() -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
             None
         }
     }
@@ -478,7 +480,9 @@ async fn s3_turso_class_a_reopen_and_recovery_replay() {
 async fn s3_postgres_class_a_reopen_and_recovery_replay() {
     require_p1s_native_cas_provenance();
     let Some(pg) = require_pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let ns = unique_ns("s3-postgres-reopen");
@@ -517,7 +521,9 @@ async fn s3_turso_native_cas_failover_reopen() {
 async fn s3_postgres_native_cas_failover_reopen() {
     require_p1s_native_cas_provenance();
     let Some(pg) = require_pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let ns = unique_ns("s3-postgres-failover");

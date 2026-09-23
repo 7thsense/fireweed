@@ -424,7 +424,7 @@ async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
             expected_epoch: Some(stale_epoch),
 
             request_id: None,
-})
+        })
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EpochFenced));
@@ -692,7 +692,7 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
             expected_epoch: None,
 
             request_id: None,
-})
+        })
         .await
         .unwrap();
     assert_eq!(claimed.items.len(), 1);
@@ -2266,7 +2266,7 @@ async fn change_record_sink_delivers() {
             expected_epoch: None,
 
             request_id: None,
-})
+        })
         .await
         .unwrap();
     assert_eq!(pushed[0], claim.items[0].item_id);
@@ -2343,7 +2343,7 @@ async fn change_record_sink_failure_isolation() {
             expected_epoch: None,
 
             request_id: None,
-})
+        })
         .await
         .unwrap();
     assert_eq!(pushed[0], claim.items[0].item_id);

@@ -16,7 +16,9 @@ fn pg_url() -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
             None
         }
     }
@@ -35,7 +37,9 @@ fn fresh_schema(tag: &str) -> String {
 #[test]
 fn composed_postgres_projection_rebuilds_from_durable_log_on_reconnect() {
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     futures::executor::block_on(reopen_inner(url));
@@ -44,7 +48,9 @@ fn composed_postgres_projection_rebuilds_from_durable_log_on_reconnect() {
 #[test]
 fn postgres_log_pagination_resumes_after_last_returned_position() {
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let mut log = PostgresLog::connect_in_schema(&url, &fresh_schema("pagination"))
@@ -89,7 +95,9 @@ fn postgres_log_pagination_resumes_after_last_returned_position() {
 #[test]
 fn postgres_log_batches_sequence_allocation_and_pages_across_insert_chunks() {
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let mut log = PostgresLog::connect_in_schema(&url, &fresh_schema("batched_append"))
@@ -145,7 +153,9 @@ fn postgres_log_batches_sequence_allocation_and_pages_across_insert_chunks() {
 #[test]
 fn composed_postgres_log_preserves_request_id_idempotency() {
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     futures::executor::block_on(
@@ -161,7 +171,9 @@ fn composed_postgres_log_preserves_request_id_idempotency() {
 #[test]
 fn postgres_log_cross_chunk_append_is_one_atomic_transaction() {
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema("batched_atomicity");

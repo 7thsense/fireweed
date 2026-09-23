@@ -97,8 +97,13 @@ async fn raw_resp(address: std::net::SocketAddr, parts: &[&str]) -> String {
 
 #[test]
 fn two_service_runtimes_share_owner_membership_and_monotonic_epochs() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
 
@@ -177,8 +182,13 @@ fn two_service_runtimes_share_owner_membership_and_monotonic_epochs() {
 
 #[test]
 fn peer_endpoint_discovery_returns_one_hop_moved() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
 

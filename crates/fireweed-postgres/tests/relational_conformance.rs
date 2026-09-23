@@ -39,8 +39,13 @@ fn fresh_schema() -> String {
 
 #[test]
 fn v0193_upgrade_backfills_item_id_high_water_before_counter_restore() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();
@@ -586,8 +591,13 @@ fn projection_index_validation_covers_legacy_compact_fields_and_replacements() {
     use fireweed_engine::{ProjectionStore, PushSpec, build_push_items};
     use fireweed_postgres::PostgresRelational;
 
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = fresh_schema();

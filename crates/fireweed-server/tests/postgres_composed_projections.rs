@@ -130,8 +130,13 @@ async fn push_claim_finalize_over_resp(addr: std::net::SocketAddr) {
 /// (no reactor-thread panic on the sync postgres `connect`/`recover`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_turso_combo_runs_under_tokio() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = format!("fireweed_pgsqlite_{}", std::process::id());
@@ -167,10 +172,7 @@ async fn postgres_turso_combo_runs_under_tokio() {
     .err()
     .expect("postgres × turso is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     let _ = std::fs::remove_file(&sqlite_path);
     drop_schema(&url, &schema).await;
 }
@@ -178,8 +180,13 @@ async fn postgres_turso_combo_runs_under_tokio() {
 /// Unified atomic postgres/postgres backend through the production fixed-pool selector.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_postgres_combo_runs_under_tokio() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = format!("fireweed_pgpg_atomic_{}", std::process::id());
@@ -207,9 +214,6 @@ async fn postgres_postgres_combo_runs_under_tokio() {
     .err()
     .expect("postgres × postgres is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     drop_schema(&url, &schema).await;
 }

@@ -1156,7 +1156,7 @@ async fn xreadgroup<B: RespBackend, H: RespHooks>(
         expected_epoch,
 
         request_id: None,
-};
+    };
     match backend.claim(req).await {
         Ok(claimed) if claimed.items.is_empty() => Resp::NullArray, // Redis returns nil when none
         Ok(claimed) => {

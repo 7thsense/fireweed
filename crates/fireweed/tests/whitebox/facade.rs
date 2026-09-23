@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+use crate::ManualClock;
 use bytes::Bytes;
 use fireweed::{
     ClaimAt, ClaimCompatibility, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig,
@@ -19,7 +20,6 @@ use fireweed_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -435,7 +435,10 @@ async fn upsert_dedups_on_client_item_key_over_memory() {
 async fn composed_objectlog_supports_atomic_upsert() {
     let root = std::env::temp_dir().join(format!("fireweed-facade-objlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let backend = Arc::new(crate::open_objectlog_turso_files(&root, &root.join("projection.turso")));
+    let backend = Arc::new(crate::open_objectlog_turso_files(
+        &root,
+        &root.join("projection.turso"),
+    ));
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
@@ -805,7 +808,10 @@ async fn composed_objectlog_supports_read_your_write_field_mutation() {
         std::env::temp_dir().join(format!("fireweed-facade-uf-objlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let fireweed = RuntimeCore::new(
-        Arc::new(crate::open_objectlog_turso_files(&root, &root.join("projection.turso"))),
+        Arc::new(crate::open_objectlog_turso_files(
+            &root,
+            &root.join("projection.turso"),
+        )),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();

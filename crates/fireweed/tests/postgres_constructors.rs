@@ -75,8 +75,13 @@ fn schema_url(url: &str, schema: &str) -> String {
 /// working multi-instance owner (acquires + fences) without the client naming either.
 #[test]
 fn open_postgres_coordinated_builds_a_working_owner() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let unique = std::time::SystemTime::now()
@@ -116,8 +121,13 @@ fn open_postgres_coordinated_builds_a_working_owner() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn open_postgres_runtime_async_is_safe_inside_tokio() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let unique = std::time::SystemTime::now()

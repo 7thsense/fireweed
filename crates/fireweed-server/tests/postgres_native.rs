@@ -250,9 +250,7 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
     .await
     .expect("start() must not hang on a refused postgres connection");
 
-    let err = result
-        .err()
-        .expect("postgres × memory must not start");
+    let err = result.err().expect("postgres × memory must not start");
     let text = err.to_string();
     assert!(
         text.contains("s3") || text.contains("retired"),
@@ -277,10 +275,7 @@ async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_slee
     .err()
     .expect("postgres is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     return;
     let Ok(base_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
@@ -515,13 +510,15 @@ async fn postgres_native_live_push_claim_ack_over_resp() {
     .err()
     .expect("postgres is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     return;
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     // A unique search_path so reruns and parallel suites never collide on the shared queue tables.

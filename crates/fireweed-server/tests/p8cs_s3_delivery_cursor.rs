@@ -75,7 +75,8 @@ fn require_s3() -> Option<(String, String, String, String, String)> {
         );
         return None;
     };
-    let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let region =
+        std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
     let Some(access) = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
         .ok()
         .filter(|value| !value.is_empty())
@@ -101,7 +102,9 @@ fn pg_url() -> Option<String> {
     match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+            eprintln!(
+                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+            );
             None
         }
     }
@@ -458,7 +461,9 @@ async fn p8cs_s3_postgres_embedded_emitter_lifecycle() {
         return;
     };
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = unique_tag("s3_pg").replace('-', "_");
@@ -504,10 +509,7 @@ async fn p8cs_s3_memory_http_delivery_smoke_through_spawned_task() {
     .err()
     .expect("s3 × memory is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     return;
     let _guard = P8CS_SERVER_LOCK.lock().await;
     let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
@@ -550,7 +552,9 @@ async fn p8cs_s3_postgres_http_delivery_smoke_through_spawned_task() {
         return;
     };
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = unique_tag("s3_http_pg").replace('-', "_");
@@ -599,8 +603,8 @@ async fn p8cs_external_kafka_feature_off_rejects_s3_class_a() {
     #[cfg(not(feature = "external-kafka"))]
     {
         let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
+            return;
+        };
         let mut config = base_config(
             BackendSpec {
                 log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
@@ -756,7 +760,9 @@ async fn p8cs_s3_postgres_cursor_failover_resume() {
         return;
     };
     let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
     let schema = unique_tag("s3_pg_cur").replace('-', "_");

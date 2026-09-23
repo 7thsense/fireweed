@@ -224,8 +224,13 @@ fn rps(claimed: usize, ms: u128) -> f64 {
 /// `claim_pool_size`; the pool only adds acquisition/lock-wait overhead on top).
 #[test]
 fn cohort_claim_pool_drains_same_queue_without_loss() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
 
@@ -276,8 +281,13 @@ fn cohort_claim_pool_drains_same_queue_without_loss() {
 /// `Mutex<Inner>` no matter which queue each caller targets.
 #[test]
 fn cohort_claim_one_queue_per_worker_scales_with_workers() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
+    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
+        );
         return;
     };
 

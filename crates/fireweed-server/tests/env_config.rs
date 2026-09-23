@@ -50,8 +50,7 @@ fn public_config_errors_name_the_fireweed_namespace() {
     let Err(error) = Config::from_env(&with_public_s3(&[(
         "FIREWEED_BOOTSTRAP_QUEUES",
         "missing-colon",
-    )]))
-    else {
+    )])) else {
         panic!("invalid Fireweed configuration must fail closed");
     };
     assert!(error.to_string().contains("FIREWEED_BOOTSTRAP_QUEUES"));
