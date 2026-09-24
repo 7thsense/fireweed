@@ -1,0 +1,3 @@
+{"phase":"bulk_load","layout":"L2","n_queues":100,"rows_completed_per_queue":950000,"rows_initial_per_queue":50000,"total_rows":100000000,"elapsed_ms":1682993.3,"rows_per_sec":59418}
+{"phase":"bulk_index_build","layout":"L2","elapsed_ms":5515506.0}
+{"phase":"bulk_build_final","layout":"L2","main_bytes":45093863424,"checkpoint_ms":34744.7,"total_build_ms":7233244.1}

@@ -1,0 +1,46 @@
+Methodology finding: sustained write transactions under wal_autocheckpoint=0
+without periodic Passive checkpointing cause catastrophic I/O amplification.
+
+Repro (BEFORE the fix — spikes/claim-scale/src/main.rs before maybe_passive_checkpoint
+was added): `spike run l1 <db> 4000 6000` with FW_SPIKE_CLAIM_TRIALS=15
+FW_SPIKE_CLAIM_REPS=20 FW_SPIKE_CLAIM_BATCH=10 (300 claim + 300 finish
+transactions total, 10 rows each, no other tuning). Killed after 270s
+(4m30s) of 98% single-core CPU with zero claim-trial output ever printed.
+
+/proc/<pid>/io at kill time (single process, ~270s wall time):
+  rchar:            157,566,928,331   (~157.6 GB logical read)
+  wchar:            174,908,956,340   (~174.9 GB logical write)
+  syscr:                 38,468,523   (38.5M read syscalls)
+  syscw:                    367,830
+  write_bytes:       16,901,668,864   (~16.9 GB physical write)
+  cancelled_write_bytes: 14,184,288,256  (~14.2 GB write later discarded)
+
+For ~300KB of logical row changes (300 transactions x 10 rows x ~1KB/row),
+this is a >50,000x physical-write amplification factor — consistent with an
+O(WAL size) (or worse) cost per transaction once the never-checkpointed WAL
+crosses some internal threshold, i.e. O(n^2) total cost over n sustained
+transactions.
+
+Root cause identified from crates/fireweed-turso/src/local.rs:3403 ("Idle/close
+and a process-wide Passive cap bound the WAL instead") and
+crates/fireweed-turso/src/projection.rs:127-176 (`maybe_passive_checkpoint_log_backed`,
+`LOG_BACKED_CHECKPOINT_TRY_BYTES = 400 * 1024 * 1024`, `LOG_BACKED_CHECKPOINT_MUST_BYTES
+= 500 * 1024 * 1024`, called after every apply batch at projection.rs:3987,4039):
+production NEVER lets the WAL grow unbounded even with wal_autocheckpoint=0 —
+it issues an explicit `PRAGMA wal_checkpoint(PASSIVE)` after every apply once
+the on-disk WAL file exceeds 400 MiB. This spike's initial harness had no such
+call (a single checkpoint after ingest, then an uncapped operations loop),
+which is NOT how production actually behaves under sustained write load.
+
+Fix: `spikes/claim-scale/src/main.rs` `maybe_passive_checkpoint()`, called
+after every write-transaction commit (ingest batch, claim, finish, extend,
+sweep), mirroring the TRY threshold exactly (this spike is single-connection,
+so it skips production's two-permit semaphore and MUST tier — no multi-store
+stampede risk here).
+
+Repro AFTER the fix (same workload, same host, same load): completed in 28.9s
+wall time (real), with claim and finish latency flat and stable across all 15
+trials (claim p50 ~250-320us, finish p50 ~80-90ms, both trial-to-trial stable,
+no escalation) — see results/probe2-l1-manual-check (not saved as a numbered
+scale run; superseded by the real l1-1m/l1-10m/l2-1m/l2-10m runs which all
+carry this fix from the start).

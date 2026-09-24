@@ -1,0 +1,14 @@
+{"phase":"finding8_start_size","layout":"L2","main_bytes":45093863424,"wal_bytes":0,"selected_queues":[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]}
+{"phase":"finding8_claim","layout":"L2","trial":1,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":488.9,"claims_per_sec":204.5,"p50_us":1483.8,"p99_us":94559.5}
+{"phase":"finding8_finish","layout":"L2","trial":1,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":134.0,"finishes_per_sec":746.3,"p50_us":1335.0,"p99_us":1606.0}
+{"phase":"finding8_claim","layout":"L2","trial":2,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":216.7,"claims_per_sec":461.5,"p50_us":1544.6,"p99_us":2463.5}
+{"phase":"finding8_finish","layout":"L2","trial":2,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":136.2,"finishes_per_sec":734.2,"p50_us":1341.3,"p99_us":1800.9}
+{"phase":"finding8_claim","layout":"L2","trial":3,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":284.4,"claims_per_sec":351.6,"p50_us":1548.5,"p99_us":53601.2}
+{"phase":"finding8_finish","layout":"L2","trial":3,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":128.3,"finishes_per_sec":779.3,"p50_us":1278.3,"p99_us":1487.8}
+{"phase":"finding8_extend","layout":"L2","trial":1,"reps":20,"batch":1000,"queue_no":26,"elapsed_ms":2.3,"extends_per_sec":8805.1,"p50_us":101.1,"p99_us":260.0}
+{"phase":"finding8_extend","layout":"L2","trial":2,"reps":20,"batch":1000,"queue_no":33,"elapsed_ms":2.6,"extends_per_sec":7606.3,"p50_us":107.4,"p99_us":315.3}
+{"phase":"finding8_extend","layout":"L2","trial":3,"reps":20,"batch":1000,"queue_no":50,"elapsed_ms":2.3,"extends_per_sec":8846.9,"p50_us":95.5,"p99_us":252.4}
+{"phase":"finding8_sweep","layout":"L2","trial":1,"sweep_size":10000,"n_sweep_calls":1,"distinct_queues_touched":20,"claims_touched":100,"discovery_ms":0.13,"total_ms":100.25,"item_rows_reclaimed":10000}
+{"phase":"finding8_sweep","layout":"L2","trial":2,"sweep_size":10000,"n_sweep_calls":1,"distinct_queues_touched":20,"claims_touched":100,"discovery_ms":0.12,"total_ms":98.77,"item_rows_reclaimed":10000}
+{"phase":"finding8_sweep","layout":"L2","trial":3,"sweep_size":10000,"n_sweep_calls":1,"distinct_queues_touched":20,"claims_touched":100,"discovery_ms":0.11,"total_ms":98.92,"item_rows_reclaimed":10000}
+{"phase":"finding8_final_size","layout":"L2","main_bytes":45093900288,"checkpoint_ms":1516.5}
