@@ -4893,9 +4893,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "cd57ad4ca89d7567e4fb",
+        "id": "8bd2c4630ab386365128",
         "identity": "(\"source_revision\", row.source_revision.as_str()),",
-        "line": 80,
+        "line": 82,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e2_failover.rs",
         "status": "discovery_negative"
@@ -7469,9 +7469,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "239bdd5e49b97274b231",
+        "id": "6d2b792774ee4457bd30",
         "identity": "\"image\":${IMAGE@Q},\"image_id\":${IMAGE_ID@Q},\"source_revision\":${SOURCE_REV@Q},",
-        "line": 332,
+        "line": 345,
         "owner": "P15",
         "path": "scripts/perf/tp002-e2-failover-kind.sh",
         "status": "discovery_negative"
@@ -82246,7 +82246,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "b9d96c062c12b4afe622b3f55e731802697cf3b4a14826cc6077f4a062c2b0e1",
+  "source_inventory_sha256": "2a6d34b175300978afdf01fe17872dd912f4a38bb67d0df7bdab4dfa72457012",
   "workspaces": [
     {
       "listing_error_sha256": "",
