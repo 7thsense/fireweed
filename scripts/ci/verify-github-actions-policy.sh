@@ -6,7 +6,8 @@
 #   bash scripts/ci/verify-github-actions-policy.sh
 #
 # Context-aware rules:
-#   - Hosted fast lanes (ci.yml, pages.yml): no services/matrix/docker/kind/perf.
+#   - Hosted fast lanes (ci.yml, pages.yml): no services/matrix/docker/kind/perf. ci.yml may
+#     install the checksum-pinned RustFS binary through the S3 qualification script.
 #   - Focused turso.yml (P13t): only its fixed PostgreSQL/S3 correctness fixtures.
 #   - nightly.yml: manual extended lib tests; no services/perf.
 #   - release.yml: owned by P17r — no services/kind; Docker publication exception
@@ -40,7 +41,7 @@ fi
 # ---------------------------------------------------------------------------
 ci="${workflow_root}/ci.yml"
 grep -Fq 'timeout-minutes: 10' "${ci}"
-if rg -n 'services:|matrix:|cargo install|rustup toolchain install nightly|docker run|kind-helm|(^|[[:space:]/])release-gate\.sh([[:space:]]|$)|(^|[[:space:]/])nightly-gate\.sh([[:space:]]|$)|cargo test --workspace' "${ci}"; then
+if rg -n 'services:|matrix:|cargo install|rustup toolchain install nightly|docker|kind-helm|(^|[[:space:]/])release-gate\.sh([[:space:]]|$)|(^|[[:space:]/])nightly-gate\.sh([[:space:]]|$)|cargo test --workspace' "${ci}"; then
     echo "default CI contains an unbounded or duplicated heavy lane" >&2
     exit 1
 fi
@@ -49,6 +50,7 @@ fi
 grep -Fq 'bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode' "${ci}"
 grep -Fq 'run: bash scripts/ci/verify-github-actions-policy.sh' "${ci}"
 grep -Fq 'python3 scripts/ci/public-release-gate.py' "${ci}"
+grep -Fq 'bash scripts/ci/s3-qualification-endpoint.sh install' "${ci}"
 
 release_gate="${repo_root}/scripts/ci/release-gate.sh"
 grep -Fq -- '--governed-performance-only' "${release_gate}"

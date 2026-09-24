@@ -377,7 +377,7 @@ def build_overlay_assignments(
             find_route(routes_idx, "async_projection_spec_preserves_legacy_defaults")
         ],
         "NATIVE-CONDITIONAL-WRITE-AUTHORITY": [
-            find_route(routes_idx, "p1s_attestation_is_minio_native_cas")
+            find_route(routes_idx, "p1s_attestation_is_rustfs_native_cas")
         ],
         "SNORRI-REOPEN": [find_route(routes_idx, "snorri_reopen_s3_memory")],
         "SNORRI-PROJECTION-REBUILD": [
@@ -392,7 +392,7 @@ def build_overlay_assignments(
             find_route(routes_idx, "production_s3_object_log_config_uses_p1s_attested")
         ],
         "S3-NATIVE-CAS-CAPABILITY-ATTESTATION": [
-            find_route(routes_idx, "p1s_attestation_is_minio_native_cas")
+            find_route(routes_idx, "p1s_attestation_is_rustfs_native_cas")
         ],
         "CHANGE-RECORDS-REQUIRE-DURABLE-LOG": [
             find_route(routes_idx, "change_records_require_durable_log")

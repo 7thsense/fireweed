@@ -151,7 +151,7 @@ pub enum ObjectLogSpec {
         region: String,
         credentials: S3CredentialSource,
         segment_config: SegmentConfig,
-        /// Plain HTTP is rejected unless this is explicitly true. It exists for local MinIO and must not
+        /// Plain HTTP is rejected unless this is explicitly true. It exists for local test endpoints and must not
         /// be enabled for production shared-store traffic.
         allow_insecure_http: bool,
     },
@@ -279,12 +279,12 @@ impl ObjectLogSpec {
             } => {
                 if endpoint.starts_with("http://") && !allow_insecure_http {
                     return Err(EngineError::Invalid(
-                        "plaintext S3 endpoint requires explicit allow_insecure_http=true (local MinIO only)",
+                        "plaintext S3 endpoint requires explicit allow_insecure_http=true (local test endpoints only)",
                     ));
                 }
                 if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
                     return Err(EngineError::Invalid(
-                        "S3 endpoint must use https:// (or explicitly allowed http:// for local MinIO)",
+                        "S3 endpoint must use https:// (or explicitly allowed http:// for local test endpoints)",
                     ));
                 }
                 if bucket.trim().is_empty() || bucket.contains('/') {

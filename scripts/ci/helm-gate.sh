@@ -219,8 +219,8 @@ assert_no_fixture_credentials() {
     local description="$2"
     local forbidden
     for forbidden in \
-        "minioadmin" \
-        "minioadmin-secret" \
+        "fixture-access-key" \
+        "fixture-secret-key" \
         "postgres://fireweed:fireweed@postgres:5432/fireweed"
     do
         assert_not_contains "$file" "$forbidden" "${description} fixture credential"

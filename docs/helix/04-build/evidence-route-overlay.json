@@ -167,7 +167,7 @@
     {
       "requirement_id": "NATIVE-CONDITIONAL-WRITE-AUTHORITY",
       "routes": [
-        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_minio_native_cas_not_garage"
+        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_rustfs_native_cas_not_garage"
       ]
     },
     {
@@ -206,7 +206,7 @@
     {
       "requirement_id": "S3-NATIVE-CAS-CAPABILITY-ATTESTATION",
       "routes": [
-        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_minio_native_cas_not_garage"
+        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_rustfs_native_cas_not_garage"
       ]
     },
     {

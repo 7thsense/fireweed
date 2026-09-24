@@ -93,7 +93,7 @@ the default serving store.
 | Log | Blob store | Typical use |
 |-----|------------|-------------|
 | `filesystem` | Directory tree (local disk, NAS e.g. `/tank/…`) | Single-site shared FS, simple tests, real path durability |
-| `s3` | S3-compatible API | Multi-node cloud / MinIO / Garage |
+| `s3` | S3-compatible API | Multi-node cloud / RustFS |
 
 Same object-log protocol (segments, manifest, conditional write / authority,
 retention). Multi-writer still requires ownership and fencing rules; a NAS path

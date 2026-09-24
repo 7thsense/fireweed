@@ -1131,7 +1131,7 @@ pub enum LogConfig {
         node_id: Option<u8>,
         coordination: Option<PostgresCoordinationConfig>,
     },
-    /// Retired compatibility selector. Local tests use MinIO via [`LogConfig::S3`].
+    /// Retired compatibility selector. Local tests use RustFS via [`LogConfig::S3`].
     Filesystem { root: PathBuf },
     /// Class A: S3-compatible object log (the public durable log).
     S3 {
@@ -2428,9 +2428,9 @@ mod storage_config_open_tests {
                 let region =
                     std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
                 let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-                    .unwrap_or_else(|_| "minioadmin".into());
+                    .unwrap_or_else(|_| "fireweed".into());
                 let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-                    .unwrap_or_else(|_| "minioadmin".into());
+                    .unwrap_or_else(|_| "fireweed-test-rustfs".into());
                 let cfg = base_cfg(
                     LogConfig::S3 {
                         endpoint,
@@ -2963,7 +2963,7 @@ impl Drop for ObjectLogTursoLifecycle {
     }
 }
 
-#[cfg(feature = "objectlog")]
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
 fn open_composed_object_log_engine(
     root: &std::path::Path,
     namespace: &str,
@@ -5614,7 +5614,7 @@ fn open_s3_objectlog_memory_projection(
 
 /// Open the public product cell: S3-compatible object-log × local Turso.
 ///
-/// Local processes reuse or start MinIO; durability still goes through
+/// Local processes reuse or start RustFS; durability still goes through
 /// [`fireweed_objectlog`] (LogEngine group-commit), not a raw S3 client.
 #[cfg(feature = "objectlog")]
 pub fn open_product(clock: Arc<dyn Clock>) -> Fireweed {

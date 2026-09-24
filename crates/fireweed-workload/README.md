@@ -93,7 +93,7 @@ keeps its existing I/O behavior; the composition explicitly opts into log-backed
 projection I/O.
 
 The default cell is
-`s3--turso` (S3-compatible object-log via MinIO locally, Turso projection) with
+`s3--turso` (S3-compatible object-log via RustFS locally, Turso projection) with
 asynchronous projection; `--memory` is retired. Every shard has its own physical
 log and projection. Multiple queues in one database would still share a writer
 and are not what `--shards` measures.

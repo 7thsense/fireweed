@@ -314,7 +314,7 @@ enum DefinitionAuthority {
     /// One store owns this in-memory blob namespace. A short catalog-only permit makes the
     /// get/put pair atomic without serializing append, read, projection, or unrelated I/O.
     ProcessLocal,
-    /// S3 PutObject with `If-None-Match: *` (enforced by the endpoint, e.g. P1s MinIO).
+    /// S3 PutObject with `If-None-Match: *` (enforced by the endpoint, e.g. P1s RustFS).
     /// Owned by Fireweed because `object_log::BlobStore` is overwrite-only `put`.
     S3CreateOnly { put: Arc<S3CreateOnlyPut> },
     /// Generic/custom BlobStore path without a create-only publisher: fail closed rather

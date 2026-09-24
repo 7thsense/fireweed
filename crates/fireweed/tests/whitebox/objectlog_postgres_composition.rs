@@ -652,8 +652,9 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         }
     };
     let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| unique_bucket("pg"));
-    let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "fireweed".into());
+    let secret =
+        runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "fireweed-test-rustfs".into());
     let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
     let pg_url = runtime_env("PG_TEST_URL")
         .expect("FIREWEED_PG_TEST_URL must be set when exercising the postgres projection");
@@ -665,7 +666,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
     let (_, run_nonce) = unique_fixture("public_s3_objectlog_postgres");
     // Long unique namespace (>>63 bytes) without raw path separators or non-ASCII.
     // Keys are hex-encoded, but pathological UTF-8 / slash-heavy prefixes have
-    // produced opaque MinIO "service error" on create-only probe on this host.
+    // produced an opaque S3 "service error" on create-only probe on this host.
     let namespace = format!("s3-objectlog-postgres-{run_nonce}");
     let durability = ObjectLogRuntimeConfig {
         object_log: ObjectLogStorage::S3Compatible {

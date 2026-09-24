@@ -345,7 +345,7 @@ fn first_class_s3_log_backend_pairs_with_postgres_projection() {
 fn s3_env_rejects_plaintext_without_explicit_local_opt_in() {
     let result = Config::from_env(&env(&[
         ("FIREWEED_LOG_BACKEND", "s3"),
-        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://minio:9000"),
+        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://rustfs:9000"),
         ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed"),
         ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
         ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),

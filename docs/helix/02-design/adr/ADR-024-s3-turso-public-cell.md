@@ -57,7 +57,7 @@ mutation.
 S3 is not a second log engine. The log engine is `fireweed-objectlog`. That
 crate has two publication adapters for one protocol: filesystem, for a single
 process on local disk, and S3, for the shared store. Filesystem publication
-is how the log protocol is tested without MinIO, and it is the code the S3
+is how the log protocol is tested without an S3 server, and it is the code the S3
 adapter is built on. It is not a `LogConfig` a caller can select, and it is
 not a Fireweed support cell. A filesystem object-log test is not evidence
 about the public cell, and a public-cell result is not evidence about the

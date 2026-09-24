@@ -362,9 +362,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "17e1e25cf5dee465fc18",
+        "id": "f06b9d2f76cc593ea622",
         "identity": "#[ignore = \"US-009 recovery proof requires FIREWEED_PG_TEST_URL\"]",
-        "line": 811,
+        "line": 812,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/objectlog_postgres_composition.rs",
         "status": "discovery_negative"
@@ -3374,9 +3374,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "bd7b2b942eb5622e5739",
+        "id": "01f216a0e90b5abc934d",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 793,
+        "line": 794,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/objectlog_postgres_composition.rs",
         "status": "discovery_negative"
@@ -3640,9 +3640,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8a8de3f4c1a19748c86a",
+        "id": "89235b42a419bece7342",
         "identity": "f\"missing {SERVICE_BIN}; build with:\\n\"",
-        "line": 275,
+        "line": 260,
         "owner": "P10px",
         "path": "examples/python-resp/run_insert_matrix.py",
         "status": "discovery_negative"
@@ -3654,9 +3654,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "b9e586bb0911665b220d",
+        "id": "2039b94ca5d7b8ebc25e",
         "identity": "f\"passed={summary['passed']} failed={summary['failed']} skipped={summary['skipped']} \"",
-        "line": 719,
+        "line": 697,
         "owner": "P10px",
         "path": "examples/python-resp/run_insert_matrix.py",
         "status": "discovery_negative"
@@ -3668,9 +3668,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "72a636e0595a77b53996",
+        "id": "2caf7a69c9d5a2ff8703",
         "identity": "skipped = sum(1 for r in results if r.get(\"status\") == \"skip\")",
-        "line": 735,
+        "line": 713,
         "owner": "P10px",
         "path": "examples/python-resp/run_insert_matrix.py",
         "status": "discovery_negative"
@@ -3682,9 +3682,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d24929ada221bdcbaa82",
+        "id": "82533083f94e57932fb8",
         "identity": "\"skipped\": skipped,",
-        "line": 760,
+        "line": 738,
         "owner": "P10px",
         "path": "examples/python-resp/run_insert_matrix.py",
         "status": "discovery_negative"
@@ -3906,9 +3906,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "dbcf725d95d5aea5da8b",
+        "id": "631f3252f97fb69e5046",
         "identity": ": \"${FIREWEED_S3_TEST_ENDPOINT:?secret file missing FIREWEED_S3_TEST_ENDPOINT}\"",
-        "line": 158,
+        "line": 173,
         "owner": "P10px",
         "path": "scripts/ci/s3-qualification-endpoint.sh",
         "status": "discovery_negative"
@@ -3990,9 +3990,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "94bf964f96d4ad46c1e4",
+        "id": "25fd70a5be873249eb3c",
         "identity": "require(workflow.count(marker) == 1, \"missing/duplicate fixture step: \" + name)",
-        "line": 35,
+        "line": 34,
         "owner": "P10px",
         "path": "scripts/ci/turso_workflow_fixtures.py",
         "status": "discovery_negative"
@@ -4018,9 +4018,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "b8740c410a989b43d3e7",
+        "id": "2072f756f5e5c295784e",
         "identity": "\"missing PG environment\": (\"FIREWEED_PG_TEST_URL=%s\", \"IGNORED_PG_URL=%s\"),",
-        "line": 81,
+        "line": 84,
         "owner": "P10px",
         "path": "scripts/ci/turso_workflow_fixtures.py",
         "status": "discovery_negative"
@@ -4032,9 +4032,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "4fd9aca461d81a91f6ab",
+        "id": "09392503125ca1c20eb6",
         "identity": "\"missing cleanup\": (\"s3-qualification-endpoint.sh teardown\", \"s3-qualification-endpoint.sh status\"),",
-        "line": 86,
+        "line": 89,
         "owner": "P10px",
         "path": "scripts/ci/turso_workflow_fixtures.py",
         "status": "discovery_negative"
@@ -4046,9 +4046,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "3df09292bec8dbc28b3d",
+        "id": "945c0a9e900e1498bb1d",
         "identity": "echo \"missing governed services authorization: scripts/ci/governed-product-services.json\" >&2",
-        "line": 112,
+        "line": 114,
         "owner": "P10px",
         "path": "scripts/ci/verify-github-actions-policy.sh",
         "status": "discovery_negative"
@@ -4231,9 +4231,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7cbdeb2407d6e33a6e1b",
+        "id": "b14320cf1122ca6bf758",
         "identity": "f\"missing {SERVICE_BIN}; build with:\\n\"",
-        "line": 275,
+        "line": 260,
         "owner": "P10px",
         "path": "examples/python-resp/run_insert_matrix.py",
         "status": "discovery_negative"
@@ -4259,9 +4259,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e9d1ae2e96f563bce0a2",
+        "id": "5ce60d81ec88a11b4a0c",
         "identity": "\"missing PG environment\": (\"FIREWEED_PG_TEST_URL=%s\", \"IGNORED_PG_URL=%s\"),",
-        "line": 81,
+        "line": 84,
         "owner": "P10px",
         "path": "scripts/ci/turso_workflow_fixtures.py",
         "status": "discovery_negative"
@@ -6881,9 +6881,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "6f08196b6503b355247e",
+        "id": "540e3b9e7f6a3dd7dfc6",
         "identity": "export SOURCE_REVISION",
-        "line": 211,
+        "line": 230,
         "owner": "P10px",
         "path": "scripts/ci/s3-qualification-endpoint.sh",
         "status": "discovery_negative"
@@ -6895,9 +6895,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "c3bf4945806b5b0c63ea",
+        "id": "e171333775f5098a0abc",
         "identity": "SOURCE_REVISION=$(git -C \"$REPO_ROOT\" rev-parse HEAD)",
-        "line": 212,
+        "line": 231,
         "owner": "P10px",
         "path": "scripts/ci/s3-qualification-endpoint.sh",
         "status": "discovery_negative"
@@ -6909,9 +6909,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "fb4c9d8f1df05d3682fa",
+        "id": "c224a067a5b1e793080f",
         "identity": "\"source_revision\": os.environ[\"SOURCE_REVISION\"],",
-        "line": 255,
+        "line": 274,
         "owner": "P10px",
         "path": "scripts/ci/s3-qualification-endpoint.sh",
         "status": "discovery_negative"
@@ -17855,7 +17855,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "3bf5cd12f7dbc08ce1e80af6adde82052a267ae3af550b3c39ddf5141a2e9f63",
+    "input_sha256": "6afdbfe8d1a4f4deb3ddabca472826091fe84c828dcbf3cb010ff24d8f224b09",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -43799,13 +43799,13 @@
         "-p",
         "fireweed-objectlog",
         "--lib",
-        "s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set",
+        "s3_create_only::tests::live_s3_probe_enforced_create_only_when_env_set",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set",
-      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::s3_create_only::tests::live_minio_probe_enforced_create_only_when_env_set",
+      "harness_id": "s3_create_only::tests::live_s3_probe_enforced_create_only_when_env_set",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::s3_create_only::tests::live_s3_probe_enforced_create_only_when_env_set",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -65245,13 +65245,13 @@
         "fireweed-server",
         "--test",
         "production_s3_object_log_config",
-        "p1s_attestation_is_minio_native_cas_not_garage",
+        "p1s_attestation_is_rustfs_native_cas_not_garage",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "p1s_attestation_is_minio_native_cas_not_garage",
-      "id": "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_minio_native_cas_not_garage",
+      "harness_id": "p1s_attestation_is_rustfs_native_cas_not_garage",
+      "id": "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_rustfs_native_cas_not_garage",
       "listed_kind": "test",
       "package": "fireweed-server",
       "target": "production_s3_object_log_config",
@@ -82217,7 +82217,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "b3de0a2090b4f3574e8bac7d5ac43bc60858eb430d47644fdc40c98b4f04523b",
+  "source_inventory_sha256": "b3577528e91726dae146be135338e65bc54c2b6badc80f1de112fe16fd6fd39c",
   "workspaces": [
     {
       "listing_error_sha256": "",

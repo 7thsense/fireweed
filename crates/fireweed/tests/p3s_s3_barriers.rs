@@ -66,9 +66,9 @@ fn require_s3_env() -> (String, String, String, String, String) {
     let region =
         std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
     let access =
-        std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_owned());
-    let secret =
-        std::env::var("FIREWEED_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_owned());
+        std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "fireweed".to_owned());
+    let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+        .unwrap_or_else(|_| "fireweed-test-rustfs".to_owned());
     (endpoint, bucket, region, access, secret)
 }
 
