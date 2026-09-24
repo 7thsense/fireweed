@@ -2,7 +2,7 @@
 """Provider-neutral Snorri semantic verifier (P7N).
 
 Maps TP-004 stable Snorri semantic IDs to Fireweed-owned proof commands and
-optional evidence ledgers. Provider brand strings (Garage, MinIO, eldir, …) are
+optional evidence ledgers. Provider brand strings (Garage, MinIO, RustFS, eldir, …) are
 forbidden in fixtures and cell IDs — only authority-manifest cell IDs and
 capability tokens are accepted.
 
@@ -53,7 +53,7 @@ S3_CELLS = tuple(f"s3--{projection}" for projection in ("memory", "turso", "post
 
 # Forbidden provider-brand tokens in fixtures / cell IDs (P1s / P4 neutrality).
 FORBIDDEN_BRANDS = re.compile(
-    r"(?i)\b(garage|minio|eldir|aws|gcs|azure|r2|cloudflare|digitalocean)\b"
+    r"(?i)\b(garage|minio|rustfs|eldir|aws|gcs|azure|r2|cloudflare|digitalocean)\b"
 )
 
 # Common semantic proofs. Lifecycle commands are generated per exact current cell by

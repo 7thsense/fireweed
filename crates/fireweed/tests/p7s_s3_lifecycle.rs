@@ -38,10 +38,9 @@ fn require_s3_env() -> (String, String, String, String, String) {
         .expect("FIREWEED_S3_TEST_ENDPOINT required for P7S3 (P1s provenance)");
     let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed".into());
     let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-    let access =
-        std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret =
-        std::env::var("FIREWEED_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "fireweed".into());
+    let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+        .unwrap_or_else(|_| "fireweed-test-rustfs".into());
     (endpoint, bucket, region, access, secret)
 }
 

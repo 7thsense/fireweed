@@ -18,7 +18,7 @@ does not block an async runtime worker or the data-plane LogEngine.
 The upstream `object-log` v0.3.1 `BlobStore` port exposes overwrite-only `put`.
 Fireweed therefore owns a separate create-only path for **queue-definition**
 authority on the S3 open path: `PutObject` with `If-None-Match: *`. That path
-requires the endpoint to enforce the precondition (P1s-qualified MinIO does;
+requires the endpoint to enforce the precondition (P1s-qualified RustFS does;
 Garage v2.2.0 does not). Generic `open_with_blob` (custom adapters without a
 create-only publisher) still fails closed rather than pretending an
 unconditional read-then-put is authoritative. Multi-writer **manifest**
@@ -31,7 +31,8 @@ manifest keys); cross-process multi-writer S3 still needs control-plane fencing.
 |----------------|-----------------------------|--------------------------|
 | **Filesystem local blob, one process** | Synced temp + atomic hard-link create; canonical-root handles share one sequencer | Supported, including concurrent handles and unrelated queues |
 | **Filesystem local blob, multiple processes** | Definition hard-link is authoritative, but `object-log` v0.3.1 manifest sequencing is not cross-process fenced | Unsupported for concurrent writers |
-| **AWS S3 / MinIO** (P1s-qualified) | Endpoint enforces HTTP 412; Fireweed issues `If-None-Match: *` for definitions | Supported for single-writer product cells (definition create-only + log append) |
+| **AWS S3 / RustFS 1.0.0** (P1s-qualified) | Endpoint enforces HTTP 412; Fireweed issues `If-None-Match: *` for definitions. RustFS passes the two-writer CAS preflight (`scripts/ci/s3-qualification-endpoint.sh provision`) | Supported for single-writer product cells (definition create-only + log append) |
+| **MinIO** | End-of-life; release binaries withdrawn | **Retired** as the qualification and test endpoint |
 | **Garage v2.2.0** | **Not enforced** — second conditional PUT returns **200** | **Unsupported** |
 | **Other S3-compatible** | Must enforce create-only; multi-process multi-writer also needs fenced sequencing | Supported only when create-only is enforced; multi-writer still needs control-plane fencing |
 

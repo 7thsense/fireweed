@@ -286,7 +286,7 @@ Every cell is a valid selection. Semantics differ only by **durability class**
 | Log | Blob store | Typical use |
 |-----|------------|-------------|
 | `filesystem` | Directory tree (local disk, NAS e.g. `/tank/…`) | Single-site shared FS, simple tests, real path durability |
-| `s3` | S3-compatible API | Multi-node cloud / MinIO / Garage |
+| `s3` | S3-compatible API | Multi-node cloud / RustFS |
 
 Same object-log protocol (segments, manifest, conditional write / authority,
 retention). Multi-writer still requires ownership and fencing; a NAS path is not

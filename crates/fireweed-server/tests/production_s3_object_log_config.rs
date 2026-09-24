@@ -2,8 +2,8 @@
 //!
 //! Consumes the P1s attested endpoint (`FIREWEED_S3_TEST_*` / secret file outside
 //! the repository). Replaces retired Garage-positive production-config coverage
-//! with provider-neutral cell IDs and attested MinIO provenance. Disposable
-//! in-process docker MinIO and `.env.garage-e3` are not used.
+//! with provider-neutral cell IDs and attested RustFS provenance. Ad hoc
+//! in-process endpoints and `.env.garage-e3` are not used.
 //!
 //! Focused run:
 //! ```text
@@ -177,7 +177,7 @@ fn production_s3_config_rejects_incomplete_credentials_and_local_fallback() {
     let mixed = map(&[
         ("FIREWEED_LOG_BACKEND", "filesystem"),
         ("FIREWEED_OBJECT_LOG_ROOT", "/tmp/would-silently-fallback"),
-        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://minio:9000"),
+        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://rustfs:9000"),
         ("FIREWEED_PROJECTION_BACKEND", "memory"),
     ]);
     let Err(error) = Config::from_env(&mixed) else {
@@ -229,7 +229,7 @@ fn production_s3_config_parses_public_s3_memory_and_turso_cells() {
 
 /// P1s attestation is consumed for positive live identity (not Garage).
 #[test]
-fn p1s_attestation_is_minio_native_cas_not_garage() {
+fn p1s_attestation_is_rustfs_native_cas_not_garage() {
     let doc = load_attestation();
 
     assert_eq!(
@@ -262,8 +262,8 @@ fn p1s_attestation_is_minio_native_cas_not_garage() {
         .unwrap_or("")
         .to_ascii_lowercase();
     assert_eq!(
-        selected, "minio",
-        "P1s positive selection must be minio, not garage: selected={selected}"
+        selected, "rustfs",
+        "P1s positive selection must be rustfs, not garage: selected={selected}"
     );
     assert!(
         doc.pointer("/results/selected")

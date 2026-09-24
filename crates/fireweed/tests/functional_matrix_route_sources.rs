@@ -357,7 +357,7 @@ fn route_source_leaf_ids_are_provider_neutral() {
                 !id.contains('×'),
                 "legacy × selector is not provider-neutral: {id}"
             );
-            for banned in ["garage", "minio", "hybrid", "objectlog"] {
+            for banned in ["garage", "minio", "rustfs", "hybrid", "objectlog"] {
                 assert!(
                     !id.to_ascii_lowercase().contains(banned),
                     "provider brand {banned} forbidden in cell_id {id}"
