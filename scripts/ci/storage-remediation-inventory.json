@@ -2870,9 +2870,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6772569fce1d5bddc05b",
+        "id": "c20b86814abfe766d946",
         "identity": "let skipped = (1..4)",
-        "line": 701,
+        "line": 840,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/qualification.rs",
         "status": "discovery_negative"
@@ -2884,9 +2884,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5f4c7761ffab0ba9693b",
+        "id": "b27633c7b86ccb757751",
         "identity": "updates.extend(skipped);",
-        "line": 733,
+        "line": 872,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/qualification.rs",
         "status": "discovery_negative"
@@ -70412,6 +70412,35 @@
         "fireweed-turso",
         "--test",
         "qualification",
+        "turso_item_id_zero_key_lookups_bind_the_full_active_key",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "turso_item_id_zero_key_lookups_bind_the_full_active_key",
+      "id": "Cargo.toml::fireweed-turso::qualification::test::turso_item_id_zero_key_lookups_bind_the_full_active_key",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "qualification",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.97.1",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--test",
+        "qualification",
         "turso_local_wal_benchmark_evidence_verifier",
         "--",
         "--exact"
@@ -82217,7 +82246,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "b3577528e91726dae146be135338e65bc54c2b6badc80f1de112fe16fd6fd39c",
+  "source_inventory_sha256": "b9d96c062c12b4afe622b3f55e731802697cf3b4a14826cc6077f4a062c2b0e1",
   "workspaces": [
     {
       "listing_error_sha256": "",
