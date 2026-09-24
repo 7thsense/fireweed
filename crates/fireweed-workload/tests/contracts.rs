@@ -19,7 +19,9 @@ fn update(id: ItemId, payload: BatchUpdateValue<Option<Bytes>>) -> BatchUpdateEn
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn payload_replacement_keep_clear_and_purge() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let fw = open_store(root.path(), memory, TestClock::at(200)).unwrap();
             let q = create_queue(&fw, "payload").await.unwrap();
@@ -94,7 +96,9 @@ async fn payload_replacement_keep_clear_and_purge() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn due_order_fifo_and_expired_lease_fencing() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let clock = TestClock::at(100);
             let fw = open_store(root.path(), memory, clock.clone()).unwrap();
@@ -168,7 +172,9 @@ async fn due_order_fifo_and_expired_lease_fencing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn separate_uniform_batches_keep_global_priority_and_future_eligibility() {
     tokio::time::timeout(Duration::from_secs(20), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let clock = TestClock::at(100);
             let fw = open_store(root.path(), memory, clock.clone()).unwrap();
@@ -205,7 +211,9 @@ async fn separate_uniform_batches_keep_global_priority_and_future_eligibility() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_transitions_cannot_both_advance_the_same_instance_fence() {
     tokio::time::timeout(Duration::from_secs(20), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let fw = open_store(root.path(), memory, TestClock::at(200)).unwrap();
             let q = create_queue(&fw, "fence-race").await.unwrap();
@@ -280,7 +288,9 @@ async fn configured_thousand_row_batches_are_admitted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retention_cycles_allow_expired_request_and_item_keys_to_be_reused() {
     tokio::time::timeout(Duration::from_secs(45), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let clock = TestClock::at(200);
             let fw = open_store(root.path(), memory, clock.clone()).unwrap();
@@ -353,7 +363,9 @@ async fn retention_cycles_allow_expired_request_and_item_keys_to_be_reused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_ordinary_claims_reserve_disjoint_rows_before_projection() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let fw = open_store(root.path(), memory, TestClock::at(200)).unwrap();
             let q = create_queue(&fw, "concurrent-claims").await.unwrap();
@@ -429,7 +441,9 @@ fn addressed_request(name: &str, entries: Vec<AddressedMutation>) -> ItemMutatio
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leased_rows_are_atomically_enriched_and_mixed_outcomes_replay() {
     tokio::time::timeout(Duration::from_secs(45), async {
-        for memory in [true, false] {
+        // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+        {
+            let memory = false;
             let root = tempfile::tempdir().unwrap();
             let fw = open_store(root.path(), memory, TestClock::at(200)).unwrap();
             let q = create_queue(&fw, "atomic-enrichment").await.unwrap();

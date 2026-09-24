@@ -2,7 +2,8 @@ use std::process::Command;
 
 #[test]
 fn component_cli_labels_payloads_and_verifies_both_storage_modes() {
-    for memory in [false, true] {
+    // The memory store is retired (3a8d8270); both payload modes run on the public s3 × turso store.
+    {
         for varied in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let mut command = Command::new(env!("CARGO_BIN_EXE_fireweed-workload"));
@@ -21,9 +22,6 @@ fn component_cli_labels_payloads_and_verifies_both_storage_modes() {
                     "--root",
                 ])
                 .arg(root.path());
-            if memory {
-                command.arg("--memory");
-            }
             if varied {
                 command.arg("--primitive-varied-payload");
             }
