@@ -2,7 +2,7 @@
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
     let clock = Arc::new(ManualClock::at(100));
-    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), clock.clone());
     let q = qkey();
     let mut definition = qdef();
     definition.retry_policy.max_attempts = 2;
