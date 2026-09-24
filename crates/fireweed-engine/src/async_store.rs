@@ -1262,6 +1262,17 @@ pub trait AsyncLogStore: Send + Sync {
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send;
 
+    /// Reload this handle's view of `shard` from durable storage, so later reads include appends
+    /// made by other writers since it opened. The default does nothing: a log with one writer is
+    /// already current.
+    fn refresh_shard(
+        &self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let _ = shard;
+        async { Ok(()) }
+    }
+
     fn high_water(
         &self,
         shard: QueueKey,
