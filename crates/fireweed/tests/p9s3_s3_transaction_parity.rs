@@ -6,6 +6,9 @@
 //! helpers and live P1s provenance; no unexpected `Unavailable`, skip, or
 //! provider-specific substitute.
 //!
+//! ADR-024 later retired `s3×memory` and `s3×postgres`: those tests now prove
+//! rejection before storage I/O, and the assertion set runs on `s3×turso`.
+//!
 //! Authority: ObjectLogAuthority::NativeConditionalWrite (create-only after P7S3).
 //!
 //! Focused run:
@@ -13,7 +16,7 @@
 //! export LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/opt/openssl@3/lib:${LD_LIBRARY_PATH:-}"
 //! export FIREWEED_PG_TEST_URL='postgres://fireweed:fireweed@127.0.0.1:55432/fireweed'
 //! export CARGO_TARGET_DIR=/home/erik/Projects/fireweed-shared-target
-//! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
+//! set -a; source "${FIREWEED_S3_SECRET_DIR:-/tmp/fireweed-s3-secrets}/credentials.env"; set +a
 //! rustup run 1.97.1 cargo test -p fireweed --features objectlog,turso,postgres \
 //!   --test p9s3_s3_query_parity -- --nocapture
 //! ```
@@ -34,8 +37,6 @@ use serde_json::Value;
 
 static ORDINAL: AtomicU64 = AtomicU64::new(0);
 
-const ATTESTATION_PATH: &str = "/tmp/fireweed-s3-secrets/s3-native-cas-capability-attestation.json";
-
 fn require_s3_env() -> (String, String, String, String, String) {
     let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT")
         .expect("FIREWEED_S3_TEST_ENDPOINT required for P9S3 (P1s provenance; zero skips)");
@@ -49,17 +50,19 @@ fn require_s3_env() -> (String, String, String, String, String) {
     (endpoint, bucket, region, access, secret)
 }
 
-fn require_pg_url() -> String {
-    std::env::var("FIREWEED_PG_TEST_URL")
-        .expect("FIREWEED_PG_TEST_URL required for P9S3 s3×postgres (zero skips)")
-}
-
 fn load_attestation() -> Value {
-    let text = std::fs::read_to_string(ATTESTATION_PATH).unwrap_or_else(|error| {
-        panic!("P9S3 requires P1s attestation at {ATTESTATION_PATH}: {error}")
+    let path = fireweed_objectlog::p1s_attestation_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "P9S3 requires P1s attestation at {}: {error}",
+            path.display()
+        )
     });
     serde_json::from_str(&text).unwrap_or_else(|error| {
-        panic!("P1s attestation must be valid JSON at {ATTESTATION_PATH}: {error}")
+        panic!(
+            "P1s attestation must be valid JSON at {}: {error}",
+            path.display()
+        )
     })
 }
 
@@ -181,7 +184,7 @@ fn s3_log_config(namespace: String, projection: ProjectionStoreConfig) -> Storag
         control_plane: None,
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
-        async_projection: None,
+        async_projection: Some(fireweed::AsyncProjectionSpec::default()),
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
         recovery: RecoveryPolicy {
@@ -190,6 +193,23 @@ fn s3_log_config(namespace: String, projection: ProjectionStoreConfig) -> Storag
             max_tail_commands: 10_000,
         },
     }
+}
+
+/// ADR-024 retired every S3 cell except s3 × turso. `open` rejects them before
+/// storage I/O, so these checks need neither the P1s attestation nor PostgreSQL.
+async fn assert_retired_cell(cell_id: &str, projection: ProjectionStoreConfig) {
+    let config = s3_log_config(unique_ns(cell_id), projection);
+    let retired = fireweed::EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL);
+    assert_eq!(
+        config.validate(),
+        Err(retired.clone()),
+        "{cell_id} validate"
+    );
+    let error = fireweed::open_async(config, Arc::new(SystemClock) as _)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{cell_id} must not open"));
+    assert_eq!(error, retired, "{cell_id} open");
 }
 
 async fn open_cell(cell_id: &str, config: StorageConfig) -> Fireweed {
@@ -207,12 +227,10 @@ async fn run_p9(cell_id: &str, config: StorageConfig) {
     eprintln!("P9S3 PASS {cell_id} run_p9_surface");
 }
 
+/// ADR-024 retired s3 × memory; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_memory_strict_p9_transaction_parity() {
-    require_p1s_native_cas_provenance();
-    let ns = unique_ns("s3-memory");
-    let config = s3_log_config(ns, ProjectionStoreConfig::Memory);
-    run_p9("s3--memory--strict", config).await;
+    assert_retired_cell("s3--memory", ProjectionStoreConfig::Memory).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -229,16 +247,14 @@ async fn s3_turso_strict_p9_transaction_parity() {
     run_p9("s3--turso--strict", config).await;
 }
 
+/// ADR-024 retired s3 × postgres; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_strict_p9_transaction_parity() {
-    require_p1s_native_cas_provenance();
-    let pg = require_pg_url();
-    let ns = unique_ns("s3-postgres");
-    let config = s3_log_config(
-        ns,
+    assert_retired_cell(
+        "s3--postgres",
         ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(pg),
+            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
-    );
-    run_p9("s3--postgres--strict", config).await;
+    )
+    .await;
 }

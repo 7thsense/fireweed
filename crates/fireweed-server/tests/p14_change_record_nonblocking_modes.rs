@@ -8,7 +8,7 @@ use fireweed_memory::composed_memory_backend;
 use fireweed_server::{
     BackendSpec, ChangeRecordSinkConfig, ChangeRecordSinkMode, Config, ControlPlaneSpec, LogSpec,
     ObjectLogSpec, PostgresWholeOperationAdapter, ProjectionSpec, ResponseBarrierSpec,
-    SegmentConfig, start,
+    S3CredentialSource, SegmentConfig, start,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -18,10 +18,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-fn qdef() -> QueueDefinition {
+fn qdef(queue: &str) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new("t1").unwrap(),
-        queue_id: QueueId::new("q1").unwrap(),
+        queue_id: QueueId::new(queue).unwrap(),
         priority_model: PriorityModel {
             kind: PriorityModelKind::Int64,
             direction: PriorityDirection::Ascending,
@@ -65,19 +65,36 @@ fn tmp_root(tag: &str) -> PathBuf {
 fn segments() -> SegmentConfig {
     SegmentConfig::new(262_144, 20).unwrap()
 }
-fn base_config(backend: BackendSpec) -> Config {
+fn base_config(backend: BackendSpec, queue: &str) -> Config {
     Config::new(
         backend,
         0,
         "127.0.0.1:0".into(),
         Duration::from_secs(60),
-        vec![qdef()],
+        vec![qdef(queue)],
     )
 }
-fn fs_backend(root: PathBuf) -> BackendSpec {
+/// Serialize S3 × server boots; each test also owns a unique queue in the shared bucket.
+static P14_SERVER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The public server cell (ADR-024): shared RustFS object log × local Turso projection.
+fn s3_turso_backend(root: PathBuf) -> BackendSpec {
+    let s3 = fireweed_objectlog::shared_s3_test_env();
     BackendSpec {
-        log: LogSpec::ObjectLog(ObjectLogSpec::local(root, segments())),
-        projection: ProjectionSpec::InMemory,
+        log: LogSpec::ObjectLog(ObjectLogSpec::S3 {
+            endpoint: s3.endpoint.clone(),
+            bucket: s3.bucket.clone(),
+            region: s3.region.clone(),
+            credentials: S3CredentialSource::Static {
+                access_key_id: s3.access_key.clone(),
+                secret_access_key: s3.secret_key.clone(),
+            },
+            segment_config: segments(),
+            allow_insecure_http: s3.allow_insecure_http(),
+        }),
+        projection: ProjectionSpec::Turso {
+            path: root.join("projection.db"),
+        },
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: None,
@@ -113,7 +130,7 @@ fn kafka_sink() -> ChangeRecordSinkConfig {
 #[cfg(not(feature = "external-kafka"))]
 const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
      the default in-process embedded surface needs no endpoint";
-async fn redis_xadd(addr: SocketAddr) {
+async fn redis_xadd(addr: SocketAddr, stream: &str) {
     let client = redis::Client::open(format!("redis://{addr}")).unwrap();
     let mut con = client
         .get_multiplexed_async_connection_with_config(
@@ -123,7 +140,7 @@ async fn redis_xadd(addr: SocketAddr) {
         .await
         .unwrap();
     let _: String = redis::cmd("XADD")
-        .arg("t1:q1")
+        .arg(stream)
         .arg("*")
         .arg("priority")
         .arg(1)
@@ -176,12 +193,14 @@ fn p14_delivery_modes_resolve_independently() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p14_embedded_change_record_emission_keeps_heartbeat_live() {
+    let _guard = P14_SERVER_LOCK.lock().await;
     let root = tmp_root("embedded");
+    let queue = unique_tag("embedded-q");
     with_heartbeat(|| async {
-        let mut c = base_config(fs_backend(root.clone()));
+        let mut c = base_config(s3_turso_backend(root.clone()), &queue);
         c.change_record_sink = embedded_sink();
         let s = start(c).await.unwrap();
-        redis_xadd(s.addr()).await;
+        redis_xadd(s.addr(), &format!("t1:{queue}")).await;
         tokio::time::sleep(Duration::from_millis(80)).await;
         s.shutdown_and_drain(Duration::from_secs(5)).await;
     })
@@ -190,15 +209,17 @@ async fn p14_embedded_change_record_emission_keeps_heartbeat_live() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p14_http_change_record_emission_keeps_heartbeat_live() {
+    let _guard = P14_SERVER_LOCK.lock().await;
     let root = tmp_root("http");
+    let queue = unique_tag("http-q");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let acceptor = tokio::spawn(accept_one_http_ok(listener));
     with_heartbeat(|| async {
-        let mut c = base_config(fs_backend(root.clone()));
+        let mut c = base_config(s3_turso_backend(root.clone()), &queue);
         c.change_record_sink = http_sink(port);
         let s = start(c).await.unwrap();
-        redis_xadd(s.addr()).await;
+        redis_xadd(s.addr(), &format!("t1:{queue}")).await;
         tokio::time::sleep(Duration::from_millis(120)).await;
         s.shutdown_and_drain(Duration::from_secs(5)).await;
     })
@@ -210,7 +231,8 @@ async fn p14_http_change_record_emission_keeps_heartbeat_live() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p14_external_kafka_feature_off_rejects_class_a_enabled_sink() {
     let root = tmp_root("kafka-off");
-    let mut c = base_config(fs_backend(root.clone()));
+    let queue = unique_tag("kafka-off-q");
+    let mut c = base_config(s3_turso_backend(root.clone()), &queue);
     c.change_record_sink = kafka_sink();
     assert_eq!(
         start(c).await.err(),
@@ -222,7 +244,8 @@ async fn p14_external_kafka_feature_off_rejects_class_a_enabled_sink() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p14_external_kafka_feature_on_composition_accepts_class_a() {
     let root = tmp_root("kafka-on");
-    let mut c = base_config(fs_backend(root.clone()));
+    let queue = unique_tag("kafka-on-q");
+    let mut c = base_config(s3_turso_backend(root.clone()), &queue);
     c.change_record_sink = kafka_sink();
     match tokio::time::timeout(Duration::from_secs(20), start(c))
         .await
@@ -230,7 +253,7 @@ async fn p14_external_kafka_feature_on_composition_accepts_class_a() {
     {
         Ok(s) => {
             with_heartbeat(|| async {
-                redis_xadd(s.addr()).await;
+                redis_xadd(s.addr(), &format!("t1:{queue}")).await;
                 tokio::time::sleep(Duration::from_millis(80)).await;
                 s.shutdown_and_drain(Duration::from_secs(5)).await;
             })

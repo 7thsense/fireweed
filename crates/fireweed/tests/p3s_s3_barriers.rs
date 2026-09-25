@@ -11,6 +11,9 @@
 //! - keep unsupported endpoint/field negatives and exact deferred-flush
 //!   rejections on S3×memory / S3×Postgres
 //!
+//! ADR-024 later retired S3×memory and S3×Postgres: those cells now prove
+//! rejection before storage I/O, and the live clauses run on S3×Turso.
+//!
 //! Provider-neutral async apply (lag/catch-up/restart/poison/transactional SQL
 //! checkpoints) is reused from P3b; this suite only proves the S3 composition
 //! wiring reaches those pipelines with caller-selected bounds.
@@ -21,11 +24,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
     AsyncProjectionSpec, ConfigSecret, EngineError, LogConfig, ObjectLogAuthority,
-    ProjectionStoreConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig,
-    StorageConfig, SystemClock,
+    ProjectionStoreConfig, RETIRED_STORAGE_CELL, RecoveryAction, RecoveryPolicy, ResponseBarrier,
+    SegmentConfig, StorageConfig, SystemClock,
 };
-use postgres::{Client, NoTls};
-use sha2::{Digest, Sha256};
 
 struct FixtureRoot(PathBuf);
 
@@ -72,11 +73,6 @@ fn require_s3_env() -> (String, String, String, String, String) {
     (endpoint, bucket, region, access, secret)
 }
 
-fn require_pg_url() -> String {
-    std::env::var("FIREWEED_PG_TEST_URL")
-        .expect("FIREWEED_PG_TEST_URL is required for P3s S3×Postgres cells")
-}
-
 fn s3_config(
     projection: ProjectionStoreConfig,
     barrier: ResponseBarrier,
@@ -107,23 +103,6 @@ fn s3_config(
     }
 }
 
-fn fixture_postgres_schema(namespace: &str) -> String {
-    let digest = Sha256::digest(namespace.as_bytes());
-    let mut schema = String::from("fireweed_");
-    for byte in digest.iter().take(27) {
-        schema.push_str(&format!("{byte:02x}"));
-    }
-    schema
-}
-
-fn drop_test_schema(url: &str, namespace: &str) {
-    let schema = fixture_postgres_schema(namespace);
-    let mut client = Client::connect(url, NoTls).expect("connect for fixture cleanup");
-    client
-        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
-        .expect("drop isolated projection schema");
-}
-
 fn structural_s3_config(
     projection: ProjectionStoreConfig,
     barrier: ResponseBarrier,
@@ -149,6 +128,13 @@ fn structural_s3_config(
     }
 }
 
+fn retired_postgres_projection() -> ProjectionStoreConfig {
+    ProjectionStoreConfig::Postgres {
+        url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
+    }
+}
+
+/// ADR-024: s3 × turso is the only public cell; the other S3 projections are retired.
 #[test]
 fn s3_validate_time_pins_are_retired_for_all_three_projections() {
     for projection in [
@@ -156,32 +142,29 @@ fn s3_validate_time_pins_are_retired_for_all_three_projections() {
         ProjectionStoreConfig::Turso {
             path: PathBuf::from("/tmp/p3s-never-opened.sqlite"),
         },
-        ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
-        },
+        retired_postgres_projection(),
     ] {
-        for barrier in [
+        let axis = projection.axis_name();
+        let expected = if matches!(projection, ProjectionStoreConfig::Turso { .. }) {
+            Ok(())
+        } else {
+            Err(EngineError::Invalid(RETIRED_STORAGE_CELL))
+        };
+        let config = structural_s3_config(
+            projection,
             ResponseBarrier::AsyncProjection,
-            ResponseBarrier::AsyncProjection,
-        ] {
-            let config = structural_s3_config(
-                projection.clone(),
-                barrier,
-                format!("p3s-validate-{}-{:?}", projection.axis_name(), barrier),
-            );
-            assert_eq!(
-                config.validate(),
-                Ok(()),
-                "S3×{} under {barrier:?} must validate",
-                projection.axis_name()
-            );
-        }
+            format!("p3s-validate-{axis}"),
+        );
+        assert_eq!(config.validate(), expected, "S3×{axis}");
     }
 }
 
 #[test]
 fn unsupported_s3_field_and_endpoint_negatives_are_retained() {
-    let projection = ProjectionStoreConfig::Memory;
+    let fixture = FixtureRoot::new();
+    let projection = ProjectionStoreConfig::Turso {
+        path: fixture.path().join("negatives.db"),
+    };
     let empty_fields = StorageConfig {
         log: LogConfig::S3 {
             endpoint: String::new(),
@@ -292,81 +275,47 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn all_six_s3_barrier_cells_open_with_caller_tuning() {
+fn s3_turso_opens_with_caller_tuning_and_retired_s3_cells_reject_before_io() {
     let fixture = FixtureRoot::new();
     let _s3 = require_s3_env();
-    let mut ordinal = 0_u8;
 
-    for barrier in [
+    let config = s3_config(
+        ProjectionStoreConfig::Turso {
+            path: fixture.path().join("projection.db"),
+        },
         ResponseBarrier::AsyncProjection,
-        ResponseBarrier::AsyncProjection,
-    ] {
-        ordinal += 1;
-        let config = s3_config(
-            ProjectionStoreConfig::Memory,
-            barrier,
-            format!("p3s-memory-{}-{}", std::process::id(), ordinal),
-        );
-        let handle =
-            fireweed::open(config, Arc::new(SystemClock)).expect("s3×memory barrier must open");
-        assert!(handle.projection_control().is_none());
-        drop(handle);
-        eprintln!("P3s PASS s3×memory barrier={barrier:?}");
+        format!("p3s-turso-{}", std::process::id()),
+    );
+    assert_eq!(config.async_projection, Some(non_default_spec()));
+    let handle = fireweed::open(config, Arc::new(SystemClock)).expect("s3×Turso barrier must open");
+    let control = handle
+        .projection_control()
+        .expect("s3×Turso projection control");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build verification runtime")
+        .block_on(control.verify())
+        .expect("empty Turso projection verifies");
+    drop(handle);
+    eprintln!("P3s PASS s3×turso barrier=AsyncProjection");
 
-        ordinal += 1;
+    for projection in [ProjectionStoreConfig::Memory, retired_postgres_projection()] {
+        let axis = projection.axis_name();
         let config = s3_config(
-            ProjectionStoreConfig::Turso {
-                path: fixture.path().join(format!("projection-{ordinal}.db")),
-            },
-            barrier,
-            format!("p3s-turso-{}-{}", std::process::id(), ordinal),
+            projection,
+            ResponseBarrier::AsyncProjection,
+            format!("p3s-retired-{axis}-{}", std::process::id()),
         );
-        let handle =
-            fireweed::open(config, Arc::new(SystemClock)).expect("s3×Turso barrier must open");
-        let control = handle
-            .projection_control()
-            .expect("s3×Turso projection control");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build verification runtime")
-            .block_on(control.verify())
-            .expect("empty Turso projection verifies");
-        drop(handle);
-        eprintln!("P3s PASS s3×turso barrier={barrier:?}");
+        let error = fireweed::open(config, Arc::new(SystemClock))
+            .err()
+            .unwrap_or_else(|| panic!("s3×{axis} must not open"));
+        assert_eq!(
+            error,
+            EngineError::Invalid(RETIRED_STORAGE_CELL),
+            "s3×{axis}"
+        );
     }
-
-    let url = require_pg_url();
-    for barrier in [
-        ResponseBarrier::AsyncProjection,
-        ResponseBarrier::AsyncProjection,
-    ] {
-        ordinal += 1;
-        let namespace = format!("p3s-postgres-{}-{}", std::process::id(), ordinal);
-        let config = s3_config(
-            ProjectionStoreConfig::Postgres {
-                url: ConfigSecret::new(&url),
-            },
-            barrier,
-            namespace.clone(),
-        );
-        let handle =
-            fireweed::open(config, Arc::new(SystemClock)).expect("s3×PostgreSQL barrier must open");
-        let control = handle
-            .projection_control()
-            .expect("durable PostgreSQL projection control");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build verification runtime")
-            .block_on(control.verify())
-            .expect("empty PostgreSQL projection verifies");
-        drop(handle);
-        drop_test_schema(&url, &namespace);
-        eprintln!("P3s PASS s3×postgres barrier={barrier:?}");
-    }
-
-    assert_eq!(ordinal, 6, "exactly six S3 barrier cells");
 }
 
 #[test]
@@ -380,13 +329,16 @@ fn s3_create_queue_uses_if_none_match_create_only_on_qualified_endpoint() {
         PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
     };
 
+    let fixture = FixtureRoot::new();
     let _s3 = require_s3_env();
     let config = s3_config(
-        ProjectionStoreConfig::Memory,
+        ProjectionStoreConfig::Turso {
+            path: fixture.path().join("cas-create.db"),
+        },
         ResponseBarrier::AsyncProjection,
         format!("p3s-cas-create-{}", std::process::id()),
     );
-    let fireweed = fireweed::open(config, Arc::new(SystemClock)).expect("s3×memory opens");
+    let fireweed = fireweed::open(config, Arc::new(SystemClock)).expect("s3×turso opens");
     let definition = QueueDefinition {
         tenant_id: TenantId::new("p3s").unwrap(),
         queue_id: QueueId::new("cas-create").unwrap(),

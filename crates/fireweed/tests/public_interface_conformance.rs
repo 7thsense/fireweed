@@ -74,7 +74,7 @@ fn objectlog_storage(
         control_plane: None,
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
-        async_projection: None,
+        async_projection: Some(fireweed::AsyncProjectionSpec::default()),
         segments: SegmentConfig::new(262_144, 20).unwrap(),
         namespace: namespace.into(),
         recovery: RecoveryPolicy::default(),

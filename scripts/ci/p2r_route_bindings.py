@@ -379,15 +379,12 @@ def build_overlay_assignments(
         "NATIVE-CONDITIONAL-WRITE-AUTHORITY": [
             find_route(routes_idx, "p1s_attestation_is_rustfs_native_cas")
         ],
-        "SNORRI-REOPEN": [find_route(routes_idx, "snorri_reopen_s3_memory")],
+        # ADR-024: s3 × memory is retired; the public cell carries the Snorri semantics.
+        "SNORRI-REOPEN": [find_route(routes_idx, "snorri_reopen_s3_turso")],
         "SNORRI-PROJECTION-REBUILD": [
             find_route(routes_idx, "snorri_projection_rebuild_s3_turso")
         ],
-        "SNORRI-RETRY-ONCE": [
-            find_route(routes_idx, "snorri_retry")
-            if any("snorri_retry" in r for r in routes_idx)
-            else find_route(routes_idx, "snorri_reopen_s3_turso")
-        ],
+        "SNORRI-RETRY-ONCE": [find_route(routes_idx, "snorri_retry_once_s3_turso")],
         "PROVISIONED-QUALIFICATION-RUNNER": [
             find_route(routes_idx, "production_s3_object_log_config_uses_p1s_attested")
         ],

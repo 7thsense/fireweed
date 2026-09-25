@@ -11,9 +11,13 @@
 //!
 //! Out of scope: full CL-1..CL-8 (P11), simultaneous multi-mode delivery, Turso (P12a).
 //!
+//! ADR-024 later retired the S3 × memory / Postgres server arms: they now prove
+//! `start` rejects them before I/O, and opt-out/isolation/reap run on S3 × Turso.
+//! Embedded / Http transport on S3 × Turso is covered by the P14 suite.
+//!
 //! Focused run:
 //! ```text
-//! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
+//! set -a; source "${FIREWEED_S3_SECRET_DIR:-/tmp/fireweed-s3-secrets}/credentials.env"; set +a
 //! export FIREWEED_PG_TEST_URL=postgres://fireweed:fireweed@127.0.0.1:55432/fireweed
 //! cargo test -p fireweed-server --test p8cs_s3_delivery_cursor -- --nocapture
 //! cargo test -p fireweed-objectlog s3_emission_cursor_native_cas -- --nocapture
@@ -39,8 +43,6 @@ use fireweed_server::{
     ObjectLogSpec, ProjectionSpec, ResponseBarrierSpec, S3CredentialSource, SegmentConfig,
     emit_change_record_tick, start,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 
 /// Serialize heavy S3×server boots so parallel tokio tests do not starve the RESP client.
@@ -176,6 +178,49 @@ fn base_config(backend: BackendSpec, queues: Vec<QueueDefinition>) -> Config {
     )
 }
 
+/// Turso projection file under a per-test temp root; the caller removes the root.
+fn turso_projection(root: &std::path::Path) -> ProjectionSpec {
+    ProjectionSpec::Turso {
+        path: root.join("projection.db"),
+    }
+}
+
+fn temp_root(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(unique_tag(tag));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temp root");
+    root
+}
+
+/// ADR-024 retired every S3 server cell except s3 × turso. `start` rejects them
+/// before endpoint, barrier, or storage I/O.
+async fn assert_retired_server_cell(cell: &str, projection: ProjectionSpec) {
+    let error = start(base_config(
+        BackendSpec {
+            log: s3_log_spec(
+                "http://127.0.0.1:9",
+                "fireweed",
+                "us-east-1",
+                "akid",
+                "secret",
+            ),
+            projection,
+            control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::AsyncProjection,
+            async_projection: None,
+        },
+        Vec::new(),
+    ))
+    .await
+    .err()
+    .unwrap_or_else(|| panic!("{cell} is not a public cell"));
+    assert_eq!(
+        error,
+        EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL),
+        "{cell}"
+    );
+}
+
 fn embedded_sink() -> ChangeRecordSinkConfig {
     ChangeRecordSinkConfig {
         enabled: true,
@@ -215,33 +260,6 @@ fn pause_envelope(id: &str) -> CommandEnvelope {
         checksum: CommandChecksum(0),
         created_at: UtcTimestamp::new(1, 0).unwrap(),
     }
-}
-
-async fn redis_xadd(addr: std::net::SocketAddr, stream: &str) {
-    let client = redis::Client::open(format!("redis://{addr}")).expect("redis url");
-    let mut con = client
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::new()
-                .set_response_timeout(Some(Duration::from_secs(10))),
-        )
-        .await
-        .expect("redis connect");
-    let _: String = redis::cmd("XADD")
-        .arg(stream)
-        .arg("*")
-        .arg("priority")
-        .arg(1)
-        .query_async(&mut con)
-        .await
-        .expect("XADD");
-}
-
-async fn accept_one_http_ok(listener: TcpListener) {
-    let (mut socket, _) = listener.accept().await.expect("accept change-record http");
-    let mut buf = Vec::new();
-    let _ = socket.read_to_end(&mut buf).await;
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    let _ = socket.write_all(response).await;
 }
 
 #[derive(Default)]
@@ -380,127 +398,40 @@ async fn p8cs_s3_log_cursor_lifecycle_native_cas() {
     );
 }
 
-// ── Real Server lifecycle: S3 × memory / sqlite / postgres ──────────────────
-
-async fn smoke_s3_embedded_cell(mut config: Config, cell: &str, stream: &str) {
-    config.change_record_sink = embedded_sink();
-    let server = start(config)
-        .await
-        .unwrap_or_else(|e| panic!("{cell} Embedded delivery must start: {e:?}"));
-    redis_xadd(server.addr(), stream).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // Shutdown must cancel/join emitter + fjord tasks without leak.
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-}
+// ── Retired S3 server arms: memory / postgres reject before I/O ─────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_memory_embedded_emitter_lifecycle() {
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let (endpoint, bucket, region, access, secret) = require_s3();
-    let def = qdef_named("p8cs", &unique_tag("mem"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
-        },
-        vec![def],
-    );
-    smoke_s3_embedded_cell(config, "s3×memory", &stream).await;
+    assert_retired_server_cell("s3×memory", ProjectionSpec::InMemory).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_postgres_embedded_emitter_lifecycle() {
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let (endpoint, bucket, region, access, secret) = require_s3();
-    let url = pg_url();
-    let schema = unique_tag("s3_pg").replace('-', "_");
-    create_schema(&url, &schema).await;
-    let def = qdef_named("p8cs", &unique_tag("pg"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let scoped = url_with_schema(&url, &schema);
-    let config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::Postgres { url: scoped },
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
+    assert_retired_server_cell(
+        "s3×postgres",
+        ProjectionSpec::Postgres {
+            url: "postgres://127.0.0.1:1/fireweed".to_owned(),
         },
-        vec![def],
-    );
-    smoke_s3_embedded_cell(config, "s3×postgres", &stream).await;
-    drop_schema(&url, &schema).await;
+    )
+    .await;
 }
 
-// ── Transport smoke through real spawned emitter (HTTP + feature-off Kafka) ─
+// ── Retired HTTP arms and feature-off Kafka on the public cell ──────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_memory_http_delivery_smoke_through_spawned_task() {
-    let err = start(base_config(
-        BackendSpec {
-            log: s3_log_spec(
-                "http://127.0.0.1:9",
-                "fireweed",
-                "us-east-1",
-                "akid",
-                "secret",
-            ),
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
-        },
-        Vec::new(),
-    ))
-    .await
-    .err()
-    .expect("s3 × memory is not a public cell");
-    let text = err.to_string();
-    assert!(text.contains("s3") || text.contains("retired"), "{text}");
+    assert_retired_server_cell("s3×memory", ProjectionSpec::InMemory).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_postgres_http_delivery_smoke_through_spawned_task() {
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let (endpoint, bucket, region, access, secret) = require_s3();
-    let url = pg_url();
-    let schema = unique_tag("s3_http_pg").replace('-', "_");
-    create_schema(&url, &schema).await;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let acceptor = tokio::spawn(accept_one_http_ok(listener));
-
-    let def = qdef_named("p8cs", &unique_tag("http-pg"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let scoped = url_with_schema(&url, &schema);
-    let mut config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::Postgres { url: scoped },
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
+    assert_retired_server_cell(
+        "s3×postgres",
+        ProjectionSpec::Postgres {
+            url: "postgres://127.0.0.1:1/fireweed".to_owned(),
         },
-        vec![def],
-    );
-    config.change_record_sink = http_sink(port);
-    let server = start(config)
-        .await
-        .expect("s3×postgres HTTP delivery must start");
-    redis_xadd(server.addr(), &stream).await;
-
-    tokio::time::timeout(Duration::from_secs(15), acceptor)
-        .await
-        .expect("HTTP sink must receive delivery from spawned emitter")
-        .expect("acceptor join");
-
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    drop_schema(&url, &schema).await;
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -514,10 +445,11 @@ async fn p8cs_external_kafka_feature_off_rejects_s3_class_a() {
     #[cfg(not(feature = "external-kafka"))]
     {
         let (endpoint, bucket, region, access, secret) = require_s3();
+        let root = temp_root("kafka-off");
         let mut config = base_config(
             BackendSpec {
                 log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-                projection: ProjectionSpec::InMemory,
+                projection: turso_projection(&root),
                 control_plane: ControlPlaneSpec::InProcess,
                 response_barrier: ResponseBarrierSpec::AsyncProjection,
                 async_projection: None,
@@ -535,15 +467,17 @@ async fn p8cs_external_kafka_feature_off_rejects_s3_class_a() {
             }
             other => panic!("expected Invalid feature message, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
 // ── Opt-out + isolation + reap coupling on S3 product cells ─────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
+async fn p8cs_s3_turso_opt_out_isolation_and_reap_coupling() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
     let (endpoint, bucket, region, access, secret) = require_s3();
+    let root = temp_root("opt-out");
 
     // Opt-out: enabled sink + emit_change_records=false still starts (no emitter work).
     let mut opted_out = qdef_named("p8cs", &unique_tag("opt"));
@@ -551,7 +485,7 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
     let mut config = base_config(
         BackendSpec {
             log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::InMemory,
+            projection: turso_projection(&root),
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
@@ -568,7 +502,7 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
     let mut disabled = base_config(
         BackendSpec {
             log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::InMemory,
+            projection: turso_projection(&root),
             control_plane: ControlPlaneSpec::InProcess,
             response_barrier: ResponseBarrierSpec::AsyncProjection,
             async_projection: None,
@@ -658,6 +592,7 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
         "durable S3 cursor at/past emitted position for reap coupling: cursor={cursor:?} terminal={:?}",
         pos_a[0]
     );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

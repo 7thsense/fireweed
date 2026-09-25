@@ -42,6 +42,15 @@ impl S3TestEnv {
     }
 }
 
+/// P1s native-CAS attestation written by `scripts/ci/s3-qualification-endpoint.sh provision`
+/// under `FIREWEED_S3_SECRET_DIR` (default `/tmp/fireweed-s3-secrets`, as in that script).
+pub fn p1s_attestation_path() -> PathBuf {
+    std::env::var_os("FIREWEED_S3_SECRET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/fireweed-s3-secrets"))
+        .join("s3-native-cas-capability-attestation.json")
+}
+
 static ENV: OnceLock<S3TestEnv> = OnceLock::new();
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 

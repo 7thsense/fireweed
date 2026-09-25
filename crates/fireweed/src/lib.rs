@@ -2373,95 +2373,40 @@ mod storage_config_open_tests {
         drop(fw);
     }
 
+    /// ADR-024 retired postgres × memory and s3 × memory. `open` rejects both before
+    /// storage I/O, so live fixtures in the environment do not change the outcome.
     #[test]
-    fn open_dispatches_postgres_and_s3_cells_or_skips_without_live_env() {
+    fn open_rejects_retired_postgres_and_s3_memory_cells_before_io() {
         let clock = clock();
-
-        // Compile/dispatch path for postgres×memory: skip when no live DB.
-        #[cfg(feature = "postgres")]
-        {
-            if let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") {
-                let cfg = base_cfg(
-                    LogConfig::Postgres {
-                        url: ConfigSecret::new(url),
-                        schema: Some("fw_matrix_open".to_owned()),
-                        mode: PostgresMode::LogReplay,
-                        node_id: None,
-                        coordination: None,
-                    },
-                    ProjectionStoreConfig::Memory,
-                );
-                let fw = open(cfg, Arc::clone(&clock)).expect("postgres×memory with live PG");
-                drop(fw);
-            } else {
-                eprintln!(
-                    "storage_config_open: postgres cell skipped (FIREWEED_PG_TEST_URL unset)"
-                );
-            }
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            let cfg = base_cfg(
+        let pg_url = std::env::var("FIREWEED_PG_TEST_URL")
+            .unwrap_or_else(|_| "postgres://127.0.0.1:1/fireweed".to_owned());
+        let s3_endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT")
+            .unwrap_or_else(|_| "http://127.0.0.1:1".to_owned());
+        for cfg in [
+            base_cfg(
                 LogConfig::Postgres {
-                    url: ConfigSecret::new("postgres://localhost/fireweed"),
-                    schema: None,
+                    url: ConfigSecret::new(pg_url),
+                    schema: Some("fw_matrix_open".to_owned()),
                     mode: PostgresMode::LogReplay,
                     node_id: None,
                     coordination: None,
                 },
                 ProjectionStoreConfig::Memory,
-            );
-            let err = open(cfg, Arc::clone(&clock)).expect_err("postgres without feature");
-            assert!(
-                matches!(err, EngineError::Invalid(msg) if msg.contains("s3 log") || msg.contains("postgres")),
-                "expected retired-cell or feature-gate error, got {err:?}"
-            );
-        }
-
-        // S3 dispatch: without live endpoint, open may fail at network/storage — still exercises match arm.
-        #[cfg(feature = "objectlog")]
-        {
-            if std::env::var("FIREWEED_S3_TEST_ENDPOINT").is_ok() {
-                let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").unwrap();
-                let bucket =
-                    std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed".into());
-                let region =
-                    std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-                let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-                    .unwrap_or_else(|_| "fireweed".into());
-                let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-                    .unwrap_or_else(|_| "fireweed-test-rustfs".into());
-                let cfg = base_cfg(
-                    LogConfig::S3 {
-                        endpoint,
-                        bucket,
-                        region,
-                        access_key_id: ConfigSecret::new(access),
-                        secret_access_key: ConfigSecret::new(secret),
-                        allow_insecure_http: true,
-                    },
-                    ProjectionStoreConfig::Memory,
-                );
-                let fw = open(cfg, Arc::clone(&clock)).expect("s3×memory with live S3");
-                drop(fw);
-            } else {
-                // Ensure the S3 arm is selected (validation + open attempt) without requiring live S3.
-                let cfg = base_cfg(
-                    LogConfig::S3 {
-                        endpoint: "http://127.0.0.1:1".to_owned(),
-                        bucket: "fireweed".to_owned(),
-                        region: "us-east-1".to_owned(),
-                        access_key_id: ConfigSecret::new("akid"),
-                        secret_access_key: ConfigSecret::new("secret"),
-                        allow_insecure_http: true,
-                    },
-                    ProjectionStoreConfig::Memory,
-                );
-                // Open will fail (connection refused / storage); the cell is still dispatched.
-                let err = open(cfg, Arc::clone(&clock));
-                assert!(err.is_err(), "unreachable S3 endpoint must not succeed");
-                eprintln!("storage_config_open: s3×memory dispatch exercised (no live S3)");
-            }
+            ),
+            base_cfg(
+                LogConfig::S3 {
+                    endpoint: s3_endpoint,
+                    bucket: "fireweed".to_owned(),
+                    region: "us-east-1".to_owned(),
+                    access_key_id: ConfigSecret::new("akid"),
+                    secret_access_key: ConfigSecret::new("secret"),
+                    allow_insecure_http: true,
+                },
+                ProjectionStoreConfig::Memory,
+            ),
+        ] {
+            let err = open(cfg, Arc::clone(&clock)).expect_err("retired cell");
+            assert_eq!(err, EngineError::Invalid(RETIRED_STORAGE_CELL));
         }
     }
 }

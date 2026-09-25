@@ -15,6 +15,9 @@
 //! - **ac_txn_dry_run** — aggregate AC-TXN-5/5A cardinality dry-runs over the same axes
 //! - **t0_t2_register** — proves the T0–T2 matrix harness is registered (12 cells)
 //!
+//! ADR-024 leaves one public cell. In every family, `s3--turso` validates and each
+//! other cell is rejected with `RETIRED_STORAGE_CELL` before storage I/O.
+//!
 //! Cell IDs use the manifest separator (`--`). Test function names map
 //! `log--projection` to rustc-safe `prefix_log_projection`.
 
@@ -23,12 +26,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
     AsyncProjectionSpec, ConfigSecret, EngineError, LogConfig, ObjectLogAuthority, PostgresMode,
-    ProjectionStoreConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig,
-    StorageConfig,
+    ProjectionStoreConfig, RETIRED_STORAGE_CELL, RecoveryAction, RecoveryPolicy, ResponseBarrier,
+    SegmentConfig, StorageConfig,
 };
 
-const ASYNC_REQUIRES_OBJECT_LOG: EngineError =
-    EngineError::Invalid("async-projection-requires-object-log");
+const RETIRED: EngineError = EngineError::Invalid(RETIRED_STORAGE_CELL);
+const PUBLIC_CELL: (&str, &str) = ("s3", "turso");
 
 const LOGS: [&str; 4] = ["memory", "postgres", "filesystem", "s3"];
 const PROJECTIONS: [&str; 3] = ["memory", "turso", "postgres"];
@@ -130,57 +133,13 @@ fn storage(
     }
 }
 
-fn dry_run_strict(log: &str, projection: &str) {
-    let root = fixture_root(&format!("strict-{log}-{projection}"));
-    let tag = format!("{log}_{projection}");
-    let cfg = storage(
-        log,
-        projection,
-        ResponseBarrier::AsyncProjection,
-        &root,
-        &tag,
-    );
-    cfg.validate().unwrap_or_else(|error| {
-        panic!(
-            "strict dry-run {} validate failed: {error}",
-            cell_id(log, projection)
-        )
-    });
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-fn dry_run_async_valid(log: &str, projection: &str) {
-    assert!(
-        OBJECT_LOGS.contains(&log),
-        "async valid leaf only for object-log cells"
-    );
-    let root = fixture_root(&format!("async-{log}-{projection}"));
-    let tag = format!("async_{log}_{projection}");
-    let cfg = storage(
-        log,
-        projection,
-        ResponseBarrier::AsyncProjection,
-        &root,
-        &tag,
-    );
-    cfg.validate().unwrap_or_else(|error| {
-        panic!(
-            "object-log async dry-run {} validate failed: {error}",
-            cell_id(log, projection)
-        )
-    });
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-fn dry_run_async_invalid(log: &str, projection: &str) {
-    assert!(
-        NON_OBJECT_LOGS.contains(&log),
-        "async invalid leaf only for non-object-log cells"
-    );
-    let root = fixture_root(&format!("async-invalid-{log}-{projection}"));
-    // Never-created path: rejection must precede I/O.
+/// Validate one cell without storage I/O: `s3--turso` passes, every other cell is retired.
+fn dry_run_cell(family: &str, log: &str, projection: &str) {
+    let id = cell_id(log, projection);
+    let root = fixture_root(&format!("{family}-{log}-{projection}"));
+    // Never-created path: validation must not touch storage.
     let never = root.join("never-created");
-    let tag = format!("reject_{log}_{projection}");
+    let tag = format!("{family}_{log}_{projection}");
     let cfg = storage(
         log,
         projection,
@@ -188,18 +147,42 @@ fn dry_run_async_invalid(log: &str, projection: &str) {
         &never,
         &tag,
     );
-    assert_eq!(
-        cfg.validate(),
-        Err(ASYNC_REQUIRES_OBJECT_LOG),
-        "async-invalid dry-run {} must reject before I/O",
-        cell_id(log, projection)
-    );
+    if (log, projection) == PUBLIC_CELL {
+        cfg.validate()
+            .unwrap_or_else(|error| panic!("{family} dry-run {id} validate failed: {error}"));
+    } else {
+        assert_eq!(
+            cfg.validate(),
+            Err(RETIRED),
+            "{family} dry-run {id} must reject the retired cell before I/O"
+        );
+    }
     assert!(
         !never.exists(),
-        "async-invalid {} must not create storage paths",
-        cell_id(log, projection)
+        "{family} dry-run {id} must not create storage paths"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn dry_run_strict(log: &str, projection: &str) {
+    dry_run_cell("strict", log, projection);
+}
+
+fn dry_run_async_valid(log: &str, projection: &str) {
+    assert!(
+        OBJECT_LOGS.contains(&log),
+        "async valid leaf only for object-log cells"
+    );
+    dry_run_cell("object-log-async", log, projection);
+}
+
+fn dry_run_async_invalid(log: &str, projection: &str) {
+    assert!(
+        NON_OBJECT_LOGS.contains(&log),
+        "async invalid leaf only for non-object-log cells"
+    );
+    // Retirement precedes the async-projection object-log rule.
+    dry_run_cell("async-invalid", log, projection);
 }
 
 // ---------------------------------------------------------------------------

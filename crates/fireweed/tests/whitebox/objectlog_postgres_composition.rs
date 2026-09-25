@@ -156,6 +156,19 @@ fn item(priority: i64) -> NewItem {
     }
 }
 
+/// `ResponseBarrier::AsyncProjection` advertises eventual apply: the object log is the
+/// durability authority and the projection may lag the response (`commit_surface.rs`).
+fn assert_async_projection_commit_capabilities(caps: &fireweed::CommitCapabilities) {
+    assert!(!caps.atomic_transition_commit);
+    assert!(caps.vectorized_commit);
+    assert!(caps.lease_validation);
+    assert!(caps.retained_commit_idempotency);
+    assert!(caps.non_work_side_records);
+    assert!(caps.authoritative_recovery_reads);
+    assert!(caps.delayed_awaits_timers);
+    assert_eq!(caps.durability_class, DurabilityClass::EventualApply);
+}
+
 fn assert_authoritative_commit_capabilities(caps: &fireweed::CommitCapabilities) {
     assert!(caps.atomic_transition_commit);
     assert!(caps.vectorized_commit);
@@ -440,12 +453,12 @@ fn public_objectlog_postgres_delete_and_rebuild() {
         block_on(fireweed.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
     let second = block_on(fireweed.push(&key, item(20))).unwrap();
 
-    // Strict visibility: acknowledgement means the durable PostgreSQL image is queryable immediately.
+    // Acknowledgement here is followed by reads of the PostgreSQL image.
     let expected = block_on(fireweed.metrics(&key)).unwrap();
     assert_eq!(expected.pending, 2);
     assert_eq!(block_on(fireweed.peek(&key, 10)).unwrap().len(), 2);
     let caps = fireweed.commit_capabilities(&key).unwrap();
-    assert_authoritative_commit_capabilities(&caps);
+    assert_async_projection_commit_capabilities(&caps);
     assert_eq!(
         block_on(
             fireweed
@@ -701,7 +714,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             .expect("object-log/Postgres owns a disposable projection");
         assert!(block_on(control.verify()).unwrap().compatible);
         let caps = fireweed.commit_capabilities(&key).unwrap();
-        assert_authoritative_commit_capabilities(&caps);
+        assert_async_projection_commit_capabilities(&caps);
         caps
     };
 
@@ -729,12 +742,13 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         };
         let fireweed = fireweed::open(turso_durability, clock).unwrap();
         let turso_caps = fireweed.commit_capabilities(&queue()).unwrap();
-        // Projection-specific consistency prose differs (Postgres vs Turso apply path);
-        // authority flags and durability class must still match.
-        assert_eq!(
-            postgres_caps.atomic_transition_commit,
-            turso_caps.atomic_transition_commit
-        );
+        // The public s3 × turso cell commits each transition as one object-log batch
+        // and applies Turso afterwards, so it advertises atomic transitions under
+        // eventual apply (as the public conformance suite expects). The composed
+        // PostgreSQL projection advertises the generic eventual capabilities.
+        assert!(!postgres_caps.atomic_transition_commit);
+        assert!(turso_caps.atomic_transition_commit);
+        assert_eq!(turso_caps.durability_class, DurabilityClass::EventualApply);
         assert_eq!(
             postgres_caps.vectorized_commit,
             turso_caps.vectorized_commit
@@ -782,7 +796,10 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             recovered.entries[0].status,
             fireweed::CommitEntryStatus::Committed
         );
-        assert_eq!(postgres_caps.durability_class, DurabilityClass::Atomic);
+        assert_eq!(
+            postgres_caps.durability_class,
+            DurabilityClass::EventualApply
+        );
         assert_eq!(turso_caps.durability_class, DurabilityClass::EventualApply);
     }
 

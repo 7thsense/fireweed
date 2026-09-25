@@ -5,6 +5,9 @@
 //! cursor), prove the TP-004 live S3 semantic IDs against P1s-attested
 //! provider-neutral values with **zero skips**:
 //!
+//! ADR-024 later retired `s3×memory` and `s3×postgres`: those tests now prove
+//! rejection before storage I/O, and the assertion set runs on `s3×turso`.
+//!
 //! | Semantic ID | Proof |
 //! | --- | --- |
 //! | `SNORRI-REOPEN` | Class A round-trip reopen on `s3×memory|sqlite|postgres` |
@@ -20,7 +23,7 @@
 //! ```text
 //! export LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/opt/openssl@3/lib:${LD_LIBRARY_PATH:-}"
 //! export FIREWEED_PG_TEST_URL='postgres://fireweed:fireweed@127.0.0.1:55432/fireweed_snorri_p6p'
-//! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
+//! set -a; source "${FIREWEED_S3_SECRET_DIR:-/tmp/fireweed-s3-secrets}/credentials.env"; set +a
 //! rustup run 1.97.1 cargo test -p fireweed --features objectlog,turso,postgres \
 //!   --test p6s_s3_durability_acceptance -- --nocapture
 //! ```
@@ -43,8 +46,6 @@ use serde_json::Value;
 
 static ORDINAL: AtomicU64 = AtomicU64::new(0);
 
-const ATTESTATION_PATH: &str = "/tmp/fireweed-s3-secrets/s3-native-cas-capability-attestation.json";
-
 fn require_s3_env() -> (String, String, String, String, String) {
     let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT")
         .expect("FIREWEED_S3_TEST_ENDPOINT required for P6s (P1s provenance; zero skips)");
@@ -58,20 +59,19 @@ fn require_s3_env() -> (String, String, String, String, String) {
     (endpoint, bucket, region, access, secret)
 }
 
-fn require_pg_url() -> String {
-    std::env::var("FIREWEED_PG_TEST_URL")
-        .or_else(|_| std::env::var("SNORRI_FIREWEED_POSTGRES_URL"))
-        .expect(
-            "FIREWEED_PG_TEST_URL or SNORRI_FIREWEED_POSTGRES_URL required for P6s s3×postgres (zero skips)",
-        )
-}
-
 fn load_attestation() -> Value {
-    let text = std::fs::read_to_string(ATTESTATION_PATH).unwrap_or_else(|error| {
-        panic!("P6s requires P1s attestation at {ATTESTATION_PATH}: {error}")
+    let path = fireweed_objectlog::p1s_attestation_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "P6s requires P1s attestation at {}: {error}",
+            path.display()
+        )
     });
     serde_json::from_str(&text).unwrap_or_else(|error| {
-        panic!("P1s attestation must be valid JSON at {ATTESTATION_PATH}: {error}")
+        panic!(
+            "P1s attestation must be valid JSON at {}: {error}",
+            path.display()
+        )
     })
 }
 
@@ -211,7 +211,7 @@ fn s3_log_config(namespace: String, projection: ProjectionStoreConfig) -> Storag
         control_plane: None,
         authority: Some(ObjectLogAuthority::NativeConditionalWrite),
         response_barrier: ResponseBarrier::AsyncProjection,
-        async_projection: None,
+        async_projection: Some(fireweed::AsyncProjectionSpec::default()),
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
         recovery: RecoveryPolicy {
@@ -220,6 +220,23 @@ fn s3_log_config(namespace: String, projection: ProjectionStoreConfig) -> Storag
             max_tail_commands: 10_000,
         },
     }
+}
+
+/// ADR-024 retired every S3 cell except s3 × turso. `open` rejects them before
+/// storage I/O, so these checks need neither the P1s attestation nor PostgreSQL.
+async fn assert_retired_cell(cell_id: &str, projection: ProjectionStoreConfig) {
+    let config = s3_log_config(unique_ns(cell_id), projection);
+    let retired = fireweed::EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL);
+    assert_eq!(
+        config.validate(),
+        Err(retired.clone()),
+        "{cell_id} validate"
+    );
+    let error = fireweed::open_async(config, Arc::new(SystemClock) as _)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{cell_id} must not open"));
+    assert_eq!(error, retired, "{cell_id} open");
 }
 
 async fn open_cell(cell_id: &str, config: StorageConfig) -> Fireweed {
@@ -491,14 +508,12 @@ async fn run_snorri_projection_rebuild(cell_id: &str, config: StorageConfig) {
     );
 }
 
-// --- SNORRI-REOPEN: all three S3 cells ---
+// --- SNORRI-REOPEN: s3×turso; retired S3 cells reject before I/O ---
 
+/// ADR-024 retired s3 × memory; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_reopen_s3_memory() {
-    require_p1s_native_cas_provenance();
-    let ns = unique_ns("s3-memory-reopen");
-    let config = s3_log_config(ns, ProjectionStoreConfig::Memory);
-    run_snorri_reopen("s3--memory", config).await;
+    assert_retired_cell("s3--memory", ProjectionStoreConfig::Memory).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -515,28 +530,24 @@ async fn snorri_reopen_s3_turso() {
     run_snorri_reopen("s3--turso", config).await;
 }
 
+/// ADR-024 retired s3 × postgres; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_reopen_s3_postgres() {
-    require_p1s_native_cas_provenance();
-    let pg = require_pg_url();
-    let ns = unique_ns("s3-postgres-reopen");
-    let config = s3_log_config(
-        ns,
+    assert_retired_cell(
+        "s3--postgres",
         ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(pg),
+            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
-    );
-    run_snorri_reopen("s3--postgres", config).await;
+    )
+    .await;
 }
 
-// --- SNORRI-RETRY-ONCE: every live S3 projection row ---
+// --- SNORRI-RETRY-ONCE: s3×turso; retired S3 cells reject before I/O ---
 
+/// ADR-024 retired s3 × memory; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_retry_once_s3_memory() {
-    require_p1s_native_cas_provenance();
-    let ns = unique_ns("s3-memory-retry");
-    let config = s3_log_config(ns, ProjectionStoreConfig::Memory);
-    run_snorri_retry_once("s3--memory", config).await;
+    assert_retired_cell("s3--memory", ProjectionStoreConfig::Memory).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -553,21 +564,19 @@ async fn snorri_retry_once_s3_turso() {
     run_snorri_retry_once("s3--turso", config).await;
 }
 
+/// ADR-024 retired s3 × postgres; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_retry_once_s3_postgres() {
-    require_p1s_native_cas_provenance();
-    let pg = require_pg_url();
-    let ns = unique_ns("s3-postgres-retry");
-    let config = s3_log_config(
-        ns,
+    assert_retired_cell(
+        "s3--postgres",
         ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(pg),
+            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
-    );
-    run_snorri_retry_once("s3--postgres", config).await;
+    )
+    .await;
 }
 
-// --- SNORRI-PROJECTION-REBUILD: disposable projections (turso + postgres control plane) ---
+// --- SNORRI-PROJECTION-REBUILD: s3×turso; retired S3 cells reject before I/O ---
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_projection_rebuild_s3_turso() {
@@ -583,31 +592,20 @@ async fn snorri_projection_rebuild_s3_turso() {
     run_snorri_projection_rebuild("s3--turso", config).await;
 }
 
+/// ADR-024 retired s3 × postgres; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_projection_rebuild_s3_postgres_control_plane() {
-    require_p1s_native_cas_provenance();
-    let pg = require_pg_url();
-    let ns = unique_ns("s3-postgres-rebuild");
-    let config = s3_log_config(
-        ns,
+    assert_retired_cell(
+        "s3--postgres",
         ProjectionStoreConfig::Postgres {
-            url: ConfigSecret::new(pg),
+            url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
         },
-    );
-    run_snorri_projection_rebuild("s3--postgres", config).await;
+    )
+    .await;
 }
 
-/// Memory projection is not disposable: projection_control must be None (unsupported negative retained).
+/// ADR-024 retired s3 × memory; see `assert_retired_cell`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snorri_projection_rebuild_s3_memory_has_no_control() {
-    require_p1s_native_cas_provenance();
-    let ns = unique_ns("s3-memory-no-control");
-    let config = s3_log_config(ns, ProjectionStoreConfig::Memory);
-    let fireweed = open_cell("s3--memory", config).await;
-    assert!(
-        fireweed.projection_control().is_none(),
-        "s3×memory must not expose disposable projection_control (unsupported negative retained)"
-    );
-    drop(fireweed);
-    eprintln!("P6s PASS SNORRI-PROJECTION-REBUILD unsupported-negative s3--memory control=None");
+    assert_retired_cell("s3--memory", ProjectionStoreConfig::Memory).await;
 }

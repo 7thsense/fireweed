@@ -7,7 +7,7 @@
 //!
 //! Focused run:
 //! ```text
-//! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
+//! set -a; source "${FIREWEED_S3_SECRET_DIR:-/tmp/fireweed-s3-secrets}/credentials.env"; set +a
 //! export FIREWEED_PG_TEST_URL=postgres://fireweed:fireweed@127.0.0.1:55432/fireweed
 //! cargo test -p fireweed-server --test production_s3_object_log_config -- --nocapture
 //! ```
@@ -18,8 +18,6 @@ use std::time::Duration;
 
 use fireweed_server::{Config, LogSpec, ProjectionSpec, start};
 use serde_json::Value;
-
-const ATTESTATION_PATH: &str = "/tmp/fireweed-s3-secrets/s3-native-cas-capability-attestation.json";
 
 fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
@@ -72,11 +70,18 @@ fn require_p1s_s3() -> Option<(String, String, String, String, String)> {
 }
 
 fn load_attestation() -> Value {
-    let text = std::fs::read_to_string(ATTESTATION_PATH).unwrap_or_else(|error| {
-        panic!("P4s requires P1s attestation at {ATTESTATION_PATH}: {error}")
+    let path = fireweed_objectlog::p1s_attestation_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "P4s requires P1s attestation at {}: {error}",
+            path.display()
+        )
     });
     serde_json::from_str(&text).unwrap_or_else(|error| {
-        panic!("P1s attestation must be valid JSON at {ATTESTATION_PATH}: {error}")
+        panic!(
+            "P1s attestation must be valid JSON at {}: {error}",
+            path.display()
+        )
     })
 }
 
