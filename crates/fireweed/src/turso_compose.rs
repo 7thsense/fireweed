@@ -1870,6 +1870,9 @@ macro_rules! impl_turso_product_ports {
             ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
                 let shard = shard.clone();
                 async move {
+                    // Another pod may have owned this queue since this handle opened the shared
+                    // log; read its durable index, not this handle's snapshot of it.
+                    AsyncLogStore::refresh_shard(self.log.as_ref(), shard.clone()).await?;
                     let high_water = self.projection.writer_recovery_high_water(&shard).await?;
                     let mut from = high_water.clone();
                     loop {

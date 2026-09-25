@@ -11,6 +11,8 @@ mod async_product;
 mod async_projection_apply;
 pub mod commit_surface;
 pub mod compose_log;
+#[doc(hidden)]
+pub mod head_publish_pause;
 mod log_engine_store;
 pub mod maintenance;
 pub mod object_store_observability;

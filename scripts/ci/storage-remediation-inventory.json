@@ -2618,6 +2618,20 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
+        "id": "7d13890f502cdf4af7ff",
+        "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\")",
+        "line": 45,
+        "owner": "P10ps",
+        "path": "crates/fireweed-server/tests/objectlog_shared_ownership.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10ps",
+          "P2f"
+        ],
+        "detail": "fail_closed=true",
         "id": "04c3a03ffbf0b3575863",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\")",
         "line": 145,
@@ -2870,9 +2884,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6772569fce1d5bddc05b",
+        "id": "c20b86814abfe766d946",
         "identity": "let skipped = (1..4)",
-        "line": 701,
+        "line": 840,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/qualification.rs",
         "status": "discovery_negative"
@@ -2884,9 +2898,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5f4c7761ffab0ba9693b",
+        "id": "b27633c7b86ccb757751",
         "identity": "updates.extend(skipped);",
-        "line": 733,
+        "line": 872,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/qualification.rs",
         "status": "discovery_negative"
@@ -2926,9 +2940,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "49976382294708bc2a0d",
+        "id": "a35f3cda0ccdbfdc7546",
         "identity": "\"Turso packed apply skipped sequence: expected {expected}, first {}\",",
-        "line": 2885,
+        "line": 2888,
         "owner": "P10pf",
         "path": "crates/fireweed/src/turso_compose.rs",
         "status": "discovery_negative"
@@ -64171,6 +64185,64 @@
         "-p",
         "fireweed-server",
         "--test",
+        "objectlog_shared_ownership",
+        "greater_epoch_owner_hydrates_snapshot_tail_before_serving",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "greater_epoch_owner_hydrates_snapshot_tail_before_serving",
+      "id": "Cargo.toml::fireweed-server::objectlog_shared_ownership::test::greater_epoch_owner_hydrates_snapshot_tail_before_serving",
+      "listed_kind": "test",
+      "package": "fireweed-server",
+      "target": "objectlog_shared_ownership",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.97.1",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-server",
+        "--test",
+        "objectlog_shared_ownership",
+        "stale_append_paused_before_authority_cannot_survive_handoff",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "stale_append_paused_before_authority_cannot_survive_handoff",
+      "id": "Cargo.toml::fireweed-server::objectlog_shared_ownership::test::stale_append_paused_before_authority_cannot_survive_handoff",
+      "listed_kind": "test",
+      "package": "fireweed-server",
+      "target": "objectlog_shared_ownership",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.97.1",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-server",
+        "--test",
         "p14_change_record_nonblocking_modes",
         "p14_bounded_runtime_bridge_returns_backpressure_when_saturated",
         "--",
@@ -70390,6 +70462,35 @@
       "expected_ran": 1,
       "harness_id": "turso_grouped_schedule_fast_path_preserves_summary_order_and_recovery",
       "id": "Cargo.toml::fireweed-turso::qualification::test::turso_grouped_schedule_fast_path_preserves_summary_order_and_recovery",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "qualification",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.97.1",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--test",
+        "qualification",
+        "turso_item_id_zero_key_lookups_bind_the_full_active_key",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "turso_item_id_zero_key_lookups_bind_the_full_active_key",
+      "id": "Cargo.toml::fireweed-turso::qualification::test::turso_item_id_zero_key_lookups_bind_the_full_active_key",
       "listed_kind": "test",
       "package": "fireweed-turso",
       "target": "qualification",
@@ -82217,7 +82318,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "ac6895bc03a1ccc941a0a1c49c4f3eeadfed66769f609abe23a08bc9ba8412c0",
+  "source_inventory_sha256": "7005732e84fac77962563e36ecd6e64367f4b690565abaa01c0dcf6697f4ac0e",
   "workspaces": [
     {
       "listing_error_sha256": "",
