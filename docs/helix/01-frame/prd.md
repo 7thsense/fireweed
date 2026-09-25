@@ -24,28 +24,49 @@ the command log.
 The 2026-09-17 amendment is historical. It does not define current selectors.
 Historical DDx IDs, requirement IDs, artifact names, and original measurements
 retain their identity. SQLite selectors stay retired and are not a differential
-reference. See [the current Rust interface](../02-design/contracts/API-005-fireweed-rust-facade.md)
+reference. See [the kernel contract](../02-design/contracts/API-006-fireweed-kernel-contract.md)
 and [storage authority manifest](../04-build/storage-authority-manifest.json).
+
+## Kernel contract (API-006)
+
+[API-006](../02-design/contracts/API-006-fireweed-kernel-contract.md) is the
+contract a consumer depends on. It supersedes API-001 to API-005 (owner
+decision, 2026-09-23 design discussion), and the requirements below follow it:
+
+- A queue declares an ordered list of stages, typed fields and indexes when it
+  is created, and that definition is immutable. Queue metadata is mutable,
+  owned by the consumer and never interpreted.
+- A record has an upstream-owned key, one stage, a `rank` (`i64`) and declared
+  fields. A claim walks one stage in rank order under a per-claim lease; a write
+  addresses records by key. No stage is special: there are no terminal states.
+- The contract is in-process. There is no remote API, expiry or retention
+  machinery, cohort, discovery, side record, progress bound or relaxed ordering.
+
+Requirement ids are stable. A requirement the contract removed is marked
+**Retired (API-006)** with its reason, and its id is never reused. New
+requirements take the next free id (FR-56 onward).
 
 ## Summary
 
 fireweed is a durable priority queue engine for applications that need high-volume,
-ordered, recoverable work execution. A queue defines its priority model,
-ordering mode, progress bound, eligibility rules, and batching constraints.
-Clients push and update items idempotently, workers claim eligible items under a
-lease, and claimed items are finalized as complete, failed, retryable, or
-released.
+ordered, recoverable work execution. A queue declares its stages, typed fields
+and indexes. Clients add and update records idempotently by key, workers claim
+the records of one stage in rank order under a lease, and they settle claimed
+records by writing them: a stage move, a new rank, or a delete.
 
 fireweed is also the transaction mapping layer for this centralized state-machine
-workflow. The native interface is batch-centric. The public storage cell
-(ADR-024) is S3 object-log × Turso projection with `AsyncProjection` only.
-A successful mutation is durable on the object log. A later claim polls applied
-rows; an empty claim is a poll, not a failure of the mutation. A rejected
-mutation has no committed effect. An interrupted or timed-out mutation can be
-resolved through `request_id` without duplicating state transitions. Class A
-durability is the object log. Turso rebuilds through `projection_control` and
-is not the command log. Latency, cost, and recovery time MUST NOT silently
-change state-machine integrity.
+workflow. The native interface is batch-centric, and its semantics are API-006's.
+A successful mutation is durable (DUR1). A claim observes every acknowledged
+write (V2); a short or empty claim is a successful poll, not a failure of the
+mutation (C5), and C5a bounds how long a candidate can be missed. `read` and
+`scan` are fresh (V3). A rejected mutation has no committed effect (E1). An
+interrupted or timed-out mutation can be resolved through `request_id`, or by
+`read`, without duplicating state transitions (E2, RQ1–RQ4). Implementation
+note (ADR-024): the public storage cell is S3 object-log × Turso projection
+with `AsyncProjection`; Class A durability is the object log, and Turso rebuilds
+through projection control on the admin handle and is not the command log.
+Latency, cost, and recovery time MUST NOT silently change state-machine
+integrity.
 
 The product is general-purpose and may become open source. Seventh Sense is the
 first validation workload: several delivery, action, job, and connector queues
@@ -106,8 +127,9 @@ queue with timestamp ordering as a first-class validation case.
 
 1. Applications can define durable priority queues without hardcoding domain
    concepts into the queue engine.
-2. Workers can claim the highest-priority eligible work, or bounded-relaxed work
-   when scale requires it, without starving eligible items.
+2. Workers can claim the lowest-ranked claimable records of a stage, in rank
+   order, at a cost logarithmic in queue size plus the records returned
+   (API-006 C9).
 3. Producers and schedulers can write and update items idempotently at the
    single-deployment write rate in Success Metrics, and beyond it by distributing
    work across multiple queues.
@@ -119,23 +141,23 @@ queue with timestamp ordering as a first-class validation case.
 6. Operators can configure a commit-latency bound for applicable Class A logs and
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
-7. Callers can depend on one transaction contract on the public cell
-   (S3 object-log × Turso, `AsyncProjection` only, ADR-024) without
-   backend-specific choreography. Success is durable on the object log.
-   Claim polls applied rows.
+7. Callers can depend on one transaction contract (API-006) without
+   backend-specific choreography: success is durable (DUR1), a claim observes
+   every acknowledged write (V2), and `read` and `scan` are fresh (V3). The
+   public cell (S3 object-log × Turso, ADR-024) implements it.
 
 ### Success Metrics
 
 | Metric | Target | Measurement Method |
 |--------|--------|--------------------|
 | Single-queue progress under load | A 10M-resident queue completes the declared ingest and claim/finalize operation mix with exact counts, no duplicate claims, monotonically advancing cursors, and bounded queues/connections/tasks under ordinary concurrent host load | Portable Tier-1 evidence record (TP-002 E1), with throughput reported as topology-bound capacity |
-| Behavior preserved at scale | Adding queues, owners, and concurrent load preserves exact outcomes and every queue's progress bound; same-run loaded results remain within the declared degradation envelope of interleaved controls | Multi-queue scale-out + concurrency benchmark per the Tier-2 evidence record (TP-002 E2) |
+| Behavior preserved at scale | Adding queues, owners, and concurrent load preserves exact outcomes and every queue's claim order and progress (API-006 C4, C5a); same-run loaded results remain within the declared degradation envelope of interleaved controls | Multi-queue scale-out + concurrency benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Queue density | At least 1000 cold queues plus one designated hot queue are active concurrently; all queues become progress-eligible, the hot and cold phases complete exactly, and shared workers/connections/tasks remain bounded rather than growing per queue | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Hot queue scale | At least 10M items resident in one active queue remain writable, claimable, observable, and exactly recoverable under the declared topology | Benchmark per TP-002 E1 and E3 |
 | Core operation capacity | Throughput and p50/p95/p99 for batch push, update, claim, and finalize are published with workload, host, topology, and resource limits; pass/fail uses correctness, progress, bounded resources, and same-run degradation rather than absolute speed | Benchmark harness under representative Seventh Sense and synthetic workloads |
-| External transaction integrity | The public cell (s3 × turso, `AsyncProjection`, ADR-024) satisfies success/error/unknown-outcome semantics and proves crash recovery from the object log. Empty claim is a poll, not a lost mutation. This row does not record a 10M-resident or 1000-queue pass | Cell conformance plus fault injection per TP-003 on that cell |
+| External transaction integrity | The public cell (s3 × turso, ADR-024) satisfies API-006's success, error and unknown-outcome semantics (DUR1, E1, E2, RQ1–RQ4) and proves crash recovery from the object log. A short or empty claim is a successful poll (C5), not a lost mutation. This row does not record a 10M-resident or 1000-queue pass | Cell conformance plus fault injection per TP-003 on that cell |
 | Commit latency and cost dial | Applicable Class A logs publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
-| Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
+| Claim order and progress | 0 claim-order inversions against `(rank, insertion sequence)` within a stage, and a claim on a quiet queue returns its first candidates (API-006 C4, C5a). Replaces the retired progress-bound metric | Contract suite plus adversarial tests with skewed rank and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
 
 ### Scale Substantiation
@@ -164,18 +186,21 @@ evidence record is not publishable.
 - fireweed v1 will not hardcode Seventh Sense job, action, connector, quota,
   paused, suppressed, or campaign concepts into the core item model.
 - fireweed v1 will not be a full workflow engine like Temporal.
-- fireweed v1 will not require strict global priority ordering for every queue.
+- fireweed v1 will not offer relaxed ordering. Every claim is in strict rank
+  order within its stage (API-006 C4); the earlier bounded-relaxed option is
+  retired.
 - fireweed v1 will not implement AMQP, Kafka, or SQS compatibility as the core
-  data model. A Kafka producer wire adapter (ApiVersions/Metadata/Produce only,
-  mapped to fireweed enqueue semantics) is in scope as P2 (ADR-005); consumer-side
-  Kafka APIs are permanently out of scope.
+  data model. It has no remote API or wire adapter: the RESP adapter is
+  deleted, and a network front may be rebuilt later as a pure transport over
+  `Store` (API-006 §8). The Kafka producer wire adapter (ADR-005) was already
+  retired by ADR-007.
 - fireweed v1 will not prescribe a storage engine or shard implementation in the
   PRD.
 - fireweed v1 does not enforce downstream API rate limits or quotas. Pacing work
   to a downstream system's accepted rate (for example a per-account,
   per-connector, or per-day send ceiling) is the responsibility of the calling
   worker. fireweed exposes claim-pacing controls (claim batch size, claim cadence,
-  per-item `not_before`, and group selection) that a caller uses to pace itself;
+  a future `rank`, and whole-group claims) that a caller uses to pace itself;
   fireweed itself performs no rate admission and applies no downstream-rate token
   bucket.
 
@@ -189,14 +214,14 @@ evidence record is not publishable.
 backlogs, and keep noisy workloads isolated.
 
 **Pain Points**: Existing queue behavior is split across brokers, tables, and
-worker code; correctness and latency are hard to reason about at 10M-item scale.
+worker code; correctness and latency are hard to reason about at 10M-record scale.
 
 ### Secondary Persona: Worker/Application Engineer
 
 **Role**: Engineer producing and consuming queued work
 
-**Goals**: Push items idempotently, update priority and metadata, claim
-compatible batches, and finalize outcomes without designing a custom queue.
+**Goals**: Add and update records idempotently, change their rank and fields,
+claim compatible batches, and settle them without designing a custom queue.
 
 **Pain Points**: Downstream APIs require batches by account, connector, job,
 campaign, domain, or other compatibility keys; FIFO queues do not provide that
@@ -218,62 +243,69 @@ priority, retry, claim, and state logic with different table shapes.
 
 1. General queue namespaces with isolation, routing, metrics, and independent
    scale behavior.
-2. Queue-defined priority models, including timestamp ascending as a first-class
-   model and at least one non-timestamp model.
-3. Strict and bounded-relaxed ordering modes with mandatory progress guarantees.
-4. Priority and eligibility as separate concepts.
-5. Idempotent batch push and client batch update, plus one atomic operator
-   mutation operation that can resolve addressed items or selectors, enforce
-   caller version and lease policy, change lifecycle/schedule/caller data, and
-   persist the resolved outcome for exact replay on every supported backend.
-6. Batch claim and group-aware batch claim.
+2. One caller-controlled `rank` (`i64`) per record orders claims within a
+   stage. Timestamps (the default rank is the insertion time in µs) and
+   non-timestamp priorities are both ranks (API-006 §2).
+3. Strict rank ordering, with a progress guarantee (API-006 C4, C5a) and a
+   claim cost of O(log n + k + b) for n records, k returned and b skipped for
+   gates (C9). Bounded-relaxed ordering and per-queue progress bounds are
+   retired.
+4. Rank and claimability as separate concepts: claimability is stage, lease,
+   `rank <= horizon`, and gates (C1).
+5. Idempotent, atomic write units: insert, upsert, sparse update, stage move,
+   settle, delete, claim extension, gate ops and a queue-metadata CAS, with
+   exact replay by `request_id` (API-006 §4.2). The selector-resolving operator
+   mutation is retired: selection is `scan` or `read`, and safety is the
+   version check.
+6. Batch claim, always within one declared stage, including whole-group
+   claims.
 7. Durable claim leases with at-least-once execution and single active lease per
-   item.
-8. Batch finalize for complete, failed, retry, and release outcomes with
-   per-item results.
-9. Opaque payload and metadata with metadata-driven eligibility gates.
-10. Observability for queue depth, lifecycle counts, leases, retries, oldest
-    eligible age, and progress-bound risk.
+   record.
+8. Settling claimed records by writes carrying the claim token (stage move, new
+   rank, release, delete), with per-write outcomes. There are no engine
+   finalize outcomes.
+9. Declared, typed fields and indexes (fixed at queue creation), queue-level
+   gates, and consumer-owned queue metadata. There is no separate payload and
+   no side record.
+10. Observability for counts by stage and lease state, pause state, ready
+    groups and the oldest ready time (`stats`), and counts over declared
+    indexes (`aggregate`).
 11. Performance at 10M-item hot queue scale under representative concurrent
     load: core batch operations complete with exact outcomes, monotonic progress,
     no duplicate claims, and bounded shared resources. Horizontal scale is
     achieved by distributing queues across nodes while preserving each queue's
-    progress bound. Absolute throughput and latency are reported for the declared
-    topology as capacity evidence, not used as portable release thresholds.
+    claim order and progress (API-006 C4, C5a). Absolute throughput and latency
+    are reported for the declared topology as capacity evidence, not used as
+    portable release thresholds.
     Substantiated by the recorded scale evidence (see "Scale Substantiation").
-12. Active-scope discovery (native service mode): a tenant-scoped read operation
-    (`DiscoverActiveScopes`, API-001) returns the queues, and group keys within a
-    queue, that currently have eligible work, ranked by oldest-eligible age -
-    tenant-scoped top-N across queues when no queue is named, and queue-global
-    when one queue is named - so a worker fleet can route
-    claims for per-group fairness. Per-group fairness is a routing concern served
-    by this operation, not an engine progress invariant; the engine guarantees
-    only the single queue-global progress bound (FR-9/FR-12). Discovery is
-    advisory for reservation - `BatchClaim` remains the authoritative selection
-    path. Compatibility adapters MAY omit it and MUST document the omission.
+12. Retired (API-006): active-scope discovery is deleted (FR-48). Its one real
+    use, a batching threshold, is the bounded `stats.groups` read (S2).
 13. The queue is the unit of sharding: each queue is owned by a single node.
     Write and claim load scale beyond one storage deployment by distributing
     queues across nodes; a producer needing more than one owner's throughput for
     a logical stream partitions it across multiple queues at the application
-    layer. Single-active-lease, deterministic claim ordering, and the per-queue
-    progress bound are preserved per queue.
+    layer. Single-active-lease, deterministic claim ordering, and progress
+    (API-006 C5a) are preserved per queue.
 14. Queue density: a single deployment exercises at least 1000 cold queues plus
     one hot queue on one node. Every queue becomes progress-eligible, exact
-    lifecycle counts reconcile, and loaded behavior stays within its declared
+    stage counts reconcile, and loaded behavior stays within its declared
     same-run degradation envelope. This
-    requires per-queue background work (lease-expiry sweeps, progress monitoring,
-    summary recompute, recurring rearm, idempotency/retention GC) to be
+    requires per-queue background work (lease-expiry sweeps, summary recompute,
+    request-id GC) to be
     multiplexed onto bounded shared per-node resources, never one task, loop, or
     connection per queue.
     Aggregate single-node throughput is reported for the declared node;
     multi-node deployment provides aggregate headroom.
-15. Transaction contract on the public cell (ADR-024): S3 object-log × Turso
-    projection and `AsyncProjection` only. Batch mutation success is durable on
-    the object log. Structured rejection has no committed effect. Unknown
-    retries resolve by `request_id`. Idempotency replay and claim exclusivity
-    hold. An empty claim polls applied rows and is not a command failure.
-    Recovery replays the object log through `projection_control`. No caller
-    needs a second cell or a `Strict` barrier.
+15. The API-006 transaction contract holds on the public cell (ADR-024). Batch
+    mutation success is durable (DUR1). Structured rejection has no committed
+    effect (E1). Unknown outcomes resolve by `request_id` or by `read` (E2,
+    RQ1–RQ4). Idempotency replay and claim exclusivity hold. A claim observes
+    every acknowledged write (V2); a short or empty claim is a successful poll,
+    not a command failure (C5), bounded by C5a; `read` and `scan` are fresh
+    (V3). Implementation note: the cell is S3 object-log × Turso projection
+    with `AsyncProjection`, and recovery replays the object log through
+    projection control on the admin handle. No caller needs a second cell or a
+    `Strict` barrier.
 16. Applicable Class A log configurations MUST expose an
     operator-configurable commit-latency
     bound that controls group-commit cadence. Lower bounds reduce mutation
@@ -283,256 +315,327 @@ priority, retry, claim, and state logic with different table shapes.
 
 ### Should Have (P1)
 
-1. SQS-shaped API adapter for familiar send, receive, delete, visibility, delay,
-   and batch semantics. The adapter cannot represent mutable priority or
-   schedule updates and must remain secondary to the native fireweed API.
+1. Deferred (API-006): an SQS-shaped API adapter. The contract has no remote
+   API; any adapter is rebuilt later as a pure transport over `Store`, under its
+   own contract, and stays secondary to it.
 2. fireweed deployment-level rate limits, quotas, and tenant capacity controls
    (protecting the fireweed deployment from noisy tenants - not enforcing callers'
    downstream API limits, which are a permanent non-goal).
-3. Dead-letter, redrive, and retention policies configurable per queue.
-4. Operational repair actions for pause, unpause, reschedule, retry, fail,
-   complete, and purge by queue scope.
+3. Retired (API-006): per-queue dead-letter, redrive and retention policies. A
+   dead letter is a stage the consumer names, redrive is a stage move, and
+   retention is a consumer concern.
+4. Operational repair: pause and resume are the `"*"` gate (W9); reschedule,
+   retry, fail, complete and purge are ordinary writes; ending a lease without
+   its token is `Operator::force_clear`, reached only from the admin handle
+   (FR-58).
 
 ### Nice to Have (P2)
 
-1. Additional compatibility adapters, such as BullMQ-style or Faktory-style
-   client APIs.
+1. Deferred (API-006): additional compatibility adapters, such as BullMQ-style
+   or Faktory-style client APIs, wait for a transport over `Store`.
 2. A hosted dashboard for queue inspection, repair, and trend analysis.
-3. Optional bounded-relaxed ordering-quality metrics such as rank error.
-4. Kafka producer wire adapter: ApiVersions/Metadata/Produce over heimq-wire,
-   mapping Produce records to fireweed enqueue semantics. Consumer-side Kafka APIs
-   are permanently out of scope (ADR-005).
+3. Retired (API-006): bounded-relaxed ordering-quality metrics. There is no
+   relaxed ordering.
+4. Retired: the Kafka producer wire adapter (ADR-005, superseded by ADR-007).
+   API-006 has no remote API either. Consumer-side Kafka APIs remain
+   permanently out of scope.
 
 ## Functional Requirements
 
+Requirement ids are stable. **Retired (API-006)** marks a requirement the
+kernel contract removed; its id is never reused. Clause ids in parentheses (for
+example C4) are API-006 clauses.
+
 ### Subsystem: Queue Definition
 
-- **FR-1** - A queue is an isolated namespace with a stable identifier used for
-  routing, scaling, metrics, and operational control.
-- **FR-2** - A queue declares its priority model at creation, including priority
-  value type, ordering direction, and deterministic tie-breaker.
-- **FR-3** - Timestamp ascending is a first-class priority model.
-- **FR-4** - At least one non-timestamp priority model is supported to validate
-  that fireweed is not timestamp-only.
-- **FR-5** - A queue declares its ordering mode at creation: strict or
-  bounded-relaxed.
-- **FR-6** - Queue priority model and ordering mode are immutable after creation
-  unless a later migration design explicitly supports changing them.
+- **FR-1** - A queue is an isolated namespace with a stable identifier,
+  `(tenant, queue)`, used for routing, scaling, metrics, and operational
+  control. Queues are cheap: a consumer uses one queue per job type. No
+  operation and no atomic unit spans queues (A4).
+- **FR-2** - Every record carries one caller-controlled `rank` (`i64`). A claim
+  takes the records of its stage in ascending rank, and equal ranks go in
+  insertion order (ORD1, ORD2). A queue declares no priority model, value type,
+  direction, or tie-breaker.
+- **FR-3** - Timestamp ordering is first-class. The default rank is the
+  insertion time in µs, which gives FIFO, and a caller-supplied time in µs as
+  the rank gives timestamp-ascending order. A rank in the future schedules the
+  record: it is not claimable until the claim's horizon (by default, now)
+  reaches it (C1).
+- **FR-4** - Non-timestamp priorities are ranks too. A priority bucket is an
+  offset added to the rank: negative to run sooner, positive to run later
+  (API-006 §6.5).
+- **FR-5** - Retired (API-006): there is no per-queue ordering mode. Every claim
+  is in strict rank order within its stage (C4). Bounded-relaxed ordering is
+  removed because rank ordering is the product's core and must stay simple and
+  fast (owner decision, 2026-09-23 design discussion).
+- **FR-6** - A queue's definition is declared when the queue is created: an
+  ordered list of 1..=32 stages (default `[INITIAL, COMPLETED]`; the first is
+  the insert default), up to 256 typed fields, and up to 32 indexes. The
+  definition is immutable: `define_queue` is create-or-verify, a different
+  definition is a conflict, and changing any part of it means a new queue
+  (D1–D6, §5.1).
+- **FR-56** - A queue carries consumer-owned metadata: a map of at most 64 KiB
+  with a version, changed only by a metadata op inside a write unit (a sparse
+  patch, optionally compare-and-swap on the version), read fresh together with
+  the definition, and never interpreted by the engine (W13, R4, §5.2).
+- **FR-57** - A queue can be closed with `delete_queue`, even while it holds
+  records and live claims. `archive: true` archives it; a full delete is
+  allowed only when the instance's delete policy is `AllowFull` (the default is
+  `ArchiveOnly`). Closing is atomic and durable, every lease token of the queue
+  dies, and closed is final: every later op on the queue, `define_queue`
+  included, fails with `QueueClosed`, except a repeated `delete_queue`, which
+  reports `already_closed` (DQ1–DQ5).
 
 ### Subsystem: Priority and Progress
 
-- **FR-7** - Strict queues claim eligible items according to priority key plus
-  deterministic tie-breaker, computed over the claim's effective domain (the
-  candidate set after the queue eligibility predicate and any caller
-  group/metadata filters); when that domain is a single `group_key`, the order is
-  exact per-group priority order (every group is co-resident on the queue's owner
-  by construction — the queue is the unit of sharding).
-  The progress bound (FR-9, FR-12) remains queue-global regardless of group
-  filtering; group filtering does not create a per-group progress metric and
-  never causes the engine to return items outside the caller's declared filter.
-- **FR-8** - Bounded-relaxed queues may claim eligible items out of strict
-  priority order to improve throughput.
-- **FR-9** - Every queue declares a mandatory progress bound measured from the
-  moment an item becomes eligible.
-- **FR-10** - Ineligible items, including future-scheduled, gated, leased, or
-  retry-backoff items, do not accrue progress-bound age while ineligible.
-- **FR-11** - Lease expiry returns an item to eligibility without resetting its
-  progress-bound clock.
-- **FR-12** - The queue must claim eligible items before their progress bound is
-  exceeded, regardless of priority relaxation or group-aware batching.
-- **FR-13** - Ordering-quality bounds such as maximum rank error may be exposed,
-  but they do not replace the mandatory progress bound.
+- **FR-7** - A claim names one declared stage and returns the claimable records
+  of that stage in `(rank, insertion sequence)` order, or the named records of a
+  `Keys` claim (C1, C4). No claim orders by an index. Records of other stages,
+  leased records, and records ranked beyond the horizon are never visited (C9).
+- **FR-8** - Retired (API-006): bounded-relaxed ordering is removed (see FR-5).
+- **FR-9** - Retired (API-006): there is no per-queue progress bound. Strict
+  rank order replaces it: the lowest-ranked claimable record of a stage is the
+  first candidate of the next claim of that stage, and a claim on a quiet queue
+  returns the first `min(max_records, candidates)` candidates (C5a).
+- **FR-10** - A record's ready age counts from when it became claimable,
+  `max(rank, the time it last became Free in its stage)`. A record ranked in the
+  future, or leased, is not ready (S2).
+- **FR-11** - Lease expiry frees every record still attached to the expired
+  claim within Δ (at most 5 s). Each record keeps its stage, rank, and insertion
+  sequence, so it returns to its place in claim order, and its `attempts` count
+  is kept (V4, ORD1).
+- **FR-12** - Retired (API-006): there is no progress bound to enforce (see
+  FR-9). The contract suite tests claim order and progress instead (C4, C5a).
+- **FR-13** - Retired (API-006): without relaxed ordering there is no rank-error
+  bound (see FR-5).
 
 ### Subsystem: Eligibility and Metadata
 
-- **FR-14** - Claims return the highest-priority eligible items under the
-  queue's ordering and progress contract.
-- **FR-15** - Eligibility is determined by lifecycle state, lease state,
-  not-before timing, retry timing, and queue-defined metadata gates.
-- **FR-16** - Items carry opaque caller-defined payload and metadata.
-- **FR-17** - Metadata gates can prevent an otherwise high-priority item from
-  being claimed, such as a paused or disabled domain state in the caller's
-  application.
+- **FR-14** - A claim returns the first candidates of its stage in claim order.
+  A record is a candidate when it is in the claim's stage, Free, of
+  `rank <= horizon`, and carries no Blocked gate, while the queue is not paused
+  (C1, C5).
+- **FR-15** - Claimability depends only on stage, lease state, rank against the
+  claim horizon, and gates (C1). There is no separate not-before time, retry
+  timer, or lifecycle state; a delay or a retry backoff is a rank in the future.
+- **FR-16** - Records carry declared, typed fields (`Int`, `Float`, `Bool`,
+  `Time`, `Str`, `Bytes`), declared with their indexes when the queue is
+  created. A value is at most 64 KiB and a record at most 4 MiB. Every value
+  within those bounds behaves the same: there is no "large" flag and no
+  separate payload. Fields are the only per-record data; there are no side
+  records (F1–F3, §5.1).
+- **FR-17** - Gates can keep an otherwise claimable record unclaimed. A record
+  carries up to 8 gate keys, and a gate's queue-level state (Open or Blocked) is
+  set by gate ops inside write units, atomically with the unit and without
+  changing any record. The reserved gate `"*"` pauses the queue (W9). Metadata
+  blockers are removed: a static per-record condition is a gate or a stage.
 
 ### Subsystem: Idempotent Ingest and Mutation
 
-- **FR-18** - Clients can push one or more items idempotently using a
-  caller-supplied logical item key.
-- **FR-19** - Duplicate pushes for the same logical item key converge on one
-  logical item according to documented conflict rules.
-- **FR-20** - Clients can batch update priority, not-before timing, payload
-  references, and metadata for non-terminal items. Operator/embedder clients
-  can instead use one backend-independent atomic mutation operation for
-  lifecycle, schedule, caller-data, field/entity, and gate-key changes. That
-  operation resolves selectors and validates version/lease guards under the
-  queue's serialization boundary, commits all item and queue-gate changes as
-  one durable unit, and replays the stored resolved outcome by request ID.
-- **FR-21** - Batch push and update return per-item results for accepted,
-  duplicate, conflicted, rejected, and failed items.
-- **FR-22** - The queue defines an idempotency retention window so deduplication
-  state is bounded.
+- **FR-18** - Records are addressed by a key that the upstream system owns:
+  opaque bytes, 1..=256 B, unique within the queue across every stage. A large
+  natural key is hashed upstream (§3).
+- **FR-19** - Writes to one key converge on one record. An insert with
+  `Expect::Absent` reports `Exists` when the key is present, and a write with
+  `Expect::Any` upserts (W3, W5). A resend with the same `request_id` returns
+  the recorded outcome without re-evaluation (RQ2).
+- **FR-20** - A write changes any record in any stage by key, with a sparse
+  patch of its stage, rank, gates, and fields, optionally guarded by its
+  version (W3, W5, W8). A leased record is written only by its claim holder,
+  with the token (W4). A write request is a list of atomic units; a unit may
+  also carry claim extensions and gate ops, and one unit of the request may
+  carry the queue-metadata op (W2, W13, W14). The selector-resolving operator mutation is retired: selection is
+  `scan` or `read`, and safety is the version check.
+- **FR-21** - A write returns one outcome per unit: the per-write outcomes of an
+  applied unit, or the failing write and its reason for a rejected unit, which
+  has no effect (W2).
+- **FR-22** - `request_id` is optional on `write`, `claim` and
+  `Operator::force_clear`; `define_queue` and `delete_queue` take none because
+  they are naturally idempotent (RQ1). Replay is kept for the request-id
+  retention R, which is at least 24 h. R is a contract bound, not a per-queue
+  setting (V5, §6.8).
 
 ### Subsystem: Claim Leases and Lifecycle
 
-- **FR-23** - Every accepted item is observable in exactly one lifecycle state:
-  pending, in process, retry, complete, or failed, or an equivalent model that
-  preserves those observable states. Recurring items (FR-49) cycle between
-  pending and in-process indefinitely and reach a terminal state only on explicit
-  terminal finalize or out-of-band purge; `recurrence.until` stops re-arming but
-  does not by itself change lifecycle state.
-- **FR-24** - A claim creates a lease that makes the item unavailable to other
-  workers until finalized, released, or expired.
-- **FR-25** - No item may have more than one active lease at a time.
-- **FR-26** - If a worker does not finalize before lease expiry, the item becomes
-  eligible for redelivery according to queue policy.
-- **FR-27** - Accepted items, priority, metadata, lease state, and lifecycle
-  state survive process and node restart.
+- **FR-23** - Every record is in exactly one of its queue's declared stages and
+  is either Free or Leased. The caller owns the stage: an insert lands in the
+  first stage unless it names another, and any write may move a record to any
+  declared stage. No stage is special: there is no terminal flag and no engine
+  Completed or Failed state. A record lives until the consumer deletes it or
+  closes its queue (§3).
+- **FR-24** - A claim leases the batch it returns under one token and one
+  expiry. No other claim returns a leased record, and lease-free writes to it
+  are rejected, until its holder releases or deletes it, the claim expires, or
+  an operator force-clears it (C3, L1–L4).
+- **FR-25** - No record may have more than one active lease at a time (C6).
+- **FR-26** - If the holder neither settles nor extends before the claim's
+  expiry, every record still attached to the claim becomes claimable again
+  within Δ. There is no queue redelivery policy (V4).
+- **FR-27** - Every acknowledged effect survives process and node restart:
+  records with their stage, rank, gates, and fields; claims and leases; gate
+  state; queue metadata; and queue closure (DUR1).
 - **FR-28** - The delivery guarantee is at-least-once execution with a single
   active lease; consumers remain responsible for idempotent side effects.
+  `attempts` counts the claims of a record and is never reset (L6).
 
 ### Subsystem: Batch and Group Operations
 
-- **FR-29** - Workers can claim up to a bounded number of eligible items in one
-  batch.
-- **FR-30** - Batch claim returns items in the queue's ordering mode and
-  deterministic result order.
-- **FR-31** - Group-aware batch claim can restrict results to items sharing a
-  caller-defined compatibility key or metadata predicate.
-- **FR-31a** - A group-aware batch claim can bound the number of distinct
-  compatibility groups returned in one claim and return all currently-eligible
-  items for each selected group as a whole unit, so workers can build batches
-  sized by downstream group-cardinality limits (for example an API that accepts
-  up to N distinct entities per call) rather than only by total item count. This
-  mode requires the queue to be created with group co-residency and a per-group
-  size cap (`max_eligible_group_size`).
-- **FR-32** - Group-aware batch claim, including bounded multi-group
-  (group-batching) claims, must not permanently favor one group or violate the
-  queue's single queue-global progress bound for other eligible groups;
-  multi-group selection orders groups by the queue's claim ordering and that
-  progress bound, and skips only groups that are contended by another active
-  claim. Per-group fairness across many groups is achieved by routing workers via
-  active-scope discovery, not by a per-group engine invariant. There is no
-  per-group progress metric.
-- **FR-32a** - A queue MAY enable cohort claims (`cohort_policy`), in which a set
-  of items sharing a `group_key` forms one cohort with a declared complete size.
-  Cohort support is opt-in and requires group co-residency placement; it MUST NOT
-  change semantics for queues that do not enable it.
-- **FR-32b** - When cohort claims are enabled, no cohort member may be claimed by
-  any claim unit until the cohort is complete AND every member is individually
-  eligible; a whole-cohort claim MUST lease the entire cohort atomically under one
-  lease or lease none of it. Cohort members are never individually claimable.
-- **FR-32c** - A cohort that does not become complete-and-claim-eligible within
-  its `completion_bound_ms` MUST be expired (all members terminal `failed`,
-  `cohort-incomplete`); a partial cohort MUST NOT execute in v1. The queue-global
-  progress bound (FR-9/FR-12) is unchanged; `completion_bound_ms` is a
-  cohort-lifecycle timeout that `CreateQueue` MUST enforce to be
-  `<= progress_bound_ms`, which preserves FR-12 for withheld eligible members.
-- **FR-33** - Workers can batch finalize leased items as complete, failed,
-  retryable with optional delay, or released.
-- **FR-34** - Batch finalize returns per-item results, including stale lease,
-  already terminal, validation failure, and success outcomes.
-- **FR-35** - Queue or deployment configuration exposes maximum batch sizes and
-  claim limits.
+- **FR-29** - Workers can claim up to 1000 records in one claim. The response
+  is at most 16 MiB and always holds at least the first candidate (C7, §6.8).
+- **FR-30** - A claim returns records in a deterministic order:
+  `(rank, insertion sequence)` for `Next` and within each group of
+  `WholeGroups`, and request order for `Keys` (C4).
+- **FR-31** - A claim narrows its results by stage (one stage per claim) or by
+  whole groups (`WholeGroups`). Records found through a declared index are
+  claimed by key: a `scan`, then a `Keys` claim (C2). Single-group claims,
+  index-ordered claims and metadata-predicate filters are removed: a record kind
+  is a stage, and a compatibility key is a group or an indexed field (C1, C4).
+- **FR-31a** - A `WholeGroups` claim bounds the number of distinct groups it
+  returns (`max_groups`) and returns every candidate of each group it takes, so
+  workers can size batches by a downstream per-call entity limit. It stops
+  before a group that would exceed `max_records` or the response limit; an
+  oversized first group comes back as a prefix flagged `partial_group`. Inserts
+  are never rejected for group size, and there is no per-group size cap (C4,
+  C7, W10).
+- **FR-32** - `WholeGroups` orders groups by their first candidate in claim
+  order and takes only groups with no leased member in any stage (C4, C6a). A
+  consumer that needs one holder per group claims the group's stages only with
+  `WholeGroups`. There is no per-group fairness mechanism beyond rank order.
+- **FR-32a** - Retired (API-006): cohorts are deleted (owner decision,
+  2026-09-23 design discussion). The use case is served by inserting the whole
+  group in one atomic write unit, claiming it with `WholeGroups`, and checking
+  the group's count in the caller.
+- **FR-32b** - Retired (API-006): cohorts are deleted (see FR-32a).
+- **FR-32c** - Retired (API-006): cohorts are deleted, so there is no cohort
+  completion bound or expiry (see FR-32a).
+- **FR-33** - Workers settle claimed records by writing them with the claim's
+  token: `Release(t)` with a stage move (finish or fail), a new rank (retry with
+  backoff), or a `Delete`. `Held(t)` patches a record and keeps its lease. There
+  are no engine finalize outcomes (W4, W5, W7).
+- **FR-34** - A rejected write unit reports the failing write and its reason,
+  including a stale or wrong token (`StaleLease`), a record leased by another
+  holder (`Leased`), a version mismatch, and a validation failure (W2, W4).
+  There is no "already terminal" outcome.
+- **FR-35** - Batch sizes and claim limits are contract constants, not queue or
+  deployment configuration (§6.8).
 
 ### Subsystem: Retry, Failure, and Retention
 
-- **FR-36** - Retry outcome supports retry count, retry metadata, and not-before
-  timing.
-- **FR-37** - Queue policy defines when retryable items become terminal failed
-  items.
-- **FR-49** - A queue may be declared `recurring`; an item may be re-armed
-  (returned to pending with a new caller-supplied eligibility time and optional
-  priority) an unbounded number of times without becoming terminal failed.
-- **FR-50** - Re-arm does not count against retry exhaustion (FR-37) and MUST
-  reset the per-cycle transient-retry counter; only transient `retry` finalizes
-  within a cycle are bounded by `max_attempts`.
-- **FR-51** - A recurring item is a single logical item per logical key
-  (singleton), reusing idempotent push convergence; fireweed does not create one
-  item per cycle.
-- **FR-52** - A recurring item terminates only via explicit terminal finalize,
-  `recurrence.until` followed by terminal finalize/purge, or out-of-band
-  `PurgeItems`. Idle backoff scheduling is caller-owned in v1.
-- **FR-53** - Recurring inventory MUST be observable (idle recurring count vs
-  active recurring count) and MUST NOT be counted as retry backlog or failures.
-- **FR-54** - A re-armed recurring item is subject to the same queue-global
-  progress bound (FR-9/FR-12) as any other eligible item once its eligibility
-  time passes; recurrence introduces no per-group progress bound and no second
-  eligibility rule.
-- **FR-38** - Terminal complete and failed outcomes are durably recorded with
-  lifecycle state, finalization metadata, failure code when present, and final
-  command position.
-- **FR-39** - Queue policy defines bounded retention for terminal item records
-  and idempotency records so storage growth is controlled.
+- **FR-36** - The engine counts `attempts` (+1 per claim, never reset). Retry
+  metadata is fields written by the settling write, and a retry delay is a rank
+  in the future (W5, §3).
+- **FR-37** - Retired (API-006): there is no queue retry policy and no engine
+  failure state. A consumer compares `attempts` with its own limit and moves an
+  exhausted record to a stage it names for failures.
+- **FR-49** - A record can recur without limit: its holder settles each cycle
+  with `Release(t)` and a new rank (the next run time), in the same stage or
+  another. There is no recurring queue mode and no re-arm op.
+- **FR-50** - Retired (API-006): there is no engine retry exhaustion for a
+  re-rank to count against, and `attempts` is never reset. A consumer that
+  needs a per-cycle retry budget stores a base count in a field and compares
+  `attempts` minus that base.
+- **FR-51** - A recurring record is one record per key; re-ranking it never
+  creates another record.
+- **FR-52** - A recurring record ends when the consumer deletes it (W7) or moves
+  it to a stage that nothing claims. There is no `recurrence.until`. Idle
+  backoff scheduling is caller-owned.
+- **FR-53** - Idle (future-ranked) and ready records can be told apart: `stats`
+  counts records by stage and lease state, and `aggregate` over a declared index
+  keyed on the stage and `Rank` buckets them by rank (S1, Q4). There is no retry
+  backlog or failure count to confuse them with.
+- **FR-54** - A re-ranked record is claimed in rank order, like any other
+  record, once its rank is at or below the claim's horizon. Recurrence adds no
+  second rule.
+- **FR-38** - Retired (API-006): there are no terminal outcomes or finalization
+  records. A settling write is durable like any write (DUR1), a settled record
+  stays in a consumer-named stage, and per-transition history travels in its
+  fields (W5). No command position is exposed (§6.7).
+- **FR-39** - Retired (API-006): retention is a consumer concern. Records never
+  expire; the consumer deletes them (W7) or closes their queue (FR-57), and
+  request ids are kept at least R (FR-22). A future delete-by-filter op may
+  serve bulk retention.
 
 ### Subsystem: Observability and Operations
 
-- **FR-40** - The queue exposes counts by lifecycle state per queue.
-- **FR-41** - The queue exposes oldest eligible age, current worst progress-bound
-  risk, active leases, retry backlog, and terminal failure counts.
-- **FR-42** - The queue exposes throughput and latency metrics for push, update,
-  claim, finalize, retry, and lease expiry.
+- **FR-40** - The queue exposes free and leased counts for each declared stage,
+  and whether it is paused (S1).
+- **FR-41** - The queue exposes a bounded ready-groups count and the oldest
+  ready time for a stage (S2), and counts over any declared index range, by
+  index key, time bucket, value range, or lease state (Q4). Progress-bound
+  risk, retry backlog, and terminal failure counts are removed with the
+  concepts they measured; a failure stage's size is a stage count.
+- **FR-42** - Implementations emit throughput and latency telemetry for write,
+  claim, and lease expiry. It is outside the `Store` contract, which exposes no
+  backend introspection (API-006 §8).
 - **FR-43** - Queue isolation includes noisy-neighbor protection: one queue's
   load or backlog cannot prevent another queue from making progress within its
   configured limits.
-- **FR-48** - In native service mode, fireweed exposes a tenant-scoped discovery
-  read that enumerates the queues, and group keys within a queue, that currently
-  have eligible work for the principal, ranked by oldest-eligible age. With no
-  `queue_id` it ranks authorized queues (tenant-scoped top-N across queues); with
-  one `queue_id` it ranks that queue's group keys. Discovery MUST use the same eligibility predicate as
-  `BatchClaim` (the API-001 Eligibility Precedence subsection) and MUST be
-  gate-current at read time. Discovery is the mechanism by which a worker fleet
-  achieves per-group fairness; per-group fairness is NOT an engine progress
-  invariant (the engine guarantees only the queue-global progress bound,
-  FR-9/FR-12). Discovery results are advisory for reservation and MAY be
-  approximate when documented; they MUST NOT lease, mutate, reserve, or guarantee
-  that a subsequent claim succeeds. Discovery MUST only enumerate queues the
-  principal is authorized to read, and MUST bound enumeration via pagination or a
-  documented per-tenant queue ceiling.
+- **FR-48** - Retired (API-006): active-scope discovery is deleted. Only tests
+  called it; its one real use, Seventh Sense's batching threshold, is the
+  bounded `stats.groups` read (S2).
+- **FR-58** - Ending a lease without its token is `Operator::force_clear`, in a
+  separate trait reached only from the admin handle; `Store` has no such op.
+  Normal workflows never use it as a side channel, and CI bans the `Operator`
+  trait and the admin handle in Snorri, the workload and loadgen crates, and
+  the contract suite (OP1–OP4).
 
 ### Subsystem: Seventh Sense Validation
 
-- **FR-44** - fireweed can represent Seventh Sense scheduled delivery/action work
-  using timestamp-ascending priority without embedding Seventh Sense-specific
-  states in the core lifecycle.
-- **FR-45** - Seventh Sense-specific pause, suppression, account, connector, job,
-  and campaign controls are represented as eligibility predicates per the API-001
-  Eligibility Precedence definition: static per-item conditions use
-  `eligibility_policy.metadata_blockers`, and scope-level conditions that block or
-  reopen many items at once (for example an account or connector disabled) use
-  dynamic gate keys via `SetGates`. Downstream delivery-pacing and quota
-  constraints are **not** core queue features and are **not** eligibility
-  conditions: callers pace claims using claim batch size, claim cadence,
-  `not_before`, and group selection (see Non-Goals). fireweed does not model a
-  downstream rate or quota as a lifecycle state or claim-time admission control.
-- **FR-46** - fireweed can support the existing Seventh Sense need to ingest work
-  quickly and update scheduled time later.
-- **FR-47** - fireweed can claim batches compatible with downstream Seventh Sense
-  API constraints such as account, connector, job, campaign, or external batch
-  key.
-- **FR-47a** - fireweed can represent Seventh Sense work by mapping its nesting
-  onto the four client-visible axes (ADR-004): `tenant_id` for the
-  account/isolation boundary, `queue_id` per logical stream, `group_key` for the
-  per-queue ordering/atomicity key (`job_id` for non-cohort scheduled-action
-  queues; `callback_id` for cohort-enabled callback queues — co-resident on the
-  queue's owner by construction, so per-group order and cohort atomicity hold), and
-  `account`, `connector`, `campaign` as `metadata`. The scheduled timestamp maps
-  to timestamp-ascending `priority`. Progress is enforced queue-globally; per-job
-  or per-callback fairness is a worker-routing concern via active-scope discovery.
+- **FR-44** - fireweed can represent Seventh Sense scheduled delivery and action
+  work with the scheduled time in µs as the rank, one queue per job type, and
+  consumer-named stages for its steps, without Seventh Sense-specific states in
+  the engine.
+- **FR-45** - Seventh Sense pause, suppression, account, connector, job, and
+  campaign controls are gates: a status change is one gate op that blocks or
+  reopens every record carrying that gate at once, without rewriting records
+  (W9). There are no metadata blockers. Downstream delivery-pacing and quota
+  constraints are **not** core queue features and are **not** claimability
+  conditions: callers pace claims using `max_records`, claim cadence, a future
+  rank, and whole-group claims (see Non-Goals). fireweed does not model a
+  downstream rate or quota as a stage or as claim-time admission control.
+- **FR-46** - fireweed can ingest work quickly and set or change its scheduled
+  time later: a lease-free write by key sets a new rank or moves the record to
+  another stage (W5).
+- **FR-47** - fireweed can claim batches compatible with downstream Seventh
+  Sense API constraints: one queue per job type, stages for each kind of work,
+  whole groups by a group key such as a lead or a job, and, for records found
+  by a declared field such as account, connector, or campaign, a `scan`
+  followed by a `Keys` claim (C1, C2, C4).
+- **FR-47a** - fireweed can represent Seventh Sense's nesting on API-006's
+  axes: `tenant` for the account and isolation boundary; one queue per job
+  type; stages for that type's steps; `group` as the whole-group axis (for
+  example `job_id`, or the lead for Marketo enrichment); declared fields for
+  account, connector, and campaign; and gates for account and connector status.
+  Claims are in rank order within a stage; per-job fairness is not an engine
+  concept.
 - **FR-47b** - fireweed can claim batches bounded by a downstream per-call entity
-  limit, such as the Marketo lead-enrichment constraint of up to 300 distinct
-  leads per API call, returning all currently-eligible tasks for the selected
-  leads as whole groups in one atomic claim.
-- **FR-47c** - fireweed can represent the Seventh Sense `actions_scheduled`
-  `batch_checksum` / `callback_id` "execute the complete batch together"
-  requirement as an opt-in cohort claim, without embedding `callback_id`
-  semantics in the core lifecycle.
+  limit, such as the Marketo lead-enrichment limit of 300 distinct leads per API
+  call, with `WholeGroups { max_groups: 300 }`: every currently claimable task
+  of each selected lead, as whole groups, in one atomic claim (C3, C4).
+- **FR-47c** - fireweed can execute a Seventh Sense `actions_scheduled`
+  callback batch (`batch_checksum` / `callback_id`) together: each batch is
+  inserted as one group in one atomic write unit, claimed with `WholeGroups`,
+  and checked against its expected count by the caller, with no `callback_id`
+  semantics in the engine. Cohorts are deleted (API-006 §8); this rewording
+  replaces the earlier cohort claim (ADR-025 KC-12, draft D14).
 - **FR-55** - fireweed can represent Seventh Sense `jobs_queue` and
-  `connectors_queue` singleton recurring rows (one per job/connector key,
-  re-armed via next-processing time, never terminal until the underlying entity
-  is removed via `PurgeItems`) using recurring-queue primitives, without
-  embedding job/connector concepts in the core model.
+  `connectors_queue` singleton recurring rows: one record per job or connector
+  key in its type's queue, re-ranked on settle with the next processing time
+  (`{Release(t), Put{rank}}`), and removed with a `Delete` when the underlying
+  entity is removed, without job or connector concepts in the engine.
 
 ## Acceptance Test Sketches
+
+These sketches predate API-006 and use API-001 vocabulary. Rows for retired
+requirements (FR-5, FR-8, FR-9, FR-12, FR-13, FR-32a to FR-32c, FR-37, FR-38,
+FR-39, FR-48, FR-50) are retired with them, and FR-47c's cohort rows give
+way to its reworded requirement. The rows that cite API-001
+map to API-006 clauses: request-id conflict to RQ2, optimistic update conflict
+to W3 (`VersionMismatch`), leased update conflict to W4 (`Leased`), and claim
+retry idempotency to C8. The tenant-spoofing and SQS-adapter rows are retired
+with the remote API, and the `rearm` rows with the recurring mode. The other
+rows keep their intent under the rewritten requirements. The governing
+acceptance scenarios are API-006 §9 (CS6) and TP-003.
 
 | Requirement | Scenario | Input | Expected Output |
 |-------------|----------|-------|-----------------|
@@ -605,49 +708,62 @@ Reference systems and interfaces to study:
 
 - **Business**: The first validation workload is Seventh Sense scheduled
   delivery/action execution.
-- **Technical**: fireweed must support durable claims and batch operations without
-  requiring exact global ordering for every queue.
+- **Technical**: fireweed must support durable claims and batch operations with
+  strict rank order within a stage (API-006 C4), and no ordering across stages
+  or queues.
 - **Technical**: Downstream API rate/quota enforcement is out of the fireweed
   engine. The claim path MUST NOT contain a downstream-rate admission stage;
-  callers pace via claim batch size, claim cadence, `not_before`, and group
-  selection.
+  callers pace via claim batch size, claim cadence, a future `rank`, and
+  whole-group claims.
 - **Product**: Seventh Sense-specific concepts must remain outside the core
   model unless they are necessary for generic durable priority queue semantics.
 
 ### Assumptions
 
-- Queue priority type, ordering direction, ordering mode, and progress bound can
-  be fixed at queue creation for v1.
+- The queue definition (stages, fields, and indexes) can be fixed at queue
+  creation; changing it means a new queue (API-006 §5.1).
 - At-least-once execution with single active lease is the correct durability
   contract; exactly-once side effects are caller-owned.
 - Batch and group-aware operations are required for the first useful release.
-- Timestamp priority uses producer-supplied scheduled time; producers are
+- A timestamp rank uses a producer-supplied scheduled time in µs; producers are
   responsible for the business meaning of that timestamp.
 
 ### Dependencies
 
 - Seventh Sense production workload data for realistic load profiles, group
   distributions, priority skew, and downstream API batch constraints.
-- The committed v1 technical designs for all five log backends, all three
-  projections, and queue ownership/assignment/fencing/rebalance across nodes.
-  These substantiate the horizontal envelope in Success Metrics.
-- API-001 for native fireweed operations. SQS-shaped compatibility remains a
-  later adapter, not the native contract.
-- A later operator/retention contract for P1 redrive, purge, archive, and
-  administrative repair APIs.
+- The S3×Turso technical designs (TD-017 for the Turso projection layout,
+  TD-018 for the partitioned object log) and mapped queue placement with no
+  rebalancing (ADR-025 OD-13). These substantiate the horizontal envelope in
+  Success Metrics.
+- API-006 for the kernel contract. Any remote or compatibility adapter is a
+  later transport over `Store`, not the contract.
+- Retired: a separate operator/retention contract. Repair is
+  `Operator::force_clear` plus ordinary writes (API-006 §7), whole queues close
+  with `delete_queue`, and retention is a consumer concern.
 
 ## Risks
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| Strict priority creates a scalability bottleneck | High | High | Support bounded-relaxed ordering with mandatory progress bounds |
-| Relaxed ordering misses business scheduling expectations | Medium | High | Require per-queue progress bounds and validate timestamp queues against Seventh Sense scheduling SLA |
-| Group-aware claims starve other groups | Medium | High | Make progress bounds override group preference |
+| Strict priority creates a scalability bottleneck | High | High | Keep every claim a stage-bound index walk of O(log n + k + b) (API-006 C9), held by the TP-003 claim-path performance gates |
+| Relaxed ordering misses business scheduling expectations | n/a | n/a | Retired (API-006): there is no relaxed ordering |
+| Group-aware claims starve other groups | Medium | High | `WholeGroups` orders groups by their first candidate in rank order (API-006 C4) |
 | Idempotency state grows without bound | Medium | Medium | Require a documented idempotency retention window |
-| Generic model becomes too Seventh Sense-specific | Medium | High | Keep Seventh Sense states in metadata and validation, not core lifecycle |
+| Generic model becomes too Seventh Sense-specific | Medium | High | Keep Seventh Sense states in consumer-named stages and declared fields, not engine states |
 | Performance tests use unrealistic uniform workloads | High | Medium | Include skewed priority, future-scheduled, leased, retry, and group-heavy test profiles |
 
 ## Resolved API Decisions
+
+API-006 supersedes these decisions where they conflict. Retired: the
+progress-bound metrics (there is no progress bound), retry as `pending` with
+`not_before` (a retry is a new rank), the whole-cohort claim mode (cohorts are
+deleted; `WholeGroups` is the remaining all-or-nothing group claim), the
+SQS-shaped adapter as P1 work (no remote API), recurring items as a queue mode
+(a recurring record is re-ranked on settle), and discovery as the fairness
+mechanism (deleted). Pacing uses `max_records`, claim cadence, a future rank,
+and `WholeGroups`, not `not_before` and `compatibility` filters. The first
+client surface is API-006, not API-001.
 
 - v1 progress-bound metrics use eligible age: `oldest_eligible_age_ms` and
   `progress_bound_risk_count` count or estimate eligible items near
@@ -707,13 +823,15 @@ Reference systems and interfaces to study:
   metadata cannot carry a placement/atomicity key. This confirmation gates the
   migration topology but does NOT block generic fireweed implementation, since
   `group_key` topology and `progress_bound_ms` are per-queue configuration.
+  Under API-006 neither question applies: there is no progress bound, cohorts
+  are deleted, and a queue's whole-group axis is its `group`.
 
 ## Success Criteria
 
-fireweed is successful when a general-purpose queue can be created with a
-configured priority model, accepts and updates work idempotently at production
-scale, claims eligible work in strict or bounded-relaxed order without
-starvation, survives worker failure through leases, and supports group-aware
+fireweed is successful when a general-purpose queue can be created with
+declared stages, fields, and indexes, accepts and updates work idempotently at
+production scale, claims claimable work in rank order without starvation,
+survives worker failure through leases, and supports group-aware
 batch execution. For Seventh Sense, success means scheduled delivery/action work
 can move to fireweed without losing timestamp scheduling correctness, operational
 visibility, or throughput.

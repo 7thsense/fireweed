@@ -16,6 +16,13 @@ ddx:
 
 # Architecture Decision Record
 
+> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
+> The change-log surface is outside the external contract (API-006 §6.7, §8). No change record, command envelope,
+> log position or history is a `Store` obligation or part of conformance, and `emit_change_records` and the
+> retention frontier tied to it leave the queue definition. Whether `fireweed-server` keeps the embedded Fjord
+> fetch of the command log is an S3×Turso deployment question; if it is kept, it exposes internal command
+> envelopes with no compatibility promise.
+
 ## Public cell (ADR-024)
 
 ADR-024 supersedes the 2026-09-17 storage-selector amendment for public

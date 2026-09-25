@@ -9,14 +9,20 @@ ddx:
     - {kind: informed_by, to: api-native-client-interface}
     - {kind: informed_by, to: adr-queue-as-shard-unit-and-projection-families}
     - {kind: governs, to: build-foqs-inspired-interface-and-boundary}
-  status: accepted
+  status: superseded
 ---
 
 # ADR-018: Queue templates and exact ensure are a Rust-library additive contract
 
+> **Superseded on 2026-09-24 by ADR-025** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`) and API-006 (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`) (owner decision, 2026-09-23 design
+> discussion). This ADR is design history and does not govern the implementation.
+>
+> - **Survives:** exact create-or-verify, which is now the op itself: `define_queue` compares the normalized definition exactly and fails with `DefinitionConflict { existing }` (API-006 D1–D3).
+> - **Gone:** `QueueTemplate`, `QueueCreationPolicy`, `ensure_queue`, `EnsureQueueOutcome` and `EnsureQueueError`. The per-backend atomic-create prerequisites (B-010, B-013 to B-016) are moot, because D1 requires an atomic, durable create of every implementation.
+
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-07-23 | Accepted | Project owner | API-001, ADR-008, B-004, B-010, B-013, B-014, B-015, B-016 | High |
+| 2026-07-23 | Superseded by ADR-025 (2026-09-24) | Project owner | API-001, ADR-008, B-004, B-010, B-013, B-014, B-015, B-016 | High |
 
 ## Context
 
@@ -238,7 +244,7 @@ landed or is otherwise gated out of the tested constructor set.
 ## Supersession
 
 - **Supersedes**: None.
-- **Superseded by**: None.
+- **Superseded by**: ADR-025 and API-006 (2026-09-24).
 
 ## Concern Impact
 

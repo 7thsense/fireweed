@@ -13,14 +13,21 @@ ddx:
     - {kind: informed_by, to: adr-granularity-mapping-and-claim-domain}
     - {kind: informed_by, to: adr-queue-as-shard-unit-and-projection-families}
     - {kind: governs, to: build-foqs-inspired-interface-and-boundary}
-  status: accepted
+  status: superseded
 ---
 
 # ADR-019: Lifecycle and routing orchestration are additive Rust-facade helpers
 
+> **Superseded on 2026-09-24 by ADR-025** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`) and API-006 (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`) (owner decision, 2026-09-23 design
+> discussion). This ADR is design history and does not govern the implementation. Nothing in it survives:
+>
+> - The lifecycle aliases (`complete`, `retry`, `release`, `discover`) are deleted, because settling is a `write` (API-006 W5, W7).
+> - Discovery and its stamped accessor are deleted; the bounded `stats.groups` read (S2) serves the one real use.
+> - `claim_across_queues` and the dispersion selectors are deleted: no op spans queues (A4).
+
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-07-24 | Accepted | Project owner | API-001, ADR-004, ADR-008, ADR-018, B-005, B-006, B-007, B-011 | High |
+| 2026-07-24 | Superseded by ADR-025 (2026-09-24) | Project owner | API-001, ADR-004, ADR-008, ADR-018, B-005, B-006, B-007, B-011 | High |
 
 ## Context
 
@@ -259,7 +266,7 @@ prefix, or ignore urgency. B-011's time-only-crossed descriptors must be able to
 ## Supersession
 
 - **Supersedes**: None.
-- **Superseded by**: None.
+- **Superseded by**: ADR-025 and API-006 (2026-09-24).
 
 ## Concern Impact
 

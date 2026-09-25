@@ -8,6 +8,14 @@ ddx:
 
 # Scheduler and Router Boundary
 
+> **Historical; see API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`). This guide
+> describes the API-001 surface: `CreateQueue` with priority models, ordering modes and retry policy,
+> `not_before`, group filters, finalize outcomes, `DiscoverActiveScopes` and `claim_across_queues`. Under
+> API-006 a queue declares stages, fields and indexes; a claim walks one stage in rank order; a future `rank`
+> schedules; settling is a write; and discovery and cross-queue claims are deleted. The boundary it draws
+> still holds: Fireweed's claim is the only reservation, and pacing and downstream admission belong to the
+> caller.
+
 fireweed owns durable queue state and queue-local leasing. Routers and schedulers
 may decide where a worker should ask next and how much downstream work the
 worker is allowed to start, but they must treat fireweed claims as the only

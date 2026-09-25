@@ -8,14 +8,14 @@ kind: feature
 
 # FEAT: Idempotent Ingest and Mutation
 
-The public cell is one cell: an S3 object log, a Turso projection, and AsyncProjection. Other selectors fail closed before I/O.
+Implementation note (ADR-024): the public cell is one cell, an S3 object log and a Turso projection with `AsyncProjection`, and other selectors fail closed before I/O. The behavior below is API-006's and does not depend on the cell.
 
 ## Behavior
 
-Clients push one or more items idempotently with a request id (FR-18).
-Duplicate pushes for the same logical item key converge on one item (FR-19).
-Clients can batch-update priority, not-before, payload, and metadata (FR-20).
-Batch push and update return per-item results (FR-21).
-The queue defines an idempotency retention window (FR-22).
+Records are addressed by an upstream-owned opaque key, unique within the queue (FR-18).
+Writes to one key converge on one record, and a resend with the same request id replays the recorded outcome (FR-19).
+A write patches any record by key (stage, rank, gates, and fields) with an optional version check; only the claim holder writes a leased record (FR-20).
+A write returns one outcome per atomic unit (FR-21).
+Request ids are kept for at least 24 h, a contract bound rather than a queue setting (FR-22).
 
 Covers FR-18 through FR-22.

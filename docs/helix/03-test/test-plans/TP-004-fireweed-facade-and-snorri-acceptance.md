@@ -4,6 +4,8 @@ ddx:
   depends_on:
     - api-fireweed-rust-facade
     - adr-023-pre-release-fireweed-namespace-cutover
+    - api-fireweed-kernel-contract
+    - tp-verification-acceptance-criteria
   status: accepted
 ---
 
@@ -23,6 +25,44 @@ Historical DDx IDs, requirement IDs, artifact names, and original measurements
 retain their identity. SQLite selectors stay retired and are not a differential
 reference.
 
+
+## Kernel contract (API-006)
+
+API-005 is superseded by
+[API-006](../../02-design/contracts/API-006-fireweed-kernel-contract.md), the
+Fireweed kernel contract (owner decision, 2026-09-23 design discussion).
+`Fireweed` now wraps `Arc<dyn Store>` and delegates 1:1 to the eight `Store`
+ops, and Snorri migrates to that contract; the contract is not bent to fit
+Snorri's current code. Four requirements now govern this plan:
+
+- **Black-box contract suite.** The functional prerequisite for any Fireweed
+  build, and for any Snorri acceptance run, is `fireweed-contract-suite`
+  passing on the implementation under test (API-006 §9; TP-003 AC-KC-1 to
+  AC-KC-3). Snorri tests its own workflows; it does not re-prove the contract.
+- **No backend knobs.** Neither the contract suite nor Snorri's acceptance
+  tests branch on backend, feature set or capability (API-006 CS4).
+- **Operator ban.** Snorri never references the `Operator` trait,
+  `force_clear` or the admin handle, and CI fails the build if it does
+  (API-006 OP4; TP-003 AC-KC-4).
+- **Performance gates.** The claim-path and storage gates of TP-003 §3.12
+  (AC-PERF-1 to AC-PERF-6 and AC-PERF-8) precede any TP-005 timing run.
+  AC-PERF-7 is a recorded measurement, not a gate.
+
+The gates below that test API-005's surface are superseded. Their text stays
+as history; they no longer qualify a release:
+
+| Gate in this plan | Disposition | Replacement |
+|---|---|---|
+| Contract compile: API-005 constructors, Snorri method signatures and named types, retired Rust names; Fireweed gates 3, 4 and 8; the export closure and normalized public-API comparison | Superseded | Compile fixtures over the `fireweed-contract` types, the `Store` and `Operator` traits and the `Fireweed` wrapper; no `Store` value converts into an `Operator` (OP1) |
+| Fireweed gate 5 (the shared suite with `batch_update`, `mutate_items` and `live_items`), per-constructor operation parity, and the atomic item mutation row | Superseded | The black-box contract suite |
+| Fireweed gate 6: `projection_control()` on `Fireweed` | Superseded | Projection control on the admin handle (`TursoAdmin::projection_control()`, API-006 §7), tested in Fireweed under the AGENTS.md projection lifecycle rule |
+| Fireweed gate 7: no backend identity, discriminator or downcast | Retained | API-006 §8 and CS4 |
+| Fireweed gate 9 feature-set commands and gate 10 million-cycle run | Superseded | The contract suite, then the TP-003 §3.12 claim-path gates; TP-005 timing runs only after both |
+| Snorri feature-set compile checks and the API-005 Snorri acceptance slice | Superseded | Snorri's migration to API-006: groups with `WholeGroups` claims for per-instance exclusivity, record kinds as stages, per-transition history in fields, and its manifest in queue metadata |
+| `SNORRI-MATRIX-LIFECYCLE` | Superseded | Snorri's own lifecycle over the `Store` ops, on `s3--turso` |
+| `SNORRI-REOPEN`, `SNORRI-RETRY-ONCE` | Retained | DUR1; RQ2 |
+| `SNORRI-PROJECTION-REBUILD` | Superseded | Projection rebuild needs the admin handle, which Snorri may not reference (OP4); Fireweed's own recovery suites cover it |
+| Dependency identity, the `running 0 tests` rule, live-provider attestation and the no-skip policy | Retained | Unchanged |
 
 ## Testing strategy
 

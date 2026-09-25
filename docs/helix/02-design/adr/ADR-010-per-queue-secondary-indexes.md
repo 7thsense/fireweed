@@ -4,6 +4,7 @@ ddx:
   depends_on:
     - adr-queue-as-shard-unit-and-projection-families
     - adr-cqrs-log-projection-storage-model
+  status: superseded
   review:
     self_hash: cd412536c22371beb00f53e7d439cbabed2de5f357c1cf2b8659b9ab38f4c055
     deps:
@@ -14,7 +15,13 @@ ddx:
 
 # ADR-010: Per-Queue Projection-Maintained Secondary Indexes over Configured Item Fields
 
-- Status: Accepted; **declaration shape superseded by ADR-011** (the untyped `IndexSpec { name, fields, unique }` and raw length-prefixed byte keys are replaced by axon-esf typed `IndexDef`/`CompoundIndexDef` and the canonical `axon_esf::index_key` encoder). The maintain-on-apply mechanism, per-queue scope, pre-commit uniqueness validation, `IndexQueryPort`, and phasing in this ADR stand.
+> **Superseded on 2026-09-24 by ADR-025** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`) and API-006 (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`) (owner decision, 2026-09-23 design
+> discussion). This ADR is design history and does not govern the implementation.
+>
+> - **Survives:** per-queue indexes over typed fields. They are declared at queue creation in `QueueDef.indexes`, over declared fields and the built-ins `Stage`, `Rank` and `Group`, and read through `scan` and `aggregate` (API-006 §4.6, §4.7, §5.1). Maintaining them on apply is an S3×Turso detail (TD-017 §7).
+> - **Gone:** unique indexes and the pre-commit uniqueness validator (the record key is the only uniqueness), `IndexQueryPort` and the `query_index*` methods, and in-memory-first phasing.
+
+- Status: Superseded by ADR-025 (2026-09-24; see the note above). Previously: Accepted; **declaration shape superseded by ADR-011** (the untyped `IndexSpec { name, fields, unique }` and raw length-prefixed byte keys are replaced by axon-esf typed `IndexDef`/`CompoundIndexDef` and the canonical `axon_esf::index_key` encoder). The maintain-on-apply mechanism, per-queue scope, pre-commit uniqueness validation, `IndexQueryPort`, and phasing in this ADR stand.
 - Date: 2026-06-27
 - Supersedes/relates: ADR-008 (queue as shard unit + two projection families), ADR-001 (CQRS log/projection), ADR-009 (encapsulated library surface), CONTRACT-007 (queue schema — referenced for index *shape* only)
 - Driver: consumer "cayce" needs to look up queued items by a configured field value without scanning, and to enforce uniqueness on a configured field, in tests that run on the in-memory backend.

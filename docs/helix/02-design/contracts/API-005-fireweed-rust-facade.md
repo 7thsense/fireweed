@@ -5,14 +5,32 @@ ddx:
     - api-native-client-interface
     - api-hot-projection-query-surface
     - adr-concrete-fireweed-facade-and-optional-controls
-  status: accepted
+  status: superseded
 ---
 
 # API-005: Fireweed Rust facade
 
+> **Superseded on 2026-09-24 by [API-006](API-006-fireweed-kernel-contract.md), the Fireweed kernel
+> contract** (owner decision, 2026-09-23 design discussion). This document is design history and does
+> not govern the implementation.
+>
+> **What survives, and where it went:**
+> - One public type: `fireweed::Fireweed` wraps `Arc<dyn Store>` and delegates 1:1 to the eight `Store` ops (API-006 §1). The method inventory below collapses into those ops or is deleted.
+> - Native async: every `Store` op returns a boxed `Send` future (§4.0).
+> - Opaque composition: no backend identity, discriminator, downcast, capability probe or configuration getter (§8, CS4).
+> - Projection control: moves from `Fireweed::projection_control()` to the implementation's admin handle (`TursoAdmin` for S3×Turso), which also carries the `Operator` and queue placement. No `Store` semantics depend on it (§7).
+> - Construction: each implementation's constructor returns its `Store` together with its admin handle. The contract fixes only the injected `Clock`, the documented Δ and the `DeletePolicy`; `StorageConfig` and every other input are implementation-specific (§7).
+>
+> **What is gone:** the method inventory as public surface, the historical query component, the export
+> closure, and the Snorri acceptance slice. Snorri migrates to API-006 rather than the contract bending
+> to Snorri (owner decision, 2026-09-23 design discussion). The method-by-method disposition is in
+> `docs/helix/00-discover/external-interface-kernel-contract-draft.md` §6, which is design history:
+> where it differs from API-006, API-006 wins. TP-004's facade and Snorri-slice gates are superseded
+> with this document.
+
 **Type**: Rust binding contract
 **Version**: v0.24
-**Status**: accepted
+**Status**: superseded by API-006 (previously accepted)
 **Related**: API-001, API-004, ADR-009, ADR-012, ADR-015, ADR-017, ADR-022,
 ADR-023, TP-004, orthogonal-storage-matrix-brief
 

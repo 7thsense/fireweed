@@ -17,6 +17,7 @@ ddx:
     - td-resp-wire-adapter
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
+    - api-fireweed-kernel-contract
   review:
     self_hash: 1f28a43e7928388a17e76507cc38e3b5ffc411860ecba33bba16fb8f320aa209
     deps:
@@ -55,6 +56,63 @@ retain their identity. SQLite selectors stay retired and are not a differential
 reference.
 
 
+## Kernel contract (API-006)
+
+[API-006](../../02-design/contracts/API-006-fireweed-kernel-contract.md) is the
+contract a consumer depends on, and it supersedes API-001 to API-005 (owner
+decision, 2026-09-23 design discussion). The PRD's requirements follow it, and
+it changes this plan in four ways:
+
+- **Black-box contract suite.** `fireweed-contract-suite` runs in-process
+  against `Arc<dyn Store>` through `run_all(constructor, reopen, Δ, clock,
+  fault_hook)`, with at least one scenario per MUST clause, each citing its
+  clause id, and every scenario run a second time through a torn-read adversary
+  for `stats` and `aggregate` (API-006 CS1–CS3, CS6). It is the functional
+  qualification of every `Store` implementation. Port-level, workflow and
+  consumer suites add evidence; they never replace, skip or weaken it.
+- **No backend knobs.** The suite has no per-backend clause, knob, capability
+  probe or backend identity (CS4). Every implementation passes or fails the
+  same scenarios.
+- **Operator ban.** CI bans the `Operator` trait and the admin handle in Snorri,
+  in the workload and loadgen crates, and in the contract suite (OP4, CS5). A
+  separate operator suite covers OP1–OP3.
+- **Performance gates.** C9, the claim cost, and the S2 cost bound are checked
+  by the claim-path and storage gates derived from the spikes in
+  `docs/helix/02-design/spikes/` (SPIKE-002 to SPIKE-006; TP-003 §3.12,
+  AC-PERF-1 to AC-PERF-6 and AC-PERF-8), not by the black-box suite.
+  AC-PERF-7, the per-queue commit cost on MinIO, is a recorded measurement,
+  not a gate.
+
+TP-003 §3.12 holds the pass bars (AC-KC-1 to AC-KC-5, AC-PERF-1 to AC-PERF-8).
+The rows and suites below that test retired surfaces are superseded; immutable
+evidence may keep their names, but they no longer qualify a build:
+
+| Earlier row, layer or suite | Disposition | Current binding |
+|---|---|---|
+| Library (facade) integration layer (`crates/fireweed/tests/**`, the API-005 verb list) | Superseded | `fireweed-contract-suite` through `Fireweed`, which wraps `Arc<dyn Store>` 1:1 |
+| Wire (RESP) integration layer; per-queue ownership + routing row; `routing_redirect_tests` | Retired | The RESP front is deleted and there is no remote API; queue ownership is implementation evidence on the admin handle |
+| FR-2 to FR-6 rows; `core_priority_model_tests` | Superseded | Rank ordering and the immutable definition: C4, ORD2, D1–D6 |
+| FR-8, FR-9, FR-12, FR-13 row; `storage_conformance_progress_tests`, `per_queue_progress_tests`; the bounded-relaxed half of `product_workflow_generic_priority_bounded_relaxed_e2e` | Retired (PRD FR-5, FR-8, FR-9, FR-12, FR-13) | Claim order and C5a progress in the contract suite |
+| FR-7/14, FR-10/11/15/17, FR-16, FR-18 to FR-22, FR-20, FR-23 to FR-28, FR-29 to FR-35, FR-33 to FR-37 rows | Superseded | The matching API-006 clauses in the contract suite: C1, C4, W9, V4; F1–F3; W3, W5, RQ1–RQ4; W4, W8; L1–L6, C6, DUR1; C2–C7; W4, W5. Retry exhaustion is retired |
+| FR-38, FR-39 row; `postgres_retention_tests` | Retired (PRD FR-38, FR-39) | Records live until deleted; `delete_queue` closes a queue |
+| FR (g6 cohort) row; `storage_conformance_cohort_tests`, `service_cohort_tests`, `product_workflow_callback_cohort_e2e` | Retired (PRD FR-32a to FR-32c); FR-47c is reworded, not retired | FR-47c's callback batch: atomic group insert, `WholeGroups` claim and a caller count check (W2, C4, C6a) |
+| FR-48 (g4 discovery) and `fireweed_group_summary` rows; `storage_conformance_discovery_tests`, `service_discovery_tests` | Retired (PRD FR-48) | `stats.groups` (S2) |
+| FR-23, FR-49 to FR-55 (g5 recurring) row; `core_recurrence_rearm_tests`, `service_recurrence_purge_tests`, `product_workflow_jobs_connectors_recurring_e2e` | Superseded | Re-rank on settle (W5) and `Delete` (W7) |
+| FR-31a, FR-32 (g1 whole-group) and ADR-008 co-residency rows; `storage_conformance_group_batching_tests`, `service_group_batching_tests` | Superseded | `WholeGroups` (C4, C6a, C7) |
+| FR-15, FR-17 (g2 dynamic gates) row; `storage_conformance_gate_tests`, `service_gate_tests` | Superseded | Gate ops in write units (W9, C1) |
+| FR-47a / ADR-004 granularity row | Superseded | Tenant, queue, stage, group, declared fields and gates (PRD FR-47a) |
+| API-002 rows (repair, redrive, bulk purge, archive/retention, async operations, operator authorization); `operator_*` suites; `product_workflow_operator_repair_redrive_e2e` | Superseded | `force_clear` in the operator suite (OP1–OP3). Pause, redrive and purge are writes, and archive is `delete_queue`; async operations and operator authorization are retired |
+| Eligibility Precedence row | Superseded | C1 |
+| API-001 idempotency and claimed-item response shape rows; `claimed_item_shape_conformance_tests` | Superseded | RQ1–RQ4, C8; `Record` and C3 |
+| API-001 auth row; `service_auth_tenant_tests` | Retired | The contract is in-process and has no principal; queue isolation is ISO1 |
+| API-003 workload profile row | Superseded | API-006; no replacement profile exists yet. `product_workflow_scheduled_action_delivery_e2e` migrates to API-006 terms |
+
+The FR-1, FR-43, durability, public-cell, response-barrier, TD-002 to TD-005,
+queue-density and ADR-003 rows stand as implementation evidence. The Scope
+section's requirement that TP-002 E0/E1 workloads declare a `progress_bound_ms`
+is retired with the progress bound; those workloads assert claim order and C5a
+progress instead.
+
 ## Scope
 
 This plan defines the minimum test coverage required before the first fireweed
@@ -89,6 +147,8 @@ queue's persisted progress contract.
 
 | Layer | Location | Purpose |
 |-------|----------|---------|
+| Kernel contract (black-box) | `fireweed-contract-suite`, run by each `Store` implementation's tests | The API-006 conformance suite: `run_all` over the constructor (both `DeletePolicy` values), `reopen`, Δ, a manual `Clock` and the post-commit fault hook; one scenario per MUST clause, run directly and through the torn-read adversary; no backend knobs (TP-003 AC-KC-1 to AC-KC-3). |
+| Operator | a separate operator suite that takes the admin handle | API-006 OP1–OP3 (`force_clear`). The contract suite, Snorri, and the workload and loadgen crates never link the `Operator` trait or the admin handle; a CI guard enforces it (TP-003 AC-KC-4, AC-KC-5). |
 | Core unit | `crates/fireweed-core/src/**`, `crates/fireweed-engine/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, version rules, and the engine's decision helpers + dependency-direction guard. |
 | Backend conformance | `crates/fireweed-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executes against the public cell `s3--turso` (ADR-024). It includes transaction-contract scenarios (object-log durability, rejection-no-effect, unknown-outcome replay, empty claim as a poll), reopen from the object log, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. Required routes fail rather than silently skip when a fixture or feature is absent. |
 | Postgres integration | `crates/fireweed-postgres/tests/**` | The durable-log postgres adapter (TD-004 template) against a real DB, env-gated on `FIREWEED_PG_TEST_URL`: the full conformance suite + a reconnect/durability replay test. |
@@ -101,6 +161,12 @@ queue's persisted progress contract.
 
 | Requirement | Governing Artifact | Required Test Evidence |
 |-------------|--------------------|------------------------|
+| API-006 conformance | API-006 §4, §6, §9 / TP-003 §3.12 | `fireweed-contract-suite` passes on every `Store` implementation with at least one scenario per MUST clause, each citing its clause id, including every CS6 scenario; every scenario also passes through the torn-read adversary; zero skips; no per-backend clause, knob or capability probe (AC-KC-1 to AC-KC-3). |
+| API-006 operator separation | API-006 §7 / TP-003 §3.12 | The CI guard finds no reference to the `Operator` trait or the admin handle in Snorri, the workload and loadgen crates, or the contract suite; the operator suite passes OP1–OP3 (AC-KC-4, AC-KC-5). |
+| API-006 claim cost (C9) and S2 cost bound | API-006 C9, S2 / TP-003 §3.12 (evidence: SPIKE-002 to SPIKE-006 in `docs/helix/02-design/spikes/`) | Stage-bound claim plans and bounded `stats.groups` reads, per-claim leases, statement discipline, the lean claim row, same-run scale ratios and queue count per file pass AC-PERF-1 to AC-PERF-6 and AC-PERF-8; the per-queue commit cost on MinIO is recorded (AC-PERF-7, a measurement). |
+| FR-56 queue metadata | PRD FR-56 / API-006 D1, W13, R4, §5.2 | The contract suite covers a new queue's empty metadata at version 0, a metadata CAS inside a unit with record writes, its rejection rolling the unit back, the 64 KiB bound (LIM1), and fresh `read{queue: true}` (CS6). |
+| FR-57 `delete_queue` | PRD FR-57 / API-006 DQ1–DQ5 | The contract suite runs `delete_queue` under both policies on a non-empty queue with a live claim: `NotPermitted` for a full delete under `ArchiveOnly` on an open and on an archived queue, `QueueClosed` for every other op afterwards, including after `reopen`, and `already_closed` on repeat (CS6). |
+| FR-58 operator separation | PRD FR-58 / API-006 OP1–OP4 | The operator suite passes OP1–OP3 through the admin handle, and the CI guard finds no `Operator` or admin-handle reference in Snorri, the workload and loadgen crates, or the contract suite (TP-003 AC-KC-4, AC-KC-5). |
 | FR-1 | PRD queue namespace isolation | Create two queues in one tenant and same queue IDs in different tenants; routing, metrics, and storage keys remain isolated. |
 | FR-2, FR-3, FR-4 | PRD priority model | Create timestamp and non-timestamp queues; valid priorities encode to deterministic `priority_sort`; invalid priorities fail. |
 | FR-5, FR-6 | PRD ordering mode immutability | Create strict and bounded-relaxed queues; attempts to mutate priority model or ordering mode fail. |
@@ -121,7 +187,7 @@ queue's persisted progress contract.
 | ADR-008 group co-residency by construction | ADR-008 / ADR-004 / TD-001 / TD-002 | The queue is the unit of sharding, so all items of a `group_key` are co-resident on the queue's single owner **by construction** (no `group_co_residency` flag, no `hash(group_key) mod shard_count`); `whole_group`/`whole_cohort` claims are owner-local and atomic; `same_group_key` remains an item-level filter (may return a partial group). |
 | FR-31a, FR-32 (g1 whole-group) | API-001 `group_batching` / TD-001 / TD-002 | `compatibility.group_batching` returns up to `max_groups` whole eligible groups, atomically per group, ordered by the group representative; `same_group_key` remains an item filter (not whole-group); `max_eligible_group_size` enforced at push; `batch-too-large` when the next group will not fit. |
 | FR (g6 cohort) | API-001 `cohort_policy`/`whole_cohort` / TD-001 / TD-002 / TD-004 | A `whole_cohort` claim leases one complete, claim-eligible cohort atomically under one shared cohort lease; members are never individually claimable; cohort key = `group_key`; `completion_bound_ms <= progress_bound_ms` enforced; idempotent under duplicate push; cohort never leaks members to other claim units. |
-| FR-15, FR-17a (g2 dynamic gates) | API-001 Eligibility Precedence / `SetGates` / TD-002 | `gate_keys`/`SetGates` flip queue-scoped gate state O(1) without rewriting item rows; gate predicate is evaluated at claim/discovery time (anti-join); a blocked gate makes matching items ineligible without accruing progress-bound age beyond policy; one Eligibility Precedence definition is the sole eligibility source. |
+| FR-15, FR-17 (g2 dynamic gates) | API-001 Eligibility Precedence / `SetGates` / TD-002 | `gate_keys`/`SetGates` flip queue-scoped gate state O(1) without rewriting item rows; gate predicate is evaluated at claim/discovery time (anti-join); a blocked gate makes matching items ineligible without accruing progress-bound age beyond policy; one Eligibility Precedence definition is the sole eligibility source. |
 | FR-23, FR-49–FR-55 (g5 recurring) | API-001 `recurrence`/`rearm`/`PurgeItems` / TD-002 / TD-004 | `rearm` releases the lease, sets `eligible_since = max(commit_time, not_before)`, resets per-cycle retry, bumps version without terminating; `recurrence.until` drains; in-band `PurgeItems` (P0, per-key/`item_id`) removes the item with tombstone + replay safety; recurring metrics served from the metrics projection (idle excluded from oldest-eligible age and retry backlog); recurrence and cohort are mutually exclusive. |
 | FR-48 (g4 discovery) | API-001 `DiscoverActiveScopes` / TD-002 / TD-003 | Tenant-scoped top-N across queues, or owner-local group ranking for one queue, by oldest-eligible age via the single `fireweed_group_summary` projection; gate-current (advance past blocked, not exclude); `as_of` = the owner's observed frontier (min over queues read for the tenant-wide case); per-queue authorization; advisory for routing (`BatchClaim` remains authoritative). |
 | FR (per-queue ownership + routing) | TD-003 / TD-006 / ADR-008 | A queue is owned by one node; claims are single-owner-local (no fan-out / k-way merge); single active lease across owner reassignment/drain; a deposed owner's append is epoch-fenced; a wrong-node command is `-MOVED`-redirected to the owner and converges in one hop. (Cross-queue scale magnitude → TP-002 E2.) |
@@ -153,6 +219,11 @@ queue's persisted progress contract.
 
 Implementation beads should create or extend these suites:
 
+- `kernel_contract_suite` (`fireweed-contract-suite`, API-006 §9; direct and
+  torn-read runs)
+- `kernel_operator_suite` (API-006 OP1–OP3, through the admin handle)
+- `operator_ban_guard` (CI guard for API-006 OP4)
+- `claim_path_performance_gates` (TP-003 AC-PERF-1 to AC-PERF-8)
 - `core_domain_tests`
 - `core_priority_model_tests`
 - `core_lifecycle_transition_tests`
@@ -218,6 +289,9 @@ Implementation beads should create or extend these suites:
 - `operator_validation_tests` (P1/operator release suite over AC-E2E-7 and
   operator suites)
 
+The Kernel contract section above lists the suites in this list that API-006
+supersedes or retires.
+
 Scale, density, and object-log performance suites (`performance_single_deployment_baseline_tests`,
 `performance_cross_queue_scale_out_tests`, `queue_density_single_node_tests`,
 `object_log_latency_cost_matrix_tests`, `object_log_commit_recovery_tests`,
@@ -240,6 +314,11 @@ Performance testing must include:
 - group-heavy compatibility claims;
 - one hot queue/tenant alongside one small eligible queue;
 - Postgres claim query plans showing index use instead of full scans.
+- the API-006 claim-path and storage gates (TP-003 §3.12): stage-bound claim
+  plans with no stage-blind statement, per-claim lease cost, statement
+  discipline, the lean claim row, 1M-to-10M and 100-queue same-run ratios, and
+  queue count per file; plus the per-queue commit cost on MinIO at 1, 10, 100
+  and 1,000 queues, recorded as a measurement.
 
 ## Manual or Deferred Evidence
 

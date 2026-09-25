@@ -24,6 +24,13 @@ ddx:
 
 # Technical Design: TD-016 Unified packed add / update / delete
 
+> **Amended by ADR-025 and API-006 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
+> The pipeline mechanics here (sequencer, overlay, packed append, set-based apply) stand for S3×Turso. The
+> mapping of ops onto API-001 lifecycle states (Complete, Fail, Retry, Release, Rearm, `terminal_ids`) and
+> cohort claims predates API-006, which has no terminal stages, engine outcomes or cohorts: every mutation is
+> a `write` unit, and settling is a stage move, a new rank or a delete (API-006 W5, W7). The op mapping at
+> API-006's limits is not yet written (TD-017, Open items).
+
 **Contract**: API-001 | **ADR**: ADR-013, ADR-017 | **TD**: TD-010, TD-011
 
 ## Scope

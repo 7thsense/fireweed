@@ -9,6 +9,8 @@ ddx:
     - adr-orthogonal-log-projection-composition
     - td-storage-architecture-backend-contracts
     - tp-scale-substantiation
+    - api-fireweed-kernel-contract
+    - tp-verification-acceptance-criteria
   status: accepted
   review:
     self_hash: af91841838128efbd8aec308c20b127aef0fbc4f50e328b6a210674b9ba73080
@@ -45,6 +47,30 @@ commit, not product pass bars. The campaign plan states the same rule: the
 and is not a qualification pin; v0.31.30 s3 × Turso (~9507 on `bcef51f9`) is
 not a qualification pin. A miss of those script gates is not a product failure.
 
+
+## Kernel contract (API-006)
+
+API-005 is superseded by
+[API-006](../../02-design/contracts/API-006-fireweed-kernel-contract.md)
+(owner decision, 2026-09-23 design discussion), so this plan's facade
+references change:
+
+- **Functional prerequisite.** A cell is eligible for timing only after the
+  black-box contract suite passes on it (API-006 §9; TP-003 AC-KC-1 to AC-KC-3).
+  TP-004's facade suite and per-constructor parity rows, cited below, are
+  superseded.
+- **Construction.** Each implementation's constructor returns its `Store` and
+  its admin handle. The API-005 `StorageConfig` construction contract cited
+  below is implementation-specific input, outside the contract. Timed
+  operations go through `Fireweed` over `Arc<dyn Store>`: `write` and `claim`
+  replace append, claim and finalize.
+- **No backend knobs.** Cells may differ only in construction, never in the
+  operations timed or the assertions made (API-006 CS4).
+- **Claim-path gates.** The portable gates derived from the spikes in
+  `docs/helix/02-design/spikes/` (SPIKE-002 to SPIKE-006) are TP-003 §3.12
+  (AC-PERF-1 to AC-PERF-6 and AC-PERF-8 are gates; AC-PERF-7 is a recorded
+  measurement). This plan's host-bound matrix stays capacity
+  evidence and never substitutes for them.
 
 ## Testing strategy
 
@@ -186,7 +212,7 @@ not claim a 10M-resident or 1000-queue result.
 
 | Class | Rows | Success boundary |
 | --- | --- | --- |
-| `AsyncProjection` | `s3--turso` only | The object log has the command. Claim polls applied Turso rows and may be empty. That empty claim is not a failure. Lag stays within `AsyncProjectionSpec` or the cell fails closed. |
+| `AsyncProjection` | `s3--turso` only | The object log has the command. A claim observes every acknowledged write (API-006 V2); a short or empty claim is a successful poll, not a failure (C5), bounded by C5a. Lag stays within `AsyncProjectionSpec` or the cell fails closed. |
 
 Cross-class ratios are descriptive only and carry `comparison_status =
 "different_success_boundary"`. Async rows report the timed response boundary

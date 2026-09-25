@@ -5,14 +5,20 @@ ddx:
     - api-native-client-interface
     - adr-engine-enforced-coordination-and-encapsulated-library-surface
     - adr-023-pre-release-fireweed-namespace-cutover
-  status: accepted
+  status: superseded
 ---
 
 # ADR-022: Concrete Fireweed facade and optional controls
 
+> **Superseded on 2026-09-24 by ADR-025** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`) and API-006 (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`) (owner decision, 2026-09-23 design
+> discussion). This ADR is design history and does not govern the implementation.
+>
+> - **Survives:** one concrete, backend-opaque `Fireweed` handle. It now wraps `Arc<dyn Store>` and delegates 1:1 to the eight `Store` ops (API-006 §1).
+> - **Replaced:** the inherent native-method surface becomes the eight ops; `projection_control()` moves from `Fireweed` to the implementation's admin handle (`TursoAdmin`, API-006 §7); the queue-scoped capability checks are deleted, since there is no introspection (§8); `batch_update` becomes `write`; and the `Embedded*` and role-named constructor families become one S3×Turso constructor.
+
 | Date | Status | Deciders | Related | Confidence |
 | --- | --- | --- | --- | --- |
-| 2026-07-24 | Accepted | Project maintainers | API-001, API-004, API-005, ADR-009, ADR-023 | High |
+| 2026-07-24 | Superseded by ADR-025 (2026-09-24) | Project maintainers | API-001, API-004, API-005, ADR-009, ADR-023 | High |
 
 ## Context
 

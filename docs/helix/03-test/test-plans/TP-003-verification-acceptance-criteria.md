@@ -21,6 +21,11 @@ ddx:
     - td-object-log-turso-projection
     - tp-governing-test-traceability
     - tp-scale-substantiation
+    - api-fireweed-kernel-contract
+    - spike-record-key-storage
+    - spike-claim-path-at-scale
+    - spike-turso-value-size-boundary
+    - spike-declared-field-storage-layout
   review:
     self_hash: c211fd97e18d7693ab736fb6a81ba3a73c8a3772bf22e0d317b8d6f2ea7d7fcc
     deps:
@@ -358,7 +363,108 @@ Canonical suite IDs for bead citation are the TP-001 names
 test filter in each command is the executable entry point for that canonical
 suite.
 
+### 3.12 Kernel contract conformance and claim-path performance (API-006)
+
+API-006 is the contract a consumer depends on, and it supersedes API-001 to
+API-005 (owner decision, 2026-09-23 design discussion). These criteria make its
+conformance suite and its cost clause (C9) build-gating. They apply to every
+implementation of `Store`; the public cell `s3--turso` is the first.
+
+Three rules govern them:
+
+- **One black-box suite.** `fireweed-contract-suite` runs in-process against
+  `Arc<dyn Store>` through `run_all(constructor, reopen, Δ, clock, fault_hook)`
+  (API-006 CS1). It is the functional qualification of the `Store` contract.
+  Port-level suites, product workflows and consumer tests may add evidence, but
+  they never replace, skip or weaken it.
+- **No backend knobs.** The suite has no per-backend clause, knob, feature
+  switch, capability probe or backend identity (CS4). Every implementation
+  passes or fails the same scenarios. A scenario that needs a backend-specific
+  branch is a defect.
+- **Operator ban.** The suite never links the `Operator` trait or the admin
+  handle (CS5). A CI guard fails the build when Snorri, the workload or loadgen
+  crates, or the contract suite reference either one (OP4). A separate operator
+  suite covers OP1–OP3.
+
+| AC | Setup | Assertion | Pass bar |
+|----|-------|-----------|----------|
+| AC-KC-1 contract suite | `run_all` on every implementation: its constructor under both `DeletePolicy` values, the suite's manual `Clock`, the documented Δ, `reopen`, and the post-commit fault hook | At least one scenario per MUST clause of API-006 §4 and §6, each citing its clause id (CS2), including every CS6 scenario | 100% pass; 0 skipped, ignored or zero-assertion scenarios; every MUST clause of §4 and §6 except the two cost clauses (C9 and the S2 cost bound) has a scenario |
+| AC-KC-2 torn-read adversary | Every AC-KC-1 scenario again, through the adversary that serves `stats` and `aggregate` from a mix of pre- and post-write state under concurrent writes (CS3) | Scenarios hold with torn `stats` and `aggregate`; `read` and `scan` get no lag wrapper and stay fresh (V3) | 100% pass in both runs |
+| AC-KC-3 no backend knobs | Inspect the suite source and its entry point | No per-backend branch, `cfg`, knob, capability probe or backend identity; `run_all` takes only the CS1 inputs (CS4) | 0 occurrences |
+| AC-KC-4 operator ban | CI dependency and source guard over Snorri, the workload and loadgen crates, and `fireweed-contract-suite` | No reference to the `Operator` trait, `force_clear` or the admin handle (OP4, CS5) | 0 references; any reference fails the build |
+| AC-KC-5 operator suite | A separate suite that takes the admin handle | OP1: no `Store` value reaches an `Operator`. OP2: each key is its own atomic unit, detached with a new version, while the claim's other records stay attached and its token stays valid for them. OP3: validation, durability and replay match `write` | 100% pass |
+
+**Claim-path and storage performance gates.** C9 and the S2 cost bound are the
+clauses the black-box suite leaves to performance gates (API-006 CS2). These
+gates verify them, and the implementation rules the spikes found necessary, for
+the S3×Turso implementation (its layout is TD-017, which maps each of its checks
+to these ACs). This section is the only owner of their pass bars. AC-PERF-1 to
+AC-PERF-6 and AC-PERF-8 are gates; AC-PERF-7 is a recorded measurement, not a
+gate. They follow
+this plan's portability rule: pass bars are structural (query plans, statement
+and schema shape) or same-run ratios, never host-bound absolute rates. The
+spike figures explain why each gate exists; they are not pass bars. Spike
+sources: `docs/helix/02-design/spikes/SPIKE-002-record-key-storage.md`,
+`docs/helix/02-design/spikes/SPIKE-004-claim-path-at-scale.md`,
+`docs/helix/02-design/spikes/SPIKE-005-turso-value-size-boundary.md` and
+`docs/helix/02-design/spikes/SPIKE-006-declared-field-storage-layout.md`.
+
+| AC | Gate | Pass bar | Why (spike evidence) |
+|----|------|----------|----------------------|
+| AC-PERF-1 stage-bound claim | Every claim-path statement binds the stage and walks the stage-prefixed claim-order index over unclaimed records, with the index forced | Query plan is an indexed range seek with no table scan and no sorter; 0 stage-blind claim-path statements; a `Next` claim visits no record of another stage, no leased record and no record with `rank > horizon`; the `stats.groups` reads seek their group-head indexes and visit at most `limit` groups (S2) | A stage-blind claim query cost 5,000–6,500× the stage-bound one at 1M rows (SPIKE-004 Finding 5) |
+| AC-PERF-2 claim cost at scale | `Next` claim and settle on one queue at 1M and 10M records, interleaved in one run | 10M claim and settle medians within the workload's declared same-run envelope of the 1M control | Throughput did not degrade from 1M to 10M once settle was fixed (SPIKE-004 Finding 6) |
+| AC-PERF-3 claims table | Leases are per claim: one claims row per claim, and a nullable indexed claim id on each record | `Extend` cost does not grow with the claim's record count; expiry discovery cost grows with expired claims, not with claimed records; settling a claim's records with one shared patch is one bulk update by claim id, not one statement per record | Extend about 80× and expiry discovery about 75× faster than per-record lease columns; a per-record settle loop was a measured regression (SPIKE-004 Findings 2, 3 and 6) |
+| AC-PERF-4 statement discipline | A test over every hot statement, plus review | The index is forced on every hot `SELECT` and `UPDATE`; each key is looked up separately, never through one `IN (...)` list against a composite index; each multi-statement op runs in one explicit transaction with prepared statements reused inside it; the passive WAL checkpoint cap is on; each Turso file has one serialized writer connection; the key index is maintained during ingest, not built after a bulk load | The planner skipped the secondary index without a hint, and `IN (...)` did not seek (SPIKE-002 Findings 0 and 1); independent writers failed with `database is locked` at 32 concurrent claimers, and a post-load unique index over 100M rows took 85 minutes (SPIKE-004 Finding 8); the claim path was 300–500× slower without one transaction and reused statements (SPIKE-006 Recommendation 3) |
+| AC-PERF-5 lean claim row and value placement | Schema test | The claim-path row carries no field bytes; fields live in a separate binary-map row; a value over about 4 KiB spills per field; the page size stays 4 KiB; the queue is stored as a per-queue integer surrogate and the key as a BLOB | Layout C was fastest on the claim path (SPIKE-006 Finding 2); the overflow knee sits between 3 and 4 KiB at a 4 KiB page, and larger pages did not help (SPIKE-005); the surrogate saves 11–21% per row and BLOB keys 11–18% (SPIKE-002) |
+| AC-PERF-6 many queues per file | 100 queues × 1M records in one Turso file against a 1-queue 10M control, in one run (TD-017 §13's G-100M shape) | Claim median and p99 within the workload's declared same-run envelope of the control. The proposed envelope is a claim median of at least 90% of the control's and a worst-trial p99 of at most 2× the control's, with finish, extend and sweep within the same bounds. It is INFERRED from SPIKE-004's 2–24% trial spreads; the lean-row run confirms or replaces it | With field bytes on the claim row, claim throughput dropped 46% and p99 rose up to 52× (SPIKE-004 Finding 8). The lean row of AC-PERF-5 is expected to fix this, but that is INFERRED: the follow-up measurement is pending, and this gate stays open until it lands |
+| AC-PERF-7 per-queue commit cost (measurement, not a gate) | Today's per-queue commit cost on MinIO at 1, 10, 100 and 1,000 queues (TD-018 Spike A) | Recorded with its topology before any compaction, snapshot, log-split or full-delete GC design is committed | Those designs are proposed, not committed: measure first (owner decision, 2026-09-23 design discussion) |
+| AC-PERF-8 queues per file | `define_queue` and file open at 100, 1,000 and 10,000 queues in one Turso file, in one run | `define_queue` creates no table or index, so the file's schema object count does not depend on its queue count; `define_queue` latency and file open time at 10,000 queues within the workload's declared same-run envelope of the 100-queue control | Per-queue tables took 13,111.3 s to create and 26.64 s to open at 10,000 queues, which breaks "queues must be cheap" (SPIKE-006 Finding 7; owner decision, 2026-09-23 design discussion) |
+
+**Disposition of earlier criteria.** API-006 retires or rebinds several
+criteria above. Immutable evidence may keep the old names, but only the current
+binding counts toward qualification.
+
+| Earlier criterion | Disposition | Current binding |
+|---|---|---|
+| INV-1, INV-10, INV-12, INV-13, INV-14 | Retained | C6, DUR1, W12, E1, E2, RQ2 |
+| INV-2 no lost work | Retained: every acknowledged record is in its stage, or deleted by an acknowledged write | DUR1 |
+| INV-3 no conflicting terminal | Retired | No terminal states; stages belong to the caller |
+| INV-4 progress bound; AC-OWN-1 | Retired | Claim order (ORD2) and progress (C5a) in AC-KC-1 |
+| INV-5 idempotency | Retained for `request_id`; `operation_id` retired | RQ1–RQ4, C8 |
+| INV-6 ordering | Strict half retained as `(rank, insertion sequence)` within a stage; bounded-relaxed half retired | C4, ORD2 |
+| INV-7 group/cohort atomicity | Whole-group half retained; cohort half retired | C4, C6a, C7 |
+| INV-8 tenant isolation; AC-SEC-1 | Retained as queue isolation; principal authorization, discovery and operator paths retired | ISO1; PRD FR-1 |
+| INV-9 group co-residency | Retained as implementation evidence: a queue is never split across partitions or owners | ADR-025 OD-13 |
+| INV-11 operator lease fence; AC-OP-1 | Retained | OP2, AC-KC-5 |
+| AC-CORE-1 priority encoding | Retired | `rank` is a plain `i64`; the ESF encoder is exercised by AC-KC-1 |
+| AC-CORE-2 lifecycle transitions | Retired | No transition graph; any stage may follow any other (W5) |
+| AC-CORE-3 idempotency keys | Retained for record keys and `request_id` | W3, RQ2 |
+| AC-CORE-4 retry exhaustion | Retired | No retry policy (PRD FR-37) |
+| AC-CLAIM-1, AC-CLAIM-2, AC-CLAIM-4, AC-CLAIM-6 | Retained, with per-claim leases: `Extend` renews the whole claim | C6, V4, C4, W14 |
+| AC-CLAIM-3 eligibility gates | Retained for gates and future ranks; `not_before`, retry backoff and metadata blockers retired | C1, W9 |
+| AC-CLAIM-5 bounded-relaxed bound | Retired | PRD FR-5, FR-8 |
+| AC-GRP-1 whole-group | Retained; `batch-too-large` becomes stop-before-the-group plus `partial_group` | C4, C7 |
+| AC-GRP-2 `same_group_key` filter | Retired | Single-group claims are deleted |
+| AC-COH-1, AC-COH-2, AC-E2E-3 | Retired | Cohorts are deleted |
+| AC-GATE-1 | Retained | W9 |
+| AC-GATE-2 | Retained for claims; the oldest-eligible half retired (`oldest_ready_since` ignores gates) | C1, S2 |
+| AC-REC-1 to AC-REC-3 | Superseded | Re-rank on settle (W5), stage counts (S1), `Delete` (W7) |
+| AC-E2E-4 recurring singleton | Restated in API-006 terms: one record per job or connector key, settled each cycle with `Release(t)` and a new rank, idle records told apart by stage counts and rank aggregates, teardown by `Delete`; `rearm`, retry exhaustion and `recurrence.until` are gone | W5, W7, S1, Q4 |
+| AC-DISC-1, AC-LAT-3 | Retired | Discovery is deleted; `stats.groups` (S2) |
+| AC-ROUTE-1 | Retired | The RESP front is deleted; there is no remote API |
+| AC-OP-6 pause/resume | Superseded | The `"*"` gate (W9) and `stats.paused` (S1) in AC-KC-1 |
+| AC-OP-2 to AC-OP-5, AC-OP-7 to AC-OP-9 | Superseded | API-002 is superseded: redrive is a stage move, purge is `Delete`, archive is `delete_queue`, inspection is `read`; async operations, operator authorization, selectors and cohort targeting are gone; `force_clear` is AC-KC-5 |
+| AC-E2E-7 operator workflow | Restated in API-006 terms: pause and resume with the `"*"` gate, inspection by `read` and `scan` (no tokens returned), `force_clear` of leased records through the admin handle, redrive as stage moves, purge as `Delete`, and archive as `delete_queue`; dry-run, async operations, audit records and operator principals are gone | W9, R3, OP1–OP3, W5, W7, DQ1–DQ5 |
+| AC-OBS-1 metrics ground truth | Superseded | `stats` and `aggregate` in AC-KC-1 and AC-KC-2 (S1, S2, Q4, Q5) |
+| AC-E2E-6 | Noisy-neighbor half retained; discovery routing retired | PRD FR-43 |
+| AC-E2E-8 | Generic non-timestamp rank ordering retained; bounded-relaxed half retired | PRD FR-4 |
+| AC-TXN-1 to AC-TXN-12, other AC-E2E rows | Retained; operation names map to `define_queue`, `write`, `claim` and `delete_queue`. Their "claim polls applied rows" wording is replaced: a claim observes every acknowledged write (V2), and a short or empty claim is a successful poll (C5), bounded by C5a | E1, E2, DUR1, RQ1–RQ4, V2, C5 |
+
 ## 4. Backend Conformance Gate
+
+The API-006 black-box contract suite (§3.12, AC-KC-1 to AC-KC-3) is the
+conformance gate for the `Store` contract. The port-level scenarios below are
+implementation evidence; they cannot replace, skip or weaken that suite.
 
 Every `LogStore`/`ProjectionStore`/`SnapshotStore`/`ControlPlaneStore`
 implementation MUST pass **100%** of the TD-001 shared conformance scenarios (durable
@@ -511,21 +617,26 @@ but not sufficient.
 | Property tests | ≥ `props` (PR tier); 0 falsifications | per-PR |
 | Fuzz targets (command decode, selector, priority decode) | ≥ `fuzz` (PR tier); 0 new crashes | per-PR |
 | Current segment format (golden, bounds, corruption, recovery) | Literal current bytes; CRC32C/SHA-256 standards; all single-bit mutations; truncated/oversized/malicious lengths; manifest/key/header mismatch; deterministic data/control replay; retired shapes rejected | per-PR |
-| Product E2E smoke (`FIREWEED_E2E_SCALE=smoke`) | P0/core AC-E2E-1..6 and AC-E2E-8..9 pass at smoke shape for each implemented suite and required backend profile; include AC-E2E-7 once the P1/operator surface is implemented | per-PR once the suite exists |
+| Product E2E smoke (`FIREWEED_E2E_SCALE=smoke`) | P0/core AC-E2E-1, AC-E2E-2, AC-E2E-4, AC-E2E-5, AC-E2E-6, AC-E2E-8 and AC-E2E-9, in API-006 terms per the §3.12 disposition table (AC-E2E-4 restated; the noisy-neighbor half of AC-E2E-6; the strict-rank half of AC-E2E-8), pass at smoke shape; include the restated AC-E2E-7 once the operator suite exists. AC-E2E-3 is retired | per-PR once the suite exists |
 | **Every `AC-*` in §3 executes and passes at its stated bar** | 100% of claimed `AC-*` green | per-PR for unit/integration ACs and product smoke; release for soak, scale, and release-shape product E2E ACs |
 | Portable capacity/degradation gates `AC-LAT-1..4` | exact work, same-run ratios, structural complexity, and declared resource bounds pass; absolute p50/p95/p99 are reported only | release |
-| Operator suites (`operator_repair/redrive/purge/async/auth` + `AC-OP-1..9`) | 100% pass | operator-enabled release |
+| Operator surface: `AC-KC-5` and INV-11 (§3.12), replacing the API-002 operator suites (`operator_repair/redrive/purge/async/auth`) and AC-OP-2..9 | 100% pass; INV-11 = 0 under the §2 stress matrix | per-PR for AC-KC-5; operator-enabled release for INV-11 |
+| Kernel contract suite `AC-KC-1` to `AC-KC-3` (§3.12) | 100% pass in the direct and torn-read runs; zero skipped, ignored or zero-assertion scenarios; no backend knob | per-PR |
+| Operator ban guard `AC-KC-4` and operator suite `AC-KC-5` (§3.12) | 0 references from Snorri, the workload and loadgen crates, or the contract suite; operator suite 100% pass | per-PR |
+| Claim-path structural gates `AC-PERF-1`, `AC-PERF-4`, `AC-PERF-5` (§3.12) | query-plan, statement and schema assertions pass | per-PR |
+| Claim-path and storage scale gates `AC-PERF-2`, `AC-PERF-3`, `AC-PERF-6`, `AC-PERF-8` (§3.12) | same-run bars pass; `AC-PERF-6` stays open until the lean-row measurement lands | release |
+| Per-queue commit cost `AC-PERF-7` (§3.12) | recorded with its topology; a measurement, not a gate | once, before any compaction, snapshot, log-split or full-delete GC design is committed |
 | Backend conformance (§4) — `s3--turso` (ADR-024) | 100% of scenarios for that cell; zero missing/ignored/fixture-skipped rows | release |
 | External transaction contract (§3.10) — `s3--turso` | AC-TXN-1..6 green on that cell with `AsyncProjection`; INV-12..INV-14 = 0. Not a 10M or 1000-queue claim | release |
 | Coverage — `fireweed-storage` conformance scenarios | 100% executed | release |
 | Loom (each custom concurrent structure) | exhaustive to the bounded preemption depth; 0 failing interleavings | release |
 | Property + fuzz (nightly tier) | ≥ `props`/`fuzz` nightly values; 0 falsifications/crashes | release |
 | Flaky rate | < 0.1% over 100 CI repeats of the suite | release |
-| P0/core safety invariants INV-1..INV-10 and INV-12..INV-14 | 0 violations under the §2 stress matrix and §3.10 duress matrix | release |
+| P0/core safety invariants INV-1, INV-2, INV-5..INV-10 and INV-12..INV-14, as rebound in §3.12 (INV-3 and INV-4 are retired) | 0 violations under the §2 stress matrix and §3.10 duress matrix | release |
 | Operator safety invariant INV-11 | 0 violations under the §2 stress matrix with operator repair/purge actions enabled | operator-enabled release |
 | TP-002 E0 (portable progress/capacity contract), E1, E2 (cross-queue scale-out + ≥1000-queue density), E3 (object-log latency/cost/recovery) | pass at TP-002 bars | release |
-| `AC-SEN` P0/core product workflow aggregate | AC-E2E-1..6 and AC-E2E-8..9 green with ledger evidence; INV-1..INV-10 = 0 where applicable | release |
-| Operator product workflow aggregate | AC-E2E-7 green with ledger evidence; INV-8 and INV-11 = 0 | operator-enabled release |
+| `AC-SEN` P0/core product workflow aggregate | AC-E2E-1, AC-E2E-2, AC-E2E-4, AC-E2E-5, AC-E2E-6, AC-E2E-8 and AC-E2E-9, in API-006 terms per §3.12, green with ledger evidence; the current P0/core invariants = 0 where applicable | release |
+| Operator product workflow aggregate | AC-E2E-7, as restated in §3.12, green with ledger evidence; INV-8 and INV-11 = 0 | operator-enabled release |
 
 The release gate is intentionally self-contained from a clean checkout:
 `scripts/ci/release-gate.sh` validates TP-002 E0-E3 from closed DDx source beads
@@ -554,26 +665,35 @@ criteria touch storage, concurrency, claim, lease, operator, or scale behavior
 
 fireweed P0/core v1 is "verified" when:
 
-1. INV-1..INV-10 and INV-12..INV-14 hold with 0 violations where applicable
-   on `s3--turso` (ADR-024) for the §3.10 duress cases that this plan runs.
-   There is no public Class B row.
+1. INV-1, INV-2, INV-5..INV-10 and INV-12..INV-14, as rebound in §3.12, hold
+   with 0 violations where applicable on `s3--turso` (ADR-024) for the §3.10
+   duress cases that this plan runs. INV-3 and INV-4 are retired. There is no
+   public Class B row.
 2. Every current `AC-*` in §3 passes at its stated bar, recorded in the ledger.
 3. The §4 backend conformance gate is the public cell, with zero silent skips.
 4. The §5 CI quality gates are green.
 5. TP-002 E0–E3 are specified on `s3--turso`. A 10M-resident or 1000-queue
    result is not recorded for v0.31.30 and is not a pass this plan may cite.
 6. AC-SEN — the product validation suite (`product_validation_tests`) runs the
-   P0/core product workflows AC-E2E-1 through AC-E2E-6 plus AC-E2E-8 and
-   AC-E2E-9 at their release bars, proving the scheduled
-   delivery/action, Marketo group batching, callback cohort, recurring
-   jobs/connectors, crash recovery, noisy-neighbor routing, generic
-   non-timestamp bounded-relaxed, and downstream pacing non-goal workflows
-   end-to-end with the applicable invariants holding.
-7. The P1/operator-enabled product surface is "verified" only when
-   `operator_validation_tests` runs AC-E2E-7 and the API-002 operator suites at
-   their release bars, including INV-11 under the §2 stress matrix with
-   operator repair/purge actions enabled. This is required before claiming
+   P0/core product workflows AC-E2E-1, AC-E2E-2, AC-E2E-4, AC-E2E-5,
+   AC-E2E-6, AC-E2E-8 and AC-E2E-9 at their release bars, in API-006 terms per
+   the §3.12 disposition table, proving the scheduled delivery/action,
+   Marketo group batching, recurring jobs/connectors (re-ranked on settle),
+   crash recovery, noisy-neighbor isolation, generic non-timestamp rank
+   ordering, and downstream pacing non-goal workflows end-to-end with the
+   applicable invariants holding. AC-E2E-3 (callback cohorts) is retired; the
+   callback-batch need is a `WholeGroups` claim with a caller count check
+   (PRD FR-47c).
+7. The operator surface is "verified" only when AC-KC-5 passes and
+   `operator_validation_tests` runs AC-E2E-7, as restated in §3.12, at its
+   release bars, including INV-11 under the §2 stress matrix with
+   `force_clear` and follow-up writes enabled. This is required before claiming
    operator support, but it does not block the P0/core v1 gate above.
+8. AC-KC-1 to AC-KC-5 (§3.12) pass on every `Store` implementation, and
+   AC-PERF-1 to AC-PERF-6 and AC-PERF-8 pass on S3×Turso; AC-PERF-6 counts only
+   once its measurement has landed, and AC-PERF-7 is recorded, not gated.
+   These gate the API-006 contract; the disposition table in §3.12 says which
+   earlier criteria no longer count.
 
 Any gap MUST be recorded as an explicit, dated deferred item with an owner, not
 silently dropped.

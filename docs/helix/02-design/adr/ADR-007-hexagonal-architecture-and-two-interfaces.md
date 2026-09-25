@@ -19,6 +19,11 @@ ddx:
 
 # Architecture Decision Record
 
+> **Under revision per ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
+> "Two interfaces (RESP + Rust library)" becomes one in-process interface, API-006's `Store`. The RESP adapter is
+> deleted, and a network front may be rebuilt later as a pure transport over `Store`, under its own contract
+> (owner decision, 2026-09-23 design discussion). Where this ADR conflicts with API-006, API-006 governs.
+
 **ADR ID**: ADR-007
 **Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
 **Status**: accepted (status updated 2026-07-05 — the migration this ADR specifies is built:

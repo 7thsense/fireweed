@@ -21,6 +21,14 @@ ddx:
 
 # Architecture Decision Record
 
+> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
+> Decision 2 is superseded for the external surface: that surface is `fireweed-contract` (the object-safe `Store`
+> and `Operator` traits and the DTOs), the `fireweed` wrapper over `Arc<dyn Store>`, and one constructor per
+> implementation, so the `dyn` erasure this ADR rejects is now the design (API-006 §1). Engine ports and backends
+> stay off the external surface. Decision 7's `ItemId` leaves the contract: the record key is caller-owned.
+> Decisions 1 and 3–6 are S3×Turso internals, not contract matters; target affinity follows mapped placement
+> (ADR-025 OD-13), and the RESP references are moot. Where this ADR conflicts with API-006, API-006 governs.
+
 **ADR ID**: ADR-009
 **Title**: The engine enforces coordination below the ports; the library is the only encapsulated external surface
 **Status**: accepted (status updated 2026-07-05 — this ADR is cited as committed by the accepted

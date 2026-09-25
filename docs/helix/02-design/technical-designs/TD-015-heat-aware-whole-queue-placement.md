@@ -20,6 +20,11 @@ ddx:
 
 # Technical Design: TD-015 Heat-Aware Whole-Queue Placement
 
+> **Under revision per ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, OD-13).
+> Static per-queue HRW is no longer the settled placement policy: the control plane maps each queue to one
+> partition and never rebalances queues (owner decision, 2026-09-23 design discussion). Whether this evaluation
+> applies to placing partitions on nodes is an open question in TD-018.
+
 **Status**: Proposed; operator review required before any architecture or implementation change.
 **Disposition**: No architecture change recommended.
 **Scope**: placement-policy evaluation for whole queues only.

@@ -23,6 +23,10 @@ ddx:
 
 # Technical Design
 
+> **Historical; see API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`) and ADR-025.
+> The RESP adapter is deleted (owner decision, 2026-09-23 design discussion). A network front may be rebuilt
+> later as a pure transport over `Store`, under its own contract. Nothing below governs current work.
+
 ## Public cell (ADR-024)
 
 ADR-024 supersedes the 2026-09-17 storage-selector amendment for public

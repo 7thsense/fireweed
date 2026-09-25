@@ -74,7 +74,9 @@ any commit already in the trail.
 
 ## Projection lifecycle tests
 
-Tests that exercise projection verify, delete, or rebuild MUST call
+Tests that exercise projection verify, delete, or rebuild MUST call projection
+control on the admin handle (`TursoAdmin::projection_control()`; API-006 §7),
+never the data-plane `Store`. Until the admin handle lands, that API is today's
 `Fireweed::projection_control()`. Unlinking `.db` / `.turso` / WAL files and
 reopening is not a substitute for that API. Crash-loss and
 `RecoveryAction::RebuildProjection` on open belong in server or workload

@@ -36,6 +36,12 @@ ddx:
 
 # Technical Design: TD-010 Default local Turso derived projection
 
+> **Amended by ADR-025 and API-006 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
+> The claim microbatch cap below (800 requested rows and 4 MiB of rendered response) is under API-006's claim
+> limits (1000 records and a 16 MiB response, C7, §6.8), and TD-017 replaces the projection schema. Projection
+> control moves from `Fireweed` to the admin handle (API-006 §7). The serving protocol at API-006's limits is
+> not yet restated (TD-017, Open items).
+
 ## Public cell (ADR-024)
 
 ADR-024 supersedes the 2026-09-17 storage-selector amendment for public

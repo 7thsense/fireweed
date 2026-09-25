@@ -16,6 +16,12 @@ ddx:
 
 # ADR-004: Granularity Mapping and Claim Domain
 
+> **Under revision per ADR-025 and API-006 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
+> Discovery (`DiscoverActiveScopes`), the per-queue progress bound, `metadata_equals` claim filters and
+> `same_group_key` are gone. A claim walks one declared stage in rank order, and whole groups are claimed with
+> `WholeGroups` (API-006 C1, C4, C5a, C6a). The rule that physical placement is never client-visible stands
+> (API-006 §8). Where this ADR conflicts with API-006, API-006 governs; its full rewrite is separate work.
+
 ## Context
 
 API-001 defines `tenant_id`, `queue_id`, `group_key`, and `metadata`; physical

@@ -8,6 +8,12 @@ ddx:
 
 # Choosing Fireweed Instead of a Stream
 
+> **Partly historical; see API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`). The
+> choice this guide describes still holds, but its vocabulary predates API-006: read "priority" and
+> `not_before` as `rank` (a future rank schedules a record), "complete, retry, fail, or release" as a
+> settling write (a stage move, a new rank or a delete), and "groups and cohorts" as groups claimed whole with
+> `WholeGroups`; cohorts are deleted.
+
 Use Fireweed when the application owns durable work state whose eligibility,
 priority, lease, retry, and completion state can change per item. Use an
 immutable sequential stream when consumers only need ordered append records,

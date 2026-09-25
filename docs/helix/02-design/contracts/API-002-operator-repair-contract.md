@@ -11,6 +11,7 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
+  status: superseded
   review:
     self_hash: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
     deps:
@@ -27,6 +28,24 @@ ddx:
 ---
 
 # Contract
+
+> **Superseded on 2026-09-24 by [API-006](API-006-fireweed-kernel-contract.md) §7** (the `Operator`
+> trait and the admin handle) and by ordinary `Store` writes (owner decision, 2026-09-23 design
+> discussion). This document is design history and does not govern the implementation.
+>
+> **What survives, and where it went:**
+> - Repair stays separate from the data plane: `Operator` is its own trait, reached only from the admin handle, and `Store` has no op that ends a lease without its token (OP1).
+> - Clear lease and force release: `Operator::force_clear`. Each key is its own atomic unit: the record is detached from its claim with a new version, then an optional lease-free `Put` or `Delete` applies (OP2). Validation, durability and request-id replay are those of `write` (OP3).
+> - Pause and resume: a gate op on the reserved gate `"*"` inside a `write` unit (W9), reported by `stats.paused` (S1). It is a data-plane write, not an operator op.
+> - Reschedule, force retry, force fail, force complete and redrive: lease-free writes that change `rank` or `stage`, guarded by `Expect::Version` (W3, W5). A leased record needs `force_clear` with a follow-up write.
+> - Purge: `Delete` writes (W7). Archive: `delete_queue { archive: true }` closes and archives a whole queue (DQ1–DQ5); there is no per-item archive.
+> - Inspection: `read` and `scan`, which never return lease tokens (R3, L1).
+> - Usage rule: force-clear is never a side channel. CI bans the `Operator` trait and the admin handle in Snorri, the workload and loadgen crates, and the contract suite (OP4).
+>
+> **What is gone:** selector-scoped bulk mutation and its guards, the asynchronous operation registry,
+> audit records, `RunRetention` and retention policy (retention is a consumer concern), cohort
+> targeting, engine dead-letter semantics (a failure stage belongs to the consumer), the HTTP route
+> shape, and operator authorization scopes.
 
 ## Public cell (ADR-024)
 
@@ -46,7 +65,7 @@ reference.
 **Contract ID**: API-002
 **Type**: operator / HTTP API / SDK
 **Version**: v1
-**Status**: complete
+**Status**: superseded by API-006 (previously complete)
 **Related**: PRD (P1 operator items), API-001, ADR-001, ADR-002, TD-001, TD-003
 
 ## Purpose

@@ -12,6 +12,13 @@ ddx:
 
 # ADR-011: Typed Payload Schemas and Secondary Indexes via the Shared `axon-esf` ESF Vocabulary
 
+> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
+> Superseded: the JSON Schema `entity_schema` and its payload validation, which declared typed fields replace
+> (API-006 F1–F3); axon's `IndexType`, `IndexDef`, `CompoundIndexDef` and `unique`; and the `QueueIndex` wrapper.
+> Standing: the ESF canonical, order-preserving index-key encoding. `fireweed-contract` now provides it, every
+> implementation uses it verbatim, and it must be extended to `Bytes` values and to the `Stage`, `Rank` and
+> `Group` built-ins.
+
 - Status: Accepted / Implemented
 - Date: 2026-06-28
 - Supersedes: ADR-010's **declaration shape** (`IndexSpec { name, fields: Vec<String>, unique }` — the untyped, byte-keyed interim form). ADR-010's maintain-on-apply mechanism, per-queue scope, and in-memory-first phasing **stand**.

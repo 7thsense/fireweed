@@ -13,6 +13,12 @@ ddx:
 
 # Architecture Decision Record
 
+> **Under revision per ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, OD-13).
+> "The queue is the unit of sharding" stands. Placement changes: the control plane maps each queue to one
+> partition instead of choosing an owner by HRW over queues; the partition fixes the queue's node and log
+> residency; and queues are never rebalanced across partitions (owner decision, 2026-09-23 design discussion).
+> TD-018 designs the partition cell; Decisions 1 and 3 are amended when it is accepted.
+
 ## Public cell (ADR-024)
 
 ADR-024 supersedes the 2026-09-17 storage-selector amendment for public

@@ -7,7 +7,7 @@ ddx:
     - adr-fjord-embedded-change-log-consumer-surface
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
-  status: accepted
+  status: superseded
   review:
     self_hash: 1744898d68be2d75ace9da0b8778dd69c827a518506a0598486e9d2480ad1598
     deps:
@@ -20,6 +20,13 @@ ddx:
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention
+
+> **Superseded on 2026-09-24 by ADR-025** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`) and API-006 (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`) (owner decision, 2026-09-23 design
+> discussion). This design is history and does not govern the implementation. `ChangeRecord` was already
+> retired by ADR-014's note. What remained is removed: `emit_change_records` on the queue definition and the
+> per-queue opt-out; the terminal-retention default and the CL-6 reap and emission coupling (there are no
+> terminal states and no expiry); and the Class A and Class B `ChangeRecordsRequireDurableLog` rule. Mutation
+> history is not an external obligation; only per-key `version` monotonicity is reserved (API-006 §6.7).
 
 ## Public cell (ADR-024)
 
@@ -36,7 +43,7 @@ retain their identity. SQLite selectors stay retired and are not a differential
 reference.
 
 
-**Status**: Accepted for Class A durable-log cells; unavailable for Class B memory-log cells
+**Status**: Superseded by ADR-025 (2026-09-24). Previously: Accepted for Class A durable-log cells; unavailable for Class B memory-log cells
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
 ingest path for SES exhaust, so delivery history lands beside delivery exhaust; fjord, embedded in

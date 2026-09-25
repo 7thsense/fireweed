@@ -5,6 +5,7 @@ ddx:
     - prd
     - api-native-client-interface
     - api-operator-repair-contract
+  status: superseded
   review:
     self_hash: 3206a0ad7896fa01deb790f1dca95bddab1cbe9d8f69a761cfb041a34498450e
     deps:
@@ -16,10 +17,26 @@ ddx:
 
 # Contract
 
+> **Superseded on 2026-09-24 by [API-006](API-006-fireweed-kernel-contract.md).** These profiles map a
+> workload onto API-001 and API-002 operations, and API-006 supersedes both (owner decision,
+> 2026-09-23 design discussion). This document is design history. No profile has been written against
+> API-006 yet; until one is, API-006 itself is the adapter author's contract.
+>
+> **What survives, and where it went:**
+> - The downstream rate-limit non-goal: Fireweed performs no rate admission. A workload paces itself with `max_records`, claim cadence, a future `rank` (a record is claimable only once `rank <= horizon`) and whole-group claims (API-006 C1, C4; PRD Non-Goals). Gates are not a pacing control (below).
+> - Finalize outcome mapping: settling is a write. Complete and fail become moves to consumer-named stages, retry becomes a new rank, and release is `Release(t)` (W5). There are no engine outcomes to map onto.
+> - Dynamic gate usage: gate ops inside write units; a gate is a binary pause switch, never a rate limiter (W9).
+> - Archive and retention boundaries: retention is a consumer concern; records are removed with `Delete` writes (W7), and whole queues close with `delete_queue` (§4.8, §8).
+> - Embedded engine integration: each implementation's constructor returns its `Store` and an admin handle (§7); an `Ok` from any mutating op is durable (DUR1). The embedder delivery adapter conformance suite gives way to the black-box contract suite that every implementation passes (§9).
+>
+> **What is gone:** priority models, `not_before`, `group_key` compatibility filters, the five finalize
+> outcomes and `rearm`, `client_item_key` convergence rules (the record key is the identity), and the
+> API-002 archive and retention operations.
+
 **Contract ID**: API-003
 **Type**: integration guidance / adapter contract
 **Version**: v1
-**Status**: complete
+**Status**: superseded by API-006 (previously complete)
 **Related**: API-001, API-002, PRD
 
 ## Purpose

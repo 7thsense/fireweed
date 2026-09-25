@@ -6,6 +6,7 @@ ddx:
     - api-native-client-interface
     - adr-queue-as-shard-unit-and-projection-families
     - adr-typed-payload-schemas-and-indexes-via-axon-esf
+  status: superseded
   review:
     self_hash: 2b943bd1b915099f9b16bc28b2e0640beb2b85df9c54b936ebbf6380ca0578f1
     deps:
@@ -18,11 +19,26 @@ ddx:
 
 # Contract
 
+> **Superseded on 2026-09-24 by [API-006](API-006-fireweed-kernel-contract.md)**: `scan` (§4.6),
+> `aggregate` (§4.7) and declared indexes (§5.1). This document is design history and does not govern
+> the implementation.
+>
+> **What survives, and where it went:**
+> - Typed indexed records: declared, typed fields and up to 32 indexes per queue, declared at creation over fields and the built-ins `Stage`, `Rank` and `Group` (§5.1, F1–F3). Every query is a declared-index range, never a table scan.
+> - Range scan and cursor pagination: `scan`, ordered by encoded index key then insertion sequence, with an opaque cursor that neither duplicates nor skips unchanged records (Q1–Q3, ORD3).
+> - Grouping and aggregation: `aggregate` with `GroupBy::Dims` (index keys, `TimeBucket` on `Time` fields, `Lease`) and a `truncated` flag (Q4). Declared numeric buckets: `GroupBy::Ranges`, with a null bucket (Q4).
+> - Claim by query: a `scan` of a declared index, then a `Keys` claim of the keys it found, bound to one stage (C2). Claims in index order are removed: rank is the only claim order (API-006 C4, §8).
+> - Consistency: `scan` is fresh; `aggregate` observes every acknowledged write but may be torn (V3). There is no read watermark.
+>
+> **What is gone:** bounded mutation (selection is `scan` or `read`; safety is `Expect::Version` on each
+> write), side and projection records (per-record data lives only in declared fields), capability names
+> and flags (API-006 §8 excludes backend introspection; every op is mandatory, CS7), unique secondary
+> indexes, and the internal item id (the caller's key is the identity).
+
 **Contract ID**: API-004
 **Type**: native query contract (transport-neutral)
 **Version**: v1 (draft)
-**Status**: accepted. API-005 exposes this surface through `Fireweed`; every
-supported storage composition implements the complete capability set below.
+**Status**: superseded by API-006 (previously accepted, exposed through the API-005 `Fireweed` facade).
 **Related**: PRD (FR-44..47 Seventh Sense validation), API-001 (native client interface, claimed-item
 shape, Eligibility Precedence), ADR-008 (queue as shard unit), ADR-011 (typed indexes via `axon-esf`),
 epic pqueue-45e13e4d (ship Snorri hot projection query substrate)

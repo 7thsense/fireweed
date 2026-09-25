@@ -6,6 +6,7 @@ ddx:
     - concerns
     - adr-cqrs-log-projection-storage-model
     - adr-queue-as-shard-unit-and-projection-families
+  status: superseded
   review:
     self_hash: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
     deps:
@@ -17,6 +18,25 @@ ddx:
 ---
 
 # Contract
+
+> **Superseded on 2026-09-24 by [API-006](API-006-fireweed-kernel-contract.md), the Fireweed kernel
+> contract** (owner decision, 2026-09-23 design discussion). This document is design history. It does
+> not govern the implementation; new work cites API-006 clause ids.
+>
+> **What survives, and where it went:**
+> - The external transaction contract (success is durable, a rejection has no effect, an unknown outcome resolves by `request_id`): API-006 E1, E2, DUR1 and RQ1–RQ4.
+> - Queue definition: `define_queue`, create-or-verify, declaring stages, fields and indexes (D1–D6, §5.1).
+> - Batch push, batch update, atomic item mutation and gate state: the single `write` op, with atomic units, `Expect` CAS, stage moves, gate ops and a queue metadata op (§4.2, W1–W14).
+> - Batch claim, whole-group claims (`group_batching`) and claim by item ids: `claim` with `Next`, `WholeGroups` or `Keys`, always within one declared stage (C1–C9). Claim by query becomes a `scan` followed by a `Keys` claim; no claim orders by an index (API-006 §8).
+> - Eligibility Precedence: the C1 candidate rule (in the claim's stage, Free, `rank <= horizon`, no Blocked gate, queue not paused).
+> - Batch renew: `Extend` renews the whole claim (W14). Batch finalize: settling is a token-carrying write that releases, moves the stage, re-ranks or deletes (W4, W5, W7).
+> - Purge items: a `Delete` write (W7). Live item reads: `read` (R1–R4). Queue metrics: `stats` (S1–S3).
+>
+> **What is gone** (API-006 §8): priority models and ordering modes (one `rank` per record), `not_before`
+> (a future rank), engine lifecycle states and finalize outcomes (stages belong to the caller), retry and
+> recurrence policy, cohorts, active-scope discovery, payload and item metadata outside declared fields,
+> retention windows, the HTTP route shape, the RESP front and every other remote binding, and principals
+> and authorization rules. The contract is in-process; a future transport gets its own contract.
 
 ## Public cell (ADR-024)
 
@@ -36,7 +56,7 @@ reference.
 **Contract ID**: API-001
 **Type**: native command contract (transport-neutral)
 **Version**: v1
-**Status**: complete
+**Status**: superseded by API-006 (previously complete)
 **Related**: PRD, ADR-001, ADR-007 (hexagonal architecture & the two realized interfaces)
 
 > **Realized surfaces (ADR-007).** The hexagonal build realizes this transport-neutral contract through

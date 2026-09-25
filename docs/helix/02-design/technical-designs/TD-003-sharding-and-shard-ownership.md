@@ -21,6 +21,12 @@ ddx:
 
 # Technical Design: TD-003 Queue Ownership and Fencing
 
+> **Under revision per ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, OD-13).
+> Queue-to-owner assignment by HRW, and rebalancing, conflict with mapped placement: the control plane maps each
+> queue to one partition, and queues are never rebalanced across partitions (owner decision, 2026-09-23 design
+> discussion). The lease, epoch and authority-record key move from the queue to the partition when TD-018 is
+> accepted. The queue-local progress bound is retired; API-006 C5a replaces it.
+
 ## Public cell (ADR-024)
 
 ADR-024 supersedes the 2026-09-17 storage-selector amendment for public

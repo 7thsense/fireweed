@@ -21,6 +21,12 @@ ddx:
 |------|--------|----------|---------|------------|
 | 2026-09-21 | Accepted | Project owner | ADR-012, ADR-013, ADR-015, ADR-016, ADR-017, AR-2026-09-21 | High |
 
+> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
+> This ADR stands as the choice of the one production implementation of API-006's `Store`. Amended:
+> - projection control moves from `Fireweed::projection_control` to the admin handle (`TursoAdmin`, API-006 §7);
+> - `StorageConfig` selectors, `ResponseBarrier`, `RETIRED_STORAGE_CELL` and the other configuration types leave the public surface, and the S3×Turso constructor takes its own configuration;
+> - visibility is API-006 V1–V5. A claim observes every acknowledged write (V2), a short or empty claim is a successful poll (C5) bounded by C5a, and `read` and `scan` are fresh (V3). The sentences below that say a claim polls applied rows and that callers cannot ask for read-your-writes are replaced; `AsyncProjection` is this cell's internal barrier.
+
 ## Context
 
 `v0.31.30` ships one storage cell. `StorageConfig::validate` accepts only an
@@ -29,6 +35,7 @@ pair returns `RETIRED_STORAGE_CELL`
 (`storage is s3 log × turso projection only; other selectors are retired`)
 before storage I/O. `ResponseBarrier` has only `AsyncProjection`. Claim polls
 applied rows and may be empty; that empty result is not a failed command.
+(Replaced by API-006 V2 and C5; see the ADR-025 amendment above.)
 
 The 2026-09-17 amendment, repeated on the product vision, the PRD, ADR-012,
 and ADR-016, still describes twelve public cells: logs
@@ -52,7 +59,8 @@ public storage matrix and no second barrier.
 
 `ResponseBarrier` has only `AsyncProjection`. An empty claim is a poll of
 applied Turso rows, not a command failure and not a signal to retry the
-mutation.
+mutation. (Replaced by API-006 V2 and C5: a claim observes every acknowledged
+write; see the ADR-025 amendment above.)
 
 S3 is not a second log engine. The log engine is `fireweed-objectlog`. That
 crate has two publication adapters for one protocol: filesystem, for a single
@@ -101,7 +109,7 @@ they do not reinstate a retired selector.
 | Positive | Vision, PRD, contracts, and the server have one storage law and one barrier to cite. |
 | Positive | Class A durability stays on the object log; Turso remains disposable and rebuildable. |
 | Negative | Callers cannot select a filesystem log, a memory projection, Postgres storage, or Strict. |
-| Negative | Callers cannot ask for read-your-writes via Strict. Empty claim means poll again. |
+| Negative | Callers cannot ask for read-your-writes via Strict. Empty claim means poll again. (Replaced by API-006 V2 and V3: claims observe every acknowledged write, and `read` and `scan` are fresh.) |
 | Neutral | Object-log filesystem publication and Turso `:memory:` stay available inside the engine for protocol tests and non-durable benches. |
 | Neutral | Older ADRs keep their historical sentences only where a later edit marks them historical. This ADR wins on current selectors. |
 
