@@ -66,7 +66,7 @@ Out of scope:
 - Initialization sets each pragma on its own, consumes the result and reads the value back. It never sends the pragma batch through `execute_batch`: the Turso 0.7 probe showed that call can report failure after it has already switched the journal mode.
 - The connection settings are TD-017 §12's: the 4 KiB page, WAL, `synchronous = NORMAL` on log-backed writers, no autocheckpoint, the Passive checkpoint cap, the cache sizes and the busy timeout.
 - A non-durable projection is Turso on `:memory:`, with the same schema, SQL and apply path. Tests of queue semantics and non-durable benches use it. Tests of checkpoint, reopen and rebuild use a temporary file (ADR-024).
-- The pin moves only after the Turso compatibility probe and the plan tests (TD-017 §11, rule 8) pass on the new version.
+- The pin moves only after the Turso qualification tests (TP-003 §3.8) and the plan tests (TD-017 §11, rule 8) pass on the new version.
 
 ## Authority and commit order
 
@@ -134,7 +134,7 @@ These rules come from ADR-015 and ADR-017.
 
 | Risk | Prob | Impact | Mitigation |
 |---|---|---|---|
-| Turso is pre-1.0, and an upgrade changes SQL or planner behavior | M | H | The exact pin; the probe and the plan tests on every upgrade (TD-017 §11). |
+| Turso is pre-1.0, and an upgrade changes SQL or planner behavior | M | H | The exact pin; the qualification and plan tests on every upgrade (TD-017 §11). |
 | Rebuild time grows with the log | H | M | TD-018's P1 (snapshot plus tail), gated on measurement. |
 | Cancellation strands a transaction or a waiter | M | H | Owned commit tasks, and cancellation tests at each cut. |
 | A corrupt local file is served | L | H | Verification at open, rebuild from the log, and corrupt state can never advance the trusted log position. |

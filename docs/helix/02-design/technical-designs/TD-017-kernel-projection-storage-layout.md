@@ -312,8 +312,11 @@ CREATE TABLE queues (
 CREATE UNIQUE INDEX queues_name_idx ON queues (tenant, queue);
 CREATE TABLE queue_defs (queue_no INTEGER PRIMARY KEY, definition BLOB NOT NULL);
 CREATE TABLE queue_meta (queue_no INTEGER PRIMARY KEY, version INTEGER NOT NULL, metadata BLOB NOT NULL);
+CREATE TABLE apply_cursor (queue_no INTEGER PRIMARY KEY, next_offset INTEGER NOT NULL);
+CREATE TABLE schema_meta (version INTEGER NOT NULL);
 ```
 
+- **Apply cursor and schema version.** Every apply transaction advances `apply_cursor.next_offset` for each queue it applies, in the same transaction (ADR-013, TD-010). `schema_meta` holds the file's one schema version, which the adapter verifies on open (TD-010).
 - **Three rows per queue.** The registry row stays small. The definition (up to 256 fields and 32 indexes) and the metadata (up to 64 KiB) get rows of their own, so gate ops and state changes do not rewrite them. An inline large value taxes updates of the other columns in its row: 2.8–3.0× at 32–64 KiB (MEASURED, SPIKE-005).
 - **Definition.** The canonical encoding of the normalized `QueueDef`, so D2 is a byte comparison. On first use, the implementation parses it into an in-memory schema per `queue_no`: stage ordinals, field ids and types, and index ids and keys. The definition is immutable, so the cache is never invalidated; closing the queue drops it.
 - **Metadata.** The canonical encoding of the map, and its version. A W13 compare-and-swap reads the version and writes both in the unit's apply transaction. `read{queue: true}` reads `queue_defs` and `queue_meta`.
@@ -411,13 +414,13 @@ CREATE INDEX requests_retain_idx ON requests (retain_until);
 
 ## 10. Operations against the layout
 
-The pipeline (TD-016) decides which connection and which transaction run each statement. Every statement below names its index (§11).
+The pipeline (TD-016) decides which connection and which transaction run each statement. Every statement below names its index (§11). Every apply transaction in the table (each `write` unit, `claim`, `define_queue`, `delete_queue`, reclaim batch and `force_clear`) also advances `apply_cursor` for the queue (§8).
 
 | Op | Projection work |
 |---|---|
 | `define_queue` | §8. |
 | `write` Put, absent key | Insert `items` (the first stage unless the patch names one; `rank` = now in µs; `ver` 1; `attempts` 0; `free_since` = now). Insert `item_fields` if the record has fields, `item_values` for each spilled value, and `item_index` for each index whose keys are all present. Update `stage_counts`, the group (its row and `members`), each carried gate's `carriers`, and `group_heads`. |
-| `write` Put, existing record | Key lookup (§5). A field patch reads the map, which W8 needs anyway. Update the hot row by primary key (`ver` + 1; stage, rank and gates as patched; `claim_id` per the lease op). Write the map, upsert or delete spills, and rekey changed indexes. Update counts, gate `carriers` for a gate edit, and group heads. |
+| `write` Put, existing record | Key lookup (§5). A field patch reads the map, which W8 needs anyway. Update the hot row by primary key (`ver` + 1; stage, rank and gates as patched; `claim_id` per the lease op; `free_since` = now when a Free record changes stage). Write the map, upsert or delete spills, and rekey changed indexes. Update counts, gate `carriers` for a gate edit, and group heads. |
 | `write` with `Release(t)` | As Put, plus `claim_id = NULL`, `free_since` = now, `claims.record_count` − 1 (the row is deleted at 0) and `groups.leased` − 1. Use the bulk form (§11, rule 5) when the request releases the whole claim. |
 | `write` Delete | Delete the hot row, the map, the spills and the index entries. Detach and decrement as Release when the record is attached. Decrement `groups.members` and each carried gate's `carriers`, and delete rows that reach their removal rule (§9). |
 | Extend | `UPDATE claims INDEXED BY sqlite_autoindex_claims_1 SET expires_at = ? WHERE queue_no = ? AND claim_id = ?` (a primary-key seek). |

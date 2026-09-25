@@ -42,8 +42,8 @@ ADR-024 fixes the one production implementation of the contract: an S3 object
 log with a Turso projection.
 
 - The object log (`fireweed-objectlog`) is the durable authority. Its
-  filesystem publication adapter tests the log protocol without MinIO; it is
-  not a supported deployment.
+  filesystem publication adapter tests the log protocol without an S3
+  endpoint; it is not a supported deployment.
 - The Turso projection is derived. It serves claims and reads, and it is
   rebuilt from the log through projection control on the implementation's
   admin handle.

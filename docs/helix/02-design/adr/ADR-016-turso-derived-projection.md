@@ -36,7 +36,7 @@ ddx:
 3. **Turso is derived.** It is not the command log, the retention authority or the control plane. It applies committed commands and is rebuilt from the log through projection control (ADR-013).
 4. **One file per partition, one writer per file.** Each partition has one Turso file (ADR-008). Every write goes through one connection behind a mutex; reads use separate serving connections. The page size is 4 KiB, and a Passive WAL checkpoint cap is mandatory (TD-017 §12).
 5. **Qualification.** The projection passes the contract suite (API-006 CS1) and the live-versus-rebuild comparison. Replay parity between two Turso instances is not an independent oracle, so scenarios assert expected state, not only agreement between runs.
-6. **Upgrades are re-probed.** Any Turso version change or feature change reruns the compatibility probe before it lands.
+6. **Upgrades are re-qualified.** Any Turso version or feature change reruns the Turso qualification tests (TP-003 AC-TURSO-1 to AC-TURSO-4) and TD-017 §11 rule 8's plan tests before it lands.
 
 ## Alternatives
 
@@ -54,7 +54,7 @@ ddx:
 |------|--------|
 | Positive | The projection is native async and needs no blocking bridge. |
 | Positive | Losing a Turso file costs a rebuild, never data. |
-| Negative | Turso is pre-1.0, so every upgrade needs the compatibility probe again. |
+| Negative | Turso is pre-1.0, so every upgrade reruns the Turso qualification and plan tests. |
 | Negative | Cold builds are materially larger. |
 | Neutral | Replay comparisons between Turso instances are not an independent differential oracle; expected-state assertions carry that role. |
 
@@ -62,9 +62,9 @@ ddx:
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Unprobed SQL diverges in an apply arm | M | H | Expected-state assertions in the contract suite, plus live-versus-rebuild comparisons. |
+| SQL that no qualification test covers diverges in an apply arm | M | H | Expected-state assertions in the contract suite, plus live-versus-rebuild comparisons. |
 | The applied position advances ahead of the applied state | L | H | One immediate transaction for both; injected rollback and reopen checks. |
-| An upgrade changes file or SQL behavior | M | H | Exact version pin and a mandatory probe rerun before upgrades. |
+| An upgrade changes file or SQL behavior | M | H | Exact version pin; every upgrade reruns the Turso qualification and plan tests. |
 | Operators infer remote or sync support from the Turso name | M | H | Configuration and deployment docs name the embedded, local, ordinary-WAL boundary; unsupported modes are rejected before I/O. |
 
 ## Validation
@@ -73,11 +73,11 @@ ddx:
 |----------------|----------------|
 | Live and rebuilt projections match for every scenario of the contract suite | Any image, index, lease or cursor divergence. |
 | No reactor blocking under Turso load | A single-thread heartbeat stalls. |
-| The Turso version stays exactly the probed one | A dependency update or feature expansion. |
+| The Turso version stays exactly the qualified one | A dependency update or feature expansion. |
 
 ## Concern Impact
 
-- `technology-radar`: Turso 0.7 is version-sensitive and is re-probed on every upgrade.
+- `technology-radar`: Turso 0.7 is version-sensitive and is re-qualified on every upgrade.
 - `resilience`: Turso state is disposable and rebuildable from the log; it never authorizes log retention.
 
 ## References

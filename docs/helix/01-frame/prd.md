@@ -81,7 +81,7 @@ partitioned object log.
   (ADR-025 §5).
 - There are no storage selectors: the S3×Turso constructor takes its own
   configuration. Filesystem publication inside `fireweed-objectlog` tests the
-  log protocol without MinIO; it is not a supported deployment.
+  log protocol without an S3 endpoint; it is not a supported deployment.
 
 ## Problem and Goals
 
@@ -543,12 +543,13 @@ Clause ids in parentheses (for example C4) are API-006 clauses.
   by a declared field such as account, connector, or campaign, a `scan`
   followed by a `Keys` claim (C1, C2, C4).
 - **FR-47a** - fireweed can represent Seventh Sense's nesting on API-006's
-  axes: `tenant` for the account and isolation boundary; one queue per job
-  type; stages for that type's steps; `group` as the whole-group axis (for
-  example `job_id`, or the lead for Marketo enrichment); declared fields for
-  account, connector, and campaign; and gates for account and connector status.
-  Claims are in rank order within a stage; per-job fairness is not an engine
-  concept.
+  axes: one `tenant` for all of Seventh Sense's queues, because a job worker
+  claims across every account of its job type and there are no cross-queue
+  claims; one queue per job type; stages for that type's steps; `group` as the
+  whole-group axis (for example `job_id`, or the lead for Marketo enrichment);
+  declared fields for account, connector, and campaign; and gates for account
+  and connector status. Claims are in rank order within a stage; per-job
+  fairness is not an engine concept.
 - **FR-47b** - fireweed can claim batches bounded by a downstream per-call
   entity limit, such as the Marketo lead-enrichment limit of 300 distinct leads
   per API call, with `WholeGroups { max_groups: 300 }`: every currently

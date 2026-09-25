@@ -27,21 +27,17 @@ canonical_surfaces:
     - fireweed-engine
     - fireweed-projection
     - fireweed-relational
-    - fireweed-memory
-    - fireweed-sqlite
-    - fireweed-postgres
+    - fireweed-contract
+    - fireweed-contract-suite
     - fireweed-objectlog
-    - fireweed-resp
     - fireweed-server
     - fireweed-release
     - fireweed-loadgen
-    - fireweed-conformance
     - fireweed-sim-support
     - fireweed-turso
     - fireweed-bench
   binaries:
     - fireweed-service
-    - fireweed-postgres-migrate
     - fireweed-loadgen
     - fireweed-bench
     - fireweed-verify-ledger
@@ -61,13 +57,11 @@ canonical_surfaces:
   runtime:
     state_root: /var/lib/fireweed
     object_log_root: /var/lib/fireweed/object-log
-    log_database: /var/lib/fireweed/fireweed-log.db
     projection_database: /var/lib/fireweed/fireweed-projection.db
   persistence:
     sql_prefix: fireweed_
     object_prefix: fireweed/
   protocol:
-    resp_extension_prefix: FW.
     http_header_prefix: X-Fireweed-
 
 exceptions:
@@ -78,5 +72,5 @@ exceptions:
 verification:
   - no executable alias or fallback accepts a retired identifier
   - no current example, operator instruction, schema, path, prefix, or wire identifier emits a retired identifier
-  - fresh SQLite, PostgreSQL, Turso, and object-log configurations pass functional and close/reopen durability suites
+  - fresh object-log namespaces, Turso schemas and control-plane schemas pass functional and close/reopen durability tests
   - identity residue verification uses exact path-and-pattern exceptions only

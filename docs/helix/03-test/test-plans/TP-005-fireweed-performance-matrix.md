@@ -3,13 +3,10 @@ ddx:
   id: tp-fireweed-performance-matrix
   depends_on:
     - prd
-    - api-fireweed-rust-facade
-    - tp-fireweed-facade-and-snorri-acceptance
-    - adr-cqrs-log-projection-storage-model
-    - adr-orthogonal-log-projection-composition
-    - td-storage-architecture-backend-contracts
-    - tp-scale-substantiation
     - api-fireweed-kernel-contract
+    - adr-s3-turso-public-cell
+    - td-kernel-projection-storage-layout
+    - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   status: accepted
   review:
@@ -27,574 +24,437 @@ ddx:
 
 # TP-005: Fireweed performance matrix
 
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
-`10000` and `12500` are non-portable capacity observations for a named cell and
-commit, not product pass bars. The campaign plan states the same rule: the
-12.5k result stays attributed to filesystem × Turso at `49f1b6b3` (2026-09-16)
-and is not a qualification pin; v0.31.30 s3 × Turso (~9507 on `bcef51f9`) is
-not a qualification pin. A miss of those script gates is not a product failure.
-
-
-## Kernel contract (API-006)
-
-API-005 is superseded by
-[API-006](../../02-design/contracts/API-006-fireweed-kernel-contract.md)
-(owner decision, 2026-09-23 design discussion), so this plan's facade
-references change:
-
-- **Functional prerequisite.** A cell is eligible for timing only after the
-  black-box contract suite passes on it (API-006 §9; TP-003 AC-KC-1 to AC-KC-3).
-  TP-004's facade suite and per-constructor parity rows, cited below, are
-  superseded.
-- **Construction.** Each implementation's constructor returns its `Store` and
-  its admin handle. The API-005 `StorageConfig` construction contract cited
-  below is implementation-specific input, outside the contract. Timed
-  operations go through `Fireweed` over `Arc<dyn Store>`: `write` and `claim`
-  replace append, claim and finalize.
-- **No backend knobs.** Cells may differ only in construction, never in the
-  operations timed or the assertions made (API-006 CS4).
-- **Claim-path gates.** The portable gates derived from the spikes in
-  `docs/helix/02-design/spikes/` (SPIKE-002 to SPIKE-006) are TP-003 §3.12
-  (AC-PERF-1 to AC-PERF-6 and AC-PERF-8 are gates; AC-PERF-7 is a recorded
-  measurement). This plan's host-bound matrix stays capacity
-  evidence and never substitutes for them.
-
 ## Testing strategy
 
-**Goals**: Produce a reproducible, revision-bound comparative performance
-record of every supported Fireweed embedding storage composition on one
-declared client/service topology;
-measure the public facade rather than internal storage ports; preserve raw
-samples and correctness evidence; distinguish comparable common-path results
-from configuration-specific recovery and maintenance results.
+**Goals**: a reproducible, revision-bound capacity record of the S3×Turso
+implementation of API-006 on one declared host and service topology; every
+timed call goes through `Fireweed` over `Arc<dyn Store>`; raw samples and
+correctness evidence are kept; common-path results are kept apart from
+recovery and maintenance results.
 
-**Out of scope**: Cloud-provider certification;
-multi-node scale-out, which remains governed by TP-002 E2; extrapolation from
-this host to another host; GitHub-hosted performance execution.
+**Out of scope**: cloud-provider certification; multi-node scale-out, which
+TP-002 E2 governs; extrapolation from this host to another; performance runs
+on GitHub-hosted runners.
 
-Performance qualification has a hard functional prerequisite. A matrix cell
-MUST first pass TP-004's complete public-operation conformance suite and its
-documented durability verification with zero skips and zero
-construction-dependent `EngineError::Unavailable` results. An incomplete cell
-is release-blocking and ineligible for performance execution; the runner MUST
-NOT spend benchmark time characterizing it.
+**Traceability source**: PRD scale substantiation; API-006; TD-017 §13, which
+names the capacity runs this plan owns; TP-002 capacity and scale evidence.
 
-**Traceability source**: PRD scale substantiation; ADR-001 durability classes;
-ADR-012 orthogonal log/projection composition; API-005 construction boundary;
-TD-001 backend contract; TP-002 capacity and scale evidence.
+This plan owns the host-bound capacity matrix. Its results are capacity
+observations for the declared host and topology, and they never substitute
+for:
 
-Performance qualification runs on controlled operator-selected hardware.
-GitHub Actions may compile the runner, execute deterministic verifier tests, and
-verify a supplied evidence artifact. It MUST NOT produce authoritative timing
-evidence. The runner rejects an authoritative run when a conventional CI
-environment variable is present unless the operator selects a non-authoritative
-smoke tier.
+- the TP-003 §3.12 claim-path and storage gates (AC-PERF-1 to AC-PERF-8),
+  which are structural or same-run and rest on the spikes (SPIKE-002 to
+  SPIKE-006);
+- the TP-002 E0–E3 records, which alone may set governed wall-clock
+  thresholds.
 
-TP-005 evidence is never TP-002 E0, E1, E2, or E3 evidence. The schema rejects
-`tp002_evidence_ids`, and TP-005 artifacts MUST NOT be included in a TP-002
-governed bundle. TP-005 measures a single-caller embedding baseline at bounded
-workload size; it does not satisfy TP-002 resident-scale, scale-out, cost,
-recovery, or exact-tag release requirements.
+TP-005 evidence is never TP-002 evidence. The schema rejects
+`tp002_evidence_ids`, and TP-005 artifacts are never part of a TP-002 governed
+bundle. TP-005 measures a single-caller embedding baseline at bounded workload
+size; it does not meet TP-002's resident-scale, scale-out, cost, recovery or
+exact-tag requirements.
+
+**Functional prerequisite.** A revision is eligible for timing only after
+`fireweed-contract-suite` passes on it with zero skips (TP-003 AC-KC-1 to
+AC-KC-3). A revision that has not passed is release-blocking and ineligible;
+the runner spends no benchmark time characterizing it.
+
+**No backend knobs.** Every run measures the one implementation through the
+same eight ops, and every run makes the same assertions (API-006 CS4). Runs
+differ only in workload shape.
+
+Performance qualification runs on controlled, operator-selected hardware.
+GitHub Actions may compile the runner, execute deterministic verifier tests
+and verify a supplied evidence artifact; it never produces authoritative
+timing evidence. The runner rejects an authoritative run when a conventional
+CI environment variable is present, unless the operator selects the
+non-authoritative smoke tier.
 
 ### Evidence classes and claim boundary
 
-| Class | Purpose | Comparable across cells | Release claim |
+| Class | Purpose | Comparable | Release claim |
 | --- | --- | --- | --- |
-| `common` | Public facade append, claim, and finalize | Only within one response-barrier class and one run | Host/topology-bound embedding record |
-| `recovery` | Close, reopen, rebuild, and verify durable state | Only among cells with the same recovery contract | Host-bound recovery record |
-| `maintenance` | Verify, delete, and rebuild disposable projections | Only among cells exposing `projection_control()` | Host-bound maintenance record |
+| `common` | Timed insert, claim and settle through `Fireweed` | Only within one run | Host- and topology-bound capacity record |
+| `recovery` | Restart over the same durable state and verify it | Only within one run | Host-bound recovery record |
+| `maintenance` | Verify, delete and rebuild the Turso projection through projection control on the admin handle | Only within one run | Host-bound maintenance record |
+| `million-cycle-v1` | Insert 1M records, modify 500K, read and verify 1M | No | Host-bound timing only; not a 10M-resident result |
+| `phased` | The TD-017 §13 capacity runs: P1–P4, the Snorri-shaped P2p–P4r, 32 queues per file, and the Snorri transition bench | Only within one run | Host-bound regression reference; never a gate |
 | `smoke` | Fast runner and schema validation | No | None |
-| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M on `s3--turso` when that run exists | No | Host-bound timing only. This plan does not claim that run for v0.31.30, and it is not a 10M-resident pass |
 
-### Settled lifecycle and microbatch qualification contract
+### Targeted million-record lifecycle
 
-The `filesystem--turso` Seventh Sense qualification adds two same-SHA evidence
-lanes to the general matrix. Both use public requests of at most 100 items,
-retain exact item identities and full responses, retry typed admission
-backpressure at a fixed 25 ms cadence, and fail on missing, duplicate, or
-residual work. Source SHA, host, configuration, timings, counters, response
-sizes, and final queue/projection state are recorded together.
+`million-cycle-v1` is a fail-closed functional gate at scale, not a
+comparative benchmark:
 
-The phased settled lane preserves phase barriers for attribution. It executes
-Push, two pending BatchUpdate phases, then Claim plus Complete, and waits for
-the projection to cover every phase's final authoritative position before the
-next phase begins. T2 is the settled T2 rate for exactly 100,000 delivered
-items: its interval includes Claim, Complete, and final projection settlement.
-An append-ack-only rate is reported only as a diagnostic and can never satisfy
-T2 or support a release claim.
+1. Define one queue with the `record-1k` shape (see "Test data").
+2. Insert exactly 1,000,000 records with unique keys, 1,000 writes per
+   request, and time the insert phase.
+3. Modify exactly the first 500,000 records by key with a sparse field patch,
+   1,000 writes per request. Every outcome is `Put { created: false }`. Time
+   the modify phase.
+4. Read exactly 1,000,000 records by key, 1,000 keys per `read`, verifying
+   every field value. Time the read phase, verification included.
+5. Verify an exact deterministic digest: each modified record's version is
+   greater than the version its insert returned, and each untouched record
+   still has its insert version. A missing, duplicate, wrongly modified or
+   extra record fails.
+6. Restart over the same durable state, then repeat the read and digest
+   verification outside the timed phases.
 
-The mixed same-SHA control lane overlaps realistic 1 KiB ready lifecycle work
-with far-future Push, public observations, a 32-request compatible mutation
-cohort, incompatible legal Claim keys, and 32 same-key renew/reassign/purge
-operations. It records admitted service p50/p95/p99, capacity rejection and
-deadline-expiry identities, pack/projection wait observations, response bytes,
-settled throughput, and exact final state. This mixed lane is the admission and
-interference control; the phased lane remains the attribution control.
+Queue definition, one bounded 10,000-record warm-up, restart, setup and
+cleanup are outside the phase timings and recorded separately. Request
+construction stays inside each timed phase, because the gate measures the
+caller-observed operation. An error, a skip or a reduced record count is a P0
+failure. The authoritative run is on controlled local hardware and never in
+CI. This plan sets no portable wall-clock ceiling.
 
-The later continuous streaming lane replaces `join_all` waves with bounded
-queues between ingest, enrich, schedule, claim, complete, and settle. Completion
-of any request immediately admits the next request, but exact N and final
-settlement still terminate the run. Continuous client concurrency is a load
-generator, not authority to reorder requests or bypass queue admission.
+### Phased capacity runs
 
-Microbatch qualification saturates compatible public requests, not items
-inside a request. A legal generation is capped at eight requests, 800 requested
-rows, 4 MiB of rendered responses, and 20 ms linger. Evidence proves one exact
-response and lease token per request, one intact ordered packed apply
-transaction, no payload cloning by queued generations, and no projection-pool
-borrow after publication. The retained-response memory ceiling is 128 MiB for
-normal admitted work; the post-activation configured Turso page-cache ceiling
-is 224 MiB. Behavioral M1/M2/M3 gates remain authoritative.
+TD-017 §13 names these runs and records their reference values. Each phase
+starts only after the previous phase's writes are acknowledged, so a phase's
+rate (records divided by the phase's wall time) is attributable. The rollup
+rate is N divided by the sum of the phase times.
 
-During the migration window, the new path is log-first and writes no SQL-first
-lease or Claim outbox row. The legacy outbox schema and recovery-only drain stay
-for at least one release, and a reopen test must prove a pre-upgrade committed
-lease still publishes before that drain can be removed.
+- **P1–P4**, `ss_phased_capacity`, N = 10,000 by default, one queue with
+  ordinary stages and declared fields:
+  - P1 inserts N records, 100 per request;
+  - P2 writes a 1,024 B profile field to each record by key, 100 per request;
+  - P3 writes each record's scheduled time as its rank by key, 100 per
+    request;
+  - P4 claims 100 records at a time with `Next` and settles each claim by
+    moving its records to the next stage with `Release(t)`.
+- **P2p, P3p, P4p and P4r**, on a Snorri-shaped queue with 22 declared
+  indexes, two of them keyed on `Stage`, and Snorri's large state and audit
+  values as declared fields, so the ones over 4 KiB spill:
+  - P2p mixes lease-free stage moves between ordinary stages into the updates;
+  - P3p re-ranks each record by key, as P3 does;
+  - P4p claims, then settles with `Release(t)`, a move to another stage and a
+    field patch, rekeying the `Stage`-keyed indexes;
+  - P4r claims, then settles with `Release(t)` and a new rank;
+  - claims run both with `fields: None` and with a projection that leaves out
+    the large fields (API-006 F4).
+- **32 queues per file**: the 32-shard workflow qualification, run as 32
+  queues in one partition file.
+- **Snorri transition bench**: `WholeGroups` claims on the transition stage,
+  the hydrating instance read, the instance record's `Expect::Version` write,
+  and settles that move stages with history in fields, sized with Snorri's
+  measured audit and state bytes.
 
-### Targeted million-item lifecycle gate
+These runs never gate. TP-003 decides whether any of them becomes a same-run
+gate.
 
-`million-cycle-v1` is a fail-closed gate, not a comparative benchmark. For
-every supported matrix cell it performs the same public-facade lifecycle:
+### Construction
 
-1. Create one queue with a maximum push batch of 1,000.
-2. Insert exactly 1,000,000 deterministic items with unique
-   `ClientItemKey`s, in batches of 1,000, and record the timed insert phase.
-3. Modify exactly the first 500,000 items using API-001 `BatchUpdate`, in
-   batches of 1,000. Every outcome MUST be `Updated`; record the timed modify
-   phase.
-4. Read exactly 1,000,000 items using `live_items` in key-order batches of
-   1,000. The timed read phase includes value/version verification and is
-   recorded.
-5. Verify an exact deterministic digest: 500,000 updated rows at version 2 and
-   500,000 untouched rows at version 1. Missing, duplicate, reordered,
-   incorrectly updated, or extra rows fail.
-6. Close and reopen after modification, then repeat the exact read/digest
-   verification outside the timed phase. Class A recovers from the durable log.
-   Class B records its selected projection boundary: SQLite/Postgres preserves
-   latest projection state; memory is volatile and makes no replay claim.
-
-Queue creation, one bounded 10,000-item warmup, close/reopen, service setup,
-and cleanup are outside phase timings and recorded separately. Item/request
-construction remains inside each timed phase because the gate represents the
-caller-observed public operation. `EngineError::Unavailable`, an omitted cell,
-a skip, or a reduced item count is a P0 failure. The authoritative gate runs on
-controlled local hardware and is forbidden in CI. TP-005 does not impose a
-portable wall-clock ceiling; only governed TP-002 E3 evidence may define a
-release performance threshold for its declared, attested topology.
-
-### Matrix
-
-The register is one cell, `s3--turso` (ADR-024). A missing S3 service is a
-qualification failure for that cell, not permission to substitute another pair.
-
-| Log \ Projection | `turso` |
-| --- | --- |
-| `s3` | `s3--turso` |
-
-The row constructs through `open(StorageConfig)` or `open_async(StorageConfig)`
-(`StorageConfig::s3_turso`). Retired selectors are not rows. This matrix does
-not claim a 10M-resident or 1000-queue result.
-
-### Response-barrier classes
-
-| Class | Rows | Success boundary |
-| --- | --- | --- |
-| `AsyncProjection` | `s3--turso` only | The object log has the command. A claim observes every acknowledged write (API-006 V2); a short or empty claim is a successful poll, not a failure (C5), bounded by C5a. Lag stays within `AsyncProjectionSpec` or the cell fails closed. |
-
-Cross-class ratios are descriptive only and carry `comparison_status =
-"different_success_boundary"`. Async rows report the timed response boundary
-and a separate untimed catch-up duration; the two values are never added or
-presented as a strict-barrier equivalent. Durability class is recorded
-separately from response-barrier class.
-
-### Exact construction contract
-
-The runner uses the public `open(StorageConfig)` or
-`open_async(StorageConfig)` entry point consistently for a run. The two entry
-forms are construction alternatives, not storage cells. Coordinated and
-multi-node construction changes deployment topology and remains under TP-002,
-not this single-owner embedding matrix.
-
-All object-log cells use the same non-provider fields:
-
-```text
-SegmentConfig::new(262144, 20)
-RecoveryPolicy {
-  incompatible_projection: RecoveryAction::RebuildProjection,
-  verify_checksums: true,
-  max_tail_commands: 1000000,
-}
-```
-
-`LogConfig`, `ProjectionStoreConfig`, and `ResponseBarrier` match the matrix
-row exactly. Every local root, SQLite projection path, PostgreSQL schema, and
-object-log namespace is derived from the run ID, cell ID, shape ID, and
-repetition. The full resolved non-secret configuration is serialized with the
-row. A mismatch between the resolved config and the cell definition fails
-before warm-up.
+The runner builds a fresh S3×Turso instance through the `fireweed`
+constructor, which returns the `Fireweed` handle and `TursoAdmin`. Timed calls use `Fireweed` only; the admin handle is used only for projection
+control in the recovery and maintenance classes. Every S3 namespace and local
+path is derived from the run id, shape id, phase and repetition. The full
+resolved non-secret constructor configuration is serialized with each row, and
+every row of a run uses the same values; a mismatch between the resolved and
+declared configuration fails before warm-up.
 
 ### Test levels
 
 | Level | Coverage target | Priority |
 | --- | --- | --- |
-| Contract | 100% of matrix cell IDs, evidence fields, and failure semantics | P0 |
-| Integration | Every configured cell constructs through API-005 and reconciles exact state | P0 |
+| Contract | 100% of workload ids, evidence fields and failure semantics | P0 |
+| Integration | Every run constructs through the public constructor and reconciles exact state | P0 |
 | Performance | Five measured repetitions per common-path workload after warm-up | P0 |
-| Targeted lifecycle | 1M/500K/1M cycle on `s3--turso` only if a run is recorded. Not claimed for v0.31.30. Not a 10M pass | P0 when run |
-| Recovery | Every durable configured cell reopens and reconciles exact state | P0 |
-| Maintenance | Every configured disposable-projection cell verifies and rebuilds | P0 |
-| Smoke | One small repetition over local cells for developer feedback | P1 |
+| Targeted lifecycle | `million-cycle-v1` | P0 when run |
+| Recovery | Restart reconciles exact state | P0 |
+| Maintenance | Projection verify, delete and rebuild reconcile exact state | P0 |
+| Phased | The TD-017 §13 capacity runs complete with exact final state | P1 |
+| Smoke | One small repetition for developer feedback | P1 |
 
 ### Frameworks
 
 | Type | Framework | Reason |
 | --- | --- | --- |
-| Contract | Rust unit tests plus JSON Schema-style semantic verifier | Rejects missing, duplicate, malformed, or contradictory evidence |
-| Integration | `fireweed-bench` independent Cargo workspace | Isolates timing from the root workspace and exercises the public facade |
-| Performance | Monotonic `Instant` samples emitted as JSON | Retains auditable raw measurements without a hidden statistical framework |
-| External services | Operator-provided PostgreSQL and S3-compatible endpoints | Measures real configured services on controlled hardware |
+| Contract | Rust unit tests plus a JSON Schema-style semantic verifier | Rejects missing, duplicate, malformed or contradictory evidence |
+| Integration | The `fireweed-bench` Cargo workspace | Isolates timing from the root workspace and calls only public Fireweed APIs |
+| Performance | Monotonic `Instant` samples emitted as JSON | Keeps auditable raw measurements without a hidden statistical framework |
+| External services | An operator-provided S3-compatible endpoint | Measures a real configured service on controlled hardware |
 
 ## Test data
 
-All generated items are deterministic from the recorded seed. No customer data
-or production identifiers are used.
+Every generated record is deterministic from the recorded seed. No customer
+data or production identifiers are used. Each shape defines one queue with the
+default stages `[INITIAL, COMPLETED]`, the shape's declared fields and no
+indexes.
 
-| Shape | Payload | Fields | Grouping | Priority | Items | Batch | Requests/op/rep |
-| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
-| `minimal` | 0 B | none | none | sequential | 12,800 | 128 | 100 |
-| `record-1k` | 1 KiB | 16 × 64 B | none | deterministic uniform | 12,800 | 128 | 100 |
-| `group-keyed-256` | 256 B | 4 × 32 B | 64 group keys | deterministic uniform | 12,800 | 128 | 100 |
-| `large-16k` | 16 KiB | none | none | deterministic uniform | 1,600 | 16 | 100 |
+| Shape | Fields | Groups | Rank | Records | Batch | Requests/op/rep |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| `minimal` | none | none | default (insertion time) | 12,800 | 128 | 100 |
+| `record-1k` | 16 `Str` fields of 64 B | none | deterministic uniform | 12,800 | 128 | 100 |
+| `group-keyed-256` | 4 `Str` fields of 64 B | 64 | deterministic uniform | 12,800 | 128 | 100 |
+| `large-16k` | one `Bytes` field of 16 KiB, which spills | none | deterministic uniform | 1,600 | 16 | 100 |
+
+`large-16k` runs the common path twice in each repetition, each time on a
+fresh queue: once claiming with `fields: None` and once with
+`fields: Some([])` (API-006 F4). The two are reported as separate rows.
 
 The authoritative full tier uses concurrency 1, one unmeasured warm-up
-repetition, and five measured repetitions. Each operation therefore retains
-100 request samples per repetition and 500 pooled samples per cell/shape.
-This is a deliberate embedding baseline: it measures one caller driving one
-queue without claiming saturation throughput. A later saturation workload may
-vary concurrency, but it must use a different workload ID and may not replace
-this baseline.
+repetition and five measured repetitions. Each operation therefore keeps 100
+request samples per repetition and 500 pooled samples per shape. This is a
+deliberate embedding baseline: one caller driving one queue, with no claim of
+saturation throughput. A saturation workload may vary concurrency under a
+different workload id, and never replaces this baseline.
 
-Each repetition uses a fresh queue and fresh isolated storage namespace. The
-execution schedule is fixed: warm-up visits shapes in table order and cells in
-stable cell-ID order; measured rounds are outermost, shapes remain in table
-order, and for shape index `s` and round `r` the stable cell list rotates left
-by `(r + s) mod cell_count`, then reverses when `r` is odd. Warm-up storage is
-cleaned and verified before measured round zero. The exact schedule is recorded.
-The runner records every request duration in nanoseconds, not only precomputed
+Each repetition uses a fresh queue and a fresh isolated storage namespace. The
+schedule is fixed: warm-up visits shapes in table order; measured rounds are
+outermost, and for round `r` the shape order rotates left by `r mod
+shape_count` and reverses when `r` is odd. Warm-up storage is cleaned and
+verified before measured round zero, and the exact schedule is recorded. The
+runner records every request duration in nanoseconds, not only precomputed
 percentiles.
 
 ## Coverage requirements
 
 | Metric | Target | Minimum | Enforcement |
 | --- | --- | --- | --- |
-| Public cell completed | `s3--turso` (ADR-024) | that cell; zero silent substitution | Runner exits non-zero |
-| Common operations per cell/shape | append, claim, finalize | 100% | Semantic verifier |
-| Accepted/claimed/finalized reconciliation | exact | exact | Runner and verifier |
+| Shapes completed | all four | all four; no silent substitution | Runner exits non-zero |
+| Common operations per shape | insert, claim, settle | 100% | Semantic verifier |
+| Inserted, claimed and settled reconciliation | exact | exact | Runner and verifier |
 | Measured repetitions | 5 | 5 | Semantic verifier |
-| Raw request samples | exactly 100 per common operation/repetition | 100 | Semantic verifier |
-| Pooled raw request samples | exactly 500 per common cell/shape/operation | 500 | Semantic verifier |
+| Raw request samples | exactly 100 per operation and repetition | 100 | Semantic verifier |
+| Pooled raw request samples | exactly 500 per shape and operation | 500 | Semantic verifier |
 | Cross-repetition throughput CV | population CV reported | finite, mean > 0 | Semantic verifier |
 | Environment provenance | complete required fields | 100% | Semantic verifier |
 | Source provenance | clean pushed commit | exact | Launch wrapper and verifier |
 | Secret leakage | zero credential values | zero | Redaction test and evidence scan |
-| Million-cycle functionality | insert + `batch_update` + `live_items` on `s3--turso` if recorded | not claimed for v0.31.30 | Do not invent a pass |
-| Million-cycle phase observations | insert, modify, and read+verify duration | recorded for all three phases in every cell; no TP-005 ceiling | Semantic verifier |
-| Million-cycle reopen | exact class-appropriate final digest/capability boundary after close/reopen | 100% | Runner and semantic verifier |
+| Million-cycle phases | insert, modify, and read with verification | recorded for all three; no TP-005 ceiling | Semantic verifier |
+| Million-cycle restart | exact final digest after restart | 100% | Runner and semantic verifier |
 
 ### Common-path protocol
 
-For every configured cell, shape, and repetition:
+For every shape and repetition:
 
-1. Construct a fresh `Fireweed` through the public API-005 constructor.
-2. Create one queue using the versioned `matrix_queue_definition_v1` constant:
-   integer ascending priority, created-sequence tie break, strict ordering,
-   `max_rank_error=0`, default eligibility and recurrence, no cohort, 60,000 ms
-   progress/request-id/client-key/terminal retention, 3,600,000 ms maximum
-   lease, 1,000,000 retry attempts, 1,000,000 push/claim batch maxima, no group
-   maximum, no indexes or entity schema, and change-record emission disabled.
-   Read the persisted definition back and require exact equality.
-3. Append the shape's exact population using
-   `push_batch_with_request_id`, one deterministic unique request ID per batch,
-   and retain every request duration.
-4. Claim using `claim_response_with(max=batch, lease_ms=3_600_000,
-   ClaimCompatibility::default())`; finalize the returned item IDs using
-   `ack`. Claim and finalize durations are recorded separately.
-5. Assert every claim before exhaustion returns exactly `batch` items (all
-   authoritative counts divide exactly by batch), accepted = claimed =
-   finalized, accepted and claimed item IDs are unique and equal,
-   claim order matches priority then created-sequence order, lease tokens are
-   non-empty, and final queue metrics show zero pending and zero leased items.
-6. Record throughput per operation from total items divided by the enclosing
-   monotonic operation interval. The interval contains only the 100 sequential
-   public method calls; post-operation assertions are outside it.
+1. Construct a fresh instance (see "Construction").
+2. Define the shape's queue, read it back with `read{queue: true}`, and
+   require the normalized definition.
+3. Insert the shape's exact population: each request is one unit of `batch`
+   writes with `Expect::Absent` and a deterministic unique `request_id`. Keep
+   every request duration.
+4. Claim with `Next` on `INITIAL`, `max_records = batch` and a 1 h lease, and
+   settle each claim with one write: `Release(t)` and a move to `COMPLETED`
+   for every claimed record. Record claim and settle durations separately.
+5. Assert: every claim before exhaustion returns exactly `batch` records;
+   inserted = claimed = settled; every key is claimed exactly once; claim
+   results are in `(rank, insertion sequence)` order; each claim returns one
+   token; and on the quiet queue `stats` shows `INITIAL` with no Free or
+   Leased record and `COMPLETED` with every record Free. A short or empty
+   claim is a legal contract outcome (C5), but in this single-caller shape it
+   is a capacity anomaly: the repetition is recorded as failed, with the
+   short claim in its evidence.
+6. Throughput per operation is the records handled divided by the monotonic
+   interval of that operation's sequential calls. Assertions run outside the
+   interval.
 
-Setup, schema creation, warm-up, recovery, cleanup, and correctness scans are
-outside common-operation timing. Allocation and serialization performed by the
-public call path remain inside request timing.
+Setup, definition, warm-up, recovery, cleanup and correctness scans are
+outside common-operation timing. Allocation and serialization on the call
+path are inside request timing.
 
-Before timing, each cell runs an untimed conformance preflight: persisted queue
-definition equality; replay of one `push_batch_with_request_id` returns the
-same item IDs without duplicate effects; conflicting reuse of that request ID
-is rejected; when `commit_capabilities().lease_validation` is true, one claimed
-item rejects a fabricated stale lease token through `commit`; otherwise that
-check is explicitly `not_applicable`; read-after-success sees the accepted
-state. A required preflight failure blocks every timing row for that cell.
+Before timing, each run makes an untimed preflight: the definition reads back
+exactly; a resend of one insert request with its `request_id` returns
+`replayed: true` with no second effect; the same `request_id` with a different
+body gets `RequestIdConflict`; a settle with a fabricated token gets
+`StaleLease`; and a `read` after a write observes it. A failed preflight
+blocks every timing row of the run.
 
 ### Repetition and summary policy
 
-- One warm-up repetition runs first for each cell and shape and is discarded.
+- One warm-up repetition runs first for each shape and is discarded.
 - Five measured repetitions run with stable seed-derived identifiers.
-- The artifact retains per-request samples and per-repetition totals.
-- Nearest-rank percentile `p` sorts `N` integer nanosecond samples ascending and
-  selects one-indexed rank `ceil(p*N)`, clamped to `1..N`; ties require no
-  special handling.
-- The summary pools all 500 request samples and reports pooled p50/p95/p99.
-  It also reports median/minimum/maximum repetition throughput.
+- The artifact keeps per-request samples and per-repetition totals.
+- Nearest-rank percentile `p` sorts `N` integer nanosecond samples ascending
+  and selects the one-indexed rank `ceil(p*N)`, clamped to `1..N`.
+- The summary pools all 500 request samples and reports pooled p50, p95 and
+  p99, and the median, minimum and maximum repetition throughput.
 - Population CV is `sqrt(sum((x-mean)^2)/N)/mean` over five successful,
-  positive repetition-throughput values. Zero, non-finite, or missing values
-  invalidate the row; failures are never included in the denominator.
-- No samples are trimmed. Failed repetitions remain recorded as failures and
-  make the run incomplete.
-- Comparisons are valid only between rows sharing run ID, host fingerprint,
-  response-barrier class, workload shape, item count, batch size, operation, and
+  positive repetition throughputs. A zero, non-finite or missing value
+  invalidates the row; failures never enter the denominator.
+- No samples are trimmed. A failed repetition stays recorded as a failure and
+  makes the run incomplete.
+- Comparisons are valid only between rows that share run id, host
+  fingerprint, workload shape, record count, batch size, operation and
   repetition schedule.
-- Pairwise comparison status is `material` only when at least four of five
-  same-round throughput ratios point in the same direction, the median ratio is
-  at least 1.10 in that direction, and both rows have CV <= 0.15. Otherwise it
-  is `inconclusive`; this deterministic label is not a significance claim.
-- Results establish capacity on the declared topology. They do not become a
-  portable pass bar merely because one cell is faster than another.
+- A pairwise comparison is `material` only when at least four of five
+  same-round throughput ratios point the same way, the median ratio is at
+  least 1.10 in that direction, and both rows have CV ≤ 0.15. Otherwise it is
+  `inconclusive`. The label is deterministic, not a significance claim.
+- Results establish capacity on the declared topology. They never become a
+  portable pass bar because one run is faster than another.
 
-### Recovery, async catch-up, and maintenance protocol
+### Recovery and maintenance protocol
 
-Every cell receives three reopen repetitions for both `minimal` and `record-1k`,
-using the shape's authoritative item count. The runner closes the handle,
-reopens the same log/projection coordinates, times construction through its
-successful return, and verifies the exact Class A or Class B boundary. Class A
-verifies pending identity and a complete duplicate-free drain from durable-log
-recovery. Class B uses only the selected projection: SQLite/Postgres verifies
-latest state, while memory verifies volatility and absence of log-history
-capability. Results report all three raw durations plus median/min/max; no p95
-or p99 is claimed from three samples. Recovery includes payload, fields,
-priority, and item identity for `record-1k`, not counts alone.
+**Recovery.** Three restart repetitions for `minimal` and `record-1k`, each at
+the shape's full record count: drop the instance, construct a new one over the
+same S3 namespace and Turso file, time construction to its successful return,
+and verify the exact state (keys, stages, ranks and fields, not counts alone),
+then drain it exactly. Results report the three raw durations with median,
+minimum and maximum; three samples support no p95 or p99.
 
-For an async cell, recovery setup first reaches and verifies exact public
-projection catch-up before closing; reopening therefore measures a known
-durable checkpoint rather than unbounded pre-close projection debt.
+**Pre-restart verify.** Before each restart the runner calls projection
+control's verify on the admin handle and requires the file's apply cursor to
+equal the log head; a mismatch fails correctness.
 
-After each async common repetition, the runner polls public projection
-`verify()` until `compatible=true` and
-`projection_sequence == authoritative_sequence`. It records response-end
-sequence, catch-up duration, final sequences, poll count, and typed
-backpressure/errors. The orchestration safety deadline is operator-declared and
-recorded; it only bounds runner execution and is not a performance pass bar.
-Timeout or non-convergence fails correctness. This is a catch-up observation,
-not ADR-012 debt/lineage release evidence.
+**Maintenance.** Three repetitions, each on a fresh 12,800-record `record-1k`
+population: verify the exact state, delete the run-owned Turso projection
+through projection control, rebuild it from the object log, record the raw
+durations, verify the same exact state, and drain it. Maintenance never
+enters common-path latency.
 
-For each capability-bearing cell, the runner additionally obtains
-`projection_control()`, records `capabilities()`, and invokes only
-operations whose capability bit is true. Three maintenance repetitions each
-begin with a fresh 12,800-item `record-1k` population and exact pending identity
-verification, delete only the run-owned disposable projection, rebuild from the
-authoritative log, record raw durations, verify the same complete pending
-identity afterward, and drain it exactly. A
-capability required by the cell contract but absent is a cell failure; an
-operation not promised for that cell is `not_applicable`. Projection maintenance
-is never included in common-path latency.
+### Tiers and isolation
 
-Unsupported maintenance capabilities record `not_applicable`, not zero-duration
-success. This capability result is independent of projection brand and does not
-remove the row's common or reopen work.
+`smoke` is a non-authoritative developer loop. `full` requires an attested S3
+service. Missing configuration or attestation exits before storage is
+created. A supplied but unreachable service is `failed`, never
+`not_configured`. Absolute rates from either tier are capacity observations,
+not portable pass bars.
 
-### External-service isolation and tier semantics
-
-`smoke` is a non-authoritative developer loop. It is not a second public cell.
-`full` requires an attested S3 service and the `s3--turso` cell (ADR-024).
-Missing configuration or attestation exits before creating storage. A supplied
-but unreachable service is `failed`, never `not_configured`. Absolute rates
-from either tier are capacity observations, not portable pass bars. This plan
-does not claim a 10M or 1000-queue result.
-
-The full run executes on a provisioned qualification runner with isolated local
-paths plus reachable PostgreSQL and S3-compatible services. Before any cell
-opens, the runner attests its identity/topology and the services' non-secret
-capabilities: S3 provider/version/region, atomic conditional create/update,
-consistency contract, TLS mode, bucket ownership; and PostgreSQL version,
-durability settings, isolation support, database ownership. Provider brand and
-host name are observations, not requirements. A missing required capability
-fails closed before timing.
-
-PostgreSQL configuration is accepted only when
-`FIREWEED_PERF_POSTGRES_DATABASE_ACK` exactly equals the parsed database name,
-the database name begins `fireweed`, and it is not `postgres`, `template0`, or
-`template1`. Plain PostgreSQL cells use enumerated
-`fireweed_perf_<run-id>_*` schemas. Object-log/PostgreSQL cells use the facade's
-exact derived schema: `fireweed_` plus the first 54 lowercase hex characters of
-SHA-256 over the logical object-log namespace. Before construction the runner
-places both kinds in an immutable cleanup allowlist; cleanup accepts exact
-allowlist membership only, never a wildcard or caller-supplied physical schema.
-A PostgreSQL advisory lock derived from `fireweed-performance-matrix-v1`, held
-by one dedicated connection for the entire orchestration, prevents concurrent
-matrix runs. Normal completion, error, panic, SIGINT, and SIGTERM attempt schema
-cleanup and lock release; failed cleanup makes the artifact `failed`. SIGKILL
-cannot be cleaned automatically and is reported by the next lock/prefix audit.
+The full run executes on a provisioned qualification runner with isolated
+local paths and a reachable S3-compatible service. Before any instance opens,
+the runner attests its identity and topology and the service's non-secret
+capabilities: provider, version, region, native atomic conditional create and
+update, consistency contract, TLS mode and bucket ownership. Provider brand
+and host name are observations, not requirements. A missing required
+capability fails closed before timing.
 
 Every logical S3 namespace is below
-`fireweed-perf/v1/<commit12>/<run-id>/<cell>/<shape>/<phase>/rNN`. The facade's
-physical prefix is lowercase hex of the logical namespace's UTF-8 bytes followed
-by `/`. Cleanup accepts only a logical namespace from the immutable run
-allowlist, derives the physical prefix internally, and refuses an empty prefix,
-`/`, a logical namespace outside `fireweed-perf/v1/`, or a bucket
-name not exactly acknowledged by `FIREWEED_PERF_S3_BUCKET_ACK`. Cleanup lists
-and deletes only the exact run-owned prefix, relists it, and requires zero
-remaining keys. Bucket-root list/delete and deletion of a sibling run prefix are
-impossible through the cleanup type. A harness-owned raw-S3 create-if-absent
-lock object at
-`fireweed-perf/v1/_locks/matrix.lock` prevents concurrent runs; its payload
-contains the run ID, commit, and start time. A live lock blocks. Stale-lock
-removal is a separate explicit operator action and is not implemented by the
-benchmark.
+`fireweed-perf/v1/<commit12>/<run-id>/<shape>/<phase>/rNN`. The physical
+prefix is the lowercase hex of the logical namespace's UTF-8 bytes followed by
+`/`. Cleanup accepts only a logical namespace from the run's immutable
+allowlist, derives the physical prefix itself, and refuses an empty prefix,
+`/`, a namespace outside `fireweed-perf/v1/`, or a bucket not exactly
+acknowledged by `FIREWEED_PERF_S3_BUCKET_ACK`. Cleanup lists and deletes only
+the exact run-owned prefix, lists it again, and requires zero remaining keys;
+the cleanup type cannot list or delete the bucket root or a sibling run's
+prefix. A create-if-absent lock object at
+`fireweed-perf/v1/_locks/matrix.lock`, holding the run id, commit and start
+time, prevents concurrent runs. A live lock blocks; removing a stale lock is a
+separate explicit operator action that the benchmark does not implement.
 
-All local paths live below a newly created run root. Canonicalization must prove
-each cleanup target remains below that root before deletion. Run-owned cleanup
-guards execute on ordinary errors and unwinding. The evidence artifact records
-cleanup of every namespace; any incomplete cleanup makes the full run fail.
+All local paths live below a newly created run root. Canonicalization proves
+each cleanup target is below that root before deletion. Cleanup guards run on
+ordinary errors and unwinding. The artifact records the cleanup of every
+namespace, and an incomplete cleanup fails the full run.
 
 ## Evidence contract
 
 The runner writes one canonical JSON document and a SHA-256 sidecar. The
 document contains:
 
-- schema version, run ID, tier, status, start/end UTC timestamps, and command;
-- full 40-character Git commit, branch, sanitized remote URL, fetched remote
-  ref and commit, submodule state, and source-affecting-clean assertion;
-- OS, kernel, architecture, hashed host fingerprint, CPU model/count, total
-  memory, virtualization/container signal, filesystem type/mount, free space,
-  CPU governor/turbo data when available, load average, Rust and Cargo versions,
-  exact enabled features/rustflags, build profile, and benchmark lockfile hash;
-- workload parameters, seed, cell order per repetition, shape definitions, and
-  redacted service topology;
-- the `s3--turso` cell and `AsyncProjection`, with passed or failed status and
-  a reason; full-tier `not_configured`, `unsupported`, and skipped rows are invalid;
+- schema version, run id, tier, status, start and end UTC timestamps, and
+  command;
+- the full 40-character Git commit, branch, sanitized remote URL, fetched
+  remote ref and commit, submodule state, and a source-clean assertion;
+- OS, kernel, architecture, hashed host fingerprint, CPU model and count,
+  total memory, virtualization or container signal, filesystem type and
+  mount, free space, CPU governor and turbo data when available, load
+  average, Rust and Cargo versions, enabled features and rustflags, build
+  profile, and the benchmark lockfile hash;
+- workload parameters, seed, the shape order of every repetition, shape
+  definitions, and the redacted service topology;
+- the resolved non-secret constructor configuration;
 - raw request durations, per-repetition totals, derived summaries, exact
-  reconciliation counts, recovery results, and maintenance results;
-- PostgreSQL provider/version, durability settings, isolation capability,
-  database acknowledgement, and preflight results;
-- S3 endpoint scheme, hashed endpoint host and bucket, region, provider/version,
-  native conditional-write and consistency capabilities, TLS mode, bucket
-  acknowledgement, and preflight RTT samples; access and secret keys are omitted;
-- cleanup status for every run-owned local path, database schema, and object
-  namespace.
+  reconciliation counts, and the recovery, maintenance and phased results;
+- the S3 endpoint scheme, hashed endpoint host and bucket, region, provider
+  and version, conditional-write and consistency capabilities, TLS mode,
+  bucket acknowledgement and preflight round-trip samples; access and secret
+  keys are omitted;
+- the cleanup status of every run-owned local path and object namespace.
 
 The verifier recomputes percentiles, summaries, CVs, comparison labels,
-reconciliation, schedule, matrix completeness, and the sidecar digest. Unknown
-schema fields fail closed within a schema version; historical artifacts remain
-verifiable by their versioned verifier. `tp002_evidence_ids` is forbidden.
-Credential-value fields and configured credential values are rejected anywhere
-in serialized evidence; documented environment variable names may appear only
-in the specification, never in recorded command arguments. Before printing or serializing, errors pass
-through a redactor seeded with the PostgreSQL URL, S3 access key, and S3 secret;
-the wrapper never enables shell tracing. The invoking command records variable
-names, never values. Remote URLs remove user information and query strings.
+reconciliation, schedule, shape completeness and the sidecar digest. Unknown
+schema fields fail closed within a schema version; each artifact stays
+verifiable by the verifier of its schema version. `tp002_evidence_ids` is
+forbidden. Credential fields and configured credential values are rejected
+anywhere in serialized evidence; documented environment variable names appear
+only in this specification, never in recorded command arguments. Errors pass
+through a redactor seeded with the S3 access key and secret before they are
+printed or serialized, and the wrapper never enables shell tracing. The
+recorded command names variables, never their values, and remote URLs lose
+their user information and query strings.
 
 Before an authoritative run, the wrapper executes `git fetch origin main`,
 requires `HEAD == refs/remotes/origin/main`, requires no staged or tracked
 changes, and rejects untracked files under `docs/`, `crates/`, `scripts/`,
-`.cargo/`, or any Cargo/toolchain manifest path. Other untracked paths are
-represented only by content hashes in provenance; they cannot alter the
-benchmark or its governing specification. Submodules, when present, must be initialized,
-clean, and at recorded commits. The runner records the fetched ref and remote
-commit after these checks. The evidence file is archived with its attestation;
-repository tracking is not a qualification prerequisite. Re-running the same
-commit creates a new run ID; evidence is append-only and is never silently
-overwritten.
+`.cargo/` or any Cargo or toolchain manifest path. Other untracked paths enter
+provenance only as content hashes. Submodules, when present, are initialized,
+clean and at recorded commits. The evidence file is archived with its
+attestation. Running the same commit again creates a new run id; evidence is
+append-only and never overwritten.
 
 The full orchestrator has a four-hour run timeout and a 15-minute timeout per
-cell/shape/round fragment. It writes an atomic checkpoint after every fragment.
-`--resume` accepts a fragment only when its digest, source commit, run ID,
-resolved non-secret configuration, schedule, and verifier result all match;
-otherwise it cleans that fragment's exact allowlisted namespace and reruns it.
-A public call that reaches its configured progress bound or returns typed
-backpressure fails the fragment and remains in evidence. The progress bound is
-not represented as a retention setting. A normal full run is budgeted for
-30--120 minutes on the declared topology; exceeding that estimate is diagnostic,
-while exceeding a hard timeout fails the run.
+shape, round and phase fragment, and writes an atomic checkpoint after every
+fragment. `--resume` accepts a fragment only when its digest, source commit,
+run id, resolved configuration, schedule and verifier result all match;
+otherwise it cleans that fragment's allowlisted namespace and reruns it. A
+call that returns `Busy` or `Unavailable` fails its fragment and stays in the
+evidence. A normal full run is budgeted at 30 to 120 minutes on the declared
+topology; exceeding the estimate is diagnostic, and exceeding a hard timeout
+fails the run.
 
-Before any authoritative timing, the same pushed commit must pass
-`cargo test -p fireweed-conformance --all-features` and the benchmark crate's
-locked test suite. Commands, exit status, duration, and SHA-256 of captured
-output are recorded; raw output is retained separately after value redaction.
+Before any authoritative timing, the same pushed commit passes the contract
+suite (TP-003 AC-KC-1 to AC-KC-3) and the benchmark crate's locked test suite.
+Commands, exit status, duration and the SHA-256 of captured output are
+recorded; raw output is kept separately after redaction.
 
 ## Acceptance criteria layer allocation
 
 | Requirement source | Primary layer | Blocking evidence |
 | --- | --- | --- |
-| API-005 opaque facade | Contract/integration | All cells are constructed publicly and timed through `Fireweed` |
-| ADR-024 public cell | Performance matrix | `s3--turso` with `AsyncProjection` is the only row |
-| ADR-012 orthogonal composition | Matrix completeness | Public embedding log, projection, and barrier choices are explicit; control-plane/topology variants remain TP-002 scope |
-| TD-001 shared semantics | Common protocol | Exact accepted/claimed/finalized reconciliation for every row |
-| TP-002 evidence honesty | Evidence verifier | Host-bound claims, exact revision, raw samples, and no silent skips |
-| TP-004 live-provider boundary | External integration | Attested S3 and PostgreSQL prerequisites exist and all dependent cells execute |
+| API-006 conformance | Functional prerequisite | The contract suite passes on the revision before any timing |
+| API-006 CS4, no backend knobs | Protocol | Every run makes the same calls and assertions |
+| ADR-024 S3×Turso | Construction | Every run constructs the one implementation through its public constructor |
+| TD-017 §13 capacity runs | Phased class | P1–P4, P2p–P4r, 32 queues per file and the Snorri transition bench complete with exact final state |
+| TP-002 evidence honesty | Evidence verifier | Host-bound claims, exact revision, raw samples and no silent skips |
+| TP-003 §3.12 | Separation | No TP-005 result is cited as an AC-PERF pass |
 
 ## Implementation order
 
 1. Define serializable evidence types and a verifier with malformed-fixture
    tests.
-2. Add a dedicated matrix binary/module without changing the TP-002 benchmark
-   suites or their evidence format. The timed SUT module may import only the
-   public `fireweed` crate; service cleanup/provenance code is separate and
-   excluded from timed intervals.
-3. Implement stable cell construction, fresh namespace allocation, service
-   locks, signal-aware cleanup guards, and cleanup audits.
-4. Implement warm-up, rotated repetition scheduling, common operations,
-   recovery, and maintenance.
-5. Add the clean-pushed-revision launch wrapper and secret-safe environment
+2. Add a dedicated runner module without changing the TP-002 benchmark suites
+   or their evidence format. The timed module imports only public Fireweed
+   crates; cleanup and provenance code is separate and outside timed
+   intervals.
+3. Implement construction, fresh namespace allocation, the S3 lock, signal-aware
+   cleanup guards and cleanup audits.
+4. Implement warm-up, rotated scheduling, the common operations, recovery
+   and maintenance.
+5. Implement `million-cycle-v1` and the phased runs.
+6. Add the clean-pushed-revision launch wrapper and secret-safe environment
    mapping.
-6. Run smoke locally, then the full configured matrix on the pushed revision.
+7. Run smoke locally, then the full tier on the pushed revision.
 
 ## Infrastructure
 
 | Requirement | Specification |
 | --- | --- |
-| Execution host | Provisioned, attested operator-selected runner and declared service topology; never a GitHub-hosted runner |
+| Execution host | A provisioned, attested, operator-selected runner with a declared service topology; never a GitHub-hosted runner |
 | Rust | Repository-pinned toolchain; `cargo run --release --locked`; exact features recorded |
-| PostgreSQL | PostgreSQL 16+ dedicated database acknowledged by `FIREWEED_PERF_POSTGRES_DATABASE_ACK`; URL supplied by `FIREWEED_PERF_POSTGRES_URL` |
-| Object storage | Live S3-compatible provider attesting native conditional publication; endpoint/bucket/region and credentials supplied by `FIREWEED_PERF_S3_*`; bucket separately acknowledged |
-| Local storage | Run-owned directory under an explicit work root on the measured filesystem |
-| Output | run-owned `target/fireweed-perf/<commit>-<run-id>.json` plus `.sha256`; an external evidence archive may retain the attested pair |
+| Object storage | A live S3-compatible provider attesting native conditional writes; endpoint, bucket, region and credentials from `FIREWEED_PERF_S3_*`; the bucket separately acknowledged |
+| Local storage | A run-owned directory under an explicit work root on the measured filesystem |
+| Output | Run-owned `target/fireweed-perf/<commit>-<run-id>.json` plus `.sha256`; an external evidence archive may keep the attested pair |
 | CI | Compile and verifier tests only; timing evidence from CI is non-authoritative |
 
 ## Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Thermal or background-load drift | Comparisons biased by order | Warm-up, five repetitions, rotated cell order, raw samples, CV reporting |
-| Remote provider network variance | S3 tails obscure implementation changes | Record hashed topology and RTT; retain raw samples; compare only within run/class |
-| PostgreSQL residue or cross-run contention | Later cells become incomparable | Unique schemas, isolated database, explicit cleanup status |
-| Object namespace residue | Cost and list performance drift | Unique prefix per repetition and verified prefix cleanup |
-| Async projection reports success before catch-up | False reconciliation | Report response timing separately; bounded public verification catch-up blocks correctness |
-| Generic harness hides incomplete functionality | Misleading timing evidence | TP-004 functional and durability gates block the cell before any timed work |
-| Secrets reach evidence or logs | Credential disclosure | Redacted configuration types, field-name denylist, value scan before write |
-| Benchmark becomes a release bottleneck | Tests are avoided or run on CI | Separate smoke/full tiers; controlled-host execution; verifier remains fast |
+| Thermal or background-load drift | Comparisons biased by order | Warm-up, five repetitions, rotated shape order, raw samples, CV reporting |
+| Remote provider network variance | S3 tails hide implementation changes | Record the hashed topology and round trips; keep raw samples; compare only within a run |
+| Object namespace residue | Cost and list performance drift | A unique prefix per repetition and verified prefix cleanup |
+| An incomplete implementation is timed | Misleading capacity evidence | The contract-suite prerequisite blocks timing |
+| Secrets reach evidence or logs | Credential disclosure | Redacted configuration types, a field-name denylist, and a value scan before write |
+| The benchmark becomes a release bottleneck | Tests get skipped or moved to CI | Separate smoke and full tiers; controlled-host execution; a fast verifier |
 
-**Known boundaries**: This baseline is single-caller and does not establish
-saturation capacity, multi-client fairness, multi-node scaling, or certification
-of every S3 provider. Those require distinct workload IDs or remain governed by
-TP-002. The public cell is `s3--turso` (ADR-024). Provider certification
-remains outside scope. Absolute rates are not portable pass bars.
+**Known boundaries**: this baseline is single-caller. It does not establish
+saturation capacity, multi-client fairness, multi-node scaling or the
+certification of any S3 provider; those need distinct workload ids or stay
+with TP-002. Absolute rates are not portable pass bars.
 
 ## Build handoff
 
@@ -612,29 +472,36 @@ scripts/perf/verify-fireweed-matrix.sh \
   target/fireweed-perf/<commit>-<run-id>.json
 ```
 
-**Priority**: Evidence contract and verifier first; public-facade common path;
-local cells; provisioned PostgreSQL/S3 cells; recovery and maintenance.
+**Priority**: evidence contract and verifier; common path; recovery and
+maintenance; `million-cycle-v1`; the phased runs.
 
-**Blocking gate**: The public cell refuses missing S3 configuration. `s3--turso`
-executes with zero silent substitution. Exact reconciliation, async
-catch-up, recovery, maintenance, and cleanup pass; the verifier independently
-recomputes the artifact and comparison labels; the sidecar matches; and no
-credential value is present.
+**Blocking gate**: the full tier refuses a missing S3 configuration; every
+shape runs with no silent substitution; exact reconciliation, recovery,
+maintenance and cleanup pass; the verifier independently recomputes
+the artifact and comparison labels; the sidecar matches; and no credential
+value is present.
 
 ## Review checklist
 
-- [ ] Every API-005-supported storage/projection/barrier composition is present.
-- [ ] The register is `s3--turso` only (ADR-024). A missing S3 service fails before timing.
-- [ ] Common-path measurements use identical operations and workload parameters.
-- [ ] Comparisons never cross response-barrier classes.
-- [ ] Setup, recovery, maintenance, and cleanup are excluded from common timing.
-- [ ] Raw samples, repetition summaries, environment, and exact source revision are retained.
+- [ ] The contract suite passed on the revision before any timing.
+- [ ] Every run constructs S3×Turso through its public constructor; a missing
+      S3 service fails before timing.
+- [ ] Every timed call goes through `Fireweed`; the admin handle serves only
+      projection control.
+- [ ] Common-path measurements use identical operations and workload
+      parameters.
+- [ ] Setup, recovery, maintenance and cleanup are outside common timing.
+- [ ] Raw samples, repetition summaries, environment and exact source revision
+      are kept.
 - [ ] Statistical derivations are specified and independently recomputed.
 - [ ] Correctness reconciliation blocks every timing claim.
-- [ ] PostgreSQL schemas and S3 prefixes are run-owned, locked, and fail-closed on cleanup.
-- [ ] Async rows report bounded catch-up separately and remain diagnostic.
+- [ ] S3 prefixes and local paths are run-owned, locked and fail closed on
+      cleanup.
 - [ ] Service credentials are never serialized or printed.
-- [ ] Authoritative execution fetches and matches the remote revision and rejects source-affecting dirt.
-- [ ] GitHub Actions is limited to compilation and deterministic verifier tests.
-- [ ] Results are explicitly host-bound and do not imply portable SLAs.
-- [ ] TP-005 evidence cannot be accepted as TP-002 E0-E3 evidence.
+- [ ] Authoritative execution fetches and matches the remote revision and
+      rejects source-affecting changes.
+- [ ] GitHub Actions is limited to compilation and deterministic verifier
+      tests.
+- [ ] Results are explicitly host-bound and imply no portable SLA.
+- [ ] TP-005 evidence cannot be accepted as TP-002 E0–E3 evidence or as a
+      TP-003 AC-PERF pass.

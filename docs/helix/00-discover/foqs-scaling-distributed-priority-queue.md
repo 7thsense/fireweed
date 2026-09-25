@@ -39,16 +39,17 @@ prefetching.
 
 ## HELIX Usage
 
-This resource informs the PRD's reference-system analysis and future review of
-`API-001-native-client-interface.md`. Use it to evaluate API ergonomics, active-scope discovery,
-multi-queue worker fan-in, delayed retry, and the boundary between queue storage and worker pacing.
+This resource informs the PRD's reference-system analysis and review of
+[API-006](../02-design/contracts/API-006-fireweed-kernel-contract.md). Use it to evaluate API ergonomics,
+caller-side multi-queue fan-in (fireweed has no discovery and no cross-queue claim), delayed retry by rank,
+and the boundary between queue storage and worker pacing.
 
 ## Authority Boundary
 
 FOQS is an internal Meta system described at architecture level; the post is not a released protocol,
 compatibility target, or correctness specification. It does not override fireweed's batch result semantics,
-mutable priority, idempotency, progress bounds, group/cohort claims, backend-independent transaction
-contract, or queue-defined eligibility. Any interface change belongs in API-001 after PRD framing.
+mutable rank, idempotency, progress bound, whole-group claims, backend-independent transaction
+contract, or gates. Any interface change belongs in API-006 after PRD framing.
 
 ## Review Checklist
 

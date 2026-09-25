@@ -28,7 +28,7 @@ ddx:
 ## Context
 
 - Ownership is per partition: one control-plane lease and one epoch per partition, and the log rejects a commit made under a stale epoch (ADR-008, ADR-013). That model is safe only if no consumer path can write around it.
-- The public surface used to expose about 100 entry points, including engine ports, backend constructors, ownership calls, log positions and capability probes (ADR-025). A consumer that can reach a port or a backend type can bypass fencing and couples itself to one implementation.
+- The current public surface exposes about 100 entry points, including engine ports, backend constructors, ownership calls, log positions and capability probes (ADR-025). A consumer that can reach a port or a backend type can bypass fencing and couples itself to one implementation.
 - The contract is object-safe (`Arc<dyn Store>`), so a single public handle can hide the implementation completely.
 
 ## Decision

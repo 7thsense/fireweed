@@ -37,16 +37,18 @@ the operational cost of exposing placement decisions to clients.
 
 ## HELIX Usage
 
-This resource informs future design review of fireweed's `DiscoverActiveScopes` routing behavior and its
-queue-owner discovery path. Use it when evaluating how many workers consume the same top-N discovery
-result, how stale routing summaries are bounded, and whether a priority-preserving dispersion mechanism
-is needed before multi-region placement becomes product scope.
+This resource informs the router side of the [scheduler and router boundary](../01-frame/guides/scheduler-router-boundary.md).
+fireweed has no discovery and no cross-queue claim, so a caller's router that picks queues from `stats`
+inherits these failure modes. Use it when reviewing how many workers follow the same routing hint, how
+stale a router's view of ready work may be, and whether a priority-preserving dispersion mechanism is
+needed. It also applies to the cached queue-to-partition routing inside the implementation (TD-018)
+before multi-region placement becomes product scope.
 
 ## Authority Boundary
 
 The post does not establish that fireweed needs multi-region routing, client-visible region preferences, or
-FOQS's MySQL topology. It supplies failure modes for advisory discovery. Queue ownership and fencing remain
-governed by fireweed's architecture and ADRs; API changes remain governed by API-001.
+FOQS's MySQL topology. It supplies failure modes for advisory routing. Queue placement, ownership and fencing are
+governed by ADR-008 and TD-003; the interface is governed by API-006.
 
 ## Review Checklist
 

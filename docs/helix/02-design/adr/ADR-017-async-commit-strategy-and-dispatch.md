@@ -61,7 +61,7 @@ ddx:
 | Positive | Unrelated queues progress while one queue is hot or stalled. |
 | Positive | Buffered mutation bytes are bounded per node, per tenant and per queue. |
 | Negative | Callers see `Busy` under load and must retry after the hinted delay. |
-| Negative | The projection trails the log, so the read path must meet API-006 V1–V3 over applied state plus the unapplied tail (TD-016). |
+| Negative | The response waits for the Turso apply after the log commit (TD-010), so commit latency includes the apply; a failed apply poisons the affected queues until replay (TD-010). |
 
 ## Risks
 

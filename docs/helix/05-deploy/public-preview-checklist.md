@@ -17,11 +17,6 @@ ddx:
 
 # Fireweed v0.24.0 Public Preview Checklist
 
-**v0.31.30.** This pin is a source preview, unsigned, not P20pr. The rows
-below stay the historical v0.24.0 checklist. This note does not mark unchecked
-rows as passed. The public cell for the pin is s3 × turso with
-`AsyncProjection` only (ADR-024).
-
 ## Release Scope
 
 - Component: Fireweed Queue source repository and Rust embedding facade
@@ -95,7 +90,7 @@ Rollback is forward-only. Published tags are immutable.
 - v0.24.0 does not claim production multi-region readiness, capacity leadership,
   provider certification, or universal performance bounds.
 - Class B (`memory` log) carries a **semantic durability** disclaimer only; it is
-  a supported matrix row, not an incomplete product family (see public-preview-boundary).
+  a supported matrix row, not an incomplete product family.
 - Release-tier 10M recovery PASS and 1,000-queue density live evidence remain
   separate governed tracks when not closed on this tag.
 - crates.io packaging and GHCR images remain deferred until separately authorized.

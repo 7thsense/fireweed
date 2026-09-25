@@ -3,10 +3,14 @@ ddx:
   id: tp-scale-substantiation
   depends_on:
     - prd
+    - api-fireweed-kernel-contract
+    - adr-kernel-records-contract
     - adr-cqrs-log-projection-storage-model
     - adr-queue-as-shard-unit-and-projection-families
-    - td-storage-architecture-backend-contracts
+    - adr-s3-turso-public-cell
     - td-sharding-and-shard-ownership
+    - td-object-log-turso-projection
+  status: accepted
   review:
     self_hash: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
     deps:
@@ -20,151 +24,85 @@ ddx:
 
 # Test Plan: TP-002 Scale Substantiation
 
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
-`10000` and `12500` are non-portable capacity observations for a named cell and
-commit, not product pass bars. The campaign plan states the same rule: the
-12.5k result stays attributed to filesystem × Turso at `49f1b6b3` (2026-09-16)
-and is not a qualification pin; v0.31.30 s3 × Turso (~9507 on `bcef51f9`) is
-not a qualification pin. A miss of those script gates is not a product failure.
-
-
 ## Scope
 
-This plan defines the scale evidence required to substantiate every horizontal-
-scale, write-rate, and hot-queue claim made across the fireweed frame and design.
-It is the canonical home for the scale evidence-record scheme (E0–E3), the
-benchmark pass bars, the requirement-coverage rows for the cross-queue scale-out
-mechanism, the named scale test suites, and the docs-lint scale-claim checklist.
+This plan defines the evidence that substantiates every horizontal-scale,
+write-rate and hot-queue claim in the Fireweed frame and design. It is the
+home of the scale evidence records (E0–E3), their pass bars, the coverage rows
+for cross-queue scale-out, the named scale suites, and the docs-lint checklist
+for scale claims.
 
-This plan exists because the PRD asserts horizontal scale beyond a single
-database, but the PRD must name no storage backend, scale mechanism, or query
-(prd "Scale Substantiation"). Those claims are made publishable only by
-reference to the evidence records defined here. Backend names and mechanism IDs
-live in ADR-001, ADR-008 (`adr-queue-as-shard-unit-and-projection-families`),
-TD-001, TD-002, TD-003 (`td-sharding-and-shard-ownership`), and
-TD-004 (`td-s3-object-log-sqlite-projection-mode`); this plan binds them to
-measurable benchmarks. Per ADR-008 the queue is the unit of sharding, so
-horizontal scale is **cross-queue** — distributing queues across owner nodes —
-not intra-queue sharding.
+The PRD asserts horizontal scale beyond a single database. It names the one
+production implementation and its queue-to-partition placement, and no storage
+layout or query. Its scale claims are publishable only by reference to
+the evidence records defined here. Mechanisms live in the
+design: ADR-001 and ADR-024 for the object log and its Turso projection,
+ADR-008, TD-003 and ADR-025 §5 for placement and partition ownership, and
+TD-010 for the object log's serving protocol. This plan binds them to
+measurable benchmarks.
 
-This is the governing scale-evidence plan. Exact Rust function and harness names
-may evolve, but implementation beads must preserve the evidence-record intent
-and cite the relevant evidence IDs.
+Every run measures the one implementation of API-006: the S3 object log ×
+Turso projection (ADR-024). A queue is never split: the control plane assigns
+it to one partition, which fixes its node (ADR-025 §5). Horizontal scale is
+therefore **cross-queue**: partitions, and the queues in them, are distributed
+across owner nodes.
 
-The general lifecycle, conformance, idempotency, and per-backend coverage live in
-the governing test traceability plan (`tp-governing-test-traceability`). This
-plan covers only the scale-substantiation surface and references that plan's
-shared backend conformance suite (TD-001) rather than restating it.
+The functional contract is outside this plan. The contract suite, the
+operator suite and every pass bar other than the scale bars are in TP-001 and
+TP-003. Scale evidence qualifies an implementation only after the contract
+suite passes on it with zero skips (TP-003 AC-KC-1 to AC-KC-3).
 
 ## The Scale-Claim Rule
 
 > **Scale-Claim Rule**: Every scale claim MUST reference an **evidence record**
-> that names (a) the deployment shape (single-deployment Tier-1 vs cross-queue
-> Tier-2), (b) the workload envelope, and (c) the design/test artifact plus
-> benchmark that substantiates it. The PRD and product-vision MUST NOT name a
-> storage backend, profile, scale mechanism, or SQL; they reference the evidence
-> record by ID. Backend names live only in ADR-001 / ADR-008 / TD-001 / TD-002 /
-> TD-003 / TD-004 / TP-002.
+> that names (a) the deployment shape (single-deployment Tier-1 or cross-queue
+> Tier-2), (b) the workload envelope, and (c) the design or test artifact and
+> benchmark that substantiates it. The PRD and product vision may name the
+> one production implementation (ADR-024) and queue-to-partition placement
+> (ADR-025 §5); they MUST NOT name storage layout, queries or SQL, and they
+> reference the evidence record by id.
 
-The two v1 scale envelopes both deliver and both substantiate:
+| Envelope | Deployment shape | Evidence record |
+|----------|------------------|-----------------|
+| **Tier-1 (single deployment)** | one S3 object log and one owner node; the queue under test owned by that node | **E1**, against the portable contract **E0** |
+| **Tier-2 (cross-queue horizontal)** | queues mapped to partitions, and partitions distributed across independent owner nodes, each partition owned by one node at a time | **E2** and **E3** |
 
-| Envelope | Deployment shape | Delivered by | Evidence record |
-|----------|------------------|--------------|-----------------|
-| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | public cell `s3--turso` (ADR-024) | **E1** vs the portable progress/capacity contract **E0**. No 10M pass is claimed for v0.31.30 |
-| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + the public cell `s3--turso` (ADR-024) | **E2** and **E3** on that cell. No 1000-queue pass is claimed for v0.31.30 |
+Absolute rates and latencies are capacity observations for the host, topology
+and commit that produced them. They are never portable pass bars, and a miss
+of a script's rate target is not a product failure. A scale claim cites a
+passing evidence record; without one, no claim is made.
 
 ## Scale Evidence Records
 
-Every PRD/ADR/TD scale claim references one of these records.
+Every PRD, ADR and TD scale claim references one of these records. This plan
+owns the ids E0–E3; no other document mints evidence ids.
 
-**Evidence-ID convention**: this plan owns the canonical IDs **E0–E3**. All
-documents MUST reference these canonical E-IDs; no document mints its own
-evidence IDs.
+`scripts/release/build-governed-evidence-bundle.sh` stages the explicitly
+named E0, E1, E2 cross-owner, E2 density, E2 failover and E3 producer outputs
+for the checked-out revision. It writes `composite-contract.json` in an
+explicit run-owned `tp002-release` directory and dispatches
+`scripts/ci/verify-governed-release-composite.sh`; neither command scans a
+ledger or evidence directory for substitutes. `scripts/ci/release-gate.sh`
+generates fresh smoke-tier E2 and E3 rows, requires that exact composite after
+promotion to `target/tp002-release`, and verifies every named semantic
+authority against the checked-out `HEAD`. The tag workflow verifies the
+exact-revision archive, its SHA-256 sidecar and its attestation against the
+resolved tag and commit before packaging or publication.
 
-Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
+### Release-evidence freshness and source binding
 
-| Evidence ID | Source bead(s) |
-|-------------|----------------|
-| E0, E1 | `pqueue-7e2b3132` |
-| E2 | `pqueue-9afd88cc`, `pqueue-76d92a33` |
-| E3 | `pqueue-b1abd895`, `pqueue-472a09d4` |
-
-> **Build-record note (ADR-008 reframe).** The E2 source beads above measured the
-> *prior* intra-queue-shard build (single-queue-over-N-shards scale-out). Under
-> ADR-008 (queue is the unit of sharding) the **E2 requirement is reframed to
-> cross-queue scale-out** (below); the E0/E1/E3 records keep their meaning. The
-> prior E2 measurement stands as a historical attestation of the retired
-> multi-shard mechanism. E0, E1, and E3 (the portable progress contract, the
-> single-deployment envelope, and the object-log latency/cost/recovery profile)
-> are unaffected by the reframe.
->
-> **Re-measurement DONE (B3.3, 2026-07-08).** The horizontal-scale claim now cites
-> a fresh live multi-node run of the **reframed cross-queue (ADR-008 per-queue
-> owner)** mechanism, superseding the retired multi-shard attestation. Evidence:
-> [`docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl`](../../../perf/evidence/tp002-e2-cross-queue-remeasured.jsonl)
-> — one release-tier E2 ledger row from a live kind (Kubernetes-in-docker) cluster
-> of independent `object_log_sqlite_projection` owner pods (2/4/8 owners, one queue
-> per owner on disjoint bootstrap queues, CPU-limited server pods driven by a lean
-> in-cluster RESP load Job over Service ClusterIP; harness
-> `crates/fireweed-bench/tests/performance_cross_queue_scale_out_tests.rs` ::
-> `live_multi_node_object_log_sqlite_projection_e2` +
-> `scripts/perf/tp002-e2-kind.sh`). The historical run recorded:
-> (1) ingest aggregate non-decreasing **8,206 → 15,726 → 30,088 items/s** across
-> 2 → 4 → 8 owners; (2) 8-owner / 2-owner ingest multiple **3.67× ≥ 3.5×** (≈73%
-> cross-node efficiency); (3) worst single-queue floor held — ingest **3,761/s**
-> and claim+finalize **34,234/s**; (4)
-> one-owner-per-queue proven live — **56 of 56** cross-node "no such queue"
-> confirmations at 8 owners. Host: 32 cores, node image `kindest/node:v1.36.1`,
-> kind v0.32.0. (Build-provenance note: in this sandbox the source `Dockerfile.e2`
-> cannot authenticate the private git dependencies inside the Docker builder, so
-> the harness image was assembled from host-built release binaries via the
-> prebuilt-image path — `SKIP_BUILD=1` + `FIREWEED_E2_IMAGE` — which is a packaging
-> detail only; the binaries, backend, cluster topology, and load are identical to
-> the source-build path.) These absolute rates and ratios remain topology-bound
-> capacity evidence on a retired SQLite projection. That run is historical. It
-> does not qualify the public cell. The E2 register is `s3--turso` (ADR-024).
-> This plan does not claim a 10M-resident or 1000-queue pass on that cell.
-
-`scripts/release/build-governed-evidence-bundle.sh` stages explicitly named E0,
-E1, E2 cross-owner, E2 density, E2 failover/routing, and E3 producer outputs for
-the checked-out revision. It writes `composite-contract.json` beneath an explicit
-external run-owned `tp002-release` directory
-and dispatches `scripts/ci/verify-governed-release-composite.sh`; neither command
-scans a ledger or evidence directory for substitutes. `scripts/ci/release-gate.sh`
-separately generates fresh smoke-tier E2/E3 rows, then requires that exact
-composite after promotion to `target/tp002-release` and verifies every named semantic authority
-against checked-out `HEAD`. The tag workflow acquires the deterministic exact-revision archive and
-SHA-256 sidecar, reruns the composite verifier with `GITHUB_SHA`, and verifies
-the archive's attestation against the resolved tag and commit before packaging
-or publication.
-
-## Release-evidence freshness and source binding
-
-TP-002 selects **exact-tag rerun** as the release freshness policy. Historical
-E0–E3 rows remain useful build records, but they cannot make a later tag green.
-For every release tag, the governed evidence commands MUST run from the exact
-40-character commit named by that tag and produce a new reviewed attestation.
-The tag gate supplies both the tag and resolved commit to
+The release freshness policy is **exact-tag rerun**. Earlier E0–E3 rows are
+useful build records, but they cannot make a later tag green. For every
+release tag, the governed evidence commands run from the exact 40-character
+commit the tag names and produce a new reviewed attestation. The tag gate
+passes both the tag and the resolved commit to
 `fireweed-verify-evidence-attestation`; a mismatch fails closed.
 
-The policy deliberately favors a simple, auditable rule over reviewed-range
-reuse: even a docs-only release commit invalidates the prior attestation. This
-avoids asking automation to infer whether a source-range change can affect a
-benchmark. Expensive evidence may be scheduled before a release candidate, but
-the final tag's evidence must still be rerun at the exact release commit.
+The policy favors a simple, auditable rule over reviewed-range reuse: even a
+docs-only release commit invalidates the prior attestation, so automation
+never has to infer whether a change could affect a benchmark. Expensive
+evidence may run before a release candidate, but the final tag's evidence is
+rerun at the exact release commit.
 
 ### Attestation contract (`schema_version: 1`)
 
@@ -174,36 +112,36 @@ Each tag has one JSON attestation with these required fields:
 - `source.tag` and the full lowercase `source.commit` resolved from that tag;
 - the exact non-empty `producing_command`, plus UTC `produced_at` and
   `reviewed_at` timestamps;
-- one or more `evidence` entries containing a repository-relative file or
-  directory `path` and its lowercase SHA-256;
+- one or more `evidence` entries, each a repository-relative file or directory
+  `path` with its lowercase SHA-256;
 - `inputs` entries with `path`, SHA-256, and one of the mandatory kinds
-  `product_code`, `harness`, `config`, or `dependency_lock`. Every kind must be
-  present. Producers must bind the complete inputs to the command, including
-  the product crates/workspace manifests, benchmark and deployment scripts,
-  chart/runtime configuration, and dependency lockfiles.
+  `product_code`, `harness`, `config` or `dependency_lock`. Every kind is
+  present, and the inputs cover the product crates and workspace manifests,
+  benchmark and deployment scripts, chart and runtime configuration, and
+  dependency lockfiles.
 
-E1–E3 qualification runs also bind a provisioned-runner capability attestation.
-It records runner identity/topology and resource limits; PostgreSQL
-provider/version, durability settings, isolation support, and database ownership
-acknowledgement; and S3 provider/version/region, native atomic conditional
-create/update support, consistency contract, TLS mode, and bucket ownership
-acknowledgement. Provider brand and host name are observations, not required
-values. A missing, unreachable, or un-attested live S3/PostgreSQL prerequisite
-fails closed before governed work begins; no required row may become `skip`,
-`not_configured`, or a successful zero-test result.
+E1–E3 qualification runs also bind a provisioned-runner capability
+attestation: runner identity, topology and resource limits; the S3 provider,
+version and region, native atomic conditional create and update, consistency
+contract, TLS mode and bucket-ownership acknowledgement; and, where the
+topology has one, the control plane's store and version. Provider brand and
+host name are observations, not required values. A missing, unreachable or
+unattested live prerequisite fails closed before governed work begins; no
+required row becomes `skip`, `not_configured` or a successful zero-test
+result.
 
 The normative wire schema is
 [`release-evidence-attestation.schema.json`](../../../perf/evidence/release-evidence-attestation.schema.json).
 The Rust deserializer independently rejects unknown fields, and the semantic
-verifier enforces the cross-field and filesystem rules that JSON Schema cannot.
+verifier enforces the cross-field and filesystem rules that JSON Schema
+cannot.
 
-Directory SHA-256 values use the canonical implementation in
-`fireweed_release::attestation::digest_path`: recursively sorted regular files,
-with relative names, lengths, and contents in the digest. Absolute paths,
-`..`, symlinks, missing inputs, duplicate bindings, malformed hashes, unknown
-schema fields, and digest drift are rejected. Therefore a code, harness,
-configuration, dependency, or evidence-file change without a freshly reviewed
-attestation cannot silently reuse a green result.
+Directory SHA-256 values use `fireweed_release::attestation::digest_path`:
+recursively sorted regular files, with relative names, lengths and contents in
+the digest. Absolute paths, `..`, symlinks, missing inputs, duplicate
+bindings, malformed hashes, unknown schema fields and digest drift are
+rejected. A code, harness, configuration, dependency or evidence change
+without a freshly reviewed attestation therefore cannot reuse a green result.
 
 The enforcement command is:
 
@@ -215,282 +153,204 @@ cargo run -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
 
 ### Invalidation and emergency releases
 
-Any new tag or release commit, or any product-code, harness, config,
-dependency-lock, evidence, producing-command, or reviewed-attestation change,
-requires a rerun and review. Review updates `reviewed_at`; it does not waive a
-digest or source mismatch.
+Any new tag or release commit, and any change to product code, harness,
+configuration, dependency lock, evidence, producing command or reviewed
+attestation, requires a rerun and review. Review updates `reviewed_at`; it
+does not waive a digest or source mismatch.
 
-An emergency/manual exception is never an alternate green state. A manifest
-may carry an `exception` record (`approval_id`, `approved_by`, `reason`, and
-`expires_at`) for auditability, but the automated verifier intentionally
-returns failure whenever it is present. Shipping while evidence is red requires
-an out-of-band release-manager approval, a release note that names the missing
-evidence and user-visible risk, and a follow-up exact-tag evidence run. The tag
-and release UI must remain visibly unverified until that follow-up passes; an
-exception cannot suppress or relabel the failed gate.
+An emergency exception is never an alternate green state. A manifest may carry
+an `exception` record (`approval_id`, `approved_by`, `reason` and
+`expires_at`) for auditability, and the verifier returns failure whenever one
+is present. Shipping while evidence is red needs an out-of-band
+release-manager approval, a release note that names the missing evidence and
+the user-visible risk, and a follow-up exact-tag evidence run. The tag and the
+release stay visibly unverified until that run passes.
 
-### E0 — Portable per-queue progress and capacity contract
+### E0: Portable per-queue progress and capacity contract
 
 E0 is the host-independent scale **requirement**:
 
-> Under ordinary concurrent load, every queue MUST preserve exact accepted,
-> claimed, and finalized outcomes; monotonically advance; meet its configured
-> queue-global progress bound; and consume only bounded shared workers,
-> connections, memory, and pending tasks as queue count and total load increase.
+> Under ordinary concurrent load, every queue MUST keep exact outcomes (every
+> acknowledged write, claim and settle takes effect once and is never lost),
+> keep claim order (API-006 C4), make progress (every queue with candidates
+> completes non-empty claims, and a quiet queue returns its first candidates,
+> C5a), and consume only bounded shared workers, connections, memory and
+> pending tasks as queue count and total load grow.
 
-Origin: Seventh Sense requires a high-volume queue that remains correct and makes
-progress while the system is busy. A representative item/payload band and
-ingest/claim/finalize mix drive E1/E2/E3. Each run reports absolute throughput
-and latency with its exact host, topology, and resource limits as capacity
-evidence. Those values do not decide release eligibility and do not require an
-idle, quiet, dedicated, or specially selected host.
+Seventh Sense needs high-volume queues that stay correct and keep making
+progress while the system is busy. A representative record and field band and
+an insert, update, claim and settle mix drive E1–E3. Each run reports absolute
+throughput and latency with its exact host, topology and resource limits as
+capacity evidence. Those values do not decide release eligibility and do not
+need an idle, dedicated or specially selected host.
 
-The E0/E1 release workload MUST explicitly declare a positive
-`progress_bound_ms` as part of its queue configuration; there is no universal
-canonical duration chosen by this test plan. The harness MUST read back the
-persisted queue definition, prove it matches the declaration, and report zero
-accepted-to-claim intervals or discovery ages beyond that bound. Fixed latency
-buckets, rates, and percentiles are topology-bound capacity observations only;
-they MUST NOT substitute for or silently redefine the declared queue contract.
+A queue has no progress-bound setting. The E0 and E1 workloads declare a
+positive **ready-to-claim bound** as a workload parameter. The harness
+measures, for every claimed record, the interval from when the workload made
+it claimable (its scheduled time, or when it became Free in its stage,
+whichever is later) to its claim, and reports zero intervals over the bound.
+Latency buckets, rates and percentiles are capacity observations; they never
+substitute for or redefine the declared bound.
 
 **What "preserved for every queue at any scale" means.** Adding queues or load
-must not lose or duplicate work, strand an eligible queue, violate its progress
-bound, or create per-queue background resources. One designated hot queue and at
-least 1000 cold queues remain active. Interleaved same-run controls provide the
-comparison baseline; a declared degradation envelope must be justified by the
-workload and resource saturation signal. Aggregate capacity is reported, never
-extrapolated to other hosts or required to equal 1000 times a per-queue number.
+must not lose or duplicate work, strand a queue that has candidates, break the
+declared ready-to-claim bound, or create per-queue background resources. One
+designated hot queue and at least 1000 cold queues stay active. Interleaved
+same-run controls give the comparison baseline, and a declared degradation
+envelope is justified by the workload and a resource-saturation signal.
+Aggregate capacity is reported, never extrapolated to other hosts or required
+to equal 1000 times a per-queue number.
 
-### E1 — Tier-1 single-deployment envelope (pass/fail)
+### E1: Tier-1 single-deployment envelope (pass/fail)
 
-Cell: `s3` log × `turso` projection (ADR-024). Deployment: one attested S3
-object log and a local Turso projection, one queue owned by one node. A 10M
-resident set is the target below. This plan does not record that pass on
-v0.31.30.
+Deployment: one attested S3 object log and a local Turso projection on one
+owner node.
 
 | Parameter | Value |
 |-----------|-------|
-| Batch sizes | push/update/claim/finalize at 1, 100, and max-configured batch size |
-| Item / payload | representative Seventh Sense item and payload band |
-| Operation mix | representative Seventh Sense ingest / claim / finalize ratio |
-| Group cardinality / skew | group-heavy and skewed-priority profiles |
+| Batch sizes | write, claim and settle at 1, 100 and 1000 records per request (the API-006 maximum) |
+| Records and fields | a representative Seventh Sense record and field band |
+| Operation mix | a representative Seventh Sense insert, update, claim and settle ratio |
+| Groups and skew | group-heavy and skewed-rank profiles |
 | Telemetry | enabled |
-| PostgreSQL attestation | provider/version, durability/isolation settings, stated instance class, CPU, memory, IOPS, pool, and run-owned database acknowledgement |
-| Resident set | 10M items including terminal retained rows under retention policy |
-| Pass: progress and correctness | exact accepted/claimed/finalized counts, no lost or duplicate transitions, monotonic cursor/progress samples, an explicitly declared positive queue-global progress bound equal to the persisted queue definition, and zero accepted-to-claim or discovery-age violations of that declaration |
-| Pass: resources | shared workers, connections, pending tasks, and memory remain within workload-declared bounds |
-| Capacity report | ingest and claim/finalize throughput plus p50/p95/p99 latency, tied to this topology and not used as a portable pass bar |
+| Resident set | 10M records, including settled records in stages nothing claims |
+| Pass: progress and correctness | exact acknowledged, claimed and settled counts; no lost or duplicate effect; monotonic progress samples; claim order within each stage; zero ready-to-claim violations of the declared bound |
+| Pass: resources | shared workers, connections, pending tasks and memory stay within workload-declared bounds |
+| Capacity report | write, claim and settle throughput with p50, p95 and p99 latency, tied to this topology and never used as a portable pass bar |
 
-### E2 — Tier-2 cross-queue scale-out (pass/fail)
+### E2: Tier-2 cross-queue scale-out (pass/fail)
 
-Mechanism: per-queue ownership (TD-003) + cross-queue distribution (ADR-008) —
-many queues spread across many owner nodes; each queue is a single-owner,
-single-hop claim (no intra-queue sharding, no scatter-gather).
-The E2 register is the public cell `s3--turso` (ADR-024), under the portable
-work/progress/resource bars and an attested provider with native conditional
-publication. Retired projections are not extra register rows. Missing S3
-infrastructure is a failed qualification prerequisite, not a skipped cell.
-The 1000-queue density row is a target. This plan does not record that pass
-on v0.31.30.
+Mechanism: the control plane maps each queue to one partition and places each
+partition on one owner node at a time (TD-003). A queue is never split across
+partitions or owners, so every claim is local to one owner (ADR-025 §5). E2
+runs on an attested S3 provider with native conditional writes; missing S3
+infrastructure is a failed qualification prerequisite, not a skipped row.
 
 | Parameter | Value |
 |-----------|-------|
-| Owner counts | benchmark at ≥ 3 owner-node counts (e.g. 2, 4, 8 owners), distributing a fixed-per-owner number of active queues across them |
-| Pass: cross-queue scale-out | at 2, 4, and 8 owners, every phase completes exact work, aggregate logical progress is monotonic, ownership is single-valued, and shared resources remain bounded. Interleaved controls report scaling efficiency and saturation; no fixed host-speed multiple is a release bar. |
-| Pass: queue density (≥1000 active queues, single-node target) | a single node exercises **at least 1000 cold queues plus one hot queue**; every cold queue becomes claim-visible and progress-eligible, all hot and cold counts reconcile exactly, queue-global progress violations and empty post-reseed claims are zero, and background work is multiplexed onto bounded shared pools rather than one loop/connection per queue. Same-run controls quantify noisy-neighbor degradation. |
-| Pass: per-queue behavior preserved at scale (E0 invariant) | adding queues or total load must not lose or duplicate work, strand a queue, violate its progress bound, or exceed declared shared-resource bounds. |
-| Pass: per-queue local progress | each queue's oldest-eligible item is claimed before `progress_bound_ms` from its own owner's local computation (queue-global, D1 / FR-12); there is no cross-shard aggregation. |
-| Pass: owner failover / fencing | killing a queue's owner: after lease expiry a new owner acquires a strictly greater epoch, the deposed owner's append is fenced, and the queue recovers from snapshot + log tail with no lost/double work (TD-003); a queue left unowned past `progress_bound_ms` surfaces as a progress-bound violation in metrics (FR-41) and `DiscoverActiveScopes` (TD-003). |
-| SP-06 handoff profile | The E2 failover evidence schema v2 may carry a dedicated-recorder `handoff_object_store_profile`; schema v1 remains readable for historical evidence. The explicit matrix runs 200 post-fence/pre-serve samples for 256- and 1,000-item queues at scripted 25 ms and 100 ms request latency, with clean and one-unapplied-tail arms. Recorder totals reconcile with named requests. Clean: 20,300 immutable / 20,100 avoidable / 20,099 repeated GETs. Tail: 40,600 immutable / 40,400 avoidable / 39,999 repeated GETs, including 200 unique required segment GETs and 200 replayed commands. First local read requests = 0. Queue item count is not active-queue density. |
-| Pass: single lease | no item double-leased across an owner reassignment/drain (TD-003). |
-| Pass: routing redirect | a client addressing a queue on the wrong node is redirected (`-MOVED`-style) to the current owner and converges in a single hop; a stale/misrouted write is fenced, never corrupting state (TD-006 §1A). |
+| Owner counts | at least three owner-node counts (for example 2, 4 and 8), each with a fixed number of active queues per owner |
+| Pass: cross-queue scale-out | at every owner count, each phase completes exact work, aggregate logical progress is monotonic, ownership is single-valued, and shared resources stay bounded. Interleaved controls report scaling efficiency and saturation as capacity observations; no fixed host-speed multiple is a release bar |
+| Pass: queue density | one node runs **at least 1000 cold queues plus one hot queue**: every cold queue keeps a candidate and completes a non-empty claim and settle during loaded hot work; hot and cold counts reconcile exactly; zero ready-to-claim violations; background work runs on bounded shared pools, never one loop, task or connection per queue. Same-run controls quantify noisy-neighbor degradation |
+| Pass: per-queue behavior preserved | adding queues or load does not lose or duplicate work, strand a queue with candidates, break the ready-to-claim bound, or exceed declared shared-resource bounds (E0) |
+| Pass: partition failover and fencing | after a partition's owner is killed and its lease expires, the target node acquires a strictly greater epoch and fences it before serving, the deposed owner's commit is rejected, and every queue of the partition recovers every acknowledged effect from the object log (TD-003) |
+| Pass: one live claim | no record is attached to two live claims across a partition handoff or drain, and a live claim's token keeps working after the handoff (API-006 C6, TD-003) |
 
-### E3 — Object-log latency/cost + recovery (pass/fail)
+### E3: Object-log latency, cost and recovery (pass/fail)
 
-E3 request-cost rows MUST come from a test-scoped production `BlobMetricsRecorder` snapshot delta around the
-measured interval, not a separate counting `BlobStore`. PUT/create, GET, DELETE, and physical LIST page totals
-come from primitive attempts; logical head/acquire/fence/branch spans are excluded from billable totals.
-Tests assert LIST pages are attempts rather than retries, protocol retries equal loop iterations minus one,
-and hostile key/error inputs cannot create new series.
+E3 request-cost rows come from a test-scoped production `BlobMetricsRecorder`
+snapshot delta around the measured interval, never from a separate counting
+store. PUT, GET, DELETE and LIST totals count primitive attempts. Tests assert
+that each LIST page counts as an attempt and not a retry, that protocol
+retries equal loop iterations minus one, and that hostile key and error inputs
+cannot create new series. Disabled-recorder transparency and deterministic
+accounting are ordinary CI gates. Recorder overhead is judged against an
+interleaved, same-run disabled-recorder control with identical seeded work.
 
-Disabled-recorder transparency and deterministic accounting are normal CI gates. Recorder overhead is
-judged against an interleaved, same-run disabled-recorder control with identical seeded work; no pass/fail
-decision may depend on an otherwise idle or specially selected host. Absolute throughput and latency are
-capacity evidence only when the deployment topology and resource limits are declared with the result.
-
-SP-06 is a negative cache spike, not a release performance claim. The deterministic single-page BlobStore
-model assigns each
-physical request a fixed 25/100 ms cost without sleeping, so it identifies request shape and computes modeled
-p95 reproducibly. Its ignored harness output is separate from live E2 evidence; the live schema-v2 row carries
-a null profile. No cache may land from this evidence:
-avoidable reads exceed 70% and absolute modeled gain exceeds 50 ms, but relative p95 gain is only 8.97% to
-11.69%, below 20%. The observed authority-head history amplification is a new
-design input for constant-time head access and async bounded-parallel tail recovery.
-
-Cell: `s3--turso` (ADR-024), evaluated against the portable E0 contract on a
-live attested S3 provider. This section is the sole home for governed
-wall-clock release thresholds on that cell. TP-003/TP-004 correctness uses
-fixed work and exact outcomes on the same cell. TP-005 timing remains
-host-bound observation unless an E3 row explicitly adopts its metric on this
-controlled topology. Rebuild of a 10M-item projection is a target, not a
-recorded pass on v0.31.30.
+E3 runs on a live attested S3 provider against the portable E0 contract. It is
+the only home of governed wall-clock release thresholds; TP-003 correctness
+uses fixed work and exact outcomes, and TP-005 timings are host-bound
+observations unless an E3 row adopts one of its metrics on this controlled
+topology.
 
 | Parameter | Value |
 |-----------|-------|
-| Commit-latency-bound sweep | run at ≥ 4 configured bounds, including low-latency, balanced, and cost-optimized values (for example 1 ms, 5 ms, 20 ms, 100 ms or implementation-equivalent documented values) |
-| Pass: commit-bound semantics | every acknowledged request is durable and visible within the declared commit-bound semantics; p50/p95/p99 are reported as topology-bound capacity evidence |
-| Pass: progress and resources | exact logical operation counts, monotonic progress, and bounded memory/work queues hold for every bound/cell; throughput is reported unless a reviewed E3 threshold explicitly governs it |
-| Pass: cost | $/billion-commands and object/log requests per billion commands reported for each latency bound; any comparative release threshold names its reference cell, topology, and attested provider in this E3 record |
-| Pass: recovery | rebuild an exact 10M-item projection from snapshot + log tail with checksum/count/order equality, monotonic replay progress, and bounded memory/work queues; wall time is capacity evidence only |
-| Pass: manifest fencing | a stale-epoch writer's native conditional manifest commit is rejected; a provider without atomic conditional publication is rejected before I/O, with no PostgreSQL manifest-pointer fallback (TD-004) |
-| Pass: transaction contract | success-visible, rejection-no-effect, and unknown-outcome replay invariants hold under the same bound sweep; no latency setting may weaken TP-003 transaction invariants |
-| Pass: byte admission | Compare request-count-only evidence with global+tenant byte admission for small, target-sized, and oversize payloads under stalled-store and hot/cold-tenant contention. Global/tenant charges never exceed caps; a cold tenant progresses; median throughput regression is <=5% and p99 regression <=10%, including serialization paid before oversize rejection. |
+| Linger sweep | at least four commit-latency settings, including low-latency, balanced and cost-optimized values (for example 1, 5, 20 and 100 ms) |
+| Pass: commit semantics | every acknowledged request is durable (API-006 DUR1) and observed by later reads (V3) at every setting; p50, p95 and p99 are reported as capacity evidence |
+| Pass: progress and resources | exact logical operation counts, monotonic progress, and bounded memory and work queues at every setting |
+| Pass: cost | dollars per billion commands and object requests per billion commands at each setting, from the cost model of the object log that runs, with the per-queue commit cost of TP-003 AC-PERF-7 as its first measured input; any comparative threshold names its reference topology and attested provider in this record |
+| Pass: recovery | rebuild an exact 10M-record Turso projection from the object log through projection control on the admin handle, with count, checksum and order equality, monotonic replay progress, and bounded memory and work queues; wall time is capacity evidence. The rebuild runs from a suite outside the workload and loadgen crates, which never reference the admin handle (API-006 OP4) |
+| Pass: conditional-write fencing | a stale-epoch writer's conditional commit is rejected; a provider without atomic conditional writes is rejected before any I/O |
+| Pass: durability semantics | TP-003 AC-TXN-1 to AC-TXN-4 hold across the sweep; no latency or cost setting weakens them (AC-TXN-7) |
+| Pass: byte admission | global and per-tenant byte admission against request-count-only admission, for small, target-sized and oversize requests under a stalled store and hot and cold tenants: charges never exceed caps; a cold tenant progresses; median throughput regresses at most 5% and p99 at most 10%, including serialization before an oversize rejection |
 
-### Recurrence under scale (representative envelopes)
+### Recurring records under scale
 
-Run recurrence under the public cell `s3--turso` (ADR-024) for both envelopes.
-TP-003/TP-004 own correctness on that cell;
-these scale rows substantiate that recurring/never-terminal items participate in
-both deployment envelopes without special handling (recurring items participate
-in the per-queue local oldest-eligible computation like any item).
+A recurring record is one record per key, settled each cycle with
+`Release(t)` and the next run time as its rank. These rows show that recurring
+records need no special handling in either envelope.
 
 | Benchmark | Required evidence |
-|-----------|-----------------------------------|
-| Recurrence under scale (D4) | (a) **High-frequency immediate rearm** (`not_before` = now tight loop) sustains target throughput without version-monotonicity or projection corruption; (b) **idle recurring inventory** of N idle re-armed items does not inflate active-scope discovery, busy-poll, or `oldest_eligible_age_ms`, and `recurring_pending` is reported within its documented lag; (c) **purge under load** (targeted + `force` while leased), queue-local (one owner) and idempotent by `request_id`, completes within bound and leaves consistent tombstones. |
+|-----------|-------------------|
+| Recurring records under scale | (a) **high-frequency re-rank**: records settled each cycle with a rank of now sustain their throughput, with `version` increasing on every cycle and no projection divergence; (b) **idle inventory**: N idle records with future ranks do not slow claims of ready records, because a claim never visits a record ranked beyond its horizon (API-006 C9), and `stats` and `aggregate` tell idle records from ready ones; (c) **delete under load**: `Delete` of Free records, and of held records with `Release(t)`, on one owner and idempotent by `request_id`, leaves no record behind. |
 
 ## Requirement Coverage Matrix
 
-These rows extend the governing test traceability plan with the scale mechanism.
-P0 items are referenced by name (not number) to stay robust to PRD renumbering.
+These rows extend TP-001 with the scale mechanism. PRD P0 items are cited by
+name.
 
-| Requirement | Governing Artifact | Required Test Evidence |
+| Requirement | Governing artifact | Required test evidence |
 |-------------|--------------------|------------------------|
-| PRD P0 horizontal-distribution item | PRD / TD-001 / TD-003 / ADR-008 | E2 cross-queue scale-out: exact work and logical progress remain monotonic as owner count rises; the portable E0 contract holds for every queue under K-queue concurrency; single lease across owner reassignment. |
-| PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 and E2 preserve exact outcomes, queue-global progress, and bounded resources while distributing queues across owners. Throughput and latency remain declared-topology capacity evidence. |
-| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density uses fixed work (at least 1,000 cold queues plus one hot queue) on an attested live S3 row. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Concrete producer commands and topology values are evidence inputs, not permanent provider contracts. |
-| TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
-| TD-004 object-log backend | TD-010 / ADR-024 | E3 latency/cost/recovery on `s3--turso`; commit-latency-bound sweep; native conditional current-epoch fencing; providers without it fail configuration before I/O. No 10M pass is claimed here. |
-| Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |
-| TD-006 client routing | TD-006 / TD-003 | A wrong-node command is `-MOVED`-redirected to the queue's owner and converges in one hop; a stale/misrouted write is fenced, never corrupting state. |
-| Recurrence under scale (D4) | TD-001 / ADR-024 | Recurrence scale is specified on `s3--turso`: high-frequency rearm, idle inventory bound, queue-local purge under load. Not claimed as a v0.31.30 pass. |
-| Shared backend conformance | TD-001 / TP-003 / TP-004 / ADR-024 | The public cell passes the core/transaction surface with object-log recovery and zero silent skips before scale evidence may qualify it. |
+| PRD P0 horizontal distribution | PRD / ADR-008 / TD-003 / ADR-025 §5 | E2 cross-queue scale-out: exact work and monotonic logical progress as owner count rises; E0 holds for every queue under K-queue concurrency; one live claim across a partition handoff. |
+| PRD P0 performance at scale | PRD / ADR-024 / TD-010 | E1 and E2 keep exact outcomes, claim order, the declared ready-to-claim bound and bounded resources while queues spread across owners. Throughput and latency are capacity evidence for the declared topology. |
+| PRD P0 queue density | PRD / TD-003 / TD-010 | E2 density on an attested live S3 row: at least 1,000 cold queues plus one hot queue; every cold queue keeps a candidate and completes a non-empty claim and settle during loaded hot work; hot counts reconcile across baseline, load and baseline; shared workers, tasks and connections stay within declared bounds. Quiet-host and fixed-speed gates are forbidden. |
+| Placement and partition ownership | ADR-008 / TD-003 | A queue's partition is recorded at its first `define_queue` and never changes; one live lease per partition; epoch fencing of a stale owner; drain and handoff without loss or duplication; recovery of every queue in the partition from the object log. |
+| Object log | ADR-024 / TD-010 | E3 latency, cost and recovery with the linger sweep; conditional-write fencing; providers without it fail before I/O. |
+| Recurring records under scale | API-006 / ADR-024 | High-frequency re-rank, idle inventory and delete under load on S3×Turso. |
+| Contract conformance first | API-006 / TP-003 | The contract suite passes with zero skips before any scale evidence can qualify the implementation. |
 
 ## Named Test Suites
 
-Implementation beads should create or extend these suites:
+Implementation beads create or extend these suites:
 
 - `queue_ownership_fencing_tests`
 - `queue_reassignment_drain_tests`
-- `per_queue_progress_tests`
-- `routing_redirect_tests`
 - `object_log_commit_recovery_tests`
 - `object_log_latency_cost_matrix_tests`
 - `external_transaction_contract_matrix_tests`
-- `performance_cross_queue_scale_out_tests` (replaces the retired `performance_multi_shard_scale_out_tests`)
 - `performance_single_deployment_baseline_tests`
+- `performance_cross_queue_scale_out_tests`
 - `queue_density_single_node_tests`
 - `recurrence_scale_envelope_matrix_tests`
 
 ## Scale Evidence Requirements
 
-Scale benchmarking must include:
+Scale benchmarking includes:
 
-- single-deployment exact lifecycle outcomes, monotonic progress, and bounded
-  resources under the portable E0 contract, with throughput/latency reported as
-  declared-topology capacity (E1);
-- cross-queue scale-out at ≥ 3 owner-node counts, reported as aggregate accepted
-  write/claim rate per owner count, scaling monotonically with owner count (E2);
-- the portable E0 correctness, progress, and resource contract preserved for
-  every queue as active-queue count and total load grow (E2);
-- queue density: at least 1000 cold queues plus one hot queue on one node, exact
-  cold/hot lifecycle completion, every queue progress-eligible, same-run
-  degradation within its declared envelope, and all background work multiplexed
-  onto bounded shared pools (E2, `queue_density_single_node_tests`);
-- per-queue local progress: each queue's oldest-eligible item claimed before the
-  bound from its owner's local computation (E2);
-- owner failover/fencing and stalled/unowned-queue visibility as a progress-bound
-  violation, with epoch-fenced recovery and no double-lease across reassignment
-  (E2 / TD-003);
-- client routing redirect convergence in a single hop and fence-safety of a
-  misrouted write (E2 / TD-006);
-- object-log group-commit ack latency across the commit-latency-bound sweep,
-  $/command and object/log requests per billion commands at high volume, and
-  10M-item projection rebuild time for each committed object-log projection
-  variant (E3);
-- native conditional manifest fencing and fail-closed pre-I/O rejection of an
-  S3 provider that cannot supply it (E3);
-- external transaction-contract invariants under the E3 latency-bound sweep, so
-  lower latency or lower cost configurations cannot publish weaker semantics;
-- recurrence under scale on the E1 reference cell and all required E2 S3
-  projection cells.
+- single-deployment exact outcomes, monotonic progress, claim order and
+  bounded resources under the E0 contract, with throughput and latency
+  reported as capacity for the declared topology (E1);
+- cross-queue scale-out at three or more owner counts, with aggregate write
+  and claim rates reported per owner count (E2);
+- the E0 contract kept for every queue as active-queue count and total load
+  grow (E2);
+- queue density: at least 1000 cold queues plus one hot queue on one node,
+  exact completion for every queue, same-run degradation within its declared
+  envelope, and background work on bounded shared pools (E2,
+  `queue_density_single_node_tests`);
+- partition failover and fencing, with recovery from the object log and no
+  double lease across the handoff (E2, TD-003);
+- object-log commit latency across the linger sweep, dollars and object
+  requests per billion commands, and 10M-record projection rebuild time (E3);
+- conditional-write fencing and pre-I/O rejection of an S3 provider that
+  cannot supply it (E3);
+- the durability semantics of TP-003 AC-TXN-1 to AC-TXN-4 across the linger
+  sweep, so a lower-latency or lower-cost setting cannot weaken them (E3);
+- recurring records under scale in both envelopes.
 
-## Workload profile — Seventh Sense (RESP black box)
+## Deferred Evidence
 
-Product-shaped black-box profile for **jobs / actions / scheduled_actions** over
-the RESP worker surface only:
-
-- Profile: `docs/perf/workload-seventh-sense-actions-scheduler.md`
-- Harness: `examples/python-resp` suite `ss` (`SS_N=5000` smoke;
-  `./examples/python-resp/scripts/start_ss_service.sh`)
-- Hard bars: insert / mutate / point-query / drain exactness on three bootstrap
-  queues (`ss:jobs`, `ss:actions`, `ss:scheduled`)
-- Latency: p50/p95/p99 are reported as smoke capacity/regression observations;
-  they have no portable threshold and cannot substitute for governed E3
-  evidence
-
-## Manual or Deferred Evidence
-
-The following are not required before the first implementation bead but must be
-covered before claiming product validation:
-
-- Seventh Sense production scheduling SLA for concrete `progress_bound_ms`
-  validation (partially proxied by the RESP black-box drain timeout and first-
-  claim latency in the profile above; full bound remains library/metrics).
-- P1 operator redrive, purge, repair, and archive APIs, and any P1
-  operator/compatibility-adapter discovery surface. (The native
-  `DiscoverActiveScopes` operation is P0/native-service per PRD and API-001 and is
-  NOT deferred; only operator/adapter-facing discovery surfaces remain P1.)
-- Kafka/Redpanda and DynamoDB backend conformance (later design targets).
-
-Object-log scale evidence is not deferred: E2/E3 require the attested S3 rows
-across all three public projections.
+Seventh Sense's production ready-to-claim bound, which sets the E0 and E1
+workload bound, is required before claiming product validation but not before
+the first implementation bead.
 
 ## Scale-Claim Review Checklist (docs lint)
 
-A document fails review if any of the following hold:
+A document fails review if any of these hold:
 
-- It asserts "horizontal scale", a write rate, or "10M hot queue" without
-  referencing an evidence record (E0–E3) that names deployment shape + workload
-  envelope + substantiating artifact.
-- A PRD or product-vision scale sentence names a storage backend, profile, scale
-  mechanism, or SQL.
-- A scale claim in any document lacks an E-record ID.
+- It asserts "horizontal scale", a write rate or a "10M hot queue" without
+  referencing an evidence record (E0–E3) that names the deployment shape,
+  workload envelope and substantiating artifact.
+- A PRD or product-vision scale sentence names storage layout, a query or
+  SQL, or states a scale claim without an evidence-record id.
+- A scale claim in any document lacks an evidence-record id.
 
-Reviewers MUST reject documents matching any rule above.
+Reviewers MUST reject documents that match any rule above.
 
 ## Exit Criteria
 
-Before scale claims are published, the referencing evidence records must pass
-against the portable E0 correctness, progress, and resource contract: E1 for the
-single-deployment envelope, E2 for the horizontal envelope (including every-queue
-progress under K-queue concurrency),
-and E3 for the object-log latency/cost/recovery record. A scale claim in any
-document must cite at least one evidence record (E0–E3) and, where it asserts a
-benchmark outcome, the named scale test suite that produces it. A horizontal-scale
-claim MUST NOT be substantiated by the E1 PostgreSQL reference cell alone.
-
-## Resolved Decisions
-
-- Cross-owner throughput and efficiency are published capacity observations, not
-  universal bars. Release qualification uses the portable E0/E2 contract and
-  never waits for an operator to select a machine-speed threshold.
-- Attested live S3 remains required for E2 on `s3--turso` (ADR-024). Retired
-  projections are not register rows.
-- TP-003/TP-004 require that cell with zero skips before E1–E3 evidence can
-  qualify it. Missing live S3 fails closed. A 10M or 1000-queue figure is not
-  a recorded pass for v0.31.30.
-
-The queue-density target is **at least 1000 cold queues plus one hot queue on one
-node**. Every queue meets its progress contract, all lifecycle counts reconcile,
-and shared resources remain bounded; aggregate capacity is reported for that
-node without extrapolation.
+Before a scale claim is published, the evidence records it cites pass against
+the E0 contract: E1 for the single-deployment envelope, E2 for the horizontal
+envelope (including every-queue progress under K-queue concurrency), and E3
+for object-log latency, cost and recovery. A scale claim cites at least one
+evidence record and, where it asserts a benchmark outcome, the named suite
+that produced it. A horizontal-scale claim never rests on E1 alone.

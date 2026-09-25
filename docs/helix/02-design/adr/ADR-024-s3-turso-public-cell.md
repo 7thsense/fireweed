@@ -32,7 +32,7 @@ ddx:
 
 1. **There is one production implementation.** It is an object log published to S3, with a Turso projection. TD-017 designs its projection layout, and TD-018 its partitioned object log. ADR-025 commits to no second implementation.
 2. **No storage choice reaches the public surface.** The S3×Turso constructor takes its own configuration plus the construction inputs the contract fixes (the injected `Clock`, the documented Δ and the `DeletePolicy`), and returns the `Fireweed` handle together with the admin handle, `TursoAdmin` (API-006 §7). There is no storage selector, cell name or visibility barrier to choose.
-3. **The log engine is `fireweed-objectlog`.** It has one protocol and two publication adapters: S3, for the shared store, and the local filesystem, for a single process. Filesystem publication exists to test the protocol without MinIO. It is not a production configuration, a filesystem test is not evidence about S3, and an S3 result is not evidence about the filesystem adapter.
+3. **The log engine is `fireweed-objectlog`.** It has one protocol and two publication adapters: S3, for the shared store, and the local filesystem, for a single process. Filesystem publication exists to test the protocol without an S3 endpoint. It is not a production configuration, a filesystem test is not evidence about S3, and an S3 result is not evidence about the filesystem adapter.
 4. **Durability is the object log's.** The Turso projection is derived: it is not the command log, the retention authority or the control plane. `TursoAdmin`'s projection control verifies, deletes and rebuilds a projection by replaying the log, and the same replay recovers a lost Turso file (ADR-013).
 5. **Visibility is the contract's.** A claim observes every acknowledged write, `read` and `scan` are fresh, and only `stats` and `aggregate` may be torn (API-006 V1–V5). A short or empty claim is a successful poll, bounded by the progress rule C5a. TD-016 and TD-017 design how the implementation meets these rules while the projection applies behind the log.
 6. **Tests use the same code paths.** Queue-semantics tests and small non-durable benches open Turso on `:memory:`, which has the same schema, SQL and apply path as a file. Tests of checkpoint, reopen and rebuild use a temporary Turso file. No other projection engine counts as coverage of this implementation.
@@ -61,7 +61,7 @@ ddx:
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| A test on the filesystem adapter is cited as evidence about S3 | M | H | Evidence records name the adapter; S3 behavior is qualified against MinIO or S3. |
+| A test on the filesystem adapter is cited as evidence about S3 | M | H | Evidence records name the adapter; S3 behavior is qualified against the local S3 test endpoint or S3. |
 | An operator path treats the Turso file as the command log | L | H | Rebuild goes only through projection control; live-versus-rebuild comparisons in the suite. |
 | The implementation misses a performance gate at scale | M | H | TD-017 §13 gates at 10M records and at 100 queues × 1M records per file. |
 

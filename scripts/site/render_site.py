@@ -447,9 +447,9 @@ def page_concepts(meta: dict) -> str:
           </ul>
           <p>
             Normative contracts:
-            <a href="../helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>,
-            <a href="../helix/02-design/contracts/API-004-hot-projection-query-surface.md">API-004</a>,
-            <a href="../helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
+            <a href="https://github.com/7thsense/fireweed/blob/v0.31.32/docs/helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>,
+            <a href="https://github.com/7thsense/fireweed/blob/v0.31.32/docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md">API-004</a>,
+            <a href="https://github.com/7thsense/fireweed/blob/v0.31.32/docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
           </p>
         </div>
 """
@@ -803,8 +803,8 @@ def page_api_rust(meta: dict) -> str:
         <div class="page-intro">
           <h2>Rust facade API</h2>
           <p>
-            Normative shape: <a href="../../helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
-            Semantics: <a href="../../helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>.
+            Normative shape: <a href="https://github.com/7thsense/fireweed/blob/v0.31.32/docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
+            Semantics: <a href="https://github.com/7thsense/fireweed/blob/v0.31.32/docs/helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>.
           </p>
         </div>
         <div class="prose">
@@ -869,7 +869,7 @@ def page_api_resp(meta: dict) -> str:
           <h2>RESP worker API</h2>
           <p>
             Wire adapter design:
-            <a href="../../helix/02-design/technical-designs/TD-006-resp-wire-adapter.md">TD-006</a>.
+            <a href="https://github.com/7thsense/fireweed/blob/v0.31.32/docs/helix/02-design/technical-designs/TD-006-resp-wire-adapter.md">TD-006</a>.
             Two faces rationale:
             <a href="../../helix/02-design/adr/ADR-007-hexagonal-architecture-and-two-interfaces.md">ADR-007</a>.
           </p>

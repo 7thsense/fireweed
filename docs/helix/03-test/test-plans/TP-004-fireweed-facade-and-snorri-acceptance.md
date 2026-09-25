@@ -2,331 +2,175 @@
 ddx:
   id: tp-fireweed-facade-and-snorri-acceptance
   depends_on:
-    - api-fireweed-rust-facade
-    - adr-023-pre-release-fireweed-namespace-cutover
     - api-fireweed-kernel-contract
+    - adr-kernel-records-contract
+    - api-workload-integration-profiles
+    - adr-023-pre-release-fireweed-namespace-cutover
     - tp-verification-acceptance-criteria
   status: accepted
 ---
 
-# TP-004: Fireweed facade and Snorri acceptance
+# TP-004: Fireweed public surface and consumer acceptance
 
-## Public cell (ADR-024)
+## Scope
 
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
+This plan verifies two things that the contract suite cannot:
 
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
+- **The public surface.** The `fireweed` package exposes the kernel records
+  contract and nothing else: `Fireweed` wraps `Arc<dyn Store>` and delegates
+  1:1 to the eight `Store` ops, beside the S3×Turso constructor and its admin
+  handle (ADR-025 §1, API-006 §1 and §7).
+- **Consumer acceptance.** Snorri, the first consumer, runs on the kernel
+  contract as API-003 maps it, and it resolves Fireweed from the intended
+  source.
 
-
-## Kernel contract (API-006)
-
-API-005 is superseded by
-[API-006](../../02-design/contracts/API-006-fireweed-kernel-contract.md), the
-Fireweed kernel contract (owner decision, 2026-09-23 design discussion).
-`Fireweed` now wraps `Arc<dyn Store>` and delegates 1:1 to the eight `Store`
-ops, and Snorri migrates to that contract; the contract is not bent to fit
-Snorri's current code. Four requirements now govern this plan:
-
-- **Black-box contract suite.** The functional prerequisite for any Fireweed
-  build, and for any Snorri acceptance run, is `fireweed-contract-suite`
-  passing on the implementation under test (API-006 §9; TP-003 AC-KC-1 to
-  AC-KC-3). Snorri tests its own workflows; it does not re-prove the contract.
-- **No backend knobs.** Neither the contract suite nor Snorri's acceptance
-  tests branch on backend, feature set or capability (API-006 CS4).
-- **Operator ban.** Snorri never references the `Operator` trait,
-  `force_clear` or the admin handle, and CI fails the build if it does
-  (API-006 OP4; TP-003 AC-KC-4).
-- **Performance gates.** The claim-path and storage gates of TP-003 §3.12
-  (AC-PERF-1 to AC-PERF-6 and AC-PERF-8) precede any TP-005 timing run.
-  AC-PERF-7 is a recorded measurement, not a gate.
-
-The gates below that test API-005's surface are superseded. Their text stays
-as history; they no longer qualify a release:
-
-| Gate in this plan | Disposition | Replacement |
-|---|---|---|
-| Contract compile: API-005 constructors, Snorri method signatures and named types, retired Rust names; Fireweed gates 3, 4 and 8; the export closure and normalized public-API comparison | Superseded | Compile fixtures over the `fireweed-contract` types, the `Store` and `Operator` traits and the `Fireweed` wrapper; no `Store` value converts into an `Operator` (OP1) |
-| Fireweed gate 5 (the shared suite with `batch_update`, `mutate_items` and `live_items`), per-constructor operation parity, and the atomic item mutation row | Superseded | The black-box contract suite |
-| Fireweed gate 6: `projection_control()` on `Fireweed` | Superseded | Projection control on the admin handle (`TursoAdmin::projection_control()`, API-006 §7), tested in Fireweed under the AGENTS.md projection lifecycle rule |
-| Fireweed gate 7: no backend identity, discriminator or downcast | Retained | API-006 §8 and CS4 |
-| Fireweed gate 9 feature-set commands and gate 10 million-cycle run | Superseded | The contract suite, then the TP-003 §3.12 claim-path gates; TP-005 timing runs only after both |
-| Snorri feature-set compile checks and the API-005 Snorri acceptance slice | Superseded | Snorri's migration to API-006: groups with `WholeGroups` claims for per-instance exclusivity, record kinds as stages, per-transition history in fields, and its manifest in queue metadata |
-| `SNORRI-MATRIX-LIFECYCLE` | Superseded | Snorri's own lifecycle over the `Store` ops, on `s3--turso` |
-| `SNORRI-REOPEN`, `SNORRI-RETRY-ONCE` | Retained | DUR1; RQ2 |
-| `SNORRI-PROJECTION-REBUILD` | Superseded | Projection rebuild needs the admin handle, which Snorri may not reference (OP4); Fireweed's own recovery suites cover it |
-| Dependency identity, the `running 0 tests` rule, live-provider attestation and the no-skip policy | Retained | Unchanged |
-
-## Testing strategy
-
-This plan verifies the Rust facade, its first downstream consumer, and
-per-constructor behavioral parity. Existing backend and recovery suites remain
-supporting evidence; they do not substitute for running one capability-complete
-suite through every public constructor.
-
-**Goals**: exact API-005 signature/export closure; concrete-handle parity;
-full operation-family parity across every supported constructor;
-Snorri compilation and semantic acceptance against the same Fireweed revision;
-tagged GitHub-source consumption evidence for the release candidate
-**Out of scope**: non-Cargo
-release artifacts, and runtime-hardening work not exposed by API-005
-**Traceability source**: ADR-022 and API-005
+The contract itself is verified by `fireweed-contract-suite` (TP-003 AC-KC-1
+to AC-KC-3); this plan builds on it and never re-proves it. Snorri tests its
+own workflows, not the contract.
 
 | Level | Coverage target | Priority |
 | --- | --- | --- |
-| Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden retired Rust names | P0 |
-| Fireweed integration | The same capability-complete operation suite succeeds on `s3--turso` (ADR-024) | P0 |
-| Atomic item mutation | Addressed and selector mutation, dry-run, CAS, lease rejection/match/invalidation, lifecycle transitions, purge, schedule/caller-data/gate/field/entity edits, atomic rollback, and exact replay pass through every supported constructor | P0 |
-| Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 on `s3--turso` if a run is recorded. Not claimed for v0.31.30. Not a 10M pass | P0 when run |
-| Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
-| Live provider integration | `s3--turso` runs on a provisioned qualification runner with provider capability attestation and zero skips. No 1000-queue pass is claimed | P0 |
-| Published-source consumption | Snorri resolves the tagged public `7thsense/fireweed` repository rather than a workspace-internal crate | P0 |
-| Existing backend suites | No regression in each selected cell's current semantic tests | P0 |
+| Contract suite prerequisite | AC-KC-1 to AC-KC-3 pass on the revision under test | P0 |
+| Public surface | 100% of the public items of `fireweed` trace to API-006 or to the S3×Turso constructor and admin handle | P0 |
+| Operator separation | no `Store` value converts into an `Operator` (OP1); Snorri never references the `Operator` trait, `force_clear` or the admin handle (OP4, TP-003 AC-KC-4) | P0 |
+| Snorri acceptance | every Snorri semantic id below executes and passes on S3×Turso | P0 |
+| Live provider | the Snorri durability ids run on a provisioned runner with an attested S3 provider and zero skips | P0 |
+| Published-source consumption | Snorri resolves the tagged public `7thsense/fireweed` repository | P0 |
 
-## Test data
+## Surface gates
 
-Fireweed integration tests use unique temporary SQLite/filesystem-log paths and
-synthetic queue/item identifiers. Live S3 and PostgreSQL tests use provisioned,
-run-owned namespaces supplied to the qualification runner. No production or
-customer data is required.
-
-The runner records a non-secret capability attestation before construction:
-runner identity and topology; S3 provider/version/region, atomic conditional
-create/update support, consistency contract, endpoint TLS mode, and bucket
-ownership acknowledgement; PostgreSQL server version, durability settings,
-isolation support, and database ownership acknowledgement. The public contract
-depends on those capabilities, not a provider brand or host name. A missing,
-unreachable, or non-attested live S3/PostgreSQL prerequisite fails release
-qualification before tests start; it is never a passing skip.
-
-Legacy provider/topology evidence maps as follows; this is a semantic mapping,
-not a requirement to preserve old executable names:
-
-| Former contract | Provider-neutral binding |
-| --- | --- |
-| Garage round-trip/reopen on `eldir` | `SNORRI-REOPEN` on an attested live S3 row. |
-| Garage + PostgreSQL projection delete/rebuild | `SNORRI-PROJECTION-REBUILD` on `s3--postgres`. |
-| Garage retry applied exactly once | `SNORRI-RETRY-ONCE` on every live S3 projection row. |
-| Reachability of host `eldir` | Availability of any provisioned runner satisfying the runner/S3/PostgreSQL attestation. |
-
-## Coverage requirements
-
-| Metric | Target | Minimum | Enforcement |
-| --- | --- | --- | --- |
-| API-005 Snorri method signatures | 100% compile referenced | 100% | downstream compile fixture blocks |
-| API-005 Snorri named types | 100% importable from `fireweed` | 100% | single-package fixture blocks |
-| Construction-only composition boundary | 100% of enabled constructors | 100% | public-API and compile-fail tests block |
-| Per-constructor operation parity | Every inherent `Fireweed` method family succeeds; zero construction-dependent `Unavailable` results | 100% | shared conformance matrix blocks |
-| Retired Rust facade/config names | 0 externally constructible | 0 | compile-fail fixture blocks |
-
-## Fireweed gates
-
-1. A downstream fixture depends only on package `fireweed`.
-2. The fixture constructs the public cell, `s3` × `turso` (ADR-024), through
-   `StorageConfig` and assigns that result to the concrete `Fireweed` type.
-   Other selectors reject before I/O. The route registry rejects a missing or
-   silently substituted cell.
-3. The fixture names every API-005 input/output type required by Snorri without
-   depending on `fireweed-core` or `fireweed-engine`.
-4. Compile-fail fixtures reject attempts to construct with a raw backend or use
-   a retired root/configuration type, `EmbeddedHandle`, `LibBackend`, a generic
-   raw constructor, or any `Embedded*` configuration name. ADR-023 permits no
-   alias exemption for these Rust symbols.
-5. One shared suite creates a queue, appends, claims, mutates, commits, queries,
-   and finalizes through every supported constructor. It MUST include
-   `batch_update`, `mutate_items`, and `live_items`; `Unavailable`, a skip, or substituting a
-   different method is failure. Merely receiving `Ok` is not evidence: every
-   operation asserts its returned value and an independent observable
-   postcondition. Empty claim results may not skip finalize/renew/reassign
-   assertions; empty query, discovery, index, mutation, commit, or recovery
-   results fail when seeded data requires a non-empty result. Gate coverage
-   uses an item with real gate membership and proves both blocked and unblocked
-   claim behavior.
-   `mutate_items` additionally proves selector resolution and item application
-   are one atomic durable unit, exact request replay never reevaluates a
-   selector, dry-run leaves no durable or in-memory trace, each logical patch
-   bumps the item version once, and lease invalidation removes every claim-token
-   and selection-index reference before a replacement claim can succeed.
-6. `projection_control()` returns `Some` only where the composition owns a
-   disposable projection and the relevant maintenance capability is present;
-   all other cells return `None`. Capability-bearing cells retain
-   verify/delete/rebuild and reopen tests without exposing storage identity.
-7. No constructor result exposes backend/projection identity, configuration,
-   a backend discriminator, or a downcast. Capability assertions remain
-   separate and queue-scoped.
-8. New contract tests are required under `crates/fireweed/tests/` for the
-   supported-API compile fixture, compile-fail fixture, opaque-composition
-   boundary, and full forwarding closure. Until those files exist and pass,
-   this plan makes no claim that the gate is implemented.
-9. Run:
+1. A downstream fixture depends on no Fireweed package other than `fireweed`
+   and `fireweed-contract`, and names every API-006 type it uses through them.
+2. The fixture calls the S3×Turso constructor in `fireweed`, which returns the
+   `Fireweed` handle together with `TursoAdmin` (ADR-009, ADR-024).
+3. A normalized public-API comparison of `fireweed` fails on any public item
+   that is not one of the eight ops, an API-006 type, the S3×Turso constructor
+   and its configuration, or the admin handle. No backend type, capability
+   flag, log position, storage selector or alias is reachable from a consumer
+   (ADR-025, Validation).
+4. Compile-fail fixtures prove that no `Store` or `Fireweed` value converts
+   into an `Operator` (OP1), and that the names ADR-023's cutover removed do
+   not resolve; ADR-023 permits no alias.
+5. A forwarding test wraps a recording `Store` in `Fireweed` and checks that
+   each `Fireweed` method calls the matching `Store` op once, with the same
+   arguments, and returns its result unchanged.
+6. Neither `Fireweed` nor `Store` exposes backend identity, a backend
+   discriminator or a downcast (API-006 §8, CS4).
+7. Projection control lives on the admin handle. Tests that verify, delete or
+   rebuild the projection call it; they never unlink the Turso files and
+   reopen instead.
+8. Run:
 
 ```sh
 cargo fmt --all -- --check
-cargo check -p fireweed --no-default-features
-cargo check -p fireweed --no-default-features --features memory
-cargo check -p fireweed --no-default-features --features sqlite
-cargo check -p fireweed --no-default-features --features objectlog
 cargo test -p fireweed --all-features
 scripts/verify-public-crate-boundary.sh
 scripts/verify-public-artifact-topology.sh
 git diff --check
 ```
 
-10. Only after the complete shared functional suite and every durability row
-    pass with zero skips and zero construction-dependent `Unavailable`
-    results, run the TP-005 `million-cycle-v1` gate. A constructor that has
-    not passed those prerequisites is ineligible for performance testing, not
-    a slower or reduced benchmark cell. Each eligible constructor performs the
-    fixed 1,000,000-key insert, 500,000-item batch update, and 1,000,000-item
-    read/verify workload; durations are recorded as host-bound observations,
-    not portable correctness bars. Class A rows additionally close, reopen,
-    and verify the exact final image outside timed phases; Class B rows prove
-    the projection-only persistence boundary. No row may skip an operation or
-    report `Unavailable`. Any governed wall-clock release threshold belongs
-    solely to TP-002 E3 on its controlled, attested topology.
-
-Crates.io package closure is a separate follow-up. The v0.21 GitHub release
-MUST NOT publish repository-only internal crates merely to make the facade's
-current path dependencies registry-resolvable.
-
-Developer runs may report live PostgreSQL/S3 rows as `not run`; that status is
-never qualification evidence. The release runner fails closed if either live
-service is absent or its capability attestation is incomplete.
-
-The public-API closure comparison normalizes away the root-type rename and the
-explicit API-005 exclusions, then fails on any other removed public method or
-named DTO. Merely compiling the Snorri slice is insufficient.
+Each gate's test must exist and pass before this plan counts the gate as met.
 
 ## Snorri gates
 
-The sibling Snorri checkout is the acceptance client. Its migration removes
-the direct `fireweed-core` dependency and any backend-specific Fireweed package,
-retains only `fireweed`, replaces its generic state store with a non-generic
-`FireweedStateStore` holding `Arc<Fireweed>`, and deletes its `Plain`/`Embedded`
-handle enum.
+The sibling Snorri checkout is the acceptance client. It depends on `fireweed`
+only, holds an `Arc<Fireweed>`, and uses the eight ops. The kernel has no
+side records, fences, record-kind filters or operator helpers on the data
+plane, so a Snorri build that compiles against `fireweed` uses none of them.
 
-Before running any Snorri command, the acceptance record MUST prove dependency
-identity. Pre-release testing uses a path dependency on
-`../fireweed/crates/fireweed` or an exact Fireweed commit revision. Release
-testing uses the exact v0.21 tag from the public `7thsense/fireweed`
-repository. `cargo tree` and `Cargo.lock` evidence MUST show package `fireweed`
-at the intended path, revision, or tagged git source; any other repository
-source is a hard failure even if compilation succeeds from cache.
+**Dependency identity.** Before any Snorri command runs, the acceptance record
+proves which Fireweed it built against. Pre-release testing uses a path
+dependency on `../fireweed/crates/fireweed` or an exact Fireweed commit.
+Release testing uses the exact release tag of the public `7thsense/fireweed`
+repository. `cargo tree` and `Cargo.lock` show `fireweed` at the intended
+path, commit or tag; any other source fails the gate, even when the build
+succeeds from a cache.
 
-Compile each feature set independently before `--all-features`:
+**Operator ban.** The TP-003 AC-KC-4 guard runs over Snorri. Snorri cancels
+and repairs without the operator: it blocks gates and writes by key, and
+retries a write that gets `Leased` once the holder settles or the lease
+expires.
 
-```sh
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features sqlite
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features postgres
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,sqlite
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,postgres
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --all-features
-```
-
-Required Snorri semantic evidence is provider-neutral and keyed by stable
-contract IDs rather than an implementation test filename:
+**Semantic ids.** Required Snorri evidence is keyed by stable ids, not test
+file names. The acceptance record maps each id to the Snorri test binary and
+filter that ran it at the accepted revision.
 
 | ID | Required semantics |
 | --- | --- |
-| `SNORRI-MATRIX-LIFECYCLE` | Complete public push/claim/finalize/query/mutation surface on `s3--turso` (ADR-024). Not a multi-cell suite, and not a 10M or 1000-queue claim. |
-| `SNORRI-REOPEN` | Class A log recovery and Class B projection-only reopen produce their exact documented state. |
-| `SNORRI-PROJECTION-REBUILD` | Every capability-bearing disposable projection verifies, deletes, rebuilds, and returns the same item/image digest. |
-| `SNORRI-RETRY-ONCE` | Response loss and same-`request_id` retry converge to exactly one transition; conflicting body fails. |
+| `SNORRI-LIFECYCLE` | Snorri's workflow lifecycle on S3×Turso, as API-003 maps it: each workflow instance is a group; record kinds are stages, and every claim names its stage; each transition settles its input with `Release(t)` and writes the per-transition history into fields of the settled record; the instance record lives in a stage that nothing claims and is updated with `Expect::Version`; awaits are read by key. |
+| `SNORRI-EXCLUSIVITY` | Snorri claims an instance's stages only with `WholeGroups`, so two workers never hold records of one instance at once, across stages (C6a). |
+| `SNORRI-MANIFEST` | The shard manifest lives in queue metadata: one metadata CAS bootstraps it, `read{queue: true}` reads it fresh, and a concurrent bootstrap loses with `MetadataVersionMismatch` (W13, R4). |
+| `SNORRI-CANCEL` | `CancelRun` with no operator (API-003 P13, §3.5): a gate op in each shard queue blocks the run's gate, so no claim takes the run's records; each Free record of the run in a work stage moves by key to its kind's cancelled stage; a move that gets `Leased` is retried after the holder settles or the lease expires; at the end no record of the run is left in a work stage. |
+| `SNORRI-REOPEN` | After a restart over the same durable state, Snorri resumes with every acknowledged transition, instance record and manifest intact (DUR1). |
+| `SNORRI-RETRY-ONCE` | A lost response resent with the same `request_id` returns the recorded outcome with `replayed: true` and applies once; a conflicting body gets `RequestIdConflict` (RQ2). |
 
-The acceptance record maps each stable ID to the actual executed Snorri test
-binary/filter at the accepted revision. Historical filenames may remain in old
-evidence, but they are not governing identities.
+Each targeted command reports at least one executed test. A successful process
+with `running 0 tests` is a failed gate, including when a feature gate or an
+inexact filter silently excludes the named test.
 
-Each targeted command MUST report at least one executed test. A successful
-process with `running 0 tests` is a failed gate, including when a feature gate
-or a non-exact filter silently excludes the named test.
+**Live provider.** The release record also runs `SNORRI-REOPEN` and
+`SNORRI-RETRY-ONCE` on a provisioned qualification runner against a live S3
+provider. The runner attests, before construction and without secrets, its
+identity and topology, and the provider's version, region, native atomic
+conditional create and update, consistency contract, TLS mode and
+bucket-ownership acknowledgement. The contract depends on those capabilities,
+not on a provider brand or host. The runner exports
+`SNORRI_S3_TEST_ENDPOINT`, `SNORRI_S3_TEST_BUCKET`, `SNORRI_S3_TEST_REGION`,
+`SNORRI_S3_TEST_ACCESS_KEY` and `SNORRI_S3_TEST_SECRET_KEY` from host-managed
+secrets; their values never enter the repository or logs. A missing
+variable, an unattested provider, `running 0 tests` or an unmapped id fails
+the P0 row; it is never a passing skip. Developer runs may report the live rows
+as `not run`, which is never qualification evidence.
 
-The release acceptance record additionally runs the real S3-compatible and
-PostgreSQL rows on a provisioned qualification runner. Access to a particular
-host or provider brand is not contractual; the capability attestation above is.
-Inability to obtain an attested runner blocks this P0 row rather than converting
-it to a local skip. The runner exports
-`SNORRI_S3_TEST_ENDPOINT`, `SNORRI_S3_TEST_BUCKET`,
-`SNORRI_S3_TEST_REGION`, `SNORRI_S3_TEST_ACCESS_KEY`,
-`SNORRI_S3_TEST_SECRET_KEY`, and `SNORRI_FIREWEED_POSTGRES_URL` from host-managed
-secrets. Values MUST NOT be copied into the repository or logs. The accepted
-revision must execute `SNORRI-MATRIX-LIFECYCLE`, `SNORRI-REOPEN`,
-`SNORRI-PROJECTION-REBUILD`, and `SNORRI-RETRY-ONCE` for the live S3 rows,
-including PostgreSQL projection. A missing-variable `SKIP`, `running 0 tests`,
-unmapped semantic ID, or absent cell is a failed P0 row, not passing evidence.
+## Seventh Sense
+
+Seventh Sense is written in Scala, so its own cutover needs a transport over
+`Store`, which the contract leaves for later (API-006 §8, ADR-025 §4). Until
+that transport exists, its acceptance is the in-process product workflows
+that model its shapes (TP-003 AC-E2E-1 to AC-E2E-4 and AC-E2E-9).
 
 ## Acceptance criteria layer allocation
 
 | Requirement source | Primary layer | Blocking evidence |
 | --- | --- | --- |
-| ADR-022 concrete ownership | Contract compile | One non-generic `Fireweed`; forbidden legacy names fail to compile |
-| API-005 full facade closure | Fireweed integration | Normalized public-API comparison plus the complete shared suite on every constructor |
-| API-005 per-constructor parity | Fireweed integration + local performance | Zero `Unavailable` results; exact million-cycle outcomes and phase ceilings for every constructor |
-| API-005 Snorri slice | Downstream integration | Independent feature checks and semantic tests above |
-| API-005 projection control | Fireweed + Snorri object-log integration | Borrowed control verify/delete/rebuild and reassignment tests |
-| API-005 opaque composition | Contract compile | Construction selects composition; the live facade cannot disclose it |
-| Live S3/PostgreSQL durability acceptance | Provisioned runner | Provider attestation passes; all four semantic IDs execute over required cells with zero skips |
-| Published facade consumption | GitHub release + downstream integration | Public tag/release exists; post-publication lockfile resolves the exact `7thsense/fireweed` tag |
+| API-006 conformance | Contract suite | TP-003 AC-KC-1 to AC-KC-3 on the revision under test |
+| ADR-025 §1 public surface | Contract compile and public-API comparison | Surface gates 1 to 6 |
+| API-006 OP1 and OP4 | Compile-fail fixture and CI guard | Surface gate 4; TP-003 AC-KC-4 over Snorri |
+| API-003 Snorri profile | Downstream integration | The six Snorri semantic ids |
+| DUR1 and RQ2 on a live provider | Provisioned runner | `SNORRI-REOPEN` and `SNORRI-RETRY-ONCE` against attested S3 with zero skips |
+| Published source | Release and downstream integration | The public tag exists, and Snorri's lockfile resolves it |
 
-## Infrastructure and implementation order
+## Implementation order
 
-1. Add compile-success/compile-fail and opaque-composition tests before
-   completing facade forwarding; these tests define the supported closure.
-2. Add the zero-skip shared functional and durability matrix.
-3. Complete all `Fireweed` forwarding and backend implementations until that
-   matrix is green.
-4. Run Fireweed cell tests and boundary scripts.
-5. Run TP-005 performance gates only for the already-green matrix.
-6. Migrate Snorri against the exact local commit and run independent feature
-   checks before semantic tests.
-7. Run the no-skip live S3/PostgreSQL matrix on the attested qualification
-   runner against the release candidate.
-8. Publish the GitHub tag/release, then repeat dependency identity and the full
-   Snorri gates against that public tag.
+1. Add the compile-success, compile-fail, public-API comparison and
+   forwarding tests. They define the supported surface.
+2. Pass the contract suite on the revision (TP-003 AC-KC-1 to AC-KC-3).
+3. Run the surface gates and boundary scripts.
+4. Migrate Snorri against the exact local commit and run its semantic ids.
+5. Run the live-provider rows on the attested qualification runner against
+   the release candidate.
+6. Publish the tag, then repeat dependency identity and every Snorri gate
+   against that public tag.
 
-Local developer runs may report PostgreSQL/S3 rows as `not run` when fixtures
-are absent. Release acceptance requires both live services on the provisioned,
-attested runner; no governed row may be skipped there.
+TP-005 timing runs only on a revision that has passed the contract suite
+(TP-005 "Functional prerequisite").
 
 ## Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Snorri resolves its old git pin | High | Record `cargo tree` and lockfile source before accepting results |
-| Only the Snorri slice is forwarded | High | Full normalized public-API closure blocks independently |
-| A method exists on `Fireweed` but only some constructors install it | Critical | Shared per-constructor suite and million-cycle gate treat `Unavailable` as failure |
-| Compile-fail and namespace policy disagree | High | API-005 makes retired Rust types unavailable; ADR-023 permits no package aliases |
-| PostgreSQL is silently skipped | Medium | Report as `not run`; never count as a pass |
-| Provider credentials leak into evidence | High | Source runner-managed secrets and reject credential values in logs |
-
-Historical release records for Fireweed `v0.21.0` and Snorri `v0.11.0` remain
-useful provenance for the former provider-specific routes. They do not qualify
-the current s3 × turso contract (ADR-024); current qualification requires a fresh revision-
-bound provider attestation and the zero-skip semantic-ID matrix above.
-
-## Build handoff
-
-**Priority**: contract fixtures → forwarding closure → s3 × turso Fireweed cell →
-Snorri matrix → attested live-provider matrix → public GitHub tag/release →
-tagged-source repeat
-**Blocking gate**: every P0 row above passes against one recorded Fireweed
-revision with zero phantom test claims and no unreviewed supported-API removal.
+| Snorri resolves an old Fireweed source | High | Record `cargo tree` and the lockfile source before accepting results |
+| A consumer-shaped method is added to `Fireweed` | High | The public-API comparison fails on any item that does not trace to API-006; a consumer need becomes a clause change (ADR-025 §4) |
+| Snorri reaches force-clear | High | The AC-KC-4 guard over Snorri; operator-free cancel (`SNORRI-CANCEL`) |
+| A live row is skipped silently | Medium | Report it as `not run`; never count it as a pass |
+| Provider credentials leak into evidence | High | Runner-managed secrets; credential values rejected in logs |
 
 ## Failure policy
 
-- A Fireweed regression is fixed in Fireweed before changing Snorri around it.
-- A missing domain re-export is fixed at the Fireweed facade; Snorri must not
-  restore a direct internal-crate dependency.
-- Backend-specific behavior must not reintroduce a generic parameter into the
-  downstream store.
-- Operational hardening findings become focused follow-up beads. They block
-  this release only when they invalidate an operation already exposed by
-  API-005 or its existing safety guarantees.
+- A Fireweed defect is fixed in Fireweed, not worked around in Snorri.
+- A consumer need becomes a contract change only through a clause change in
+  API-006, plus an ADR when it changes the model; it is never a
+  consumer-shaped method on `Fireweed` (ADR-025 §4).
+- Snorri never restores a dependency on an internal Fireweed crate.
+- Operational hardening findings become focused beads. They block acceptance
+  only when they break an API-006 guarantee.

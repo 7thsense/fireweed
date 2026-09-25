@@ -18,12 +18,12 @@ ddx:
     - {kind: informed_by, to: adr-log-single-source-of-truth}
     - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
     - {kind: informed_by, to: td-object-log-turso-projection}
-  status: accepted
+  status: proposed
 ---
 
 # Technical Design: TD-016 Unified packed mutation path
 
-**Status**: Accepted
+**Status**: Proposed
 **Contract**: API-006 | **ADR**: ADR-013, ADR-017, ADR-025 | **TD**: TD-010, TD-017
 
 ## Scope
@@ -67,8 +67,8 @@ admit(kind) → linger → start generation
 | `Push` | inserts of new keys | add rows |
 | `Rewrite` | batched content or order changes of Free records; later selection waits for their apply | rewrite rows |
 | `Addressed` | mutations addressed by key, planned under the queue's writer fence | rewrite or remove rows |
-| `Update` | claims, and settles that take a record out of the claimable set | lease or remove rows |
-| Singleton | every other mutation, including any transition that returns a leased record to Free, gate and pause changes, queue definition and lease expiry | one request per generation |
+| `Update` | claims | lease rows |
+| Singleton | every other mutation, including every settle (`Release(t)` with a stage move, a new rank or a delete), gate and pause changes, queue definition and lease expiry | one request per generation |
 
 A request joins its queue's newest generation when that generation has not started, is of the same kind and has room. Otherwise the request starts a new generation, and a singleton always does. Generations of one queue run in FIFO order.
 
@@ -91,16 +91,16 @@ A request joins its queue's newest generation when that generation has not start
 - Lose: two generations of one queue cannot plan concurrently without the overlay, and a stale serving reader must be corrected in process instead of by waiting for apply.
 - Rejected: a separate protocol per operation (a claim coordinator, a settle bypass, leasing in SQL before the append).
 
-## Design gap
+## Open design question
 
-How API-006's `write` and `claim` map onto these generation kinds, without terminal stages and at API-006's limits, is not yet designed.
+How `write` units and settles pack into generations at API-006's limits is open; until it is designed, settles are singletons and TD-017 assumes only one transaction per packed vector.
 
-The kinds assume that a settle takes a record out of the claimable set, so the overlay can fold its id into the removed set. API-006 has no terminal stage. A settle is a `Release(t)` with a stage move or a new rank, and the record stays Free and claimable in its new stage (API-006 W5); on this path, every transition that returns a leased record to Free is a singleton. A `write` unit also combines inserts, patches, stage moves, releases, deletes, extends, gate ops and a metadata op in one atomic unit (API-006 W2), while each kind covers one kind of row work. The design must place these at API-006's limits (1,000 record writes and 16 MiB per request, and 1,000 records and a 16 MiB response per claim) without breaking the overlay's exclusion rule or per-request replay. Until it exists, TD-017 assumes only that each packed vector applies in one transaction.
+A settle leaves the record Free and claimable in its stage (API-006 W5). A `write` unit combines inserts, patches, stage moves, releases, deletes, extends, gate ops and a metadata op in one atomic unit (API-006 W2), while each kind covers one kind of row work. The packing must hold API-006's limits (1,000 record writes and 16 MiB per request, and 1,000 records and a 16 MiB response per claim) without breaking the overlay's exclusion rule or per-request replay.
 
 ## Evidence
 
 - MEASURED (evidence `1788659385`, `docs/perf/evidence/ss-phased/1788659385/summary.json`): `ss_phased_capacity_smoke` at N = 10,000 in batches of 100 with 8 in flight, on one hot queue, settled 14,493 records/s on ingest (P1), 18,843 and 13,367 records/s on the two update phases (P2, P3), and 17,086 records/s on claim then settle (P4), with exact final counts.
-- The run used filesystem log publication and a workload shaped for the earlier API, not S3×Turso and API-006 operations. It is a regression reference for this path, not a product bar (TD-017 §13).
+- The run used filesystem log publication and the pre-API-006 operations, not S3×Turso and the API-006 operations. It is a regression reference for this path, not a product bar (TD-017 §13).
 
 ## Components
 
@@ -132,5 +132,5 @@ The kinds assume that a settle takes a record out of the claimable set, so the o
 |---|---|---|---|
 | A stale serving reader re-selects an unpublished claim | H | H | The overlay's in-flight exclusion; never an exclusion list that grows with history. |
 | Set-based apply reorders a claim and a settle of the same records | M | H | Coalesce only adjacent runs of one kind, and keep envelope order across kinds. |
-| Settles take the singleton path until the design gap is closed | H | M | Close the design gap before measuring API-006 settle throughput on this path. |
+| Settles take the singleton path until their packing is designed | H | M | Design settle packing before measuring API-006 settle throughput on this path. |
 | The overlay or the retained responses outgrow memory | L | M | The per-generation and per-queue bounds, and admission refusal beyond them. |

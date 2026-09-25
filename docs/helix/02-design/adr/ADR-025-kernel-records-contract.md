@@ -14,7 +14,6 @@ ddx:
     - {kind: informed_by, to: spike-turso-value-size-boundary}
     - {kind: informed_by, to: spike-declared-field-storage-layout}
     - {kind: informed_by, to: adr-023-pre-release-fireweed-namespace-cutover}
-    - {kind: informed_by, to: adr-s3-turso-public-cell}
   status: accepted
 ---
 
@@ -110,7 +109,7 @@ These decisions bind the S3×Turso implementation, not the contract; API-006 say
 - Queues are never rebalanced across partitions.
 - Reason: mapping lets the control plane pack and separate queues by measured load, and sharing a partition's log and head keeps queues cheap.
 
-**Measure first.** Compaction, snapshots and truncation, splitting the log by partition range, and full-delete garbage collection are proposals, and none is committed before it is measured. The first measurement is today's per-queue commit cost on MinIO at 1, 10, 100 and 1,000 queues. Reason: performance comes first, and these designs trade durability and rebuild guarantees for cost.
+**Measure first.** Compaction, snapshots and truncation, splitting the log by partition range, and full-delete garbage collection are proposals, and none is committed before it is measured. The first measurement is today's per-queue commit cost on the local S3 test endpoint at 1, 10, 100 and 1,000 queues. Reason: performance comes first, and these designs trade durability and rebuild guarantees for cost.
 
 **Storage evidence** (MEASURED unless marked):
 - **Keys** (SPIKE-002): a per-queue integer surrogate instead of `(tenant TEXT, queue TEXT)` saves 11–21% per row; `BLOB` keys save 11–18% for integer and UUID keys; cost is linear in key length with no cliff up to 1024 B. Every key lookup forces `INDEXED BY` and looks up each key separately, never in one `IN (…)` list.
@@ -178,7 +177,7 @@ These decisions bind the S3×Turso implementation, not the contract; API-006 say
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
 | The product implementation misses the 100 queues × 1M records claim envelope that the spike met with the lean claim row | L | H | TP-003 AC-PERF-6 runs that shape on the product implementation (TD-017 §13). |
-| Performance work starts on compaction, snapshots or GC before the commit cost is known | M | H | Measure per-queue commit cost on MinIO at 1, 10, 100 and 1,000 queues first (TD-018, Spike A). |
+| Performance work starts on compaction, snapshots or GC before the commit cost is known | M | H | Measure per-queue commit cost on the local S3 test endpoint at 1, 10, 100 and 1,000 queues first (TD-018, Spike A). |
 | The contract grows to fit one consumer or one backend | M | H | Spec-only growth: every public item cites a clause, and a clause-manifest test runs in `fireweed-contract`. |
 | `Operator` is used as a side channel | L | H | OP4's CI ban and the separate operator suite (CS5). |
 | Consumers rely on behavior only one implementation has, such as untorn `stats` | M | M | The torn-read adversary on every scenario (CS3), and no backend knobs (CS4). |

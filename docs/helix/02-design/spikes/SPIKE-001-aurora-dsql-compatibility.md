@@ -5,12 +5,10 @@ ddx:
     - prd
     - adr-queue-as-shard-unit-and-projection-families
     - adr-log-single-source-of-truth
-    - td-postgres-native-reference-mode
   links:
     - {kind: informed_by, to: prd}
     - {kind: informed_by, to: adr-queue-as-shard-unit-and-projection-families}
     - {kind: informed_by, to: adr-log-single-source-of-truth}
-    - {kind: informed_by, to: td-postgres-native-reference-mode}
   status: completed
 ---
 

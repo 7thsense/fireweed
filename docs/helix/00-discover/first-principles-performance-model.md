@@ -25,8 +25,8 @@ ddx:
 - **Date**: 2026-08-14
 - **Scope**: requirements-level capacity for a durable, batch-centric priority
   queue, derived from disk I/O, CPU, memory bandwidth, and network bandwidth
-- **Out of scope**: current Fireweed storage-cell design, implementation
-  hot-path choices, and host-specific TP-002 / TP-005 evidence
+- **Out of scope**: storage layout, implementation hot-path choices, and
+  host-specific TP-002 / TP-005 evidence
 
 This note answers one question: given the *work* the product must do, what
 throughput of what size is a reasonable **high-performance** single-node
@@ -51,10 +51,11 @@ PRD, TP-002, or TP-005 only after an explicit product decision.
 
 ## 1. The work, not the design
 
-The required primitive is a **mutable, leased, priority-ordered work item**,
-not an immutable log record. Clients push and update items idempotently,
+The required primitive is a **mutable, leased, rank-ordered work item**,
+not an immutable log record. Clients write and update items idempotently,
 workers claim eligible batches under a single active lease, and claimed items
-are finalized. Durability after process death follows the selected log class.
+are settled. An acknowledged write is durable in the S3 object log (API-006
+DUR1).
 A node must keep a 10M-item hot queue live and exercise at least 1,000
 concurrent queues. Horizontal scale is more queues on more owner nodes, not
 a faster single logical stream.
@@ -68,27 +69,27 @@ Mixing units is how systems get fake "millions of TPS" claims.
 
 | Unit | Meaning | Conversion |
 |---|---|---|
-| **Item-mutation** | One item changes state once (push, update, claim, or finalize) | Primary capacity unit |
+| **Item-mutation** | One item changes state once (write, update, claim, or settle) | Primary capacity unit |
 | **Request / batch** | One batch operation | `request_tps = item_tps / batch_size` |
 | **Durable commit** | One fsync, WAL group-commit, or object PUT | `commit_tps = item_tps / items_per_commit` |
-| **Completed item** | One item through ingest → optional update → claim → finalize | `completions/s = item_tps / mutations_per_lifecycle` |
+| **Completed item** | One item through ingest → optional update → claim → settle | `completions/s = item_tps / mutations_per_lifecycle` |
 
 Seventh Sense's validation mix is about **3.5 item-mutations per completed
-item** (1 push, 0.5 reschedules, 1 claim, 1 finalize). Quote completions when
+item** (1 write, 0.5 reschedules, 1 claim, 1 settle). Quote completions when
 talking about application work; quote item-mutations when talking about the
 engine.
 
 ### Record size
 
-Capacity is set by the **durable encoded record**, not the JSON payload.
-Identity, lease, priority, `not_before`, `group_key`, versions, and framing
-are ~256–512 B even when the payload is tiny.
+Capacity is set by the **durable encoded record**, not the field bytes alone.
+Identity (key), stage, rank, lease/claim id, group, gates, version and framing
+are ~256–512 B even when fields are tiny.
 
-| Class | Payload | Encoded record | Role |
+| Class | Fields | Encoded record | Role |
 |---|---:|---:|---|
 | **S** | 256 B | **~512 B** | Typical Seventh Sense / work ticket |
 | **M** | 1 KiB | **~1.5 KiB** | Headline hot record |
-| **L** | 16 KiB | **~17 KiB** | Large job blob (FOQS capped payload at 10 KiB) |
+| **L** | 16 KiB | **~17 KiB** | Large field values (FOQS capped its payload at 10 KiB) |
 
 ## 2. Reference host and primitive ceilings
 
@@ -103,7 +104,7 @@ protection (PLP), 25 GbE, ~250 GB/s DRAM.
 | fsync / FLUSH | ~100 µs → **10,000 commits/s** per log stream | Unbatched durable TPS |
 | Sequential write | **3.5 GB/s** per drive (sustained, not spec-sheet burst) | Large records, high batch density |
 | Random 4K write | **200–500K IOPS** | Page-oriented stores that do not pack records |
-| CPU, rich path | **5–20 µs/item** → 50–200K item-ops/s/core | Validate, encode, priority / eligibility / lease indexes |
+| CPU, rich path | **5–20 µs/item** → 50–200K item-ops/s/core | Validate, encode, stage / rank / lease indexes |
 | CPU, cheap path | **1–3 µs/item** → 300K–1M/core | Append + hash, small item |
 | DRAM bandwidth | **200–400 GB/s** | Almost never first unless copies explode |
 | 25 GbE | **3.125 GB/s** | Request + response bytes |
@@ -199,8 +200,7 @@ Concurrency has two layers:
 If one queue's exclusive mutation is 10 µs, that queue caps at **100K
 item-mutations/s** no matter how fast the disk is. The 1,000-queue density
 requirement is how a node uses 32 cores. A single 10M hot queue only hits
-the headline bar if that exclusive section stays in the low microseconds, or
-if bounded-relaxed ordering lets more than one core work the same queue.
+the headline bar if that exclusive section stays in the low microseconds.
 
 High performance on one hot queue is therefore a **serial-section budget**,
 not a disk spec-sheet number. Claim selection must stay O(log n) at 10M
@@ -222,72 +222,73 @@ across owner nodes), not a single-node benchmark.
 
 ### High-performance region on H-server
 
+Every acknowledged write waits for the object-log commit (API-006 DUR1). A
+commit is one data-object PUT plus one head compare-and-swap for the whole
+partition, cut at the engine linger L (TD-018). A busy partition therefore
+costs about 2/L PUT/s however many items it carries, and write latency is
+about L plus two conditional-PUT round trips.
+
 | Durability | Size | Batch | High-performance bar | Completions/s at 3.5 mut/item |
 |---|---|---:|---:|---:|
-| Local NVMe, group-commit | **M (1 KiB)** | **100** | **300–500K item-mutations/s** | **85–140K** |
-| Local NVMe, group-commit | S (512 B) | 100–1000 | 400–800K | 115–230K |
-| Local NVMe, group-commit | L (16 KiB) | 100 | 50–80K | 15–23K |
-| Local NVMe, **unbatched** | any | 1 | 5–10K | 1.5–3K |
-| Object log (S3), 50–500 ms commit bound | M | fill MB segments | 50–200K / node (PUT-rate × items/PUT) | 15–60K |
-| Object log, 5–10 ms bound | M | small segments | 100–1,000 / queue | tens–hundreds |
-| Remote Postgres, batched | M | 100, pipelined | 30–150K | 10–40K |
-| Memory / Class B serving | S/M | 100+ | **1M+** | 300K+ |
+| S3 object log, 20 ms linger | **M (1 KiB)** | **100** | **50–200K item-mutations/s per node** | **15–60K** |
+| S3 object log, 20 ms linger | S (512 B) | 100–1000 | 100–300K per node | 30–85K |
+| S3 object log, 20 ms linger | L (16 KiB) | 100 | 20–50K per node | 6–15K |
+| S3 object log, 100 ms linger | M | 100 | same byte binds; 20 PUT/s per busy partition instead of 100 | same |
 
 ### Headline benchmark
 
 The one number that deserves to be called high-performance for this product:
 
-> **H-server, Class A local log, 1 KiB items, batch 100, mixed lifecycle
-> 1 : 0.5 : 1 : 1**
+> **H-server, S3 object log at the 20 ms default linger (TD-018), 1 KiB
+> items, batch 100, mixed lifecycle 1 : 0.5 : 1 : 1**
 >
-> **100,000 completed items/s ≈ 350,000 durable item-mutations/s**
+> **50,000 completed items/s ≈ 175,000 durable item-mutations/s per node**
 >
-> batch p99 ≤ 10 ms, telemetry on, 10M items already resident.
+> batch p99 ≤ 250 ms (the linger plus one data PUT and one head CAS),
+> telemetry on, 10M items already resident.
 
 Why that number:
 
-- ~35× the unbatched fsync floor, so it only happens if group-commit and
-  concurrency work.
-- ~30–50× a typical chatty Postgres queue; ~30× SQS FIFO's per-queue bar.
+- It only happens if the linger packs thousands of mutations into each
+  commit: at 20 ms, ~3,500 item-mutations (~5 MiB) share one data PUT and
+  one head CAS, so a busy partition stays near 2/L = 100 PUT/s (TD-018).
+- ~15× a typical chatty Postgres queue; ~15× SQS FIFO's per-queue bar.
 - Same order as a FOQS hot topic.
-- ~30–40% of the H-server bind for size M — ambitious, not magical.
-- A 10M hot queue drains in ~100 s; 10M ingest at 500K/s is ~20 s.
-- Far more than a SaaS scheduler typically needs (10–50K completions/s is
-  already adequate for Seventh Sense-like peaks). 100K is headroom.
+- Well under the H-server byte binds for size M (§3). On the object log,
+  commit latency and the PUT budget set the bar, not bytes.
+- A 10M hot queue drains in ~200 s; 10M ingest at 200K/s is ~50 s.
+- It covers the 10–50K completions/s that is adequate for Seventh
+  Sense-like peaks.
 
-Request rate at that point is modest: **3,500 batch-TPS**. The scarce
-resources are bytes, commits, and the per-queue serial section — not RPCs.
+Request rate at that point is modest: **1,750 batch-TPS**. At a ~150 ms
+commit, Little's law needs ~260 batches in flight. The scarce resources are
+bytes, commits, and the per-queue serial section — not RPCs.
 
 ### What is not a reasonable high-performance claim
 
-- 1M durable fsync-per-item TPS (commit_hz forbids it).
-- 1M/s of 16 KiB records (sequential disk and 25 GbE forbid it).
+- 1M durable commits/s (each commit is a data PUT plus a head CAS).
+- 1M/s of 16 KiB records (25 GbE forbids it).
 - S3-backed 100K/s at a 5 ms durability bound (PUT RTT forbids it).
 - Single-connection chatty SQL at 100K/s (round trips forbid it).
-- Comparing Class B memory 1M+/s to Class A durable as if they were the
-  same product.
 
 ## 5. The small matrix that proves the model
 
 Do not publish a single TPS cell. A high-performance *claim* on a declared
-host needs these six runs. Anything else lets a memory-only or unbatched
+host needs these six runs. Anything else lets an unbatched or non-durable
 number impersonate the product.
 
 | Run | What it proves | Pass-as-high-performance on H-server |
 |---|---|---|
-| B1 / S / durable | fsync path is healthy | 5–10K mut/s, p99 **< 1 ms** |
-| **B100 / M / durable mixed lifecycle** | **Headline** | **≥ 100K completions/s**, p99 ≤ 10 ms |
-| B1000 / S / push-only | group-commit + sequential write | **≥ 500K** ingest/s |
+| B1 / S / durable | commit path is healthy | p99 within the linger plus two conditional-PUT round trips |
+| **B100 / M / durable mixed lifecycle** | **Headline** | **≥ 50K completions/s**, p99 ≤ 250 ms |
+| B1000 / S / write-only | group commit packs the linger | **≥ 200K** ingest/s |
 | B100 / M / 10M resident | indexes stay O(log n) | ≥ 80% of headline |
-| B100 / L / durable | bandwidth honesty | **≥ 50K** mut/s |
+| B100 / L / durable | bandwidth honesty | **≥ 20K** mut/s |
 | 1,000 cold + 1 hot | density / noisy neighbor | hot ≥ 80% of single-queue headline |
 
-Object-log cells report **items/s and PUTs/s** at two commit bounds (for
-example 50 ms and 500 ms). Those numbers will be lower; that is the
-cost/latency dial, not a failed high-performance claim.
-
-Class B / memory 1M+/s is a serving-path ceiling, useful as an upper bound,
-not a durability claim.
+Every run reports **items/s and PUTs/s** at the stated linger. A second
+linger (for example 100 ms) shows the cost/latency dial; its lower PUT rate
+and higher latency are the dial, not a failed high-performance claim.
 
 ## 6. Implications for requirements (not yet folded)
 
@@ -295,18 +296,18 @@ If maintainers later want a declared-host capacity envelope, this model
 suggests four statements. None of these are in force until PRD / TP-002 /
 TP-005 are explicitly updated.
 
-1. **Primary envelope:** 1 KiB / batch 100 / 100K completions/s / H-server /
-   Class A local log.
+1. **Primary envelope:** 1 KiB / batch 100 / 50K completions/s / H-server /
+   S3 object log at a 20 ms linger.
 2. **Not-dead floor:** unbatched durable ≥ 1K mut/s, plus the existing
    portable TP-002 correctness / 10M-resident / 1,000-queue envelope.
 3. **Horizontal envelope:** more queues on more owners. Do not promise 100K
    completions/s on one logical stream without stating the serial-section
    budget.
-4. **Object-log envelope:** publish the commit-bound curve. Do not put S3 on
-   the same chart as NVMe group-commit.
+4. **Object-log envelope:** publish the linger curve: latency, throughput
+   and PUTs/s at each linger.
 
 Seventh Sense "millions resident, sub-second client latency" is easy at
-these numbers. Sub-second is a latency SLO (p99 of a B100 call in 5–20 ms).
+these numbers. Sub-second is a latency SLO (p99 of a B100 call ≤ 250 ms).
 Millions resident is a working-set problem (tens of GB), not a TPS problem.
 The scarce resources for that workload are **claim/index CPU on one hot
 queue** and **durable commit batching**.

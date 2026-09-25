@@ -35,7 +35,7 @@ ddx:
 6. **Queues are never rebalanced.** A queue never moves between partitions. A hot partition is relieved by moving the whole partition to another node. A single queue's ceiling is one partition's committer and one Turso writer.
 7. **Ownership is per partition: one writer, fenced by an epoch.** Each partition has one control-plane lease. Its owner's epoch lives in the partition's head, and the log rejects a commit made under a stale epoch (ADR-013). A handoff follows TD-003's sequence per partition: drain, release or expire the old lease, acquire the next epoch, read the head fresh, fence, hydrate the Turso file, then serve. How partitions are assigned to nodes is the control plane's choice.
 8. **The control plane is pluggable.** A single-node deployment runs it in-process; a multi-node deployment uses an external store (ADR-001). It holds assignments and leases and is never on the per-command path.
-9. **Measure first.** TD-018 designs the partition cell. Its commit path is built only after TD-018's commit-cost measurements, starting with today's per-queue commit cost on MinIO at 1, 10, 100 and 1,000 queues. Compaction, snapshots and truncation, splitting a log by partition range, and full-delete garbage collection are proposals that need their own measurement and owner decision.
+9. **Measure first.** TD-018 designs the partition cell. Its commit path is built only after TD-018's commit-cost measurements, starting with today's per-queue commit cost on the local S3 test endpoint at 1, 10, 100 and 1,000 queues. Compaction, snapshots and truncation, splitting a log by partition range, and full-delete garbage collection are proposals that need their own measurement and owner decision.
 
 ## Alternatives
 

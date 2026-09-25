@@ -3,10 +3,8 @@ ddx:
   id: discover-turso-0-7-compatibility-probe-results
   depends_on:
     - discover-rust-native-embedded-projection-alternatives
-    - adr-embedded-engine-integration-and-public-surface
   links:
     - {kind: informed_by, to: discover-rust-native-embedded-projection-alternatives}
-    - {kind: informed_by, to: adr-embedded-engine-integration-and-public-surface}
   review:
     self_hash: bf529b8c210cc69e77f4abf909897b5e8fbffd608beadf6271a166ab32259e13
     deps:
@@ -19,7 +17,6 @@ ddx:
 
 - **Observed**: 2026-07-17 (America/New_York)
 - **Work item**: `pqueue-8b488429`
-- **Governing decision**: ADR-006
 - **Candidate**: `turso = 0.7.0`, default features disabled
 - **Baseline**: `rusqlite = 0.32.1`, bundled SQLite
 - **Toolchain**: Rust 1.92.0
@@ -31,17 +28,12 @@ The probe covers the pod-local, rebuildable relational projection. It does not e
 standalone durable log authority, enable Turso sync or experimental MVCC, change production dependencies,
 or select a different backend. It did not run Niflheim or host-capacity benchmarks.
 
-Run the current retained probe from the repository root:
+The probe ran from `tools/fireweed-turso-compat-probe` at the observed date.
 
-```bash
-cargo run --locked \
-  --manifest-path tools/fireweed-turso-compat-probe/Cargo.toml
-```
-
-The tool is a nested Cargo workspace with its own lockfile. It is not a member of the root workspace and no
-default GitHub Actions workflow invokes it. Its `include_str!` reads
-`crates/fireweed-relational/src/schema.rs` and extracts the `RELATIONAL_SCHEMA` raw string at compile
-time, so the schema check cannot silently substitute a reduced copy.
+The tool was a nested Cargo workspace with its own lockfile. It was not a member of the root workspace and no
+default GitHub Actions workflow invoked it. Its `include_str!` read
+`crates/fireweed-relational/src/schema.rs` and extracted the `RELATIONAL_SCHEMA` raw string at compile
+time, so the schema check could not silently substitute a reduced copy.
 
 ## Observed Results
 
@@ -264,14 +256,13 @@ adapter would require either:
 - changing the storage axes and atomic closure to async across the workspace; or
 - introducing a blocking database actor and serial request/response handoff.
 
-The first exceeds this probe and ADR-006's stop rule. The second discards the native-async/concurrent-write
+The first exceeds this probe and its stop rule. The second discards the native-async/concurrent-write
 reason for selecting Turso and adds another scheduling and failure boundary. Neither is authorized here.
-Bundled SQLite through rusqlite remains the production baseline and adapter selection is unchanged.
 
 A future decision may reopen the candidate only if fireweed independently adopts async storage ports or Turso
-ships a supported synchronous Rust API. Any Turso version change must rerun this exact compatibility probe.
+ships a supported synchronous Rust API.
 
-ADR-015 subsequently selected full-async storage boundaries and ADR-016 selected Turso as the first
-Rust-native derived projection. Those decisions satisfy the first reopening condition without changing
-this probe's dated evidence. Production status still requires TD-010's full command/read differential,
-cancellation, recovery, and server conformance; the bounded probe alone is not that evidence.
+ADR-015 adopts full-async storage boundaries and ADR-016 selects Turso as the derived projection, which
+satisfies the first reopening condition without changing this probe's dated evidence. Production
+conformance is the contract suite on the S3×Turso implementation (API-006 §9) and the TP-003 gates; the
+bounded probe alone is not that evidence.

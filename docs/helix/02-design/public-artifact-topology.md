@@ -23,34 +23,35 @@ coordinates across manifests, release automation, storage, and wire surfaces.
 - **private** packages are maintainer test, evidence, or release tools and are
   not product artifacts.
 
-ADR-009 makes `fireweed` the only public Cargo package. In particular, a
-runtime component can be public and supported as a binary or container without
-its implementation package becoming a public Rust API.
+`fireweed` and `fireweed-contract` are the consumer-facing packages (ADR-009);
+`fireweed` is the only crate published to crates.io today. A runtime component
+can be public and supported as a binary or container without its
+implementation package becoming a public Rust API.
 
 ## Workspace package inventory
 
 The `Current package` column is the machine key consumed by
 `scripts/verify-public-artifact-topology.sh`. Every package returned in the
 root workspace by `cargo metadata --no-deps --format-version 1` must occur
-exactly once between the inventory markers. After the core rename, current and
-target package names are intentionally identical.
+exactly once between the inventory markers. Current and target package names
+are identical.
 
 <!-- markdownlint-disable MD013 -->
 <!-- workspace-package-inventory:start -->
 | Current package | Target package | Class | Registry | Publish order | Feature policy | Rationale |
 | --- | --- | --- | --- | ---: | --- | --- |
-| fireweed | fireweed | publishable | crates.io | 1 | default = memory, objectlog, turso; minimal = no default features; postgres opt-in; memory log is volatile | The sole supported Rust facade and constructor surface. |
+| fireweed | fireweed | publishable | crates.io | 1 | S3×Turso implementation (ADR-024); no storage-selector features | The sole supported Rust facade and constructor surface. |
 | fireweed-core | fireweed-core | repository-only | - | - | no public feature contract | Domain types are exposed only through the facade. |
 | fireweed-engine | fireweed-engine | repository-only | - | - | no public feature contract | Raw ports and coordination internals must not become an external construction surface. |
 | fireweed-projection | fireweed-projection | repository-only | - | - | no public feature contract | Shared projection implementation, supported only through shipped profiles. |
 | fireweed-relational | fireweed-relational | repository-only | - | - | no public feature contract | Driver-neutral relational implementation shared by internal adapters. |
-| fireweed-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Reference adapter used by the facade, tests, and local evaluation. |
+| fireweed-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Not part of the ADR-024/ADR-025 design; removed when the kernel contract lands. |
 | fireweed-objectlog | fireweed-objectlog | repository-only | - | - | facade feature objectlog | Internal adapter for supported object-log profiles. |
-| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; server tls opt-in | Optional PostgreSQL log/projection adapter. |
-| fireweed-resp | fireweed-resp | repository-only | - | - | no independent features; shipped through the service | Supported protocol adapter, not a standalone Cargo API. |
+| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; server tls opt-in | Not part of the ADR-024/ADR-025 design; removed when the kernel contract lands. |
+| fireweed-resp | fireweed-resp | repository-only | - | - | no independent features; shipped through the service | Not part of the ADR-024/ADR-025 design; removed when the kernel contract lands. |
 | fireweed-server | fireweed-server | repository-only | - | - | default env-config, postgres, turso-projection; tls and external-kafka opt-in | Composition package for the shipped service binary and container. |
 | fireweed-turso | fireweed-turso | repository-only | - | - | local enabled by facade default turso feature | Default native projection, supported through the facade. |
-| fireweed-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
+| fireweed-conformance | fireweed-conformance | private | - | - | test-only | Not part of the ADR-024/ADR-025 design; removed when the kernel contract lands. |
 | fireweed-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
 | fireweed-loadgen | fireweed-loadgen | private | - | - | evidence workload only | In-cluster release-evidence generator, not an operator command. |
 | fireweed-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
@@ -59,7 +60,7 @@ target package names are intentionally identical.
 <!-- markdownlint-enable MD013 -->
 
 The independent `fireweed-bench` workspace is a private evidence tool, not a
-registry publication. The retired Turso compatibility probe has been removed.
+registry publication.
 
 ## Cargo publication order and gate
 
@@ -80,14 +81,8 @@ cargo publish -p fireweed --dry-run
 Publishing internal engine or adapter crates to work around that closure gate
 is not allowed: it would violate ADR-009's encapsulation boundary.
 
-The facade's minimum feature contract is:
-
-- `--no-default-features` builds the engine-facing facade without an adapter;
-- default features provide memory, object-log and native Turso adapters;
-- `postgres` adds PostgreSQL log and projection compositions;
-- SQLite configuration is a migration error and no SQLite Cargo feature remains;
-- advanced API availability depends on composition. The maintenance baseline
-  records native Turso's explicit unsupported-operation boundaries.
+The facade exposes the eight `Store` ops, the S3×Turso constructor and
+`TursoAdmin` (ADR-009, ADR-024); no feature changes the API.
 
 ## Non-Cargo release artifacts
 
@@ -107,8 +102,8 @@ aliases, compatibility binaries, and dual-published artifacts.
 <!-- markdownlint-enable MD013 -->
 
 `Dockerfile`, `Dockerfile.prebuilt`, `Dockerfile.e2`, `docker-compose.yml`, the
-load generator, benchmark binaries, compatibility probe, and remaining
-`fireweed-release` verifier binaries are build or evidence inputs. They are not
+load generator, benchmark binaries and remaining `fireweed-release` verifier
+binaries are build or evidence inputs. They are not
 separate public artifacts unless a later topology decision promotes them.
 
 ## Validation

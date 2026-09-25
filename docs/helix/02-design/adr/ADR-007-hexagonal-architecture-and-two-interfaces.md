@@ -25,7 +25,7 @@ ddx:
 ## Context
 
 - The engine ports (`LibBackend`, a 21-trait bound that includes log and snapshot traits) served as the seam for storage backends. When a PostgreSQL backend was plugged in there, the seam absorbed it: lowest-common-denominator defaults, capability flags exported as API, and dialect forks (ADR-025).
-- A driving adapter that binds those ports directly, as a RESP front did, offers its own subset of the semantics. Two driving interfaces then mean two contracts.
+- A driving adapter that binds those ports directly, such as a RESP front, offers its own subset of the semantics. Two driving interfaces then mean two contracts.
 - The external contract is API-006: eight operations on an object-safe `Store` trait, one black-box conformance suite, and no capability flags (ADR-025). The architecture has to make that contract the only place an implementation plugs in.
 
 ## Decision

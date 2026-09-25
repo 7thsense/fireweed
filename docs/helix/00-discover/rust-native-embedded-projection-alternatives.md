@@ -1,8 +1,6 @@
 ---
 ddx:
   id: discover-rust-native-embedded-projection-alternatives
-  depends_on:
-    - adr-embedded-engine-integration-and-public-surface
   review:
     self_hash: 09abb88848c53782d2e9b2664714d0a4c7081b698c73da75349492f8fac714ca
     deps:
@@ -14,18 +12,16 @@ ddx:
 
 - **Decision date**: 2026-07-17
 - **Decision owner**: fireweed storage
-- **Governing decision**: ADR-006
 
 ## Scope
 
-This report evaluates the pod-local, rebuildable projection paired with an authoritative object log. It
-does not select a replacement for the standalone SQLite log-authority profile.
+This report evaluates the pod-local, rebuildable projection paired with an authoritative object log.
 
 ## Recommendation
 
-Keep bundled SQLite through `rusqlite` as the production baseline. Test **Turso Database 0.7.x first**
-with a bounded SQL-compatibility probe because it is the only evaluated alternative that is both a Rust
-database implementation and capable of preserving the existing relational projection. If that probe
+Recommendation on 2026-07-17: test **Turso Database 0.7.x first** with a bounded SQL-compatibility probe
+because it is the only evaluated alternative that is both a Rust database implementation and capable of
+preserving the existing relational projection. If that probe
 fails, test **redb 4.1.x** as the engine-shaped fallback. A redb port would replace the SQL projection
 rather than substitute a driver.
 
@@ -43,10 +39,9 @@ distinction explicit ([libSQL repository](https://github.com/tursodatabase/libsq
 
 ## Local Constraints
 
-ADR-006 sanctions bundled `rusqlite` for v1 while leaving a pure-Rust engine as a separate evaluation. It
-also requires production embedders to retain a durable backend. For the object-log profile evaluated here,
-the embedded database is a derived projection, not the acknowledgement authority. A lost projection suffix
-may be replayed; a durable high-water ahead of the corresponding projection state is still forbidden.
+The evaluated projection is derived from the object log and is not the acknowledgement authority. A lost
+projection suffix may be replayed; a durable high-water ahead of the corresponding projection state is still
+forbidden.
 
 The current port is not a generic SQL abstraction:
 
@@ -157,7 +152,7 @@ recovery ([write transaction API](https://docs.rs/redb/latest/redb/struct.WriteT
 rebuildable projection, default repair may be acceptable only if measured against the pod restart budget.
 
 Port cost is high. fireweed would need versioned composite key encodings and explicit tables for items,
-client keys, eligibility order, lease expiry, gates, cohorts, typed indexes, summaries, and cursors. Every
+client keys, eligibility order, lease expiry, gates, typed indexes, summaries, and cursors. Every
 command arm must remove stale index keys and insert new ones in the same transaction before advancing the
 cursor. The 4.1 changelog also follows recent data-loss and corruption-class fixes, so a prototype must pin
 4.1 or newer and include kill/reopen validation
@@ -233,23 +228,21 @@ prototype limited to `meta/cursor`, `items`, `active_by_client_key`, `eligible_b
   checked against the in-memory reference after every supported transition before its scope expands.
 - **Recovery latency**: redb repair and Fjall journal/compaction recovery must be measured with realistic
   resident counts. A replayable projection still has a pod readiness budget.
-- **False durability equivalence**: this report applies to the object-log-derived projection. Replacing the
-  standalone SQLite log authority requires a separate durable-ack evaluation and power-loss evidence.
-- **Scope growth**: do not port all command arms, cohorts, gates, summaries, or production wiring until a
+- **False durability equivalence**: this report applies to the object-log-derived projection only; the
+  object log, not the projection, carries the durable acknowledgement.
+- **Scope growth**: do not port all command arms, gates, summaries, or production wiring until a
   bounded probe demonstrates a material benefit over bundled SQLite.
 
-## Decision Update: Full-Async Ports Reopen Turso
+## Outcome
 
-The completed Turso 0.7 probe passed the SQL, transaction, rollback, reopen, concurrency, and conflict
-boundary but failed this report's synchronous-port stop rule. ADR-015 subsequently adopts full-async
-storage boundaries for independent architectural reasons, so a native-async Turso adapter no longer
-requires a blocking actor or nested runtime. ADR-016 therefore selects Turso as the first Rust-native
-derived projection, paired only with the authoritative object log and gated by TD-010.
+The Turso 0.7 probe passed the SQL, transaction, rollback, reopen, concurrency, and conflict boundary but
+failed this report's synchronous-port stop rule. ADR-015 adopts full-async storage boundaries for
+independent architectural reasons, so a native-async Turso adapter needs no blocking actor or nested
+runtime. ADR-016 selects Turso as the derived projection, paired only with the authoritative object log,
+and TD-010 designs it.
 
-This does not retroactively turn the bounded probe into production conformance. SQLite remains the
-reference and rollback implementation. Turso stays feature-gated until every command arm and projection
-read is differentially equal after reopen, cancellation cuts converge through `request_id`, rebuild from
-the object log is exact, and one focused CI lane passes without expanding the broad backend matrix.
+The bounded probe is not production conformance. Production conformance is the contract suite on the
+S3×Turso implementation (API-006 §9) and the TP-003 gates.
 
 ## Source Ledger
 

@@ -185,7 +185,7 @@ Two deliveries of one await race on `Version(v)`; the loser re-reads and reports
 - **CancelItems:** the same move by key for each item, with `Leased` retried.
 - **DeleteNotStarted:** `read{keys}`, then `{Version(v), None, Delete}` for each record that is Free with `attempts == 0`.
 - **PauseRun, ResumeRun, SuppressRules, UnsuppressRule** use membership gates. `snorri.paused`, `snorri.suppressed`, `snorri.failed` and each per-rule gate are blocked once, with unit gate ops. PauseRun pages `scan(by_run_status, eq=[tenant, run])` and writes `{Exists, None, Put{gates: Edit{add: {snorri.paused}}}}` per hit; ResumeRun removes the gate. SuppressRules adds each rule's gate to the records the rule selects. A gate `Edit` commutes, so no version check is needed. Lifecycle classification reads `Record.gates`.
-- **RescheduleItems, RecycleRule:** `{Exists, None, Put{rank: not_before µs}}`. A `Leased` record counts as conflicted.
+- **RescheduleItems, RecycleRule:** `{Exists, None, Put{rank: <new run time> µs}}`. A `Leased` record counts as conflicted.
 - Run and rule mutations are paged and are not atomic across pages. A `Leased` record reports `Leased` and is retried (P12).
 
 ### 3.6 Call sites

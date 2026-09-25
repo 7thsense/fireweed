@@ -20,9 +20,9 @@ ddx:
 ## Product semantics
 
 The project is not merely a priority queue. It owns the durable work lifecycle:
-acceptance, configurable ordering, eligibility, grouping, claims and leases,
-retries, idempotency, terminal state, and recovery across several storage
-profiles. It is not a workflow engine and does not define dependency graphs.
+acceptance, rank ordering, claimability, grouping, claims and leases, retries,
+idempotency, and recovery. It is not a workflow engine and does not define
+dependency graphs.
 
 The public descriptor is:
 
@@ -110,8 +110,8 @@ current public name.
 | Informal abbreviation | `FWQ` |
 
 This map is a naming input, not authorization for a mechanical global replace.
-ADR-018 must classify public, compatibility, protocol, and persisted identifiers
-before implementation begins.
+ADR-023 applies it to public, protocol, and persisted identifiers in one hard
+cutover.
 
 ## Trademark caveat
 
