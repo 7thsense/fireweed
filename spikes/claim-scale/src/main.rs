@@ -246,6 +246,76 @@ fn free_predicate(layout: Layout) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Lean claim-path row (SPIKE-004 Finding 9, testing SPIKE-006 layout C): the
+// items row carries NO field bytes at all — `fields TEXT` is dropped from the
+// table entirely, leaving exactly `queue_no, seq, key, stage, rank, version,
+// claim_id` (this spike's already-established field set minus `fields`; see
+// SPIKE-004's own Limitations note that `attempts`/`gate`/`group` are out of
+// this spike's scope, unchanged here). An optional separate `fields` table
+// `(queue_no, seq) -> TEXT` holds the same ~300B payload bulk_build's fat
+// layout puts inline, populated 1:1 with the item rows so the file's total
+// working set is comparable in size — but the claim path (do_claim/
+// do_claim_q/do_finish/do_extend/do_sweep) never references it, by
+// construction (none of those statements select or update `fields` on
+// either layout, fat or lean; grep confirms). Only implemented for L2, the
+// Recommendation — this is not a new lease representation, it is the same
+// L2 claims-table design with a narrower base row.
+fn schema_ddl_lean(with_claim_index: bool) -> Vec<String> {
+    let mut ddl = Vec::new();
+    ddl.push(
+        "CREATE TABLE items (\n\
+            queue_no INTEGER NOT NULL,\n\
+            seq INTEGER NOT NULL,\n\
+            key BLOB NOT NULL,\n\
+            stage INTEGER NOT NULL,\n\
+            rank INTEGER NOT NULL,\n\
+            version INTEGER NOT NULL,\n\
+            claim_id INTEGER,\n\
+            PRIMARY KEY (queue_no, seq)\n\
+        )"
+            .to_string(),
+    );
+    ddl.push("CREATE UNIQUE INDEX items_key_idx ON items (queue_no, key)".to_string());
+    if with_claim_index {
+        ddl.push(
+            "CREATE INDEX items_claim_idx ON items (queue_no, stage, rank, seq) \
+             WHERE claim_id IS NULL"
+                .to_string(),
+        );
+    }
+    ddl.push(
+        "CREATE INDEX items_claim_id_idx ON items (claim_id) WHERE claim_id IS NOT NULL"
+            .to_string(),
+    );
+    ddl.push(
+        "CREATE TABLE claims (\n\
+            claim_id INTEGER PRIMARY KEY,\n\
+            token_hash BLOB NOT NULL,\n\
+            holder TEXT,\n\
+            expires_at INTEGER NOT NULL,\n\
+            record_count INTEGER NOT NULL\n\
+        )"
+            .to_string(),
+    );
+    ddl.push("CREATE INDEX claims_expires_idx ON claims (expires_at)".to_string());
+    ddl
+}
+
+/// The lean layout's optional fields table: same ~300B payload per record as
+/// the fat layout's inline `fields` column (same `hex(randomblob(146))`
+/// wrapped-JSON shape bulk_build's fat INSERT..SELECT already uses), in a
+/// separate table keyed by (queue_no, seq). Never touched by the
+/// claim/finish/extend/sweep path — present only so the file's total working
+/// set (what page cache must hold) is comparable to the fat layout's,
+/// matching the task's "so what the working set contains is comparable".
+const FIELDS_TABLE_DDL: &str = "CREATE TABLE fields (\n\
+    queue_no INTEGER NOT NULL,\n\
+    seq INTEGER NOT NULL,\n\
+    fields TEXT NOT NULL,\n\
+    PRIMARY KEY (queue_no, seq)\n\
+)";
+
+// ---------------------------------------------------------------------------
 // Connection configuration — verbatim from spikes/key-storage/src/main.rs,
 // itself mirroring crates/fireweed-turso/src/local.rs:3407-3444
 // `configure_connection` under the `with_log_backed_projection()` profile
@@ -256,7 +326,13 @@ async fn configure_connection(connection: &Connection) -> turso::Result<()> {
     connection.pragma_update("page_size", "4096").await?;
     connection.pragma_update("journal_mode", "WAL").await?;
     connection.pragma_update("synchronous", "NORMAL").await?;
-    connection.pragma_update("cache_size", "-131072").await?;
+    // Production's default is -131072 (128 MiB). Finding 9's cache_size
+    // ablation (128 MiB vs 1 GiB) overrides this via FW_SPIKE_CACHE_SIZE
+    // (a raw `cache_size` pragma value, e.g. "-1048576" for 1 GiB) rather
+    // than hardcoding a second code path — every other subcommand is
+    // unaffected because the default here is unchanged.
+    let cache_size = env::var("FW_SPIKE_CACHE_SIZE").unwrap_or_else(|_| "-131072".to_string());
+    connection.pragma_update("cache_size", cache_size.as_str()).await?;
     connection.pragma_update("temp_store", "MEMORY").await?;
     connection.pragma_update("wal_autocheckpoint", "0").await?;
     connection.busy_timeout(Duration::from_secs(5))?;
@@ -1193,10 +1269,21 @@ async fn run(layout: Layout, db_path: &str, rows_completed: i64, rows_initial: i
 // is already covered by Finding 6 at 1M/10M scale on the production-faithful
 // per-batch-checkpoint path) — this is "build it however is fastest" per the
 // task: large per-queue transactions, generate_series-driven INSERT..SELECT
-// (no per-row Rust-side value marshaling), and all secondary indexes/tables
-// created AFTER the bulk load rather than maintained incrementally during
-// it. Build time is reported as its own phase, separate from any per-row
-// rate claim.
+// (no per-row Rust-side value marshaling).
+//
+// `lean` (Finding 9, L2 only): builds the lean claim-path row instead of the
+// fat one (schema_ddl_lean instead of schema_ddl) — `fields` dropped from
+// the items row entirely, with an optional separate `fields` table carrying
+// the same ~300B payload per record. Per the task's instruction to avoid
+// Finding 8's 84.65-minute post-load `CREATE UNIQUE INDEX items_key_idx`
+// where practical, the lean path builds `items_key_idx` (and the `fields`
+// table's own PK) BEFORE the load, maintained incrementally as part of each
+// per-queue INSERT..SELECT, instead of as a bulk step after — the one
+// non-unique-index-shaped structure (items_claim_idx) and the rest
+// (items_claim_id_idx, claims, claims_expires_idx) still build AFTER the
+// load, matching Finding 8's already-established fast pattern for those
+// (6.78 + 0.50 + ~0 min combined at 100M rows). Fat layout keeps the
+// original all-indexes-after-load shape unchanged (Finding 8, untouched).
 // ---------------------------------------------------------------------------
 async fn run_bulk_build(
     layout: Layout,
@@ -1204,12 +1291,120 @@ async fn run_bulk_build(
     n_queues: i64,
     rows_completed: i64,
     rows_initial: i64,
+    lean: bool,
 ) -> turso::Result<()> {
+    if lean && layout != Layout::L2 {
+        panic!("lean row layout is only implemented for L2 (Finding 9 tests the Recommendation's layout with fields dropped)");
+    }
     remove_db_files(db_path);
     let wal_path = format!("{db_path}-wal");
     let db = Builder::new_local(db_path).build().await?;
     let mut conn = db.connect()?;
     configure_connection(&conn).await?;
+
+    let row_layout = if lean { "lean" } else { "fat" };
+
+    let base_ts = now_micros();
+
+    if lean {
+        // items table + its UNIQUE key index + the fields table, all created
+        // BEFORE the load so items_key_idx is maintained incrementally
+        // during ingest rather than bulk-built after (task instruction).
+        let ddl = schema_ddl_lean(true);
+        conn.execute(&ddl[0], ()).await?; // CREATE TABLE items (lean, no fields column)
+        let key_idx_start = Instant::now();
+        conn.execute(&ddl[1], ()).await?; // CREATE UNIQUE INDEX items_key_idx (empty table, near-instant)
+        eprintln!("[bulk_build:{layout}:lean] items_key_idx created before load in {:.3}s (empty table)", key_idx_start.elapsed().as_secs_f64());
+        conn.execute(FIELDS_TABLE_DDL, ()).await?;
+
+        let insert_items_sql = "INSERT INTO items (queue_no,seq,key,stage,rank,version) \
+             SELECT ?1, ?2 + (value-1), randomblob(16), ?3, ?4 + (value-1), 1 \
+             FROM generate_series(1, ?5)";
+        let insert_fields_sql = "INSERT INTO fields (queue_no,seq,fields) \
+             SELECT ?1, ?2 + (value-1), \
+             char(123)||char(34)||char(100)||char(34)||char(58)||char(34)||hex(randomblob(146))||char(34)||char(125) \
+             FROM generate_series(1, ?3)";
+
+        eprintln!(
+            "[bulk_build:{layout}:lean] loading {n_queues} queues x ({rows_completed} COMPLETED + {rows_initial} INITIAL), \
+             items_key_idx maintained during ingest..."
+        );
+        let load_start = Instant::now();
+        for q in 1..=n_queues {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+            {
+                let mut items_stmt = tx.prepare(insert_items_sql).await?;
+                items_stmt
+                    .execute((Value::Integer(q), Value::Integer(0), Value::Integer(STAGE_COMPLETED), Value::Integer(base_ts), Value::Integer(rows_completed)))
+                    .await?;
+                items_stmt
+                    .execute((Value::Integer(q), Value::Integer(rows_completed), Value::Integer(STAGE_INITIAL), Value::Integer(base_ts), Value::Integer(rows_initial)))
+                    .await?;
+                let mut fields_stmt = tx.prepare(insert_fields_sql).await?;
+                fields_stmt.execute((Value::Integer(q), Value::Integer(0), Value::Integer(rows_completed))).await?;
+                fields_stmt.execute((Value::Integer(q), Value::Integer(rows_completed), Value::Integer(rows_initial))).await?;
+            }
+            tx.commit().await?;
+            if q % 5 == 0 {
+                maybe_passive_checkpoint(&conn, &wal_path).await?;
+            }
+            // Finer-grained than the fat path's every-10: items_key_idx is
+            // maintained during ingest here (task instruction), so per-queue
+            // cost may grow as the shared unique index outgrows cache —
+            // every-queue visibility lets a real run be monitored for that
+            // without waiting for a 10-queue milestone.
+            if q % 2 == 0 || q == n_queues {
+                eprintln!(
+                    "[bulk_build:{layout}:lean] {q}/{n_queues} queues loaded, elapsed={:.1}s, wal_bytes={}",
+                    load_start.elapsed().as_secs_f64(),
+                    file_len(&wal_path),
+                );
+            }
+        }
+        let load_elapsed = load_start.elapsed();
+        let total_rows = n_queues * (rows_completed + rows_initial);
+        println!(
+            "{{\"phase\":\"bulk_load\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"n_queues\":{n_queues},\
+             \"rows_completed_per_queue\":{rows_completed},\"rows_initial_per_queue\":{rows_initial},\
+             \"total_rows\":{total_rows},\"elapsed_ms\":{ms:.1},\"rows_per_sec\":{rps:.0},\
+             \"items_key_idx_maintained_during_ingest\":true}}",
+            ms = load_elapsed.as_secs_f64() * 1000.0,
+            rps = total_rows as f64 / load_elapsed.as_secs_f64(),
+        );
+        let _ = std::io::stdout().flush();
+
+        let remaining = &ddl[2..]; // items_claim_idx, items_claim_id_idx, claims, claims_expires_idx
+        eprintln!("[bulk_build:{layout}:lean] building {} remaining secondary indexes/tables...", remaining.len());
+        let index_start = Instant::now();
+        for stmt in remaining {
+            eprintln!("[bulk_build:{layout}:lean]   {stmt}");
+            let t0 = Instant::now();
+            conn.execute(stmt, ()).await?;
+            eprintln!("[bulk_build:{layout}:lean]   -> {:.1}s", t0.elapsed().as_secs_f64());
+        }
+        let index_elapsed = index_start.elapsed();
+        println!(
+            "{{\"phase\":\"bulk_index_build\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"elapsed_ms\":{ms:.1}}}",
+            ms = index_elapsed.as_secs_f64() * 1000.0,
+        );
+        let _ = std::io::stdout().flush();
+
+        eprintln!("[bulk_build:{layout}:lean] final checkpoint...");
+        let cp_start = Instant::now();
+        checkpoint(&conn).await?;
+        let cp_elapsed = cp_start.elapsed();
+        let main_bytes = file_len(db_path);
+        println!(
+            "{{\"phase\":\"bulk_build_final\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"main_bytes\":{main_bytes},\
+             \"checkpoint_ms\":{ms:.1},\"total_build_ms\":{total_ms:.1}}}",
+            ms = cp_elapsed.as_secs_f64() * 1000.0,
+            total_ms = (load_elapsed + index_elapsed + cp_elapsed).as_secs_f64() * 1000.0,
+        );
+        let _ = std::io::stdout().flush();
+
+        drop(conn);
+        return Ok(());
+    }
 
     let ddl = schema_ddl(layout, true);
     // ddl[0] is always the base CREATE TABLE items; everything after is
@@ -1217,7 +1412,6 @@ async fn run_bulk_build(
     // AFTER the bulk load, per the task's "indexes created after the load".
     conn.execute(&ddl[0], ()).await?;
 
-    let base_ts = now_micros();
     let insert_sql = "INSERT INTO items (queue_no,seq,key,stage,rank,fields,version)          SELECT ?1, ?2 + (value-1), randomblob(16), ?3, ?4 + (value-1),          char(123)||char(34)||char(100)||char(34)||char(58)||char(34)||hex(randomblob(146))||char(34)||char(125), 1          FROM generate_series(1, ?5)";
 
     eprintln!(
@@ -1264,7 +1458,7 @@ async fn run_bulk_build(
     let load_elapsed = load_start.elapsed();
     let total_rows = n_queues * (rows_completed + rows_initial);
     println!(
-        "{{\"phase\":\"bulk_load\",\"layout\":\"{layout}\",\"n_queues\":{n_queues},\
+        "{{\"phase\":\"bulk_load\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"n_queues\":{n_queues},\
          \"rows_completed_per_queue\":{rows_completed},\"rows_initial_per_queue\":{rows_initial},\
          \"total_rows\":{total_rows},\"elapsed_ms\":{ms:.1},\"rows_per_sec\":{rps:.0}}}",
         ms = load_elapsed.as_secs_f64() * 1000.0,
@@ -1282,7 +1476,7 @@ async fn run_bulk_build(
     }
     let index_elapsed = index_start.elapsed();
     println!(
-        "{{\"phase\":\"bulk_index_build\",\"layout\":\"{layout}\",\"elapsed_ms\":{ms:.1}}}",
+        "{{\"phase\":\"bulk_index_build\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"elapsed_ms\":{ms:.1}}}",
         ms = index_elapsed.as_secs_f64() * 1000.0,
     );
     let _ = std::io::stdout().flush();
@@ -1293,7 +1487,7 @@ async fn run_bulk_build(
     let cp_elapsed = cp_start.elapsed();
     let main_bytes = file_len(db_path);
     println!(
-        "{{\"phase\":\"bulk_build_final\",\"layout\":\"{layout}\",\"main_bytes\":{main_bytes},\
+        "{{\"phase\":\"bulk_build_final\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"main_bytes\":{main_bytes},\
          \"checkpoint_ms\":{ms:.1},\"total_build_ms\":{total_ms:.1}}}",
         ms = cp_elapsed.as_secs_f64() * 1000.0,
         total_ms = (load_elapsed + index_elapsed + cp_elapsed).as_secs_f64() * 1000.0,
@@ -1514,20 +1708,28 @@ async fn do_claim_q(
 // covering N queues costs N separate sweep calls; L2's sweep is GLOBAL (the
 // claims table and claims_expires_idx carry no queue_no at all), so one call
 // covers every queue's expired claims regardless of how many are involved.
+//
+// `row_layout` ("fat" or "lean", Finding 9) is a label only, embedded in
+// every JSON output line for traceability — it does not change any SQL
+// here. do_claim_q/do_finish/do_extend/do_sweep never reference `fields` on
+// either the fat or the lean items row, so the claim/finish/extend/sweep
+// path this function drives is byte-for-byte identical code regardless of
+// which db (fat- or lean-built) it is pointed at; only the db_path and this
+// label differ between a fat and a lean finding8 run.
 // ---------------------------------------------------------------------------
-async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_selected: usize) -> turso::Result<()> {
+async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_selected: usize, row_layout: &str) -> turso::Result<()> {
     let wal_path = format!("{db_path}-wal");
     let db = Builder::new_local(db_path).build().await?;
     let mut conn = db.connect()?;
     configure_connection(&conn).await?;
 
     let selected = select_queues(n_queues_total, n_selected);
-    eprintln!("[finding8:{layout}] selected_queues={selected:?}");
+    eprintln!("[finding8:{layout}:{row_layout}] selected_queues={selected:?}");
 
     let start_main = file_len(db_path);
     let start_wal = file_len(&wal_path);
     println!(
-        "{{\"phase\":\"finding8_start_size\",\"layout\":\"{layout}\",\"main_bytes\":{start_main},\"wal_bytes\":{start_wal},\"selected_queues\":{selected:?}}}"
+        "{{\"phase\":\"finding8_start_size\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"main_bytes\":{start_main},\"wal_bytes\":{start_wal},\"selected_queues\":{selected:?}}}"
     );
     let _ = std::io::stdout().flush();
 
@@ -1565,7 +1767,7 @@ async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_sele
         let trial_elapsed = trial_start.elapsed();
         claim_lat.sort();
         println!(
-            "{{\"phase\":\"finding8_claim\",\"layout\":\"{layout}\",\"trial\":{trial},\"reps\":{creps},\
+            "{{\"phase\":\"finding8_claim\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"trial\":{trial},\"reps\":{creps},\
              \"batch\":{cbatch},\"n_selected_queues\":{n_selected},\"elapsed_ms\":{ms:.1},\
              \"claims_per_sec\":{cps:.1},\"p50_us\":{p50:.1},\"p99_us\":{p99:.1}}}",
             ms = trial_elapsed.as_secs_f64() * 1000.0,
@@ -1586,7 +1788,7 @@ async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_sele
         let trial_elapsed = trial_start.elapsed();
         finish_lat.sort();
         println!(
-            "{{\"phase\":\"finding8_finish\",\"layout\":\"{layout}\",\"trial\":{trial},\"reps\":{creps},\
+            "{{\"phase\":\"finding8_finish\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"trial\":{trial},\"reps\":{creps},\
              \"batch\":{cbatch},\"n_selected_queues\":{n_selected},\"elapsed_ms\":{ms:.1},\
              \"finishes_per_sec\":{fps:.1},\"p50_us\":{p50:.1},\"p99_us\":{p99:.1}}}",
             ms = trial_elapsed.as_secs_f64() * 1000.0,
@@ -1618,7 +1820,7 @@ async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_sele
         let trial_elapsed = trial_start.elapsed();
         lat.sort();
         println!(
-            "{{\"phase\":\"finding8_extend\",\"layout\":\"{layout}\",\"trial\":{trial},\"reps\":{ereps},\
+            "{{\"phase\":\"finding8_extend\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"trial\":{trial},\"reps\":{ereps},\
              \"batch\":{ebatch},\"queue_no\":{q},\"elapsed_ms\":{ms:.1},\"extends_per_sec\":{eps:.1},\
              \"p50_us\":{p50:.1},\"p99_us\":{p99:.1}}}",
             ms = trial_elapsed.as_secs_f64() * 1000.0,
@@ -1668,7 +1870,7 @@ async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_sele
                     total_reclaimed += n;
                 }
                 println!(
-                    "{{\"phase\":\"finding8_sweep\",\"layout\":\"{layout}\",\"trial\":{trial},\"sweep_size\":{ssize},\
+                    "{{\"phase\":\"finding8_sweep\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"trial\":{trial},\"sweep_size\":{ssize},\
                      \"n_sweep_calls\":{ncalls},\"distinct_queues_touched\":{ndq},\
                      \"discovery_ms\":{dms:.2},\"total_ms\":{tms:.2},\"item_rows_reclaimed\":{total_reclaimed}}}",
                     ncalls = distinct_queues.len(),
@@ -1683,7 +1885,7 @@ async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_sele
                 let (d, t, n, claims_touched) = do_sweep(&mut conn, layout, 0, now, &wal_path).await?;
                 let ct = claims_touched.unwrap_or(0);
                 println!(
-                    "{{\"phase\":\"finding8_sweep\",\"layout\":\"{layout}\",\"trial\":{trial},\"sweep_size\":{ssize},\
+                    "{{\"phase\":\"finding8_sweep\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"trial\":{trial},\"sweep_size\":{ssize},\
                      \"n_sweep_calls\":1,\"distinct_queues_touched\":{ndq},\"claims_touched\":{ct},\
                      \"discovery_ms\":{dms:.2},\"total_ms\":{tms:.2},\"item_rows_reclaimed\":{n}}}",
                     ndq = distinct_queues.len(),
@@ -1701,7 +1903,7 @@ async fn run_finding8(layout: Layout, db_path: &str, n_queues_total: i64, n_sele
     let cp_elapsed = cp_start.elapsed();
     let final_main = file_len(db_path);
     println!(
-        "{{\"phase\":\"finding8_final_size\",\"layout\":\"{layout}\",\"main_bytes\":{final_main},\"checkpoint_ms\":{ms:.1}}}",
+        "{{\"phase\":\"finding8_final_size\",\"layout\":\"{layout}\",\"row_layout\":\"{row_layout}\",\"main_bytes\":{final_main},\"checkpoint_ms\":{ms:.1}}}",
         ms = cp_elapsed.as_secs_f64() * 1000.0,
     );
     let _ = std::io::stdout().flush();
@@ -1720,8 +1922,8 @@ fn main() {
              spike size_baseline <l1|l2> <db_path> <rows_completed> <rows_initial>\n  \
              spike explain <l1|l2> <db_path>\n  \
              spike diag <l1|l2> <db_path> [n_reps]\n  \
-             spike bulk_build <l1|l2> <db_path> <n_queues> <rows_completed_per_queue> <rows_initial_per_queue>\n  \
-             spike finding8 <l1|l2> <db_path> <n_queues_total> <n_selected>\n  \
+             spike bulk_build <l1|l2> <db_path> <n_queues> <rows_completed_per_queue> <rows_initial_per_queue> [fat|lean]\n  \
+             spike finding8 <l1|l2> <db_path> <n_queues_total> <n_selected> [fat|lean]\n  \
              spike multi_claim <l1|l2> <db_path> <n_queues_total> <n_selected> <n_workers> <ops_per_worker> [shared|separate]\n  \
              spike gs_test"
         );
@@ -1755,7 +1957,8 @@ fn main() {
             let db_path = &args[3];
             let n_queues_total: i64 = args[4].parse().expect("n_queues_total");
             let n_selected: usize = args[5].parse().expect("n_selected");
-            rt.block_on(run_finding8(layout, db_path, n_queues_total, n_selected)).expect("finding8 failed");
+            let row_layout = args.get(6).map(|s| s.as_str()).unwrap_or("fat");
+            rt.block_on(run_finding8(layout, db_path, n_queues_total, n_selected, row_layout)).expect("finding8 failed");
         }
         "multi_claim" => {
             let layout = Layout::parse(&args[2]);
@@ -1776,8 +1979,9 @@ fn main() {
             let n_queues: i64 = args[4].parse().expect("n_queues");
             let rows_completed: i64 = args[5].parse().expect("rows_completed");
             let rows_initial: i64 = args[6].parse().expect("rows_initial");
+            let lean = args.get(7).map(|s| s.as_str()) == Some("lean");
             ensure_parent(db_path);
-            rt.block_on(run_bulk_build(layout, db_path, n_queues, rows_completed, rows_initial)).expect("bulk_build failed");
+            rt.block_on(run_bulk_build(layout, db_path, n_queues, rows_completed, rows_initial, lean)).expect("bulk_build failed");
         }
         "gs_test" => {
             rt.block_on(async {

@@ -1,0 +1,3 @@
+{"phase":"bulk_load","layout":"L2","row_layout":"lean","n_queues":100,"rows_completed_per_queue":950000,"rows_initial_per_queue":50000,"total_rows":100000000,"elapsed_ms":2521523.9,"rows_per_sec":39659,"items_key_idx_maintained_during_ingest":true}
+{"phase":"bulk_index_build","layout":"L2","row_layout":"lean","elapsed_ms":583886.7}
+{"phase":"bulk_build_final","layout":"L2","row_layout":"lean","main_bytes":47911657472,"checkpoint_ms":18331.9,"total_build_ms":3123742.5}

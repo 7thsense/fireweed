@@ -595,6 +595,193 @@ independent writer connections to the same file) trades a predictable
 queueing cost for a real reliability cliff once concurrency is high enough
 to exceed the busy-timeout budget.
 
+### Finding 9: lean claim-path row at 100M — MEASURED, removes Finding 8's claim degradation
+
+Follow-up to Finding 8's unresolved claim-latency risk, prompted directly by
+SPIKE-006's Recommendation: SPIKE-006
+(`docs/helix/02-design/spikes/SPIKE-006-declared-field-storage-layout.md`)
+recommends a claim-path row that "carries only `key, stage, rank, claim_id,
+group, gates, version`... no field bytes at all," with fields split into a
+separate table, and found that its own layout C — the only one shaped this
+way — was immune to a 128 MiB vs 1 GiB cache-size ablation ("no measurable
+benefit from 1 GiB") specifically because "C's claim-path row and its
+field-storage tables are structurally decoupled, so claim churn cannot evict
+field data from cache and vice versa." Finding 8's degraded claim path was
+carrying ~300 B of `fields` bytes on every row of the same B-tree the claim
+`SELECT`/`UPDATE` touches. This finding tests whether narrowing L2's item
+row the same way — no `fields` column, a separate `fields` table holding
+the identical ~300 B payload — closes that gap at the owner's actual 100M
+target shape, using the same `finding8` harness and trial shape as Finding
+8 so the numbers compare directly.
+
+**Methodology check, MEASURED (code read): SPIKE-004's claim path already
+had both of SPIKE-006's required disciplines.** SPIKE-006's own Method
+section reports that its harness needed two fixes — every multi-statement
+op wrapped in one explicit transaction, and per-row statements prepared
+once and reused across the loop — "until both fixes... this spike's own
+claim path was 300-500x slower than its corrected form." SPIKE-006
+explicitly credits this spike's `do_claim` as the shape it should have
+matched from the start ("the same per-operation transaction shape
+`spikes/claim-scale`'s `do_claim` already used"; "the exact
+prepare-once/execute-many shape `spikes/claim-scale`'s `do_claim` already
+used"). Re-reading `do_claim` (`spikes/claim-scale/src/main.rs:479-554`)
+confirms this directly: the whole select-then-lease sequence runs inside
+one `conn.transaction_with_behavior(TransactionBehavior::Immediate)` (line
+493), and each per-row lease statement — L1's lease-column `UPDATE` (line
+507, executed in a loop at 514-522) and L2's `claim_id` `UPDATE` (line 542,
+executed in a loop at 545-546) — is prepared once outside its loop and
+reused via `.execute()` per row, not re-prepared per row. `do_claim_q`,
+`do_finish`, `do_extend` and `do_sweep` follow the identical shape. **Both
+disciplines were already present from Finding 0's methodology fixes; no
+change was needed for Finding 9.**
+
+**Build: lean L2, 100 queues x 1M rows (95%/5% split), `items_key_idx`
+maintained during ingest — MEASURED, 56.8% faster than Finding 8's fat
+build, and avoids its dominant 84.65-minute post-load UNIQUE-index cost.**
+Per the task's instruction to avoid Finding 8's dominant post-load
+`CREATE UNIQUE INDEX items_key_idx` cost where practical, this build
+creates `items_key_idx` *before* the load (empty-table DDL, near-instant)
+so it is maintained incrementally as part of each per-queue
+`INSERT..SELECT generate_series` statement, instead of as a separate bulk
+step after — the same "index on an order-uncorrelated key" identified as
+Finding 8's dominant cost, now paid incrementally throughout ingest instead
+of in one 84.65-minute step. `items_claim_idx` (order-correlated with
+`rank`, already fast in Finding 8) and the rest still build after the load,
+unchanged from Finding 8's shape. Small-scale validation (a 2-queue,
+2M-row probe) confirmed the maintained-index overhead was reasonable
+(~20s/queue against Finding 8's ~16.8s/queue unindexed-load rate) before
+committing to the full 100-queue build (`spike bulk_build l2 ... lean`,
+`spikes/claim-scale/results/multi100-l2-lean-build.jsonl`).
+
+| Phase | Fat (Finding 8) | Lean (Finding 9) |
+|---|---:|---:|
+| bulk load (100M rows) | 28.05 min (`items_key_idx` not yet built) | 42.03 min (`items_key_idx` maintained during ingest) |
+| `CREATE UNIQUE INDEX items_key_idx` (post-load) | **84.65 min** | **0 min (built before load, folded into bulk load above)** |
+| `items_claim_idx` (post-load) | 6.78 min | 8.81 min |
+| `items_claim_id_idx` (post-load) | 0.50 min | 0.92 min |
+| `claims` table + `claims_expires_idx` | ~0 min | ~0 min |
+| final checkpoint | 0.58 min | 0.31 min |
+| **total** | **120.55 min** | **52.06 min** |
+| final main file size | 45,093,863,424 B (45.09 GB) | 47,911,657,472 B (47.91 GB) |
+
+Total build time drops from 120.55 to 52.06 minutes (**56.8% faster**,
+**68.5 minutes saved**) and lands well inside the original ~90-minute
+target Finding 8 missed. The lean bulk-load phase itself runs at 39,659
+rows/s against Finding 8's 59,418 rows/s unindexed rate; INFERRED (rate
+comparison only, not separately isolated by an ablation run) that roughly
+14 of the 42.03 minutes is the `items_key_idx`-maintenance cost folded into
+that phase, the rest matching Finding 8's own two-table (items + a new
+`fields` table, same shape as the recommendation) write cost. Final DB size
+is **not** smaller (47.91 GB vs 45.09 GB, +6.25%) — moving `fields` to a
+separate table does not reduce total bytes stored, it relocates them; the
+point of the lean row is a narrower `items` table (the B-tree the claim
+path's `SELECT`/`UPDATE` actually touches), not a smaller file. See
+Limitations for what this build did not isolate.
+
+**Claim/finish/extend/sweep, round-robin over 20 of the 100 queues, single
+writer, 128 MiB cache — MEASURED**, calm host window (load average
+descended 21.07 -> 11.40 while waiting for concurrent unrelated host
+activity to clear, then held 11.29-11.40 (1-min) / 15.13-15.22 (5-min)
+flat across both this cell and the 1 GiB ablation cell below, no mid-cell
+jump; an initial attempt taken while the host was still busy with this
+spike's own preceding bulk-build plus unrelated concurrent `cargo`/`rustc`
+work from other sessions was discarded and re-measured in the calmer
+window once available, the same reason Finding 6 re-measured its own L2 @
+10M numbers — `spikes/claim-scale/results/finding8-l2-lean.jsonl`):
+
+| Metric | Lean L2 @ 100M (20 touched) |
+|---|---:|
+| claim, median claims/s (3 trials) | 620.9 |
+| claim, spread | 2.2% |
+| claim, p99 latency (worst trial) | 2,395.1 µs |
+| finish, median finishes/s (3 trials) | 708.5 |
+| finish, spread | 14.1% |
+| finish, p99 latency (worst trial) | 2,041.4 µs |
+| extend, median extends/s (3 trials) | 9,905.2 |
+| extend, spread | 10.4% |
+| sweep, median total_ms (3 trials) | 106.56 |
+| sweep, median discovery_ms (3 trials) | 0.12 |
+
+**Cache-size ablation (lean, 128 MiB vs 1 GiB) — MEASURED**, same calm
+window, back-to-back, same 20 queues
+(`spikes/claim-scale/results/finding8-l2-lean-1gib.jsonl`):
+
+| Metric | 128 MiB | 1 GiB | Δ |
+|---|---:|---:|---:|
+| claim, median claims/s | 620.9 | 565.7 | −8.9% |
+| finish, median finishes/s | 708.5 | 668.7 | −5.6% |
+| extend, median extends/s | 9,905.2 | 5,607.1 | **−43.4%** |
+| sweep, median total_ms | 106.56 | 105.65 | −0.9% |
+
+Claim, finish and sweep are flat to within this harness's normal
+trial-to-trial noise band (Findings 1/6 already show 2-35% spreads at this
+rep count) — no measurable benefit from 1 GiB, the same qualitative result
+SPIKE-006 Finding 8 reports for its own layout C. **Extend is the one
+exception**: a real, tight-spread (1.2%, not noise) 43.4% slowdown at 1
+GiB, reproducible across all 3 trials on the same queues in the same
+order as the 128 MiB cell. MEASURED, mechanism not isolated — INFERRED
+candidate explanation: extend's absolute latency is tiny (a single
+`claims`-row `UPDATE`, ~90-170 µs total), so a fixed per-statement pager
+overhead that scales with the *configured* `cache_size` (a larger page-hash
+table to probe on every page fetch/release, independent of how many pages
+are actually resident) would be amortized to noise inside claim/finish's
+much longer 100-row transactions but would dominate extend's single-row
+one. Not confirmed by a dedicated ablation of pager internals — flagged for
+follow-up, not load-bearing for the Recommendation below (128 MiB is
+already the production default; this is not a case *for* 1 GiB).
+
+**Does a lean claim-path row remove Finding 8's claim degradation at 100M?
+Yes — MEASURED, stated plainly.**
+
+| Metric | L2 @ 10M (1 queue, Finding 6) | Fat L2 @ 100M (20 touched, Finding 8) | Lean L2 @ 100M (20 touched, Finding 9) | Lean Δ vs 10M | Lean Δ vs Fat @100M |
+|---|---:|---:|---:|---:|---:|
+| claim, median claims/s | 649.0 | 351.6 | 620.9 | **−4.3%** | **+76.6%** |
+| claim, p99 latency | 1,806.9 µs | 94,559.5 µs | 2,395.1 µs | 1.33x higher | **39.5x lower (faster)** |
+| finish, median finishes/s | 695.4 | 746.3 | 708.5 | +1.9% | −5.1% |
+| finish, p99 latency | — | 1,800.9 µs | 2,041.4 µs | — | +13.4% |
+| extend, median extends/s | 6,201.2 | 8,805.1 | 9,905.2 | +59.7% | +12.5% |
+| sweep, median total_ms | 98.27 | 98.92 | 106.56 | +8.4% | +7.7% |
+| sweep, median discovery_ms | 0.13 | 0.12 | 0.12 | ~0% | 0% |
+
+Finding 8's claim degradation — median throughput down 45.8% and p99 up to
+52x from the clean 10M/1-queue baseline — is the one number this finding
+targeted, and it is the one number that moves: lean's 100M/20-touched claim
+throughput (620.9/s) sits within 4.3% of the 10M/1-queue baseline (649.0/s,
+well inside this harness's normal single-digit-to-teens spread band) and
+39.5x faster in the tail than the fat layout's own 100M measurement, itself
+landing within 1.33x of the 10M baseline's own p99 — the "flat from 10M to
+100M" result Finding 8 wanted but did not get on the fat layout. Finish,
+extend and sweep — already flat under the fat layout (Finding 8's own
+`do_finish` fix) — remain flat under lean too, exactly as expected: nothing
+about narrowing the row's field bytes changes an operation whose cost was
+already bounded by claim count rather than record width. **The mechanism
+matches SPIKE-006's own prediction exactly**: `items_claim_idx` (the shared
+`(queue_no, stage, rank, seq)` partial index) is byte-identical in shape
+between the fat and lean layouts — indexing only `queue_no, stage, rank,
+seq`, never `fields` — so its own on-disk size is unaffected by this
+change (Finding 7 already established the claim-order index costs the
+same on both L1 and L2 regardless of lease representation, for the same
+reason: neither indexes `fields`). What changes is the `items` *table*
+itself, which `do_claim`'s per-row `UPDATE items INDEXED BY
+sqlite_autoindex_items_1 SET claim_id=? WHERE queue_no=? AND seq=?`
+directly reads and writes: at ~64 bytes/row instead of ~364 bytes/row (5.7x
+narrower — INFERRED from the schema, `spikes/claim-scale/src/main.rs`
+`schema_ddl_lean` vs `schema_ddl`, not separately measured as an isolated
+byte count), roughly 5.7x more of that table's rows fit in the same 128 MiB
+budget, so a claim's random touches across the shared table are far less
+likely to evict — or be evicted by — another queue's pages. This is the
+same "claim-path row and field-storage tables are structurally decoupled,
+so claim churn cannot evict field data from cache and vice versa" mechanism
+SPIKE-006 Finding 8 reports for its own layout C, now confirmed at the
+owner's actual multi-queue target shape rather than SPIKE-006's own
+single-file, fewer-queues sweep.
+
+**The 100M claim target is met.** Under the lean L2 layout, claim, finish,
+extend and sweep are all flat from 10M/1-queue to 100M/100-queues (20
+touched) to within this harness's ordinary measurement noise — the
+degradation Finding 8 found and could not fix within the fat-row design is
+gone under the lean row, not merely reduced.
+
 ## Interpretation
 
 1. **The owner's claims-table proposal (question 4) is a clean win on every
@@ -671,11 +858,14 @@ to exceed the busy-timeout budget.
 
 ## Recommendation
 
-**Adopt the owner's claims-table design (L2)** for the S3×Turso lease
-representation. This holds at 1M, 10M and the owner's actual 100M/100-queue
-target shape (Findings 1-8), with one measured, unresolved residual risk on
-raw claim latency at 100M+ (below) that the recommendation carries forward
-rather than hides.
+**Adopt the owner's claims-table design (L2), with a lean claim-path row
+carrying no `fields` bytes** for the S3×Turso lease representation. This
+holds at 1M, 10M and the owner's actual 100M/100-queue target shape
+(Findings 1-9). Finding 8 first surfaced a real, measured claim-latency
+degradation at 100M+ under a fat (fields-inline) item row; Finding 9 traced
+it to page-cache pressure from those inline field bytes and resolved it by
+dropping `fields` from the item row (below) — the claim path's item row
+must be lean from the start, not fat-then-optimized-later.
 
 **1. Lease representation.** A `claims(claim_id INTEGER PRIMARY KEY,
 token_hash BLOB NOT NULL, holder TEXT, expires_at INTEGER NOT NULL,
@@ -751,23 +941,36 @@ faster and fail outright (`Busy("database is locked")`) once concurrent
 claimers exceed the `busy_timeout` budget (Finding 8, MEASURED: shared mode
 never errored at N=32 concurrent claimers; separate mode crashed at N=32).
 
-**What threatens "fast at 100M+": the one point this spike did not resolve.**
-`claim` throughput is not flat from 10M/1-queue to 100M/100-queues (20
-touched): median dropped 45.8%, with p99 spikes up to 52x, both driven by
-the same page-cache pressure that caused the finish regression (Finding 8).
-Unlike finish, `claim` has no equivalent bulk-by-shared-key fix available
-in this design, because a claim's rows have no common key *before* the
-claim is assigned — `do_claim`'s per-row lease/`claim_id`-set loop is
-structurally unavoidable here. This is a real, measured risk for the
-owner's "100 queues alive at once" target that neither layout resolves
-(L1 pays the identical claim-order-index cache pressure, Finding 6/7), and
-it is not fixed by this spike's changes. Two directions worth spiking
-separately, not measured here: (a) a larger `cache_size` for connections
-serving many-queue files (a global production tuning change, out of this
-spike's "mirror production's connection settings exactly" scope); (b)
-whether claim batches could be assigned an `IN (...)`-list bulk `UPDATE`
-instead of per-row statements, reducing statement count even without a
-shared grouping key (untested here — see Limitations).
+**What threatened "fast at 100M+" — resolved by Finding 9's lean
+claim-path row, MEASURED.** Finding 8 found `claim` throughput was not
+flat from 10M/1-queue to 100M/100-queues (20 touched): median dropped
+45.8%, with p99 spikes up to 52x, driven by page-cache pressure from the
+fat item row — ~300 B of `fields` bytes inline on every row of the same
+`items` table `do_claim`'s per-row `UPDATE` reads and writes, crowding out
+the claim-order index and the rest of the schema under the fixed 128 MiB
+`cache_size` budget. **Finding 9 resolves this**: dropping `fields` from
+the item row entirely (SPIKE-006's own recommended layout, applied to this
+spike's L2 claims-table design) and moving it to a separate table that the
+claim path never touches narrows the `items` table roughly 5.7x
+(~364 B/row to ~64 B/row), and claim throughput at 100M/20-touched returns
+to within 4.3% of the clean 10M/1-queue baseline (620.9 vs 649.0 claims/s)
+with p99 within 1.33x of that baseline (down from 52x) — flat, not merely
+improved, and the 100M claim target is met. This was not available to the
+fat-row L2 design Finding 8 measured; it requires the claim-path row
+itself to carry no field bytes, exactly as SPIKE-006 independently
+recommends. **Practical consequence**: production should ship the lean
+row (`queue_no, seq, key, stage, rank, version, claim_id` — no `fields`)
+from the start, not add it later as an optimization — a fat-row L2
+deployment at the owner's 100-queue/100M-row target would re-encounter
+Finding 8's degradation. Caveats carried forward, not resolved by Finding
+9: only 20 of the 100 queues were exercised per trial, not all 100; L1 was
+not re-measured with a lean row (out of scope — L1 is not the
+Recommendation, and Finding 6/7 already showed L1 pays the identical
+claim-order-index cache pressure fat L2 did); and Finding 9's own cache-size
+ablation surfaced one unexplained wrinkle — `extend` ran 43.4% slower at 1
+GiB than at 128 MiB under the lean layout, mechanism not isolated — which
+does not argue against 128 MiB (already production's default, and already
+sufficient for claim/finish/sweep under the lean row).
 
 ## Limitations
 
@@ -838,7 +1041,43 @@ shared grouping key (untested here — see Limitations).
   with a bulk `IN (...)`-list `UPDATE` as an alternative to the current
   per-row-by-PK form — a possible partial mitigation for Finding 8's
   claim-latency risk at 100M+, mentioned in the Recommendation as a
-  direction for separate follow-up, not measured in this spike.
+  direction for separate follow-up, not measured in this spike; Finding 9
+  resolved the underlying degradation a different way (a lean row) without
+  needing this.
+- **Finding 9's lean-layout db was built once** (L2 only, ~52 min), the
+  same "build once, measure against it" scope Finding 8 itself used for the
+  fat build — no repeat build to check build-time variance. Its `finding8`
+  measurement cells (128 MiB, 1 GiB) were each run 3 trials as usual, but an
+  initial attempt at 128 MiB was discarded and re-measured after waiting for
+  a calmer host window (load descended from ~21 to ~11 over about 5.5
+  minutes of unrelated concurrent `cargo`/`rustc` activity on this shared
+  host clearing) — the same contamination-and-recheck pattern Finding 6
+  already disclosed for its own re-measurement; the discarded attempt is
+  kept in `results/finding8-l2-lean-contaminated.jsonl` for reference, not
+  used in Finding 9's reported numbers.
+- **Only 20 of the lean db's 100 queues were exercised**, the same subset
+  size Finding 8 used, not all 100 — Finding 9's Interpretation is
+  MEASURED for that touched subset and INFERRED (not separately measured)
+  to generalize to a full 100/100 sweep, the same disclosed gap Finding 8
+  already carried.
+- **L1 was not re-measured with a lean row.** Finding 9 targets the
+  Recommendation (L2) specifically, since SPIKE-006's lean-row rationale
+  (decoupling claim-path state from field bytes) is orthogonal to which
+  lease representation is chosen; L1's own 100M/20-touched claim number
+  (Finding 8) was not re-measured under a lean row and is INFERRED, not
+  MEASURED, to improve similarly.
+- **Finding 9's 128-MiB-vs-1-GiB `extend` result (43.4% slower at 1 GiB)
+  was not isolated to a mechanism** — flagged as a real, tight-spread,
+  reproducible MEASUREMENT with an INFERRED (pager-overhead) candidate
+  explanation only; no dedicated ablation of Turso's pager internals was
+  run to confirm it.
+- **The 5.7x item-row-width narrowing figure (~364 B to ~64 B/row) is
+  INFERRED from the schema definitions** (`schema_ddl` vs `schema_ddl_lean`,
+  column list only), not measured as an isolated per-row byte count on
+  disk (Turso has no `dbstat`, the same limitation Finding 7's own
+  index-only-cost isolation already worked around differently, via a
+  baseline-delta build this finding did not repeat for the item table
+  specifically).
 
 ## Source Ledger
 
@@ -850,22 +1089,28 @@ shared grouping key (untested here — see Limitations).
 | `crates/fireweed-turso/src/local.rs:3407-3444,3403` | `configure_connection` pragma profile, the "process-wide Passive cap" comment | VERIFIED (read, reused verbatim from `spikes/key-storage`) |
 | `crates/fireweed-turso/src/projection.rs:100-176,3987,4039` | `maybe_passive_checkpoint_log_backed`, `LOG_BACKED_CHECKPOINT_TRY_BYTES`, its per-apply-batch call sites | VERIFIED (read, root-caused Finding 0's WAL-growth defect) |
 | `spikes/key-storage/src/main.rs` | connection-config template, dbstat-absence precedent, `INDEXED BY` discipline (SPIKE-002 Finding 0/1) | VERIFIED (read, own prior spike) |
-| `spikes/claim-scale/src/main.rs` (whole file) | this spike's harness, schema, operations, the `maybe_passive_checkpoint`/`INDEXED BY` fixes, the `do_finish` bulk-by-`claim_id` fix, and the `diag`/`bulk_build`/`finding8`/`multi_claim` tooling | VERIFIED (own code, own runs) |
-| `spikes/claim-scale/results/*.jsonl` | all measured figures in Findings 0-8 | VERIFIED (measured, this run) |
+| `spikes/claim-scale/src/main.rs` (whole file) | this spike's harness, schema, operations, the `maybe_passive_checkpoint`/`INDEXED BY` fixes, the `do_finish` bulk-by-`claim_id` fix, the `diag`/`bulk_build`/`finding8`/`multi_claim` tooling, and Finding 9's `schema_ddl_lean`/`FIELDS_TABLE_DDL`/`FW_SPIKE_CACHE_SIZE` additions | VERIFIED (own code, own runs) |
+| `spikes/claim-scale/results/*.jsonl` | all measured figures in Findings 0-9 | VERIFIED (measured, this run) |
 | `spikes/claim-scale/results/finding-wal-growth.txt` | Finding 0's WAL-growth defect repro | VERIFIED (measured, this run) |
 | `spikes/claim-scale/results/finding-l2-finish-regression.txt` | Finding 6's finish regression: diagnosis, ablations (cache_size, bulk-update), and the `spike diag` tooling that produced them | VERIFIED (measured, this run) |
 | `EXPLAIN QUERY PLAN` output, `spike explain`/`spike diag` subcommands | Finding 0's two wrong-index defects, Finding 5's sorter mechanism, Finding 6's at-real-scale plan verification | VERIFIED (measured, this run) |
 | `/proc/<pid>/io` counters | Finding 0's WAL-growth I/O-amplification figures | VERIFIED (measured, this run) |
 | `crates/fireweed-turso/src/projection.rs` `run_passive_checkpoint`'s `writer: &Mutex<Connection>` parameter | production's own single-writer-connection pattern, mirrored by `multi_claim`'s "shared" mode | VERIFIED (read) |
+| `docs/helix/02-design/spikes/SPIKE-006-declared-field-storage-layout.md` Method (transaction/prepared-statement rules, "300-500x slower" quote), Recommendation 1 (layout C's claim-path row shape) and Finding 8 (cache-size ablation, "structurally decoupled" mechanism) | Finding 9's premise (a lean claim-path row) and the methodology-check cross-reference for SPIKE-004's own `do_claim` | VERIFIED (read) |
 
 ## Artifacts
 
-- `spikes/claim-scale/` — standalone Cargo project (`Cargo.toml`, `src/main.rs`, `run.sh`), now with `diag`, `bulk_build`, `finding8` and `multi_claim` subcommands alongside the original `run`/`size_baseline`/`explain`.
+- `spikes/claim-scale/` — standalone Cargo project (`Cargo.toml`, `src/main.rs`, `run.sh`), now with `diag`, `bulk_build`, `finding8` and `multi_claim` subcommands alongside the original `run`/`size_baseline`/`explain`, plus Finding 9's `fat|lean` row-layout option on `bulk_build`/`finding8` and the `FW_SPIKE_CACHE_SIZE` ablation override.
 - `spikes/claim-scale/results/*.jsonl` — raw per-phase measurements: one file
   per (layout, scale) run, the two size baselines, the 100M-row bulk-build
   (`multi100-l2-build.jsonl`), the 20-queue round-robin
-  (`finding8-l2.jsonl`), and the concurrency matrix
-  (`multi-claim-l2.jsonl`, `multi-claim-l2-large.jsonl`).
+  (`finding8-l2.jsonl`), the concurrency matrix
+  (`multi-claim-l2.jsonl`, `multi-claim-l2-large.jsonl`), and Finding 9's
+  lean-layout build (`multi100-l2-lean-build.jsonl`) and 20-queue
+  round-robin at 128 MiB and 1 GiB (`finding8-l2-lean.jsonl`,
+  `finding8-l2-lean-1gib.jsonl`; the discarded, contaminated first attempt
+  at 128 MiB is kept as `finding8-l2-lean-contaminated.jsonl` for
+  reference, not used in the reported numbers).
 - `spikes/claim-scale/results/*.log` — stderr progress logs, one per run above.
 - `spikes/claim-scale/results/finding-wal-growth.txt` — the WAL-growth defect's
   repro and `/proc/<pid>/io` evidence, in full.

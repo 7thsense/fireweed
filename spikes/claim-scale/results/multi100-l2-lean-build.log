@@ -1,0 +1,68 @@
+[bulk_build:L2:lean] items_key_idx created before load in 0.000s (empty table)
+[bulk_build:L2:lean] loading 100 queues x (950000 COMPLETED + 50000 INITIAL), items_key_idx maintained during ingest...
+[bulk_build:L2:lean] 2/100 queues loaded, elapsed=39.7s, wal_bytes=1547097112
+[bulk_build:L2:lean] 4/100 queues loaded, elapsed=77.2s, wal_bytes=3114176192
+[bulk_build:L2:lean] 6/100 queues loaded, elapsed=128.4s, wal_bytes=783582832
+[bulk_build:L2:lean] 8/100 queues loaded, elapsed=165.7s, wal_bytes=2350587752
+[bulk_build:L2:lean] 10/100 queues loaded, elapsed=210.8s, wal_bytes=3927542472
+[bulk_build:L2:lean] 12/100 queues loaded, elapsed=251.5s, wal_bytes=1582421992
+[bulk_build:L2:lean] 14/100 queues loaded, elapsed=291.1s, wal_bytes=3164959312
+[bulk_build:L2:lean] 16/100 queues loaded, elapsed=339.4s, wal_bytes=791241912
+[bulk_build:L2:lean] 18/100 queues loaded, elapsed=377.7s, wal_bytes=2373824552
+[bulk_build:L2:lean] 20/100 queues loaded, elapsed=426.3s, wal_bytes=3956341272
+[bulk_build:L2:lean] 22/100 queues loaded, elapsed=483.7s, wal_bytes=1582545592
+[bulk_build:L2:lean] 24/100 queues loaded, elapsed=529.5s, wal_bytes=3156459752
+[bulk_build:L2:lean] 26/100 queues loaded, elapsed=588.4s, wal_bytes=791171872
+[bulk_build:L2:lean] 28/100 queues loaded, elapsed=652.8s, wal_bytes=2373750392
+[bulk_build:L2:lean] 30/100 queues loaded, elapsed=713.6s, wal_bytes=3956254752
+[bulk_build:L2:lean] 32/100 queues loaded, elapsed=760.3s, wal_bytes=1582487912
+[bulk_build:L2:lean] 34/100 queues loaded, elapsed=798.4s, wal_bytes=3165033472
+[bulk_build:L2:lean] 36/100 queues loaded, elapsed=845.1s, wal_bytes=791270752
+[bulk_build:L2:lean] 38/100 queues loaded, elapsed=886.0s, wal_bytes=2373890472
+[bulk_build:L2:lean] 40/100 queues loaded, elapsed=934.3s, wal_bytes=3956295952
+[bulk_build:L2:lean] 42/100 queues loaded, elapsed=973.2s, wal_bytes=1582611512
+[bulk_build:L2:lean] 44/100 queues loaded, elapsed=1014.6s, wal_bytes=3165054072
+[bulk_build:L2:lean] 46/100 queues loaded, elapsed=1065.2s, wal_bytes=791295472
+[bulk_build:L2:lean] 48/100 queues loaded, elapsed=1105.6s, wal_bytes=2373960512
+[bulk_build:L2:lean] 50/100 queues loaded, elapsed=1156.2s, wal_bytes=3956464872
+[bulk_build:L2:lean] 52/100 queues loaded, elapsed=1197.8s, wal_bytes=1582471432
+[bulk_build:L2:lean] 54/100 queues loaded, elapsed=1239.4s, wal_bytes=3165119992
+[bulk_build:L2:lean] 56/100 queues loaded, elapsed=1292.1s, wal_bytes=791316072
+[bulk_build:L2:lean] 58/100 queues loaded, elapsed=1333.2s, wal_bytes=2373791592
+[bulk_build:L2:lean] 60/100 queues loaded, elapsed=1389.6s, wal_bytes=3952081192
+[bulk_build:L2:lean] 62/100 queues loaded, elapsed=1438.7s, wal_bytes=1582685672
+[bulk_build:L2:lean] 64/100 queues loaded, elapsed=1481.2s, wal_bytes=3165400152
+[bulk_build:L2:lean] 66/100 queues loaded, elapsed=1541.0s, wal_bytes=791266632
+[bulk_build:L2:lean] 68/100 queues loaded, elapsed=1603.8s, wal_bytes=2373754512
+[bulk_build:L2:lean] 70/100 queues loaded, elapsed=1672.0s, wal_bytes=3956238272
+[bulk_build:L2:lean] 72/100 queues loaded, elapsed=1720.8s, wal_bytes=1582582672
+[bulk_build:L2:lean] 74/100 queues loaded, elapsed=1766.2s, wal_bytes=3165148832
+[bulk_build:L2:lean] 76/100 queues loaded, elapsed=1823.6s, wal_bytes=791266632
+[bulk_build:L2:lean] 78/100 queues loaded, elapsed=1865.0s, wal_bytes=2373898712
+[bulk_build:L2:lean] 80/100 queues loaded, elapsed=1921.8s, wal_bytes=3956407192
+[bulk_build:L2:lean] 82/100 queues loaded, elapsed=1965.3s, wal_bytes=1582454952
+[bulk_build:L2:lean] 84/100 queues loaded, elapsed=2011.8s, wal_bytes=3165008752
+[bulk_build:L2:lean] 86/100 queues loaded, elapsed=2072.4s, wal_bytes=791287232
+[bulk_build:L2:lean] 88/100 queues loaded, elapsed=2136.7s, wal_bytes=2369564472
+[bulk_build:L2:lean] 90/100 queues loaded, elapsed=2213.5s, wal_bytes=3952184192
+[bulk_build:L2:lean] 92/100 queues loaded, elapsed=2257.4s, wal_bytes=1582627992
+[bulk_build:L2:lean] 94/100 queues loaded, elapsed=2320.5s, wal_bytes=3165144712
+[bulk_build:L2:lean] 96/100 queues loaded, elapsed=2379.1s, wal_bytes=791233672
+[bulk_build:L2:lean] 98/100 queues loaded, elapsed=2439.1s, wal_bytes=2373787472
+[bulk_build:L2:lean] 100/100 queues loaded, elapsed=2521.5s, wal_bytes=3956361872
+[bulk_build:L2:lean] building 4 remaining secondary indexes/tables...
+[bulk_build:L2:lean]   CREATE INDEX items_claim_idx ON items (queue_no, stage, rank, seq) WHERE claim_id IS NULL
+[bulk_build:L2:lean]   -> 528.8s
+[bulk_build:L2:lean]   CREATE INDEX items_claim_id_idx ON items (claim_id) WHERE claim_id IS NOT NULL
+[bulk_build:L2:lean]   -> 55.0s
+[bulk_build:L2:lean]   CREATE TABLE claims (
+claim_id INTEGER PRIMARY KEY,
+token_hash BLOB NOT NULL,
+holder TEXT,
+expires_at INTEGER NOT NULL,
+record_count INTEGER NOT NULL
+)
+[bulk_build:L2:lean]   -> 0.0s
+[bulk_build:L2:lean]   CREATE INDEX claims_expires_idx ON claims (expires_at)
+[bulk_build:L2:lean]   -> 0.0s
+[bulk_build:L2:lean] final checkpoint...
