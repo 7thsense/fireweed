@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use fireweed::{NewItem, open_memory};
+use fireweed::{NewItem, open_product};
 use fireweed_bench::{SystemClock, all_shapes, bench_qdef, qkey};
 
 #[test]
 fn resident_terminal_count_tracks_terminal_population_via_metrics() {
     let shape = all_shapes()[0];
-    let fireweed = open_memory(Arc::new(SystemClock));
+    let fireweed = open_product(Arc::new(SystemClock));
     let queue = qkey("terminal-metrics");
 
     futures::executor::block_on(async {

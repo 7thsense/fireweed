@@ -50,8 +50,7 @@ fn public_config_errors_name_the_fireweed_namespace() {
     let Err(error) = Config::from_env(&with_public_s3(&[(
         "FIREWEED_BOOTSTRAP_QUEUES",
         "missing-colon",
-    )]))
-    else {
+    )])) else {
         panic!("invalid Fireweed configuration must fail closed");
     };
     assert!(error.to_string().contains("FIREWEED_BOOTSTRAP_QUEUES"));
@@ -233,7 +232,8 @@ fn s3_env_builds_typed_shared_profile() {
 
 #[test]
 fn every_s3_projection_accepts_postgres_publication_authority() {
-    for projection in ["turso"] {
+    {
+        let projection = "turso";
         let config = Config::from_env(&env(&[
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -282,10 +282,11 @@ fn first_class_s3_log_backend_pairs_with_memory_and_turso() {
         ),
     ]));
     assert!(memory.is_err(), "s3 × memory is retired");
-    for (projection, extra) in [(
-        "turso",
-        Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
-    )] {
+    {
+        let (projection, extra) = (
+            "turso",
+            Some(("FIREWEED_TURSO_PROJECTION_PATH", "/data/s3.db")),
+        );
         let mut pairs = vec![
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -344,7 +345,7 @@ fn first_class_s3_log_backend_pairs_with_postgres_projection() {
 fn s3_env_rejects_plaintext_without_explicit_local_opt_in() {
     let result = Config::from_env(&env(&[
         ("FIREWEED_LOG_BACKEND", "s3"),
-        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://minio:9000"),
+        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://rustfs:9000"),
         ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed"),
         ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
         ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),

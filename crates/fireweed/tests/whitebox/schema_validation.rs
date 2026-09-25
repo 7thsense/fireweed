@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{
     ClaimRef, ClaimedItem, CommitEntry, CommitRequest, EngineError, EntryOutcome, FinalizeKind,
     NewItem, PayloadUpdate, RequestId, RuntimeCore,
@@ -17,7 +18,6 @@ use fireweed_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use crate::ManualClock;
 use serde_json::json;
 
 fn qkey() -> QueueKey {

@@ -12206,10 +12206,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn projection_store_exposes_indexes_and_exact_discovery() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fw_projection_ports_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).expect("connect");
         cleanup
@@ -12299,10 +12297,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn pending_entry_ports_preserve_bounds_and_requested_order() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_pending_ports_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).expect("connect");
         client
@@ -12376,10 +12372,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn eligible_candidates_accepts_unbounded_limit_sentinel() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_unbounded_limit_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).expect("connect");
         client
@@ -12406,10 +12400,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn push_500_across_128_groups_has_constant_query_amplification() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_push_amp_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12464,10 +12456,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn async_validate_500_items_uses_one_conflict_and_one_group_query() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_validate_amp_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12511,10 +12501,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn existing_schema_requires_exact_predeployed_indexes() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_index_predeploy_{}", std::process::id());
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
@@ -12557,10 +12545,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn existing_schema_rejects_missing_maintenance_triggers() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_trigger_ready_{}", std::process::id());
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
@@ -12665,10 +12651,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn claim_refreshes_group_summary() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_gs_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12690,10 +12674,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn update_fields_reschedules_and_repairs_group_summary() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_update_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12806,7 +12788,7 @@ mod gated_group_summary_tests {
                 ..Default::default()
             },
             ..claim_req(2, 500, 2)
-}))
+        }))
         .unwrap();
         assert_eq!(claimed.items.len(), 2);
         let updated_at: i64 = backend
@@ -12828,10 +12810,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn touched_group_push_absorbs_prior_due_rows() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_due_push_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12873,10 +12853,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn due_promotion_claims_new_leader_and_repairs_to_remaining_item() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_due_claim_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12908,7 +12886,7 @@ mod gated_group_summary_tests {
                 ..Default::default()
             },
             ..claim_req(1, 500, 10)
-}))
+        }))
         .unwrap();
         assert_eq!(claimed.items.len(), 1);
         assert_eq!(claimed.items[0].priority, Some(PriorityValue::Int64(10)));
@@ -12932,10 +12910,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn incomplete_due_chunk_returns_unavailable_before_selecting() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_due_chunk_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12983,10 +12959,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn online_metrics_migration_is_bounded_resumable_and_gates_startup() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_migrate_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13137,10 +13111,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn migration_marker_serializes_waiting_update_and_delete() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_mutation_race_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13277,10 +13249,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn migration_seeds_authority_without_double_counting_preexisting_counters() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_upgrade_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13355,10 +13325,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn compound_later_field_metrics_range_uses_normalized_components() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_component_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13462,10 +13430,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn future_grouped_replacement_moves_the_due_frontier() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_replace_due_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13541,17 +13507,15 @@ mod gated_group_summary_tests {
                 ..Default::default()
             },
             ..claim_req(2, 500, 10)
-}))
+        }))
         .unwrap();
         assert_eq!(claimed.items[0].item_id, replacement_id);
     }
 
     #[test]
     fn million_due_items_in_one_hot_group_advance_in_bounded_chunks() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_hot_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).unwrap();
         client
@@ -13605,10 +13569,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn grouped_lifecycle_is_exact_at_1_100_and_1000_items() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         for size in [1usize, 100, 1_000] {
             let schema = format!("fireweed_rel_lifecycle_{size}_{}", std::process::id());
             let mut cleanup = Client::connect(&url, NoTls).unwrap();
@@ -13642,7 +13604,7 @@ mod gated_group_summary_tests {
                     ..Default::default()
                 },
                 ..claim_req(size, 500, 1)
-}))
+            }))
             .unwrap();
             assert_eq!(claimed.items.len(), size);
             assert_eq!(group_count(&b), 0);
@@ -13665,10 +13627,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn ungrouped_push_has_zero_summary_work() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_ungrouped_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13689,10 +13649,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn request_replay_and_failed_push_do_not_double_apply_summary_delta() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_summary_replay_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13737,10 +13695,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn bounded_group_queries_use_required_partial_indexes() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_group_plan_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13838,10 +13794,8 @@ mod gated_group_summary_tests {
     /// BQ-14b: group_batching leases whole groups oldest-first (env-gated; LOUD-skips without a DB).
     #[test]
     fn group_batching_leases_whole_groups() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_gb_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -13893,10 +13847,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn oversized_group_locks_only_max_items_plus_one() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_group_bound_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13961,10 +13913,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_member_lock_budget_is_global_across_candidates() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_group_global_bound_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -14035,10 +13985,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_batching_refills_past_metadata_mismatch_before_limit() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_refill_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -14088,7 +14036,7 @@ mod gated_group_summary_tests {
                 ..Default::default()
             },
             ..claim_req(1, 100, 1)
-}))
+        }))
         .unwrap();
         assert_eq!(claimed.items.len(), 1);
         assert_eq!(
@@ -14099,10 +14047,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_candidate_locks_are_scoped_and_scan_past_contention() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_group_locks_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).expect("connect");
         cleanup
@@ -14218,10 +14164,8 @@ mod gated_group_summary_tests {
     /// BQ-14c: whole_cohort leases a complete, all-eligible cohort (env-gated; LOUD-skips without a DB).
     #[test]
     fn whole_cohort_leases_complete_cohort() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_wc_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -14281,10 +14225,8 @@ mod gated_group_summary_tests {
     /// crossings, reports deferred at-risk as None, and drops fully-leased scopes (env-gated; LOUD skip).
     #[test]
     fn discover_active_scopes_reads_live_items() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_ds_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -14483,10 +14425,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_rejects_bad_token_bad_version_and_writes_nothing() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("rejects");
         let backend = block_on(backend_for_schema(&url, &schema));
 
@@ -14543,10 +14483,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_request_id_replays_without_double_write() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("replay");
         let backend = block_on(backend_for_schema(&url, &schema));
         let claim_ref = block_on(push_and_claim(&backend, 0, 10));
@@ -14592,10 +14530,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("cursor_epoch_ids");
         let backend = block_on(backend_for_schema(&url, &schema));
         let claim_ref = block_on(push_and_claim(&backend, 0, 10));
@@ -14632,10 +14568,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_atomically_finalizes_multiple_claims() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("multi_claim");
         let backend = block_on(backend_for_schema(&url, &schema));
         block_on(backend.push(&shard(), vec![item(10), item(11)], ts(0), None)).unwrap();
@@ -14701,10 +14635,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_conflict_is_per_entry_during_race() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("race");
         let b1 = block_on(backend_for_schema(&url, &schema));
         let b2 = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();

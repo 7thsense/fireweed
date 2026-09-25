@@ -11,13 +11,13 @@
 
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{EngineError, NewItem, PriorityValue, PushDisposition, RequestId, RuntimeCore};
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())

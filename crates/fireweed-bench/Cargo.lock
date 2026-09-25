@@ -1147,7 +1147,6 @@ dependencies = [
  "bytes",
  "fireweed-core",
  "fireweed-engine",
- "fireweed-memory",
  "fireweed-objectlog",
  "fireweed-postgres",
  "fireweed-projection",
@@ -1200,16 +1199,6 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "fireweed-memory"
-version = "0.31.32"
-dependencies = [
- "bytes",
- "fireweed-core",
- "fireweed-engine",
- "fireweed-projection",
 ]
 
 [[package]]
@@ -2305,7 +2294,8 @@ dependencies = [
 
 [[package]]
 name = "object-log"
-version = "0.3.1"
+version = "0.3.4"
+source = "git+https://github.com/7thsense/object-log.git?tag=v0.3.4#a6c3915abc06125acd2c1429039dd0547a047a24"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",

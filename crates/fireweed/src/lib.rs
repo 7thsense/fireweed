@@ -125,67 +125,74 @@ pub struct ActiveScopeDiscovery {
 #[cfg(test)]
 extern crate self as fireweed;
 
-/// Controllable clock for in-crate tests. Not a public projection.
+/// In-crate test fixtures. They exist only under `cfg(test)`, so no downstream crate can name them.
 #[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct ManualClock {
-    seconds: std::sync::atomic::AtomicI64,
-}
+mod test_support {
+    /// Controllable clock for in-crate tests. Not a public projection.
+    #[derive(Debug)]
+    pub(crate) struct ManualClock {
+        seconds: std::sync::atomic::AtomicI64,
+    }
 
-#[cfg(test)]
-impl ManualClock {
-    pub(crate) fn at(seconds: i64) -> Self {
-        Self {
-            seconds: std::sync::atomic::AtomicI64::new(seconds),
+    impl ManualClock {
+        pub(crate) fn at(seconds: i64) -> Self {
+            Self {
+                seconds: std::sync::atomic::AtomicI64::new(seconds),
+            }
+        }
+
+        pub(crate) fn set(&self, seconds: i64) {
+            self.seconds
+                .store(seconds, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    pub(crate) fn set(&self, seconds: i64) {
-        self.seconds
-            .store(seconds, std::sync::atomic::Ordering::SeqCst);
+    impl fireweed_engine::Clock for ManualClock {
+        fn now(&self) -> fireweed_core::UtcTimestamp {
+            fireweed_core::UtcTimestamp::new(
+                self.seconds.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+            )
+            .expect("valid timestamp")
+        }
     }
-}
 
-#[cfg(test)]
-impl fireweed_engine::Clock for ManualClock {
-    fn now(&self) -> fireweed_core::UtcTimestamp {
-        fireweed_core::UtcTimestamp::new(
-            self.seconds.load(std::sync::atomic::Ordering::SeqCst),
-            0,
+    pub(crate) type TursoMemoryBackend = crate::turso_compose::AtomicTursoBackend<
+        fireweed_engine::InProcessLogStore<fireweed_projection::MemoryLog>,
+    >;
+
+    pub(crate) fn turso_memory_backend() -> TursoMemoryBackend {
+        crate::turso_compose::assemble_memory_log_turso_in_memory()
+            .expect("turso :memory: projection")
+    }
+
+    #[cfg(feature = "objectlog")]
+    pub(crate) fn open_objectlog_turso_files(
+        log_root: &std::path::Path,
+        projection_path: &std::path::Path,
+    ) -> crate::turso_compose::DerivedObjectLogTursoBackend {
+        std::fs::create_dir_all(log_root).expect("object-log root");
+        if let Some(parent) = projection_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).expect("turso projection parent");
+        }
+        let log = fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::ObjectLogEngineStore::open_local(
+                log_root,
+                fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
+            ),
         )
-        .expect("valid timestamp")
+        .expect("open local object log");
+        crate::turso_compose::assemble_objectlog_turso(log, projection_path.to_path_buf(), None)
+            .expect("object log × turso file")
     }
-}
-
-#[cfg(test)]
-pub(crate) type TursoMemoryBackend = turso_compose::AtomicTursoBackend<
-    fireweed_engine::InProcessLogStore<fireweed_projection::MemoryLog>,
->;
-
-#[cfg(test)]
-pub(crate) fn turso_memory_backend() -> TursoMemoryBackend {
-    turso_compose::assemble_memory_log_turso_in_memory().expect("turso :memory: projection")
 }
 
 #[cfg(all(test, feature = "objectlog"))]
-pub(crate) fn open_objectlog_turso_files(
-    log_root: &std::path::Path,
-    projection_path: &std::path::Path,
-) -> turso_compose::DerivedObjectLogTursoBackend {
-    std::fs::create_dir_all(log_root).expect("object-log root");
-    if let Some(parent) = projection_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).expect("turso projection parent");
-    }
-    let log = fireweed_objectlog::block_on_objectlog(fireweed_objectlog::ObjectLogEngineStore::open_local(
-        log_root.to_path_buf(),
-        fireweed_objectlog::flush_config_from_segment(256 * 1024, 50),
-    ))
-    .expect("open local object log");
-    turso_compose::assemble_objectlog_turso(log, projection_path.to_path_buf(), None)
-        .expect("object log × turso file")
-}
+pub(crate) use test_support::open_objectlog_turso_files;
+#[cfg(test)]
+pub(crate) use test_support::{ManualClock, TursoMemoryBackend, turso_memory_backend};
 
 #[cfg(test)]
 #[path = "../tests/whitebox/active_scope_routing.rs"]
@@ -1124,7 +1131,7 @@ pub enum LogConfig {
         node_id: Option<u8>,
         coordination: Option<PostgresCoordinationConfig>,
     },
-    /// Retired compatibility selector. Local tests use MinIO via [`LogConfig::S3`].
+    /// Retired compatibility selector. Local tests use RustFS via [`LogConfig::S3`].
     Filesystem { root: PathBuf },
     /// Class A: S3-compatible object log (the public durable log).
     S3 {
@@ -1371,15 +1378,6 @@ fn validate_async_projection_spec(
     Ok(())
 }
 
-fn validate_filesystem_log_fields(root: &std::path::Path) -> EngineResult<()> {
-    if root.as_os_str().is_empty() {
-        return Err(EngineError::Invalid(
-            "filesystem object-log root must not be empty",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_s3_log_fields(
     endpoint: &str,
     bucket: &str,
@@ -1398,32 +1396,6 @@ fn validate_s3_log_fields(
         ));
     }
     Ok(())
-}
-
-fn validate_filesystem_selection(
-    projection: &ProjectionStoreConfig,
-    _response_barrier: ResponseBarrier,
-) -> EngineResult<()> {
-    match projection {
-        ProjectionStoreConfig::Memory
-        | ProjectionStoreConfig::Turso { .. }
-        | ProjectionStoreConfig::Postgres { .. } => Ok(()),
-    }
-}
-
-fn validate_s3_selection(
-    projection: &ProjectionStoreConfig,
-    _response_barrier: ResponseBarrier,
-) -> EngineResult<()> {
-    // P3s: S3 mirrors filesystem — all three projections accept both Strict and
-    // AsyncProjection. The retired memory-async pending rejection and S3×Postgres
-    // validate-time Unavailable pins are gone; runtime helpers thread the selected
-    // barrier and AsyncProjectionSpec without a second Strict pin.
-    match projection {
-        ProjectionStoreConfig::Memory
-        | ProjectionStoreConfig::Turso { .. }
-        | ProjectionStoreConfig::Postgres { .. } => Ok(()),
-    }
 }
 
 impl ObjectLogRuntimeConfig {
@@ -2321,13 +2293,19 @@ mod storage_config_matrix_tests {
         let source = include_str!("lib.rs");
         let retired_dispatch = ["fn open_object_", "log_cell("].concat();
         assert!(!source.contains(&retired_dispatch));
-
-        let validation = between(
-            source,
-            &["fn validate_filesystem_", "selection("].concat(),
-            &["fn validate_s3_", "selection("].concat(),
-        );
-        assert!(!validation.contains("LogConfig::S3"));
+        // The filesystem, memory and postgres log cells are retired (ADR-024); their
+        // selectors cannot back-edge into S3 because they no longer exist.
+        for retired in [
+            ["fn validate_filesystem_", "selection("].concat(),
+            ["fn open_filesystem_log_", "cell("].concat(),
+            ["fn open_memory_log_", "cell("].concat(),
+            ["fn open_postgres_log_", "cell("].concat(),
+        ] {
+            assert!(
+                !source.contains(&retired),
+                "retired helper returned: {retired}"
+            );
+        }
 
         let engine = between(
             source,
@@ -2335,13 +2313,6 @@ mod storage_config_matrix_tests {
             &["fn open_s3_composed_object_log_", "engine("].concat(),
         );
         assert!(!engine.contains("S3Compatible"));
-
-        let dispatch = between(
-            source,
-            &["fn open_filesystem_log_", "cell("].concat(),
-            &["fn open_s3_log_", "cell("].concat(),
-        );
-        assert!(!dispatch.contains("S3Compatible"));
 
         let postgres = between(
             source,
@@ -2361,21 +2332,6 @@ mod storage_config_open_tests {
 
     fn clock() -> Arc<dyn Clock> {
         Arc::new(SystemClock)
-    }
-
-    fn temp_dir(label: &str) -> PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "fireweed-matrix-open-{}-{}-{}",
-            label,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
     }
 
     fn base_cfg(log: LogConfig, projection: ProjectionStoreConfig) -> StorageConfig {
@@ -2472,9 +2428,9 @@ mod storage_config_open_tests {
                 let region =
                     std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
                 let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-                    .unwrap_or_else(|_| "minioadmin".into());
+                    .unwrap_or_else(|_| "fireweed".into());
                 let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-                    .unwrap_or_else(|_| "minioadmin".into());
+                    .unwrap_or_else(|_| "fireweed-test-rustfs".into());
                 let cfg = base_cfg(
                     LogConfig::S3 {
                         endpoint,
@@ -3007,7 +2963,7 @@ impl Drop for ObjectLogTursoLifecycle {
     }
 }
 
-#[cfg(feature = "objectlog")]
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
 fn open_composed_object_log_engine(
     root: &std::path::Path,
     namespace: &str,
@@ -5398,286 +5354,6 @@ where
     )))
 }
 
-fn open_memory_log_cell(
-    projection: ProjectionStoreConfig,
-    clock: Arc<dyn Clock>,
-    namespace: &str,
-) -> EngineResult<Fireweed> {
-    match projection {
-        // Class B reference cell: pure AsyncLogReplay over RAM axes.
-        // Intentionally NOT wrapped in process-wide BlockingLibBackend — ports are
-        // non-blocking-under-poll (fireweed-ca57127b / API-005 native-async path).
-        ProjectionStoreConfig::Memory => {
-            #[cfg(feature = "memory")]
-            {
-                let _ = namespace;
-                Ok(Fireweed::from_runtime(RuntimeCore::new(
-                    Arc::new(fireweed_memory::composed_memory_backend()),
-                    clock,
-                )))
-            }
-            #[cfg(not(feature = "memory"))]
-            {
-                let _ = (clock, namespace);
-                Err(EngineError::Invalid(
-                    "memory×memory requires the `memory` cargo feature",
-                ))
-            }
-        }
-        ProjectionStoreConfig::Turso { path } => {
-            #[cfg(all(feature = "memory", feature = "turso"))]
-            {
-                let _ = namespace;
-                let backend = Arc::new(turso_compose::assemble_memory_log_turso(path)?);
-                Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
-            }
-            #[cfg(not(all(feature = "memory", feature = "turso")))]
-            {
-                let _ = (path, clock, namespace);
-                Err(EngineError::Invalid(
-                    "memory×turso requires the `memory` and `turso` cargo features",
-                ))
-            }
-        }
-        ProjectionStoreConfig::Postgres { url } => {
-            #[cfg(all(feature = "memory", feature = "postgres"))]
-            {
-                use fireweed_engine::assemble_async_log_replay;
-                let log = fireweed_projection::MemoryLog::new();
-                // Schema is derived from StorageConfig.namespace so reopen reuses the same
-                // projection while distinct configs stay isolated on a shared DSN.
-                let schema = derived_postgres_schema_name(&format!("memory_pg_{namespace}"));
-                let projection =
-                    fireweed_postgres::PostgresRelational::connect_in_schema(&url.0.0, &schema)?;
-                let backend = Arc::new(assemble_async_log_replay(log, projection, 0)?.recover()?);
-                // Postgres projection axis: adapter-private offload (fireweed-ca319318).
-                wrap_postgres_runtime_safe(backend, clock)
-            }
-            #[cfg(not(all(feature = "memory", feature = "postgres")))]
-            {
-                let _ = (url, clock, namespace);
-                Err(EngineError::Invalid(
-                    "memory×postgres requires the `memory` and `postgres` cargo features",
-                ))
-            }
-        }
-    }
-}
-
-fn open_postgres_log_cell(
-    url: ConfigSecret,
-    schema: Option<String>,
-    mode: PostgresMode,
-    node_id: Option<u8>,
-    coordination: Option<PostgresCoordinationConfig>,
-    projection: ProjectionStoreConfig,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    #[cfg(not(feature = "postgres"))]
-    {
-        let _ = (url, schema, mode, node_id, coordination, projection, clock);
-        Err(EngineError::Invalid(
-            "postgres log cells require the `postgres` cargo feature",
-        ))
-    }
-    #[cfg(feature = "postgres")]
-    {
-        let url_str = url.0.0;
-        match projection {
-            ProjectionStoreConfig::Memory => open_postgres_runtime(
-                PostgresRuntimeConfig {
-                    url: ConfigSecret::new(url_str),
-                    schema,
-                    // Memory projection is the log-replay composition.
-                    mode: PostgresMode::LogReplay,
-                    node_id,
-                    coordination,
-                    claim_pool_size: 0,
-                },
-                clock,
-            ),
-            ProjectionStoreConfig::Turso { path } => {
-                #[cfg(feature = "turso")]
-                {
-                    let log = match schema.as_deref() {
-                        Some(schema) => {
-                            fireweed_postgres::PostgresLog::connect_in_schema(&url_str, schema)?
-                        }
-                        None => fireweed_postgres::PostgresLog::connect(&url_str)?,
-                    };
-                    let node = node_id.unwrap_or(0);
-                    let backend =
-                        Arc::new(turso_compose::assemble_postgres_log_turso(log, path, node)?);
-                    let _ = (mode, coordination);
-                    wrap_postgres_runtime_safe(backend, clock)
-                }
-                #[cfg(not(feature = "turso"))]
-                {
-                    let _ = (path, clock, mode, node_id, coordination, schema);
-                    Err(EngineError::Invalid(
-                        "postgres×turso requires the `turso` cargo feature",
-                    ))
-                }
-            }
-            ProjectionStoreConfig::Postgres {
-                url: projection_url,
-            } => {
-                // TD-002 / server rule: postgres×postgres is the unified relational backend; log and
-                // projection URLs must be identical.
-                if url_str != projection_url.0.0 {
-                    return Err(EngineError::Invalid(
-                        "postgres×postgres requires identical log and projection URLs",
-                    ));
-                }
-                let _ = mode; // public matrix cell is always unified relational
-                open_postgres_runtime(
-                    PostgresRuntimeConfig {
-                        url: ConfigSecret::new(url_str),
-                        schema,
-                        mode: PostgresMode::Relational,
-                        node_id,
-                        coordination,
-                        claim_pool_size: 0,
-                    },
-                    clock,
-                )
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // Mirrors the public StorageConfig axes at one conversion boundary.
-fn open_filesystem_log_cell(
-    root: PathBuf,
-    authority: Option<ObjectLogAuthority>,
-    projection: ProjectionStoreConfig,
-    response_barrier: ResponseBarrier,
-    async_projection: Option<AsyncProjectionSpec>,
-    segments: SegmentConfig,
-    namespace: String,
-    recovery: RecoveryPolicy,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    #[cfg(not(feature = "objectlog"))]
-    {
-        let _ = (
-            root,
-            authority,
-            projection,
-            response_barrier,
-            async_projection,
-            segments,
-            namespace,
-            recovery,
-            clock,
-        );
-        Err(EngineError::Invalid(
-            "filesystem log cells require the `objectlog` cargo feature",
-        ))
-    }
-    #[cfg(feature = "objectlog")]
-    {
-        let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
-        match projection {
-            ProjectionStoreConfig::Memory => open_objectlog_memory_projection(
-                root,
-                authority,
-                response_barrier,
-                async_projection,
-                segments,
-                namespace,
-                recovery,
-                clock,
-            ),
-            ProjectionStoreConfig::Turso { path } => {
-                #[cfg(feature = "turso")]
-                {
-                    let config = composed_storage_config(
-                        ObjectLogConfig::Local { root: root.clone() },
-                        authority,
-                        ComposedProjectionConfig::Turso { path: path.clone() },
-                        response_barrier,
-                        async_projection,
-                        segments,
-                        namespace.clone(),
-                        recovery,
-                    );
-                    let log = open_composed_object_log_engine(
-                        &root,
-                        &namespace,
-                        SegmentSettings {
-                            target_bytes: config.segments.target_bytes,
-                            max_latency_ms: config.segments.max_latency_ms,
-                        },
-                    )?;
-                    let backend = Arc::new(turso_compose::assemble_objectlog_turso(
-                        log,
-                        path,
-                        Some(config.async_projection.unwrap_or_default()),
-                    )?);
-                    // Product ports are natively async (LogEngine + Turso); no process-wide BLB.
-                    Ok(finish_objectlog_turso(config, clock, backend))
-                }
-                #[cfg(not(feature = "turso"))]
-                {
-                    let _ = (
-                        root,
-                        authority,
-                        path,
-                        response_barrier,
-                        async_projection,
-                        segments,
-                        namespace,
-                        recovery,
-                        clock,
-                    );
-                    Err(EngineError::Invalid(
-                        "filesystem×turso requires the `turso` cargo feature",
-                    ))
-                }
-            }
-            ProjectionStoreConfig::Postgres { url } => {
-                #[cfg(all(feature = "objectlog", feature = "postgres"))]
-                {
-                    // Call the blocking constructor directly. `open_objectlog_postgres` refuses
-                    // when a Tokio Handle is present; `open_async` already offloads this path to
-                    // `spawn_blocking`, where try_current() can still succeed.
-                    open_objectlog_postgres_blocking(
-                        composed_storage_config(
-                            ObjectLogConfig::Local { root },
-                            authority,
-                            ComposedProjectionConfig::Postgres { url: url.0 },
-                            response_barrier,
-                            async_projection,
-                            segments,
-                            namespace,
-                            recovery,
-                        ),
-                        clock,
-                    )
-                    .map(ComposedRuntime::into_fireweed)
-                }
-                #[cfg(not(all(feature = "objectlog", feature = "postgres")))]
-                {
-                    let _ = (
-                        root,
-                        authority,
-                        url,
-                        response_barrier,
-                        segments,
-                        namespace,
-                        recovery,
-                        clock,
-                    );
-                    Err(EngineError::Invalid(
-                        "object-log×postgres requires the `objectlog` and `postgres` cargo features",
-                    ))
-                }
-            }
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)] // Mirrors the public StorageConfig axes at one conversion boundary.
 fn open_s3_log_cell(
     provider: S3ComposedProvider,
@@ -5904,43 +5580,6 @@ fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3C
 
 #[cfg(feature = "objectlog")]
 #[allow(clippy::too_many_arguments)] // Mirrors the filesystem projection policy boundary.
-fn open_objectlog_memory_projection(
-    root: PathBuf,
-    authority: ObjectLogAuthority,
-    _response_barrier: ResponseBarrier,
-    async_projection: Option<AsyncProjectionSpec>,
-    segments: SegmentConfig,
-    namespace: String,
-    recovery: RecoveryPolicy,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Fireweed> {
-    let _ = (authority, recovery);
-    let log = open_composed_object_log_engine(
-        &root,
-        &namespace,
-        SegmentSettings {
-            target_bytes: segments.target_bytes,
-            max_latency_ms: segments.max_latency_ms,
-        },
-    )?;
-    let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
-            log,
-            0,
-            async_projection.unwrap_or_default(),
-        ),
-    )?;
-    // Intentionally NOT wrapped in process-wide BlockingLibBackend — LogEngine ports are
-    // driven via ObjectLogTaskDispatcher on the process-wide multi-thread runtime
-    // (fireweed-8a023735 / API-005 native-async path).
-    Ok(Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(backend),
-        clock,
-    )))
-}
-
-#[cfg(feature = "objectlog")]
-#[allow(clippy::too_many_arguments)] // Mirrors the filesystem projection policy boundary.
 fn open_s3_objectlog_memory_projection(
     provider: S3ComposedProvider,
     authority: ObjectLogAuthority,
@@ -5975,7 +5614,7 @@ fn open_s3_objectlog_memory_projection(
 
 /// Open the public product cell: S3-compatible object-log × local Turso.
 ///
-/// Local processes reuse or start MinIO; durability still goes through
+/// Local processes reuse or start RustFS; durability still goes through
 /// [`fireweed_objectlog`] (LogEngine group-commit), not a raw S3 client.
 #[cfg(feature = "objectlog")]
 pub fn open_product(clock: Arc<dyn Clock>) -> Fireweed {
@@ -6383,8 +6022,8 @@ pub fn open_postgres_coordinated(
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::future::Future;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Barrier};
     use std::task::{Context, Poll};
     use std::time::{Duration, Instant};
 
@@ -6395,10 +6034,8 @@ mod tests {
     };
 
     use super::{
-        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, Fireweed,
-        LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy, RequestId, ResponseBarrier,
-        RuntimeCore, SegmentConfig, SnapshotPolicy, StorageConfig, SystemClock,
-        apply_owned_renewal_outcomes, open, open_async,
+        ClaimByQueryAt, Fireweed, NewItem, RecoveryPolicy, RuntimeCore, SegmentConfig,
+        SnapshotPolicy, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open_async,
     };
 
     #[cfg(feature = "objectlog")]
@@ -6448,7 +6085,7 @@ mod tests {
         assert!(cadence.should_snapshot(2_000_000, Some(60_000)));
     }
     #[cfg(feature = "postgres")]
-    use super::{ConfigSecret, PostgresMode, open_postgres_async};
+    use super::open_postgres_async;
     use crate::EngineResult;
     use fireweed_engine::{
         Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
@@ -6482,7 +6119,6 @@ mod tests {
     #[cfg(feature = "memory")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_product_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -6512,7 +6148,6 @@ mod tests {
     #[cfg(feature = "memory")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_async_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -6530,12 +6165,9 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_open_postgres_async_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let Some(url) = postgres_test_url() else {
-            eprintln!(
-                "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-            );
-            return Ok(());
-        };
+        let url = postgres_test_url().expect(
+            "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
+        );
         // Isolate via URL query? Prefer schema-bearing open_postgres_runtime_async-equivalent
         // by using a dedicated DB name suffix is hard; use open_async with schema instead when
         // available. open_postgres_async uses the default schema — unique queue id avoids clash.
@@ -6577,7 +6209,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("object-log root");
 
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let fireweed = open_product_cell().await;
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -6600,11 +6231,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_objectlog_turso_repeated_create_preserves_claim_for_commit()
     -> EngineResult<()> {
-        use fireweed_core::{
-            ClaimByQueryRequest, FilterOp, OrderField, QueryFilter, SortDirection, TypedValue,
-            WorkerId,
-        };
-
         let root = std::env::temp_dir().join(format!(
             "fireweed-ol-turso-cbq-{}-{}",
             std::process::id(),
@@ -6615,7 +6241,6 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("object-log root");
-        let proj = root.join("projection.db");
 
         // Snorri's AdapterClock freezes at t=1s — exercise the same frozen-clock shape.
         let clock: Arc<dyn Clock> = Arc::new(FrozenClock { seconds: 1 });

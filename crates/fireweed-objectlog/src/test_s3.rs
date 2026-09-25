@@ -1,10 +1,11 @@
-//! Process-wide local MinIO for product tests and local runtime.
+//! Process-wide local RustFS for product tests and local runtime.
 //!
 //! Reuses `FIREWEED_S3_TEST_*` when those variables already point at a live
-//! endpoint. Otherwise starts the digest-pinned MinIO binary (or `minio` on
-//! PATH) on loopback and creates a test bucket. Object data is kept off tmpfs
-//! (`FIREWEED_MINIO_DATA`, else `/var/tmp/fireweed-test-minio-data` when `/tmp`
-//! is ram-backed) so capacity logs do not fill RAM.
+//! RustFS endpoint. Otherwise starts the checksum-pinned RustFS binary
+//! (`FIREWEED_RUSTFS_BIN`, else `rustfs` on PATH) on loopback and creates a test
+//! bucket. Object data is kept off tmpfs (`FIREWEED_RUSTFS_DATA`, else
+//! `/var/tmp/fireweed-test-rustfs-data` when `/tmp` is ram-backed) so capacity
+//! logs do not fill RAM.
 
 use crate::S3CreateOnlyPut;
 use fireweed_engine::EngineResult;
@@ -16,11 +17,14 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_PORT: u16 = 19_000;
+const DEFAULT_PORT: u16 = 19_100;
 const ACCESS_KEY: &str = "fireweed";
-const SECRET_KEY: &str = "fireweed-test-minio";
+const SECRET_KEY: &str = "fireweed-test-rustfs";
 const BUCKET: &str = "fireweed-test";
 const REGION: &str = "us-east-1";
+/// `GET /health` names the service; `/health/ready` turns 200 once storage has quorum.
+const RUSTFS_SERVICE: &str = "\"service\":\"rustfs-endpoint\"";
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Live S3-compatible endpoint used by the public s3 × turso product cell.
 #[derive(Clone, Debug)]
@@ -41,12 +45,12 @@ impl S3TestEnv {
 static ENV: OnceLock<S3TestEnv> = OnceLock::new();
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
-/// Shared MinIO (or operator-provided) S3 endpoint for this process.
+/// Shared RustFS (or operator-provided) S3 endpoint for this process.
 pub fn shared_s3_test_env() -> &'static S3TestEnv {
     ENV.get_or_init(|| {
         thread::spawn(init_s3_test_env)
             .join()
-            .unwrap_or_else(|_| panic!("minio init thread panicked"))
+            .unwrap_or_else(|_| panic!("rustfs init thread panicked"))
     })
 }
 
@@ -60,25 +64,26 @@ fn init_s3_test_env() -> S3TestEnv {
                     env.endpoint
                 );
             }
-            if !minio_health_live(&env.endpoint) {
+            if !is_rustfs(&env.endpoint) {
                 panic!(
-                    "FIREWEED_S3_TEST_ENDPOINT={} is a foreign listener, not MinIO. \
+                    "FIREWEED_S3_TEST_ENDPOINT={} is a foreign listener, not RustFS. \
                      Refusing a generic S3 dispatch failure.",
                     env.endpoint
                 );
             }
+            wait_ready_or_panic(&env.endpoint);
             ensure_bucket_or_explain(&env);
             env
         }
         None => {
             let local = format!("http://127.0.0.1:{DEFAULT_PORT}");
-            if endpoint_live(&local) && !minio_health_live(&local) {
+            if endpoint_live(&local) && !is_rustfs(&local) {
                 panic!(
                     "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} is a foreign listener, \
-                     not the expected MinIO. Refusing a generic S3 dispatch failure."
+                     not the expected RustFS. Refusing a generic S3 dispatch failure."
                 );
             }
-            spawn_local_minio()
+            spawn_local_rustfs()
         }
     }
 }
@@ -91,45 +96,66 @@ fn ensure_bucket_or_explain(env: &S3TestEnv) {
         let who = match endpoint_named {
             Some(endpoint) => format!("FIREWEED_S3_TEST_ENDPOINT={endpoint}"),
             None => format!(
-                "FIREWEED_S3_TEST_ENDPOINT is unset; listener {} is not the expected MinIO \
+                "FIREWEED_S3_TEST_ENDPOINT is unset; listener {} is not the expected RustFS \
                  (credentials {ACCESS_KEY})",
                 env.endpoint
             ),
         };
         panic!(
-            "{who} rejected the test bucket setup (wrong credentials or not MinIO). \
+            "{who} rejected the test bucket setup (wrong credentials or not RustFS). \
              This is test setup, not a product S3 dispatch failure. Underlying: {error}"
         );
     }
 }
 
-fn minio_health_live(endpoint: &str) -> bool {
+/// Status line and body of a plain-HTTP GET, or `None` when the listener does not answer.
+fn http_get(endpoint: &str, path: &str) -> Option<(u16, String)> {
     let url = endpoint.trim().trim_end_matches('/');
     let host_port = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
-    let Ok(mut addrs) = host_port.to_socket_addrs() else {
-        return false;
-    };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(250)) else {
-        return false;
-    };
+    let addr = host_port.to_socket_addrs().ok()?.next()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let host = host_port.split('/').next().unwrap_or(host_port);
-    let request = format!("GET /minio/health/live HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 1024];
+    while raw.len() < 16 * 1024 {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        }
     }
-    let mut buf = [0_u8; 256];
-    let Ok(n) = stream.read(&mut buf) else {
-        return false;
-    };
-    let text = String::from_utf8_lossy(&buf[..n]);
-    text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200")
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let status = text
+        .strip_prefix("HTTP/1.1 ")
+        .or_else(|| text.strip_prefix("HTTP/1.0 "))?
+        .get(..3)?
+        .parse()
+        .ok()?;
+    Some((status, text))
+}
+
+fn is_rustfs(endpoint: &str) -> bool {
+    matches!(http_get(endpoint, "/health"), Some((200, body)) if body.contains(RUSTFS_SERVICE))
+}
+
+fn wait_ready_or_panic(endpoint: &str) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if matches!(http_get(endpoint, "/health/ready"), Some((200, _))) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "RustFS at {endpoint} did not report /health/ready within {}s. \
+         This is test setup, not a product S3 dispatch failure.",
+        READY_TIMEOUT.as_secs()
+    );
 }
 
 fn env_from_process_environment() -> Option<S3TestEnv> {
@@ -163,7 +189,7 @@ fn endpoint_live(endpoint: &str) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
 }
 
-fn spawn_local_minio() -> S3TestEnv {
+fn spawn_local_rustfs() -> S3TestEnv {
     let endpoint = format!("http://127.0.0.1:{DEFAULT_PORT}");
     let env = S3TestEnv {
         endpoint: endpoint.clone(),
@@ -172,22 +198,23 @@ fn spawn_local_minio() -> S3TestEnv {
         access_key: ACCESS_KEY.to_owned(),
         secret_key: SECRET_KEY.to_owned(),
     };
-    let data = minio_data_dir();
+    let data = rustfs_data_dir();
     if endpoint_live(&endpoint) {
-        if existing_test_minio_on_tmpfs() && !path_on_tmpfs(&data) {
-            stop_tmpfs_test_minio();
+        if existing_test_rustfs_on_tmpfs() && !path_on_tmpfs(&data) {
+            stop_tmpfs_test_rustfs();
             let deadline = Instant::now() + Duration::from_secs(5);
             while endpoint_live(&endpoint) && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(50));
             }
         } else {
+            wait_ready_or_panic(&endpoint);
             ensure_bucket_or_explain(&env);
             return env;
         }
     }
 
-    let bin = find_minio_binary();
-    std::fs::create_dir_all(&data).expect("minio data dir");
+    let bin = find_rustfs_binary();
+    std::fs::create_dir_all(&data).expect("rustfs data dir");
 
     let mut command = Command::new(&bin);
     command
@@ -195,59 +222,57 @@ fn spawn_local_minio() -> S3TestEnv {
         .arg(&data)
         .arg("--address")
         .arg(format!("127.0.0.1:{DEFAULT_PORT}"))
-        .arg("--quiet")
-        .env("MINIO_ROOT_USER", ACCESS_KEY)
-        .env("MINIO_ROOT_PASSWORD", SECRET_KEY)
+        .env("RUSTFS_ACCESS_KEY", ACCESS_KEY)
+        .env("RUSTFS_SECRET_KEY", SECRET_KEY)
+        // The web console otherwise listens on every interface.
+        .env("RUSTFS_CONSOLE_ENABLE", "false")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = command.spawn().unwrap_or_else(|error| {
         panic!(
-            "FIREWEED_S3_TEST_ENDPOINT is unset and MinIO could not be started from {}: {error}. \
+            "FIREWEED_S3_TEST_ENDPOINT is unset and RustFS could not be started from {}: {error}. \
              This is test setup, not a product S3 dispatch failure.",
             bin.display()
         )
     });
-    *CHILD.lock().expect("minio child mutex") = Some(child);
+    *CHILD.lock().expect("rustfs child mutex") = Some(child);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if endpoint_live(&endpoint) {
-            if !minio_health_live(&endpoint) {
+            if !is_rustfs(&endpoint) {
                 panic!(
-                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} did not become MinIO. \
+                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} did not become RustFS. \
                      Refusing a generic S3 dispatch failure."
                 );
             }
+            wait_ready_or_panic(&endpoint);
             ensure_bucket_or_explain(&env);
             return env;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("MinIO did not become ready on {endpoint} within 10s");
+    panic!("RustFS did not start listening on {endpoint} within 10s");
 }
 
-fn find_minio_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("FIREWEED_MINIO_BIN") {
+fn find_rustfs_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("FIREWEED_RUSTFS_BIN") {
         return PathBuf::from(path);
     }
-    let pinned = Path::new("/tmp/fireweed-maintenance-tools/minio");
-    if pinned.is_file() {
-        return pinned.to_path_buf();
-    }
-    PathBuf::from("minio")
+    PathBuf::from("rustfs")
 }
 
-fn minio_data_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("FIREWEED_MINIO_DATA") {
+fn rustfs_data_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("FIREWEED_RUSTFS_DATA") {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
         }
     }
-    let tmp = std::env::temp_dir().join("fireweed-test-minio-data");
+    let tmp = std::env::temp_dir().join("fireweed-test-rustfs-data");
     if path_on_tmpfs(&tmp) {
-        return PathBuf::from("/var/tmp/fireweed-test-minio-data");
+        return PathBuf::from("/var/tmp/fireweed-test-rustfs-data");
     }
     tmp
 }
@@ -278,13 +303,13 @@ fn path_on_tmpfs(path: &Path) -> bool {
     best.map(|(_, tmpfs)| tmpfs).unwrap_or(false)
 }
 
-fn existing_test_minio_on_tmpfs() -> bool {
-    test_minio_pids_with_data()
+fn existing_test_rustfs_on_tmpfs() -> bool {
+    test_rustfs_pids_with_data()
         .into_iter()
         .any(|(_, data)| path_on_tmpfs(&data))
 }
 
-fn test_minio_pids_with_data() -> Vec<(i32, PathBuf)> {
+fn test_rustfs_pids_with_data() -> Vec<(i32, PathBuf)> {
     let Ok(proc) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -302,7 +327,7 @@ fn test_minio_pids_with_data() -> Vec<(i32, PathBuf)> {
             continue;
         };
         let cmdline = String::from_utf8_lossy(&raw);
-        if !cmdline.contains("minio") || !cmdline.contains("fireweed-test-minio-data") {
+        if !cmdline.contains("rustfs") || !cmdline.contains("fireweed-test-rustfs-data") {
             continue;
         }
         let args: Vec<&str> = cmdline
@@ -320,18 +345,18 @@ fn test_minio_pids_with_data() -> Vec<(i32, PathBuf)> {
     found
 }
 
-fn stop_tmpfs_test_minio() {
-    for (pid, data) in test_minio_pids_with_data() {
+fn stop_tmpfs_test_rustfs() {
+    for (pid, data) in test_rustfs_pids_with_data() {
         if !path_on_tmpfs(&data) {
             continue;
         }
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }
-    if let Ok(mut child) = CHILD.lock() {
-        if let Some(mut owned) = child.take() {
-            let _ = owned.kill();
-            let _ = owned.wait();
-        }
+    if let Ok(mut child) = CHILD.lock()
+        && let Some(mut owned) = child.take()
+    {
+        let _ = owned.kill();
+        let _ = owned.wait();
     }
 }
 
@@ -339,7 +364,7 @@ fn ensure_bucket_blocking(env: &S3TestEnv) -> EngineResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("minio bucket runtime");
+        .expect("rustfs bucket runtime");
     let client = S3CreateOnlyPut::new(
         &env.endpoint,
         &env.region,

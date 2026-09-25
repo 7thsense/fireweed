@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{
     ClaimRef, CommitEntry, CommitEntryStatus, CommitRequest, EngineError, EntryOutcome,
     FinalizeKind, InstanceFence, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem,
@@ -21,7 +22,6 @@ use fireweed_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use crate::ManualClock;
 use serde_json::json;
 
 fn qkey() -> QueueKey {
@@ -694,14 +694,6 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
     {
         // The direct object-log composition uses the same atomic command envelope and
         // must expose the full commit surface.
-        let dir = std::env::temp_dir().join(format!(
-            "fireweed-caps-objlog-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
         let objectlog_fireweed = fireweed::open_product(Arc::new(ManualClock::at(0)));
         objectlog_fireweed.create_queue(qdef(60_000)).await.unwrap();
         let ocaps = objectlog_fireweed.commit_capabilities(&q).unwrap();

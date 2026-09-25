@@ -1,7 +1,7 @@
 // Provenance: crates/fireweed/tests/whitebox/facade.rs::push_claim_ack_nack_lifecycle_over_memory
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn push_claim_ack_nack_lifecycle_over_memory() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();

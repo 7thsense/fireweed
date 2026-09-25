@@ -1242,9 +1242,9 @@ impl TursoRelational {
         }
         let ids = ids.to_vec();
         let lease_token = lease_token.clone();
-        let mut connection = self.reader.lock().await;
+        let connection = self.reader.lock().await;
         crate::projection::materialize_grouped_cohort_claimed_on(
-            &mut connection,
+            &connection,
             shard,
             &ids,
             &lease_token,
@@ -1523,7 +1523,8 @@ impl TursoRelational {
             };
             cohorts.push(FormingCohort {
                 shard: QueueKey::new(
-                    TenantId::new(tenant.clone()).map_err(|e| EngineError::Storage(e.to_string()))?,
+                    TenantId::new(tenant.clone())
+                        .map_err(|e| EngineError::Storage(e.to_string()))?,
                     QueueId::new(queue.clone()).map_err(|e| EngineError::Storage(e.to_string()))?,
                 ),
                 group_key: GroupKey::new(group.clone())

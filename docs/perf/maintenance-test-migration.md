@@ -69,6 +69,26 @@ follow-ups, and completed measurement attempts with their original outcomes.
 | `storage_matrix_t0_t2.rs` | `sqlite_log_three_cells_t0_t2` | SQLite-log cell/Helm fixture is retired. Current 12-cell matrix and Helm gate enumerate supported configurations. |
 | `objectlog_sqlite_composition.rs` | `public_objectlog_sqlite_side_records_by_prefix_pages_ordered` | Native public-interface transition coverage writes ordered side-record keys and requires exact prefix pages, cursor resumption and exclusion of unrelated prefixes. |
 
+### One-cell collapse (v0.31.32)
+
+ADR-024 keeps S3 object-log × Turso × AsyncProjection as the only public cell.
+`3a8d8270` removed the Cargo targets of the non-S3 suites; their sources and
+baseline rows were deleted afterwards. Deleted sources:
+`p14_async_nonblocking_bridge_contracts.rs`, `p3b_async_config_validation.rs`,
+`p3b_filesystem_barriers.rs`, `p5_class_b_reopen.rs`,
+`p5an_non_s3_class_a_reopen_parity.rs`, `p6n_non_s3_query_parity.rs`,
+`p7n_non_s3_lifecycle_parity.rs`, `p8n_non_s3_mutation_parity.rs`,
+`p9n_non_s3_transaction_parity.rs` and `public_durability_matrix.rs`.
+
+| Source | Removed assertion | Reason / remaining coverage |
+| --- | --- | --- |
+| `encapsulation.rs` | `open_memory_builds_a_usable_fireweed` | Memory log cell is retired. `open_product_builds_a_usable_fireweed` builds the public cell. |
+| `public_durability_matrix.rs` | `objectlog_local_direct_close_reopen` | Filesystem log cell is retired. `p5as3_s3_reopen_parity` and `p6s_s3_durability_acceptance` reopen the S3 cell. |
+| `public_durability_matrix.rs` | `objectlog_turso_async_reopen_and_log_only_rebuild` | Target removed with the non-S3 matrix. `filesystem_turso_projection_control_rebuilds_from_log` and `p6s_s3_durability_acceptance` rebuild Turso from the log. |
+| `public_durability_matrix.rs` | `objectlog_turso_strict_reopen_and_log_only_rebuild` | Strict barrier is retired (`5e5d46bb`). AsyncProjection rebuild coverage is listed above. |
+| `public_interface_conformance.rs` | `memory_turso_public_interface` | Memory log cell is retired. `public_interface_external_conformance` covers S3 × Turso. |
+| `public_interface_conformance.rs` | `filesystem_memory_public_interface` | Memory projection is retired. `public_interface_external_conformance` covers S3 × Turso. |
+
 ## Other diagnostic cleanup
 
 - Removed the unused 1,072-line private `blocking_backend` module and its two uncalled construction/path helpers. The stale helper caused Turso-only builds to reference a feature-disabled module. Its three worker-only tests are retired with the implementation. The two concurrent queue-creation tests now use shared public `open_memory` handles; the two owned-control-plane tests retain their real executor and assertions using the memory backend directly. Public current-thread storage tests remain.

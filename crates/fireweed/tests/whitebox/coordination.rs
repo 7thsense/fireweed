@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{BoundedMutationRequest, ClaimByQueryRequest, NewItem, Ownership, RuntimeCore};
 use fireweed_core::{
     EligibilityPolicy, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField, OrderingMode,
@@ -19,7 +20,6 @@ use fireweed_core::{
 use fireweed_engine::{
     Clock, ControlPlaneConfig, EngineError, InMemoryControlPlane, QueueControlPlane, QueueKey,
 };
-use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())

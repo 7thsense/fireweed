@@ -314,7 +314,7 @@ enum DefinitionAuthority {
     /// One store owns this in-memory blob namespace. A short catalog-only permit makes the
     /// get/put pair atomic without serializing append, read, projection, or unrelated I/O.
     ProcessLocal,
-    /// S3 PutObject with `If-None-Match: *` (enforced by the endpoint, e.g. P1s MinIO).
+    /// S3 PutObject with `If-None-Match: *` (enforced by the endpoint, e.g. P1s RustFS).
     /// Owned by Fireweed because `object_log::BlobStore` is overwrite-only `put`.
     S3CreateOnly { put: Arc<S3CreateOnlyPut> },
     /// Generic/custom BlobStore path without a create-only publisher: fail closed rather
@@ -577,13 +577,43 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         meta_prefix: impl Into<String>,
         flush: FlushConfig,
     ) -> EngineResult<Self> {
-        let blob: Arc<dyn BlobStore> = Arc::new(object_log::S3BlobStore::new(
+        Self::open_s3_with_prefixes_wrapping_blob(
             endpoint,
             region,
             bucket,
             access_key_id,
             secret_access_key,
-        ));
+            data_prefix,
+            meta_prefix,
+            flush,
+            |blob| blob,
+        )
+        .await
+    }
+
+    /// [`open_s3_with_prefixes`](Self::open_s3_with_prefixes) with the log's blob store wrapped
+    /// before use, so a test can observe or delay object-log I/O. Queue-definition authority keeps
+    /// its own create-only S3 client.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_s3_with_prefixes_wrapping_blob(
+        endpoint: &str,
+        region: &str,
+        bucket: &str,
+        access_key_id: &str,
+        secret_access_key: &str,
+        data_prefix: impl Into<String>,
+        meta_prefix: impl Into<String>,
+        flush: FlushConfig,
+        wrap: impl FnOnce(Arc<dyn BlobStore>) -> Arc<dyn BlobStore>,
+    ) -> EngineResult<Self> {
+        let blob: Arc<dyn BlobStore> = wrap(Arc::new(object_log::S3BlobStore::new(
+            endpoint,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key,
+        )));
         let put = Arc::new(S3CreateOnlyPut::new(
             endpoint,
             region,
@@ -1565,6 +1595,20 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 .last()
                 .map(|(p, _)| CommandPosition::new(shard.clone(), p.backend_epoch, p.sequence));
             Ok(CommandPage { entries, next })
+        }
+    }
+
+    fn refresh_shard(
+        &self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        async move {
+            let partition = partition_key(&shard);
+            let sequencer = Arc::clone(self.engine.sequencer());
+            tokio::task::spawn_blocking(move || sequencer.refresh_partition(&partition))
+                .await
+                .map_err(|error| store_err(format!("index refresh task failed: {error}")))?
+                .map_err(store_err)
         }
     }
 
@@ -2638,25 +2682,26 @@ mod tests {
         })
         .await
         .expect("flush both appends");
-        let a_positions = a_append.await.unwrap().unwrap();
+        // The fence completed first, so the lingering epoch-one append must not publish.
+        let a_result = a_append.await.unwrap();
+        assert!(
+            a_result.is_err(),
+            "an append still unpublished when its epoch is fenced must fail, got {a_result:?}"
+        );
         let b_positions = b_append.await.unwrap().unwrap();
         assert_eq!(fence_during_seal, a_epoch + 1);
-        assert_eq!(a_positions.len(), 1);
         assert_eq!(b_positions.len(), 1);
-        assert_eq!(a_positions[0].queue, a);
         assert_eq!(b_positions[0].queue, b);
-        assert_eq!(a_positions[0].sequence, b_positions[0].sequence);
-        assert_eq!(
+        assert!(
             log.read_from(a.clone(), None, 16)
                 .await
                 .unwrap()
                 .entries
-                .len(),
-            1
+                .is_empty()
         );
         assert_eq!(log.read_from(b, None, 16).await.unwrap().entries.len(), 1);
         assert!(matches!(
-            log.append_exclusive(a, vec![pause_env("stale")], a_epoch)
+            log.append_exclusive(a.clone(), vec![pause_env("stale")], a_epoch)
                 .await,
             Err(EngineError::EpochFenced)
         ));
@@ -2667,7 +2712,15 @@ mod tests {
         assert_eq!(
             log.engine.sequencer().snapshot().manifest_count - before,
             1,
-            "both partitions must publish in one durable manifest"
+            "the shared seal must publish one durable manifest"
+        );
+        let fresh = log
+            .append_exclusive(a, vec![pause_env("fresh")], fence_during_seal)
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh[0].sequence, 0,
+            "the rejected append must not consume an offset"
         );
     }
 

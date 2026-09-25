@@ -673,7 +673,7 @@ mod contention_mapping_tests {
             expected_epoch: Some(1),
 
             request_id: None,
-};
+        };
         let first = ItemId::mint(1, 1, 1);
         let second = ItemId::mint(1, 1, 2);
         let item = |id: ItemId, seq: u8| ClaimedItem {
@@ -1620,7 +1620,9 @@ where
     }
 
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
-        if let Some(replayed) = replay_recorded_batch_claim(self.projection.as_ref(), &request).await? {
+        if let Some(replayed) =
+            replay_recorded_batch_claim(self.projection.as_ref(), &request).await?
+        {
             return Ok(replayed);
         }
         self.engine.claim(request).await.map_err(map_claim)
@@ -1868,6 +1870,9 @@ macro_rules! impl_turso_product_ports {
             ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
                 let shard = shard.clone();
                 async move {
+                    // Another pod may have owned this queue since this handle opened the shared
+                    // log; read its durable index, not this handle's snapshot of it.
+                    AsyncLogStore::refresh_shard(self.log.as_ref(), shard.clone()).await?;
                     let high_water = self.projection.writer_recovery_high_water(&shard).await?;
                     let mut from = high_water.clone();
                     loop {
@@ -3059,6 +3064,9 @@ type ObjectLogEngine = AsyncComposedBackend<
 
 #[cfg(feature = "objectlog")]
 type GenerationJoins = Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>;
+/// Same-process claim replays keyed by request id: the claim work id and its leased set.
+#[cfg(feature = "objectlog")]
+type ClaimReplays = Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>;
 #[cfg(all(feature = "objectlog", test))]
 type MetricsSnapshotHook = Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>;
 
@@ -3095,7 +3103,7 @@ pub struct DerivedObjectLogTursoBackend {
     claim_work_ids: Arc<AtomicU64>,
     /// Same-process API-001 claim replay. Apply may still be in flight when the
     /// caller retries, so the leased set is remembered before Turso publishes it.
-    claim_replays: Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>,
+    claim_replays: ClaimReplays,
     /// This process owns the Turso writer. Item Claim SELECT and the FIFO
     /// rowid floor are sequenced here so the next generation can read the
     /// following slice without waiting for apply.
@@ -5370,7 +5378,9 @@ where
         }
         let epoch = ControlPlaneStore::current_epoch(backend, &cohort.shard).await?;
         let envelope = CommandEnvelope {
-            command_id: fireweed_engine::CommandId::new(format!("cohort-expired-{now_n}-{expired}")),
+            command_id: fireweed_engine::CommandId::new(format!(
+                "cohort-expired-{now_n}-{expired}"
+            )),
             request_id: None,
             request_fingerprint: None,
             request_outcome: None,
@@ -5453,8 +5463,8 @@ pub fn assemble_memory_log_turso(
 
 /// Non-durable Turso projection (`TursoConfig::in_memory`) over an in-process log.
 /// Not a public cell. Whitebox tests use this instead of `InMemoryProjection`.
-pub fn assemble_memory_log_turso_in_memory(
-) -> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_projection::MemoryLog>>> {
+pub fn assemble_memory_log_turso_in_memory()
+-> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_projection::MemoryLog>>> {
     let projection = block_on_turso(async {
         TursoRelational::open(TursoConfig::in_memory())
             .await
@@ -6715,7 +6725,7 @@ mod s3c_activation {
                     expected_epoch: None,
 
                     request_id: None,
-})
+                })
                 .await
                 .unwrap();
             assert_eq!(claimed.items.len(), 2);
@@ -7068,7 +7078,7 @@ mod s3c_activation {
                 expected_epoch: None,
 
                 request_id: None,
-})
+            })
             .await
             .unwrap();
         assert_eq!(item_claimed.items.len(), 1);
@@ -7106,7 +7116,7 @@ mod s3c_activation {
                 expected_epoch: None,
 
                 request_id: None,
-})
+            })
             .await
             .unwrap();
         assert_eq!(grouped.items.len(), 1);
@@ -7602,7 +7612,7 @@ mod s8c_outbox_migration {
                 expected_epoch: None,
 
                 request_id: None,
-})
+            })
             .await
             .unwrap();
         assert_eq!(live.items.len(), 1);
@@ -7830,10 +7840,7 @@ mod ownership_hydrate_tests {
         .await
         .unwrap();
         let still = ProjectionRead::metrics(&backend, &shard).await.unwrap();
-        assert_eq!(
-            still.pending, 1,
-            "a log-only append must not apply itself"
-        );
+        assert_eq!(still.pending, 1, "a log-only append must not apply itself");
 
         ControlPlaneStore::hydrate_projection_for_ownership(&backend, &shard)
             .await

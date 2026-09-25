@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::ManualClock;
 use fireweed::{
     BoundedMutationRequest, Bytes, ClaimByQueryRequest, ClaimRef, CommitEntry, CommitRequest,
     CommitResponseBarrier, ComposedProjectionConfig, ComposedStorageConfig, CompoundIndexDef,
@@ -24,7 +25,6 @@ use fireweed::{
     TenantId, TypedValue, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::DurabilityClass;
-use crate::ManualClock;
 use fireweed_objectlog::segmented::S3BlobStore;
 use postgres::{Client, NoTls};
 
@@ -652,8 +652,9 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         }
     };
     let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| unique_bucket("pg"));
-    let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "fireweed".into());
+    let secret =
+        runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "fireweed-test-rustfs".into());
     let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
     let pg_url = runtime_env("PG_TEST_URL")
         .expect("FIREWEED_PG_TEST_URL must be set when exercising the postgres projection");
@@ -665,7 +666,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
     let (_, run_nonce) = unique_fixture("public_s3_objectlog_postgres");
     // Long unique namespace (>>63 bytes) without raw path separators or non-ASCII.
     // Keys are hex-encoded, but pathological UTF-8 / slash-heavy prefixes have
-    // produced opaque MinIO "service error" on create-only probe on this host.
+    // produced an opaque S3 "service error" on create-only probe on this host.
     let namespace = format!("s3-objectlog-postgres-{run_nonce}");
     let durability = ObjectLogRuntimeConfig {
         object_log: ObjectLogStorage::S3Compatible {
@@ -789,10 +790,8 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn asynchronous_open_is_safe_inside_tokio() {
-    let Some(url) = runtime_env("PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = runtime_env("PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let (root, schema) = unique_fixture("tokio_async_open");
     let fireweed = fireweed::open_objectlog_postgres_async(
         public_config(&root, &schema, &url),

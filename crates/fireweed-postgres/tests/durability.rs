@@ -22,14 +22,9 @@ use fireweed_engine::{
 };
 use fireweed_postgres::{PostgresBackend, PostgresRelationalBackend};
 
-fn pg_url() -> Option<String> {
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-            None
-        }
-    }
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 fn fresh_schema(tag: &str) -> String {
@@ -44,10 +39,7 @@ fn fresh_schema(tag: &str) -> String {
 
 #[test]
 fn projection_rebuilds_from_durable_log_on_reconnect() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
     futures::executor::block_on(projection_rebuilds_from_durable_log_on_reconnect_inner(url));
 }
 
@@ -109,10 +101,7 @@ async fn projection_rebuilds_from_durable_log_on_reconnect_inner(url: String) {
 
 #[test]
 fn orchestration_writes_after_reconnect_do_not_collide() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
     futures::executor::block_on(orchestration_writes_after_reconnect_do_not_collide_inner(
         url,
     ));
@@ -191,10 +180,7 @@ fn atomic_queue_create_child_process() {
 
 #[test]
 fn postgres_queue_create_is_atomic_across_processes() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
 
     run_atomic_create_process_scenario(&url, "native");
     run_atomic_create_process_scenario(&url, "relational");

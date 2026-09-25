@@ -31,14 +31,9 @@ fn fresh_schema() -> String {
     )
 }
 
-fn pg_url() -> Option<String> {
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-            None
-        }
-    }
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 /// Generate one `#[test]` per conformance scenario, each env-gated + schema-isolated. Driven by a
@@ -57,11 +52,10 @@ macro_rules! pg_conformance {
                         }));
                     }
                     Err(_) => {
-                        eprintln!(
-                            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure ({})",
+                        panic!(
+                            "POSTGRES CONFORMANCE requires FIREWEED_PG_TEST_URL for {} (fail-closed; no LOUD skip)",
                             stringify!($name)
                         );
-                        return;
                     }
                 }
             }
@@ -243,10 +237,7 @@ fn commit_transition_shared_scenario_runs_against_postgres_log_replay() {
 
 #[test]
 fn postgres_high_water_concurrent_monotonic() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresBackend::connect_in_schema(&url, &schema)
@@ -335,10 +326,7 @@ fn postgres_high_water_concurrent_monotonic() {
 
 #[test]
 fn postgres_append_concurrent_sequence_no_gap_no_dup() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresBackend::connect_in_schema(&url, &schema)
