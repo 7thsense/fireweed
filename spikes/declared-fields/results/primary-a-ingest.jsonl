@@ -1,0 +1,1 @@
+{"phase":"ingest","layout":"A","n_queues":3,"rows_per_queue":200000,"total_rows":600000,"elapsed_ms":1110874.1,"rows_per_sec":540.1,"pre_checkpoint_main_bytes":61490130944,"checkpoint_ms":2536.0,"main_bytes":61819908096,"bytes_per_row":103033.18}

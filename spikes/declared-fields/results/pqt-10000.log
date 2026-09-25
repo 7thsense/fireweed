@@ -1,0 +1,12 @@
+[load] per_queue_tables:start loadavg_1m=8.03
+[per_queue_tables] created 1000/10000 queues
+[per_queue_tables] created 2000/10000 queues
+[per_queue_tables] created 3000/10000 queues
+[per_queue_tables] created 4000/10000 queues
+[per_queue_tables] created 5000/10000 queues
+[per_queue_tables] created 6000/10000 queues
+[per_queue_tables] created 7000/10000 queues
+[per_queue_tables] created 8000/10000 queues
+[per_queue_tables] created 9000/10000 queues
+[per_queue_tables] created 10000/10000 queues
+[load] per_queue_tables:end loadavg_1m=5.39
