@@ -2,22 +2,22 @@
 ddx:
   id: td-object-log-turso-projection
   depends_on:
+    - api-fireweed-kernel-contract
+    - adr-kernel-records-contract
+    - adr-log-single-source-of-truth
+    - adr-turso-derived-projection
+    - adr-s3-turso-public-cell
     - adr-full-async-storage-boundaries
     - adr-async-commit-strategy-and-dispatch
-    - adr-turso-derived-projection
-    - adr-log-single-source-of-truth
-    - td-storage-architecture-backend-contracts
-    - td-s3-object-log-sqlite-projection-mode
-    - api-native-client-interface
     - concerns
   links:
+    - {kind: informed_by, to: api-fireweed-kernel-contract}
+    - {kind: informed_by, to: adr-kernel-records-contract}
+    - {kind: informed_by, to: adr-log-single-source-of-truth}
+    - {kind: informed_by, to: adr-turso-derived-projection}
+    - {kind: informed_by, to: adr-s3-turso-public-cell}
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
     - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
-    - {kind: informed_by, to: adr-turso-derived-projection}
-    - {kind: informed_by, to: adr-log-single-source-of-truth}
-    - {kind: informed_by, to: td-storage-architecture-backend-contracts}
-    - {kind: informed_by, to: td-s3-object-log-sqlite-projection-mode}
-    - {kind: informed_by, to: api-native-client-interface}
     - {kind: informed_by, to: concerns}
   status: accepted
   review:
@@ -34,311 +34,108 @@ ddx:
     reviewed_at: "2026-08-04T04:50:53Z"
 ---
 
-# Technical Design: TD-010 Default local Turso derived projection
+# Technical Design: TD-010 Turso projection over the object log
 
-> **Amended by ADR-025 and API-006 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
-> The claim microbatch cap below (800 requested rows and 4 MiB of rendered response) is under API-006's claim
-> limits (1000 records and a 16 MiB response, C7, §6.8), and TD-017 replaces the projection schema. Projection
-> control moves from `Fireweed` to the admin handle (API-006 §7). The serving protocol at API-006's limits is
-> not yet restated (TD-017, Open items).
-
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
-
-**Contract**: API-001 | **ADR**: ADR-012, ADR-015, ADR-016, ADR-017 | **Scope**: supported native-async local projection
-
-## Disposition
-
-This design governs the public `fireweed-turso` projection on the one public
-cell (ADR-024): S3 object-log × Turso. `ResponseBarrier` has only
-`AsyncProjection`. Storage is not a combined profile and not a multi-cell matrix.
-
-- The public log selector is `s3`.
-- The public projection selector is `turso`.
-- No `objectlog`, `inmemory`, `hybrid`, `memory`, `sqlite`, `postgres`, or
-  `filesystem` selector is a public cell. Those pairs are not a roadmap.
-- A qualifying distribution enables Turso. A build that omits the feature rejects
-  `turso` selection as feature-unavailable before storage I/O; it never silently
-  falls back to another projection.
-- The adapter consumes the provider-neutral `EngineError` and `CommitRejection` vocabulary; it
-  defines no Turso-specific public error, capability, or RESP token.
-- Change-record and history capability come from the object log, never from
-  Turso. Turso rebuilds through `projection_control`.
+**Status**: Accepted
+**Contract**: API-006 | **ADR**: ADR-013, ADR-015, ADR-016, ADR-017, ADR-024, ADR-025 | **TD**: TD-003, TD-016, TD-017, TD-018
+**Scope**: the Turso projection of the S3×Turso implementation: how it applies the object log, serves reads, recovers and rebuilds
 
 ## Scope
 
-This design defines Turso Database as the rebuildable local relational
-projection for the S3 object log (ADR-024). It defines the adapter, recovery,
-failure behavior, and validation gates for that cell. It does not add another
-public log or projection.
+S3 object log × Turso is the one production implementation of API-006's `Store` (ADR-024, ADR-025). The object log is the authority. Each Turso file is a projection derived from it, and it serves claims and reads.
 
 In scope:
-
-- async storage-axis migration required to call a native-async projection without blocking;
-- the relational schema/codec/query substrate the Turso adapter uses;
-- `fireweed-turso`, pinned to Turso 0.7.2 in ordinary local WAL mode;
-- Turso composition with the S3 object log and `AsyncProjection`;
-- cancellation, replay from the object log, reopen, rebuild through
-  `projection_control`, and conformance on that cell. This scope does not
-  claim a 10M-resident or 1000-queue pass.
+- the `fireweed-turso` adapter, and which Turso modes it runs;
+- the authority split, and the order of log commit, apply and response;
+- the apply cursor, replay and poisoning;
+- connection roles;
+- the async boundary and cancellation;
+- open, recovery, and rebuild through projection control;
+- resource bounds, tests and risks.
 
 Out of scope:
+- The projection schema, the statement forms and the connection settings. TD-017 fixes them.
+- The write pipeline: generations, the overlay, log-first claim planning and packing. TD-016 owns it.
+- The object-log layout, partitions, snapshots and compaction. TD-018 designs them.
+- Ownership, fencing and handoff. TD-003 owns them.
 
-- Turso as command-log authority, control plane, remote database, or embedded replica;
-- SQLite as a supported projection or as a differential reference that blocks Turso;
-- any public cell other than s3 × turso, and any `Strict` barrier;
-- experimental Turso MVCC, sync, FTS, or remote/cloud features;
-- Niflheim changes;
-- remote, sync, embedded-replica, or MVCC Turso support.
+## Supported Turso boundary
 
-## Technical Approach
+- `turso = "=0.7.2"`, with `default-features = false`, embedded and local, in ordinary WAL mode (ADR-016).
+- Not supported: remote databases, embedded replicas, sync, experimental MVCC, FTS and allocator features.
+- Initialization sets each pragma on its own, consumes the result and reads the value back. It never sends the pragma batch through `execute_batch`: the Turso 0.7 probe showed that call can report failure after it has already switched the journal mode.
+- The connection settings are TD-017 §12's: the 4 KiB page, WAL, `synchronous = NORMAL` on log-backed writers, no autocheckpoint, the Passive checkpoint cap, the cache sizes and the busy timeout.
+- A non-durable projection is Turso on `:memory:`, with the same schema, SQL and apply path. Tests of queue semantics and non-durable benches use it. Tests of checkpoint, reopen and rebuild use a temporary file (ADR-024).
+- The pin moves only after the Turso compatibility probe and the plan tests (TD-017 §11, rule 8) pass on the new version.
 
-**Strategy**: complete the async storage boundary from ADR-015, extract driver-neutral relational facts,
-then implement Turso directly against the async projection axis. Compose it
-with the S3 object log (ADR-024). That log remains the command authority. The
-Turso file is not the command log.
+## Authority and commit order
 
-**Key decisions**:
+- **The log is the authority** (ADR-013). A Turso file holds nothing that a replay of the log cannot rebuild. Every value a client observes or sends back comes from the log (TD-017 §1).
+- **Commit order.** Every mutating operation (`define_queue`, `write`, `claim`, `delete_queue` and `force_clear`) runs in four steps:
+  1. The owner plans the operation against its serving snapshot and the in-flight overlay (TD-016).
+  2. It commits the operation's command to the object log, carrying its fenced epoch (TD-003).
+  3. The writer applies the committed command to the Turso file in one transaction.
+  4. The response returns.
 
-- The engine owns typed async commit operations; no arbitrary async transaction closure is public.
-- Async axes use shared receivers. `AsyncComposedBackend` takes a typed `SeparateReplayCommit` strategy
-  for object-log profiles plus an injected runtime-neutral owned-task dispatcher; it never holds an
-  axis-wide async mutex or infers append/apply sequencing from a durability enum.
-- Shared SQL, schema, codecs, and typed rows live in `fireweed-relational`; Turso never depends on the
-  SQLite adapter and the schema is not copied.
-- `TursoProjectionStore` owns `turso::Database` plus a connection/transaction coordinator using
-  `tokio::sync` primitives. The first implementation serializes writes to match the reference projection,
-  while reads use independently configured connections when safe.
-- Mutations transfer owned request data and an owned connection capability to ADR-015's bounded commit
-  task before the driver transaction begins. Dropping the caller awaiter cannot cancel a started commit;
-  shutdown drains started tasks and replay resolves any process-loss outcome.
-- Every applied batch uses one immediate transaction. Projection rows, indexes, replay outcome, counters,
-  and applied cursor commit together; an overlapping prefix is idempotent and a gap is rejected.
-- Public server and facade selection use the canonical `turso` projection value.
-  It is the default in typed config, service config, and deployment config. The
-  feature gates adapter availability, not the public name; omitted support
-  fails closed before I/O.
+  So `Ok` means durable (API-006 DUR1), and any claim, `read` or `scan` issued after it observes its effects (W12, V2, V3). `stats` and `aggregate` read the same committed state and may be torn (V3).
+- **Claims are log-first.** A claim's selection, its leases and its token hash are in its log entry. The claim's response is built from the planning snapshot before the append and is never re-rendered from Turso after it (TD-016).
+- **Unknown outcomes.** A crash between steps 2 and 4 leaves the command in the log and the caller without an answer. A resend with the same `request_id`, or a `read` of what the request touched, resolves it (API-006 E2, RQ2, RQ4). The log decides.
 
-### Governing object-log serving protocol
+## Apply
 
-For a durable object log with a Turso derived projection, the optimization unit
-is a compatible vector of public requests, not the items inside one public
-request. A driver may microbatch at most eight FIFO-compatible requests, 800
-requested rows, 4 MiB of rendered response data, and 20 ms of linger. It keeps
-one request identity, outcome vector, response, and lease token per public
-request. Compatibility may never merge outcomes or relax the public batch
-limit.
+- **One transaction per packed vector.** The writer applies each committed vector in log order in one `BEGIN IMMEDIATE` transaction. Record rows, claims, fields, index entries, counters, request records and the apply cursor commit together (TD-017 §11, rule 6).
+- **Apply cursor.** For each queue, the file records the next log offset it expects to apply. A command below the cursor is already applied and is skipped, so an overlapping replay is a no-op. A command above the cursor is a gap, and the apply fails.
+- **Poison.** An apply that fails after its log commit acknowledges nothing and poisons the projection for the affected queues: new operations on them fail closed with `Unavailable` until the owner recovers them by replay from the cursor or by a rebuild.
+- **Background batches.** The reclaim sweep, the `delete_queue` purge and the request-record sweep run on the writer connection, each batch in its own transaction under the checkpoint cap (TD-017 §3, §8, §9).
 
-Item Claim is log-first Claim. Under one committed read snapshot, the elected
-driver selects candidates and pre-materializes each bounded full response,
-including fields, metadata, entity values, gates, schedules, and lease tokens.
-It closes the snapshot before object-log I/O, appends the authoritative Claim
-envelopes, and retains those responses until their positions settle in Turso.
-After publication, response continuation may neither re-render from Turso nor
-borrow a projection connection; a durable operation therefore cannot fail with
-capacity backpressure while returning its retained result.
+## Connections
 
-Compatible Push, BatchUpdate, Claim, and Complete envelopes remain distinct
-inside one packed append. The apply worker consumes the sealed vector intact,
-in log order, in one Turso writer transaction; it does not unpack the vector
-into per-request transactions. Same-queue mutations use at most two FIFO
-generations and sixteen requests, and queued generations retain request structs
-rather than cloned payloads or pre-rendered bodies.
+- **One writer per file**, behind a `Mutex` (TD-017 §12). Every apply and every background batch goes through it.
+- **Serving readers** take the claim-planning snapshots and serve `read`, `scan`, `stats` and `aggregate`. They read committed state only. A read issued after an acknowledgement observes it, because the apply committed before the acknowledgement.
+- **Pooled readers**, with a small cache, serve generation drivers and committed-outcome reads.
+- **No per-queue resources.** No connection, task or loop exists per queue. Connections and background work are shared per file and per node.
 
-The new serving path never writes SQL-first leases or a new Claim outbox row.
-The migration window keeps the legacy outbox schema and recovery-only drain for
-at least one release so a lease committed before upgrade can still publish on
-reopen. Once the log-first path and reopen test are qualified, new outbox writes
-and the obsolete SQL-first serving path are removed separately.
+## Async boundary and cancellation
 
-**Trade-offs**: preserving relational SQL minimizes semantic porting risk, but Turso's pre-1.0 API and
-build size require an exact pin and a focused validation lane.
+These rules come from ADR-015 and ADR-017.
 
-## Component Changes
+- Every storage call returns a runtime-neutral `Send` future, and no Tokio type crosses into the contract or the engine ports. No blocking driver call runs on a reactor thread, and no standard mutex guard is held across an `.await`.
+- A mutation hands owned request data and an owned connection capability to a bounded commit task before its transaction starts. The caller awaits only a result channel, so dropping the caller's future cannot cancel a started commit.
+- Dropping the caller's future before the mutation reaches its commit task leaves no effect. After that point the commit task carries the mutation to a determinate outcome, through the log commit and the apply, and a caller that dropped its future resolves the outcome as an unknown outcome (API-006 E2).
+- Shutdown stops admission, drains the started commit tasks and closes the writer.
 
-### Modified: async engine storage boundaries
+## Open, recovery and rebuild
 
-- **Current state**: operation ports return futures, while storage axes and `Backend::write` are
-  synchronous under a standard mutex.
-- **Changes**: introduce native async axes, typed raw commit/fault controls, whole-transaction blocking
-  adapters, explicit atomic-versus-replay commit strategies, injected owned-task dispatch, per-queue
-  mutation gates, async recovery/inspection, and staged removal of the legacy sync seam.
-- **Files**: `crates/fireweed-engine/src/port.rs`, `crates/fireweed-engine/src/compose.rs`,
-  `crates/fireweed-engine/src/lib.rs`, conformance fault/scenario modules.
+- **Open.** The adapter verifies the file's schema version, then replays each owned queue's log from its apply cursor to the head before it serves (TD-003, handoff step 6). It refuses to serve a file whose schema version it does not know.
+- **Missing or unusable file.** A new file is rebuilt from the log. Without snapshots, a rebuild replays from genesis; TD-018 proposes partition snapshots (its P1), subject to measurement.
+- **Corrupt state never becomes authority.** A file that fails verification cannot advance the trusted log position and cannot justify deleting any log object.
+- **Projection control.** The admin handle (`TursoAdmin`, API-006 §7) carries projection control: verify a file against the log, delete it, and rebuild it. It is deployment control, not a consumer path. Tests of projection verify, delete and rebuild call projection control; deleting the file and reopening is not a substitute.
+- **Tokens survive.** A rebuild restores every claim from its log entry, with its id and token hash, so live tokens stay valid across a rebuild (TD-017 §3).
 
-### New: driver-neutral relational substrate
+## Resource bounds
 
-- **Purpose**: one exact schema and one set of encodings/query constants for SQLite and Turso.
-- **Interfaces**: pure owned values in; SQL text, bound values, and typed rows out.
-- **Files**: `crates/fireweed-relational/src/{lib,schema,codec,row}.rs`.
-
-The extraction must be behavior-preserving for SQLite before Turso consumes it. Driver transaction and
-row APIs remain in their adapter crates.
-
-### New: `fireweed-turso`
-
-- **Purpose**: native-async local derived projection.
-- **Interfaces**: async projection/read/recovery axes from TD-001.
-- **Files**: `crates/fireweed-turso/src/{lib,config,apply,query,error}.rs` and `tests/**`.
-
-`open` performs, consumes, and verifies individual settings for WAL, synchronous normal (`1`), and busy
-timeout `5000`. It does not send the rusqlite PRAGMA batch through `execute_batch`, because the probe proved
-that call can report failure after changing journal mode.
-
-### Modified: public 5×4 composition
-
-- Add Turso to the public projection enum and dispatch it through the common
-  facade/server composition with every log; do not introduce a combined alias.
-- Await create, replay, apply, read, recovery, and shutdown through the same
-  public interfaces as the other projections.
-- Under `Strict`, acknowledge only after the selected log's commit barrier and
-  Turso apply. Under object-log `AsyncProjection`, use the provider-neutral
-  ordered apply, poison, debt, and backpressure contract.
-- **Files**: public facade and server configuration, common composition, adapter
-  conformance, and focused Turso tests.
-
-### Modified: blocking reference adapters
-
-- Memory moves directly to async axes.
-- SQLite, blocking Postgres, and filesystem/object-log work use explicit whole-transaction blocking
-  wrappers below the async port.
-- Existing composition-root `BlockingBackend` shims are removed after call-site parity.
-
-## API/Interface Design
-
-| Surface | Governing Contract | Story-Level Usage |
-|---------|--------------------|-------------------|
-| Queue operations and transaction outcomes | API-001 | No client-visible semantic change. |
-| Projection selection | TD-001 / ADR-012 | `turso` is the canonical default projection; no combined Turso profile or alias exists. |
-| Storage traits | ADR-015 / TD-001 | Runtime-neutral `Send` futures; no Tokio type crosses into domain ports. |
-
-The public server configuration accepts
-`FIREWEED_PROJECTION_BACKEND=turso` and selects it when that key is omitted.
-`FIREWEED_TURSO_PROJECTION_PATH` is the public local database-path setting. A
-feature-disabled build returns a typed availability error before I/O and never
-maps Turso to SQLite or memory.
-
-## Data Model Changes
-
-No logical schema change is intended. Turso executes the exact relational projection schema extracted
-from the SQLite reference. The adapter-specific migration table records schema and adapter version. An
-upgrade refuses a newer/unknown schema until the compatibility probe and migrations have passed.
-
-## Integration Points
-
-| From | To | Method | Data |
-|------|----|--------|------|
-| `AsyncComposedBackend` / segmented backend | `SeparateReplayCommit` + async storage axes | owned dispatched task | typed commands, positions, expected epoch, replay outcome |
-| `fireweed-turso` | Turso 0.7 local database | async driver | relational schema, transactions, queries |
-| object log | Turso projection | ordered replay/apply | sealed committed batches |
-| public typed/service config | feature-gated composition | validated construction | adapter path and common storage settings |
-
-### External Dependencies
-
-- `turso = "=0.7.2"`, `default-features = false`.
-- Tokio synchronization/runtime support stays in adapter and composition crates, not domain contracts.
-- If Turso is unavailable or poisoned, new mutations fail with the existing typed storage/backpressure
-  error; recovery rebuilds from the trusted object-log frontier.
-
-## Security
-
-- Authentication and authorization remain in the driving adapter/host per ADR-002.
-- Every relational key includes tenant and queue identity; differential tenant-isolation tests are P0.
-- Local database permissions follow the SQLite projection posture; Turso never weakens object-log
-  encryption or retention requirements.
-- Malformed/corrupt local state cannot advance the trusted log frontier or authorize trimming.
-
-## Performance
-
-- No blocking driver call on a Tokio worker; a single-thread heartbeat must advance throughout DB work.
-- No connection, task, or loop per queue. Connections and background apply are bounded shared resources.
-- Retained-response memory is bounded separately from page cache. Normal
-  serving admits at most eight Claim drivers and twenty-four mutation
-  generations with a combined 128 MiB retained-response ceiling; no queued
-  generation clones payloads. After the shared reader is retired, the configured
-  writer plus driver/outcome pools have a 224 MiB page-cache ceiling. These are
-  structural ceilings, not substitutes for the behavioral M1/M2/M3 gates.
-- Turso must preserve exact operation outcomes, monotonic progress, structural
-  query bounds, and declared resource ceilings under public qualification;
-  throughput and latency are compared with interleaved same-run SQLite controls
-  and reported for every log composition with explicit workload and host bounds.
-- CI retains one focused/path-filtered adapter job for the s3 × turso cell
-  (ADR-024). It does not require a multi-cell matrix.
+- Responses retained between planning and apply are bounded by TD-016's generation bounds, separately from the page cache.
+- Each connection's page cache is bounded by TD-017 §12.
+- A single-thread heartbeat keeps advancing throughout database work.
 
 ## Testing
 
-- [ ] **Schema/config**: exact shared schema, partial indexes, individual PRAGMA trap/readbacks.
-- [ ] **Atomicity**: lifecycle/lease/index/replay outcome plus cursor in one transaction; injected rollback.
-- [ ] **Conformance**: every `QueueCommand` arm and projection-read output matches the expected public state before and
-  after reopen. A SQLite twin is not the gate (ADR-016, ADR-024).
-- [ ] **Recovery**: overlapping replay no-op, gap rejection, snapshot-tail counter restore, reset/rebuild,
-  manifest-sealed-before-apply crash.
-- [ ] **Cancellation**: before append, after staging, during commit, after durable eventual append, and
-  cancelled lock waiter.
-- [ ] **Dispatch/strategy**: atomic profiles cannot construct with separate append/apply; object-log uses
-  `SeparateReplayCommit`; submitted tasks survive caller drop; a stalled queue does not stall another.
-- [ ] **Runtime**: blocking-reference wrappers and Turso both keep a single-thread heartbeat alive.
-- [ ] **Configuration**: feature-enabled builds select public `turso` explicitly
-  and by default; feature-disabled builds reject it before I/O without fallback.
-  Both paths cover create/push/claim/finalize/renew/reassign/read/reopen through
-  public composition.
-- [ ] **Concurrency**: 16 disjoint writers and deterministic same-active-key conflict.
-- [ ] **Security**: tenant isolation and corrupted-local-projection fail-closed behavior.
-
-## Migration & Rollback
-
-- **Backward compatibility**: client operations are unchanged; `turso` is a
-  projection-axis value, not a new profile or alias. Omitted projection settings
-  now resolve to Turso.
-- **Data migration**: none from SQLite is required. A Turso projection rebuilds from the object log into a
-  fresh file and becomes eligible only after frontier/image verification.
-- **Feature toggle**: a compile feature controls adapter availability. Default
-  distributions enable it; minimal custom builds may omit it and fail closed.
-- **Migration to default**: changing an omitted/default selection from another
-  projection to Turso creates or opens the configured Turso file. Class A cells
-  rebuild from the authoritative log before serving. Class B operators who need
-  existing projection state must keep their prior projection explicit or
-  perform an export/import outside this design; Fireweed does not pretend a
-  memory log can rebuild lost history.
-- **Rollback**: set the prior projection explicitly and, for Class A, rebuild it
-  from the authoritative log. Preserve the Turso file until verification passes.
-  Do not disable the feature while any deployment still relies on the default.
-
-## Implementation Sequence
-
-1. Add typed async commit and cancellation conformance; remove raw closure call sites.
-2. Add shared-receiver async storage axes, typed commit strategies, an owned-task dispatcher, and migrate
-   reference composition/memory.
-3. Wrap blocking SQLite/object-log/Postgres transactions and remove composition-root blocking shims.
-4. Extract the driver-neutral relational substrate with SQLite parity.
-5. Implement and differentially test `fireweed-turso`.
-6. Wire Turso to the S3 object log and `AsyncProjection` (ADR-024); verify
-   feature-disabled fail-closed behavior.
-7. Add focused adapter CI for that cell. Do not treat a multi-cell matrix as
-   the qualification record, and do not claim a 10M or 1000-queue pass.
-8. Remove the remaining legacy synchronous axes after repository-wide conformance passes.
-
-**Prerequisites**: ADR-015 and ADR-016 accepted; exact Turso 0.7 probe preserved;
-ADR-013 response and rebuild rules unchanged.
+- **Conformance.** `fireweed-contract-suite` runs against S3×Turso through `run_all` (API-006 CS1), with `reopen` over the same object-log namespace and Turso file, and with the post-commit fault hook.
+- **Settings.** Each pragma is read back after it is set, and TD-017's plan tests pass.
+- **Atomicity.** Record rows, claims, index entries, counters, the request record and the apply cursor commit together, and an injected failure rolls all of them back.
+- **Replay.** An overlapping prefix is a no-op, a gap fails, a reopen resumes from the cursor, and a rebuild from the log reproduces every observable value, live tokens included.
+- **Cancellation.** Drop the caller's future before hand-off to the commit task, during the log commit, after it and before the apply, and while waiting for the writer. Each case ends with no effect or with one determinate outcome.
+- **Poison.** An apply failure after the log commit fails the affected queues closed until recovery, and no acknowledged write is lost or duplicated.
+- **Runtime.** A single-thread heartbeat advances during Turso work.
+- **Parity.** The same operation sequence gives the same observable state on `:memory:` and on a file.
+- **Where it runs.** Qualification runs on an S3-compatible store. The object log's filesystem publication adapter tests the log protocol without one, and a filesystem result is not evidence about S3×Turso (ADR-024).
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
-|------|------|--------|------------|
-| Async migration becomes a flag-day rewrite | M | H | Additive traits, explicit wrappers, dependency-ordered beads, removal last. |
-| Relational extraction changes SQLite behavior | M | H | Land extraction with SQLite-only parity before Turso code. |
-| Full command corpus exposes unsupported Turso behavior | M | H | Differential or common-conformance failure blocks default/public qualification and release. |
-| Cancellation leaves waiter or transaction stranded | M | H | Owned commit and lock-wait cancellation tests. |
-| New CI work is over-scaled | M | M | Cache the focused adapter job for the one public cell (ADR-024). |
+|---|---|---|---|
+| Turso is pre-1.0, and an upgrade changes SQL or planner behavior | M | H | The exact pin; the probe and the plan tests on every upgrade (TD-017 §11). |
+| Rebuild time grows with the log | H | M | TD-018's P1 (snapshot plus tail), gated on measurement. |
+| Cancellation strands a transaction or a waiter | M | H | Owned commit tasks, and cancellation tests at each cut. |
+| A corrupt local file is served | L | H | Verification at open, rebuild from the log, and corrupt state can never advance the trusted log position. |
+| An apply failure leaves a queue unserved | L | M | Poison fails the queue closed instead of serving stale state; replay or rebuild restores it. |

@@ -5,275 +5,132 @@ ddx:
   depends_on:
     - prd
     - concerns
-    - api-native-client-interface
+    - api-fireweed-kernel-contract
+    - adr-kernel-records-contract
     - adr-log-single-source-of-truth
     - adr-async-commit-strategy-and-dispatch
     - td-object-log-turso-projection
-    - td-batch-shape-and-critical-section-audit
   links:
     - {kind: informed_by, to: prd}
     - {kind: informed_by, to: concerns}
-    - {kind: informed_by, to: api-native-client-interface}
+    - {kind: informed_by, to: api-fireweed-kernel-contract}
+    - {kind: informed_by, to: adr-kernel-records-contract}
     - {kind: informed_by, to: adr-log-single-source-of-truth}
     - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
     - {kind: informed_by, to: td-object-log-turso-projection}
-    - {kind: informed_by, to: td-batch-shape-and-critical-section-audit}
-    - {kind: informed_by, to: ss-objectlog-turso-memory-goal}
   status: accepted
 ---
 
-# Technical Design: TD-016 Unified packed add / update / delete
+# Technical Design: TD-016 Unified packed mutation path
 
-> **Amended by ADR-025 and API-006 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
-> The pipeline mechanics here (sequencer, overlay, packed append, set-based apply) stand for S3×Turso. The
-> mapping of ops onto API-001 lifecycle states (Complete, Fail, Retry, Release, Rearm, `terminal_ids`) and
-> cohort claims predates API-006, which has no terminal stages, engine outcomes or cohorts: every mutation is
-> a `write` unit, and settling is a stage move, a new rank or a delete (API-006 W5, W7). The op mapping at
-> API-006's limits is not yet written (TD-017, Open items).
-
-**Contract**: API-001 | **ADR**: ADR-013, ADR-017 | **TD**: TD-010, TD-011
+**Status**: Accepted
+**Contract**: API-006 | **ADR**: ADR-013, ADR-017, ADR-025 | **TD**: TD-010, TD-017
 
 ## Scope
 
-One write path for the public queue. Seventh Sense phases (ingest, enrich,
-schedule, deliver) are measurements of that path, not designs.
+This design covers the one ordinary write path of the S3×Turso implementation: how concurrent mutations of one queue share a sequencer, an in-process overlay, one packed log append and one set-based Turso apply.
 
-In scope: filesystem--turso (and the same object-log × Turso composition)
-ordinary item mutations: Push, UpdateFieldsBatch, item Claim, Complete, Fail,
-Purge.
+In scope: the sequencer and its generation kinds, the overlay, log-first claim planning, the packed append and apply, the bounds, and the evidence.
 
-Out of scope: grouped/cohort Claim (exclusive selection), Retry/Release/Rearm
-until overlay can represent unlease, postgres S9, public API changes, larger
-generation bounds, SQL-first Claim, `SKIP LOCKED`.
+Out of scope:
+- the Turso schema and statement forms (TD-017);
+- the projection adapter, its connections, recovery and poisoning (TD-010);
+- the object log and its commit cost (TD-018);
+- ownership and fencing (TD-003).
 
-## Technical Approach
+## Technical approach
 
-**Strategy**: Every ordinary mutation is bulk add, bulk update, or bulk delete
-of item rows. Those three operations share one sequencer, one overlay, one
-packed append, and one set-based apply. Command envelopes stay distinct for
-replay (API-001). Serving protocols do not.
+**Strategy.** Every ordinary mutation inserts, rewrites or removes rows. Mutations of one queue that do the same kind of work join one generation. The generation is planned once, appended to the object log as one packed object, and applied in one Turso writer transaction. Each request keeps its own command envelope, outcome and response inside the packed object, so replay and request-id resolution stay per request (ADR-013).
 
-**Key Decisions**:
-
-- Two sequencer kinds, not four protocols. `Push` = add. `Update` = rewrite or
-  remove live rows (field-update, claim, complete, fail, purge). Same-kind
-  requests overlay FIFO in one generation (fill 8, 800 items, 4 MiB, 20 ms
-  linger, two generations / sixteen requests per queue).
-- Overlay replaces exclusive item-claim fence. Unpublished `client_keys`,
-  `leased_ids`, and `terminal_ids` are the in-process candidate set. The next
-  generation merges that overlay instead of waiting its own apply. Claim SELECT
-  excludes only in-flight overlay ids, never the cumulative completed set.
-- Realize after snapshot, before append. Add allocates ids/blobs. Claim SELECTs
-  pending minus overlay. Field-update plans against overlay versions. Complete /
-  Fail / Purge seal terminal or purge envelopes and fold `terminal_ids`. Empty
-  claims append nothing.
-- One packed append (`SelectionRequired`) per generation. Shared selection
-  fence. Slot/connection dropped before append. Responses are retained from
-  realize; no post-publication render.
-- One Turso writer transaction applies the packed vector. Adjacent same-kind
-  envelopes may coalesce into set-based SQL; mixed Claim-then-Complete of the
-  same ids keeps log order. Apply remains log-authoritative (ADR-013).
-- Grouped/cohort Claim stays exclusive. Retry/Release/Rearm stay singleton
-  until overlay can put a leased id back to pending without a second protocol.
-
-**Trade-offs**:
-
-- Gain: one code path to profile; P1–P4 settled ≥10k items/s on this path
-  (evidence `1788659385`).
-- Lose: cannot overlap two Update generations' SELECTs without overlay; stale
-  serving-reader rows must be excluded in-process, not by waiting coverage.
-- Rejected: per-phase protocols (ClaimCoordinator, Complete Bypass
-  `KeyedQueueGate`, SQL-first lease-before-append). Divergent stage rates were
-  the symptom of those forks.
-
-### Pipeline (the only ordinary write path)
+**Pipeline.** This is the only ordinary write path:
 
 ```
-admit(kind) → linger → start_generation
-  → shared fence
+admit(kind) → linger → start generation
+  → selection fence
   → serving-reader snapshot ∪ unpublished overlay
-  → FIFO realize (add allocate | update plan | claim select | delete seal)
-  → drop slot
-  → packed append
-  → set-based apply of that vector
-  → fold overlay; remember unpublished leased ids only
-  → return retained responses
+  → realize in FIFO order (insert: allocate | rewrite: plan against overlay versions | claim: select | remove: seal)
+  → release the reader slot and connection
+  → packed append: one log commit for the generation
+  → apply the packed vector in one Turso writer transaction, in log order
+  → fold the generation into the overlay
+  → return the retained responses
 ```
 
-Do not wait `last_claim` / `last_candidate_mutation` apply before return.
-Wait produce catch-up only when Claim SELECT must see a prior **Add**
-generation's pending rows.
+- A generation does not wait for the apply of an earlier generation. Claim selection waits for an earlier apply only when it must see rows that an earlier insert generation added.
+- Empty claims append nothing.
+- The writer applies the vector intact and never splits it into per-request transactions. Adjacent envelopes of the same kind may coalesce into set-based SQL. A claim followed by a settle of the same records keeps log order.
 
-### Mapping
+**Generation kinds** (`MutationGenerationKind`, `crates/fireweed-engine/src/claim_batch.rs`):
 
-| Public op | Kind | Realize | Live-set effect |
-|---|---|---|---|
-| Push | Add | identity overlay + allocate | insert pending |
-| UpdateFieldsBatch | Update | plan against overlay versions | rewrite fields/schedule |
-| Claim (item) | Update | SELECT pending − overlay leased/terminal | pending → leased |
-| Complete / Fail | Update | seal terminal envelopes | leased → terminal (delete from live set) |
-| Purge | Update | seal purge envelopes | remove rows |
-| Retry / Release / Rearm | Singleton | existing planner | leased → pending |
-| Grouped / cohort Claim | Exclusive | existing retained path | pending → leased |
-
-Seventh Sense P1 is Add. P2/P3 are Update (fields/schedule). P4 is Update
-(claim) then Update (complete). If a phase is slow, instrument this pipeline's
-snapshot / realize / append / apply stages. Do not add a lane.
-
-### Overlay exclude bound
-
-`select_item_claim_ids_on` bind count for `NOT IN` is at most in-flight overlay
-ids: `GENERATION_MAX_ITEMS * MUTATION_MAX_GENERATIONS_PER_QUEUE` (800 × 2).
-Completed ids drop from `leased_ids` into `terminal_ids` for overlay correctness
-but must not accumulate into SQL exclude after apply has made them non-Pending.
-`remember_leases` tracks unpublished claims only; Complete may forget after the
-id is in `terminal_ids` **and** either apply has covered or SELECT uses
-`lifecycle_state='Pending'` plus in-flight leased ids.
-
-## Component Changes
-
-### Modified: mutation sequencer and classifier
-
-- **Current**: `MutationGenerationKind::{Push, Update}`; Claim and Complete
-  already classify as `Compatible(Update)` in `claim_batch.rs` / `command.rs`.
-- **Changes**: Keep two kinds. No ClaimCoordinator for item Claim. No Bypass
-  Complete. Classifier tests name Add vs Update, not SS phases.
-- **Files**: `crates/fireweed-engine/src/claim_batch.rs`,
-  `crates/fireweed-engine/src/command.rs`,
-  `crates/fireweed-engine/src/async_composed.rs`
-
-### Modified: derived Turso compose driver
-
-- **Current**: Push and BatchUpdate drive `drive_candidate_mutation`. Item Claim
-  and Complete were forked; working tree admits them as Update work.
-- **Changes**: `MutationGenerationWork::{Push, BatchUpdate, Claim, Finalize,
-  Singleton}` only. `drive_started_generation` is the single driver. Overlay
-  merge is union, not clobber. Claim realize uses serving reader.
-- **Files**: `crates/fireweed/src/turso_compose.rs`
-
-### Modified: Turso snapshot, SELECT, apply
-
-- **Current**: serving-reader mutation snapshot; Claim SELECT `NOT IN` can grow
-  with remembered history; apply still tends to per-envelope or broad-row
-  rewrite.
-- **Changes**: snapshot carries `leased_ids` / `terminal_ids`. SELECT exclude is
-  in-flight only. Packed apply is set-based per adjacent kind run in log order.
-- **Files**: `crates/fireweed-turso/src/local.rs`,
-  `crates/fireweed-turso/src/projection.rs`,
-  `crates/fireweed-relational/src/apply.rs`
-
-## API/Interface Design
-
-No public surface change. API-001 batch shapes stay.
-
-| Surface | Governing Contract | Usage |
+| Kind | Work | Row effect |
 |---|---|---|
-| Push / BatchUpdate / Claim / Finalize / Purge | API-001 | Same requests; composition packs compatible calls |
-| Log envelope | ADR-013 | One command per accepted public request in the packed object |
-| Commit strategy | ADR-017 | `SeparateReplayCommit` + `SelectionRequired` for this path |
+| `Push` | inserts of new keys | add rows |
+| `Rewrite` | batched content or order changes of Free records; later selection waits for their apply | rewrite rows |
+| `Addressed` | mutations addressed by key, planned under the queue's writer fence | rewrite or remove rows |
+| `Update` | claims, and settles that take a record out of the claimable set | lease or remove rows |
+| Singleton | every other mutation, including any transition that returns a leased record to Free, gate and pause changes, queue definition and lease expiry | one request per generation |
 
-## Data Model Changes
+A request joins its queue's newest generation when that generation has not started, is of the same kind and has room. Otherwise the request starts a new generation, and a singleton always does. Generations of one queue run in FIFO order.
 
-None. Overlay is process-local. `fireweed_items` lifecycle_state remains
-Pending / Leased / Complete / Failed. No reservation table, no claim outbox
-writes on the live path.
+**Bounds** (`crates/fireweed-engine/src/claim_batch.rs`, `crates/fireweed/src/turso_compose.rs`):
+- A generation holds at most 8 requests, 8,192 records and 32 MiB of retained response. A full generation starts at once; otherwise it lingers for 10 ms.
+- A queue holds at most 4 queued generations and 16 queued requests.
+- A request over the per-generation record or byte bound, or one that arrives when its queue is full, is refused at admission with a capacity error.
 
-## Integration Points
+**Overlay.** The overlay is the in-process record of effects that are appended but not yet visible to the serving reader: unpublished keys, leased record ids and removed record ids.
+- A generation plans against the reader snapshot plus the overlay, so a stale reader never re-selects a record that an unpublished generation has leased.
+- A claim excludes only the ids of in-flight generations, never the history of settled ones, so its exclusion list stays bounded by the generations in flight.
+- Once the apply that covers an id is visible to the serving reader, the overlay drops it.
 
-| From | To | Method | Data |
-|---|---|---|---|
-| Facade | Sequencer | admit | generation kind + work |
-| Driver | Serving reader | snapshot + claim SELECT | identities, pending rows |
-| Driver | Object log | packed_append | command vector |
-| Apply | Turso writer | one IMMEDIATE | same vector in log order |
+**Log-first claims.** Under one committed reader snapshot, the generation driver selects candidates and builds each claim's full response: records, projected fields and token. It closes the snapshot before any object-log I/O, appends the claim envelopes, and retains the responses until the apply covers their positions. After the append, a response is never re-rendered from Turso and never borrows a projection connection. A packed claim apply checks that every named record moved; a mismatch poisons the apply instead of leasing a different set (TD-010).
 
-### External Dependencies
+**Grouped claims** take a separate exclusive path, which also retains its responses and never leases in SQL before the append.
 
-- **Turso 0.7 ordinary WAL**: single writer. Fallback: none; this cell is the
-  product default (TD-010).
+**Trade-offs.**
+- Gain: one code path to profile and to bound. Every phase of a workload measures this path, and none has its own protocol.
+- Lose: two generations of one queue cannot plan concurrently without the overlay, and a stale serving reader must be corrected in process instead of by waiting for apply.
+- Rejected: a separate protocol per operation (a claim coordinator, a settle bypass, leasing in SQL before the append).
+
+## Design gap
+
+How API-006's `write` and `claim` map onto these generation kinds, without terminal stages and at API-006's limits, is not yet designed.
+
+The kinds assume that a settle takes a record out of the claimable set, so the overlay can fold its id into the removed set. API-006 has no terminal stage. A settle is a `Release(t)` with a stage move or a new rank, and the record stays Free and claimable in its new stage (API-006 W5); on this path, every transition that returns a leased record to Free is a singleton. A `write` unit also combines inserts, patches, stage moves, releases, deletes, extends, gate ops and a metadata op in one atomic unit (API-006 W2), while each kind covers one kind of row work. The design must place these at API-006's limits (1,000 record writes and 16 MiB per request, and 1,000 records and a 16 MiB response per claim) without breaking the overlay's exclusion rule or per-request replay. Until it exists, TD-017 assumes only that each packed vector applies in one transaction.
+
+## Evidence
+
+- MEASURED (evidence `1788659385`, `docs/perf/evidence/ss-phased/1788659385/summary.json`): `ss_phased_capacity_smoke` at N = 10,000 in batches of 100 with 8 in flight, on one hot queue, settled 14,493 records/s on ingest (P1), 18,843 and 13,367 records/s on the two update phases (P2, P3), and 17,086 records/s on claim then settle (P4), with exact final counts.
+- The run used filesystem log publication and a workload shaped for the earlier API, not S3×Turso and API-006 operations. It is a regression reference for this path, not a product bar (TD-017 §13).
+
+## Components
+
+| Component | Responsibility | Files |
+|---|---|---|
+| Sequencer and classifier | Assign each request a generation kind or a singleton; hold the bounds | `crates/fireweed-engine/src/claim_batch.rs`, `crates/fireweed-engine/src/command.rs`, `crates/fireweed-engine/src/async_composed.rs` |
+| Generation driver | Linger, snapshot plus overlay, realize, packed append, fold | `crates/fireweed/src/turso_compose.rs` |
+| Snapshot, selection and apply | Serving-reader snapshot, claim selection with the in-flight exclusion, set-based packed apply | `crates/fireweed-turso/src/local.rs`, `crates/fireweed-turso/src/projection.rs`, `crates/fireweed-relational/src/apply.rs` |
 
 ## Security
 
-- **Authentication / authorization**: unchanged facade/tenant scope (ADR-002).
-- **Data protection**: overlay holds item ids and client keys in process, not
-  payloads beyond generation response-byte cap (4 MiB).
-- **Threats**: double-claim under stale reader — mitigated by overlay leased
-  ids, not by exclusive fence. Authority-first Claim apply still requires
-  moved-row count before bearer side effects.
-
-## Performance
-
-- **Expected load**: N=10k public batches of 100, inflight 8, one hot queue.
-- **Response target**: each of P1/P2/P3/P4 settled items/s ≥ 10,000 at N=10k
-  on filesystem--turso; T3 exact (`pending=0`, `leased=0`, `complete=10000`
-  after P4). Ack-only rates are not the gate.
-- **Pinned evidence**: `docs/perf/evidence/ss-phased/1788659385/summary.json`
-  — P1 14493, P2 18843, P3 13367, P4 settled 17086 (T3 exact). Fused Complete
-  keeps `rowid BETWEEN` only when the named ids occupy that slice; otherwise a
-  PK VALUES join. Overlay prune drops applied generations so Claim exclude
-  stays near in-flight (measured plateau 3200 at N=10k, not historical N).
-  Goal-doc N=100k T1/T2 remain after this N=10k floor.
-- **Optimizations**: pack compatible requests; set-based apply; O(in-flight)
-  claim exclude; no apply-wait on the return path.
+- The overlay holds record ids and keys in process, plus responses up to the generation byte bound. It holds no other record data.
+- A double claim under a stale reader is prevented by the overlay's leased ids, not by an exclusive fence.
+- Tenant and queue scope are unchanged: one generation serves one queue.
 
 ## Testing
 
-- **Unit**: classifier exhaustiveness (Push=Add, Claim/Complete/Fail/Purge=
-  Update); overlay FIFO (claim exclude, complete folds terminal, push key
-  conflict); SELECT bind cap.
-- **Integration**: `grouped_and_item_claim_use_retained_carrier_without_sql_first_lease`;
-  eight inflight pushes exactly-once; item claim then complete without
-  `moved 0 of N` poison.
-- **Contract**: API-001 per-request outcomes and `request_id` replay unchanged.
-- **Performance**: `ss_phased_capacity_smoke` N=10k filesystem--turso, settled
-  rates and T3 exact.
-- **Security**: authority-first moved-row poison still fails the packed Claim
-  apply when named rows did not move.
-
-## Migration & Rollback
-
-- **Backward Compatibility**: log envelopes unchanged; replay of mixed
-  UpdateFields / Claim / Finalize histories remains valid.
-- **Data Migration**: none. Legacy claim outbox stays recovery-only.
-- **Feature Toggle**: none. Derived object-log × Turso is the live path.
-- **Rollback**: revert the compose driver to the previous generation; do not
-  reintroduce SQL-first serving.
-
-## Implementation Sequence
-
-1. Freeze two-kind dispatch and overlay — Files:
-   `claim_batch.rs`, `command.rs`, `async_composed.rs`, `turso_compose.rs` —
-   Tests: classifier + overlay unit + compose source audits.
-2. Bound Claim SELECT exclude and overlay lifetime — Files:
-   `turso_compose.rs`, `projection.rs`, `local.rs` — Tests: bind-cap audit +
-   item claim integration (no poison).
-3. Set-based packed apply for Add and Update vectors — Files: `apply.rs`,
-   `projection.rs` — Tests: packed Claim/Complete/UpdateFields apply matches
-   solo model in one writer transaction.
-4. Qualify N=10k all-phase ≥10k settled items/s — Files: evidence +
-   `ss-objectlog-turso-memory-goal.md` — Tests: `ss_phased_capacity_smoke`.
-
-**Prerequisites**: TD-010 Turso projection; ADR-013 log authority; working-tree
-classifier already treats Claim/Complete as Update.
+- **Classifier.** Every command maps to exactly one kind or to singleton, with no wildcard arm.
+- **Overlay.** A claim excludes in-flight leased and removed ids; a removal folds its id; a duplicate key in a concurrent insert is rejected.
+- **Packed apply.** A packed vector applied in one writer transaction produces the same state as applying each request alone, in log order.
+- **Ordering.** A claim followed by a settle of the same records in one vector keeps log order.
+- **Exactly once.** Eight concurrent insert requests are each applied exactly once.
+- **Claim then settle.** A claim followed by a settle completes without a moved-row mismatch.
+- **Capacity.** `ss_phased_capacity_smoke` at N = 10,000 reports settled rates and exact final counts. It is reported, not gated.
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |---|---|---|---|
-| Stale reader re-selects unpublished claims | H | Double-claim / moved-0 poison | In-flight overlay exclude; never O(N) history NOT IN |
-| Set-based apply reorders Claim then Complete of same ids | M | Wrong lifecycle | Adjacent-run coalesce only; preserve envelope order across kinds |
-| Schedule-index UPDATE stays O(seconds) | M | P3 < 10k/s | Profile this path's apply stage; do not fork a schedule protocol |
-| Uncommitted compose landing | L | Beads describe a path not on HEAD | Slice 1 lands dispatch+overlay before apply work |
-
-## Review Checklist
-
-- [x] Ordinary writes are add, update, or delete on one path
-- [x] SS phases are measurements, not protocols
-- [x] Key decisions have rationale
-- [x] Trade-offs explicit
-- [x] Files named
-- [x] API-001 referenced, not redefined
-- [x] No schema migration
-- [x] Numeric 10k/s target and evidence pin
-- [x] Tests and rollback named
-- [x] Implementation sequence is the bead DAG
+| A stale serving reader re-selects an unpublished claim | H | H | The overlay's in-flight exclusion; never an exclusion list that grows with history. |
+| Set-based apply reorders a claim and a settle of the same records | M | H | Coalesce only adjacent runs of one kind, and keep envelope order across kinds. |
+| Settles take the singleton path until the design gap is closed | H | M | Close the design gap before measuring API-006 settle throughput on this path. |
+| The overlay or the retained responses outgrow memory | L | M | The per-generation and per-queue bounds, and admission refusal beyond them. |

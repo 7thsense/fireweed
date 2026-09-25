@@ -2,10 +2,8 @@
 ddx:
   id: spike-turso-value-size-boundary
   depends_on:
-    - external-interface-kernel-contract-draft
     - spike-record-field-storage
   links:
-    - {kind: informed_by, to: external-interface-kernel-contract-draft}
     - {kind: informed_by, to: spike-record-field-storage}
   status: draft
 ---

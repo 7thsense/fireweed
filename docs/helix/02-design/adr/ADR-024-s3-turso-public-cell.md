@@ -2,165 +2,87 @@
 ddx:
   id: adr-s3-turso-public-cell
   depends_on:
-    - adr-orthogonal-log-projection-composition
     - adr-log-single-source-of-truth
     - adr-full-async-storage-boundaries
     - adr-turso-derived-projection
+    - adr-kernel-records-contract
+    - api-fireweed-kernel-contract
   links:
-    - {kind: informed_by, to: adr-orthogonal-log-projection-composition}
     - {kind: informed_by, to: adr-log-single-source-of-truth}
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
     - {kind: informed_by, to: adr-turso-derived-projection}
-    - {kind: supersedes, to: adr-orthogonal-log-projection-composition}
+    - {kind: informed_by, to: adr-kernel-records-contract}
+    - {kind: informed_by, to: api-fireweed-kernel-contract}
   status: accepted
 ---
 
-# ADR-024: The public cell is s3 log × turso projection
+# ADR-024: The production implementation is the S3 object log × Turso projection
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-09-21 | Accepted | Project owner | ADR-012, ADR-013, ADR-015, ADR-016, ADR-017, AR-2026-09-21 | High |
-
-> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
-> This ADR stands as the choice of the one production implementation of API-006's `Store`. Amended:
-> - projection control moves from `Fireweed::projection_control` to the admin handle (`TursoAdmin`, API-006 §7);
-> - `StorageConfig` selectors, `ResponseBarrier`, `RETIRED_STORAGE_CELL` and the other configuration types leave the public surface, and the S3×Turso constructor takes its own configuration;
-> - visibility is API-006 V1–V5. A claim observes every acknowledged write (V2), a short or empty claim is a successful poll (C5) bounded by C5a, and `read` and `scan` are fresh (V3). The sentences below that say a claim polls applied rows and that callers cannot ask for read-your-writes are replaced; `AsyncProjection` is this cell's internal barrier.
+| 2026-09-24 | Accepted | Project owner | API-006, ADR-001, ADR-007, ADR-008, ADR-013, ADR-016, ADR-025, TD-010, TD-016, TD-017, TD-018 | High |
 
 ## Context
 
-`v0.31.30` ships one storage cell. `StorageConfig::validate` accepts only an
-S3 object log composed with a Turso projection. Every other log/projection
-pair returns `RETIRED_STORAGE_CELL`
-(`storage is s3 log × turso projection only; other selectors are retired`)
-before storage I/O. `ResponseBarrier` has only `AsyncProjection`. Claim polls
-applied rows and may be empty; that empty result is not a failed command.
-(Replaced by API-006 V2 and C5; see the ADR-025 amendment above.)
-
-The 2026-09-17 amendment, repeated on the product vision, the PRD, ADR-012,
-and ADR-016, still describes twelve public cells: logs
-`memory | postgres | filesystem | s3` crossed with projections
-`memory | turso | postgres`, Strict on all twelve, and AsyncProjection only as
-an object-log deferral. The alignment review
-`docs/helix/06-iterate/alignment-reviews/AR-2026-09-21-repo.md` records that
-split (findings F-01 and F-02). It does not shrink the written amendment, and
-it does not treat the binary as an unfinished twelve-cell build. The
-retirement is newer and intentional. This ADR is the product decision that
-review was waiting on: accept the shipped cut (path R1).
+- API-006 is the external interface, and any implementation of `Store` that passes the conformance suite is interchangeable (ADR-007, ADR-025).
+- Every additional production composition multiplies the conformance runs, performance evidence and support that each release needs. Consumers need one durable, cheap, horizontally placed implementation.
+- The storage model is an object log as the record and a derived projection for serving (ADR-001, ADR-013), and Turso is the projection engine (ADR-016).
 
 ## Decision
 
-This ADR supersedes the 2026-09-17 12-cell amendment for public selectors.
-
-The public product is one cell: an object-log published to S3, a Turso
-projection, and `AsyncProjection`, named in the gate as **s3 log × turso
-projection**. Callers, the server, and Helm open that cell. There is no
-public storage matrix and no second barrier.
-
-`ResponseBarrier` has only `AsyncProjection`. An empty claim is a poll of
-applied Turso rows, not a command failure and not a signal to retry the
-mutation. (Replaced by API-006 V2 and C5: a claim observes every acknowledged
-write; see the ADR-025 amendment above.)
-
-S3 is not a second log engine. The log engine is `fireweed-objectlog`. That
-crate has two publication adapters for one protocol: filesystem, for a single
-process on local disk, and S3, for the shared store. Filesystem publication
-is how the log protocol is tested without MinIO, and it is the code the S3
-adapter is built on. It is not a `LogConfig` a caller can select, and it is
-not a Fireweed support cell. A filesystem object-log test is not evidence
-about the public cell, and a public-cell result is not evidence about the
-filesystem adapter.
-
-The non-durable projection is Turso opened on `:memory:`
-(`TursoConfig::in_memory`). It is the same schema, SQL, and apply path as the
-file-backed projection. Tests of queue semantics and small non-durable benches
-use it. It has no WAL file, so tests of checkpoint, reopen, and rebuild use a
-temporary Turso file. The separate `InMemoryProjection` / `fireweed-memory` map is not a product
-projection and is not coverage of this cell. The `memory` Cargo feature is
-still on by default because the in-crate whitebox tests link that crate.
-New tests do not use it. Moving those tests onto Turso `:memory:` and then
-dropping the feature is cleanup, not a missing product cell.
-
-`RETIRED_STORAGE_CELL` is the fail-closed error for a selector that is not
-this cell. The name is historical. Those selectors are not a retired roadmap.
-
-Class A durability is the object log. The Turso projection is derived. It is
-rebuildable through `Fireweed::projection_control` (verify, delete, rebuild)
-and is not the command log, the retention authority, or the control plane.
-Loss of the Turso file is recovered by replaying the object log. The Turso
-file does not by itself grant log-history semantics.
-
-Historical measurements, DDx ids, and older matrix counts keep the cell that
-produced them. They do not qualify a twelve-cell or twenty-cell product and
-they do not reinstate a retired selector.
+1. **There is one production implementation.** It is an object log published to S3, with a Turso projection. TD-017 designs its projection layout, and TD-018 its partitioned object log. ADR-025 commits to no second implementation.
+2. **No storage choice reaches the public surface.** The S3×Turso constructor takes its own configuration plus the construction inputs the contract fixes (the injected `Clock`, the documented Δ and the `DeletePolicy`), and returns the `Fireweed` handle together with the admin handle, `TursoAdmin` (API-006 §7). There is no storage selector, cell name or visibility barrier to choose.
+3. **The log engine is `fireweed-objectlog`.** It has one protocol and two publication adapters: S3, for the shared store, and the local filesystem, for a single process. Filesystem publication exists to test the protocol without MinIO. It is not a production configuration, a filesystem test is not evidence about S3, and an S3 result is not evidence about the filesystem adapter.
+4. **Durability is the object log's.** The Turso projection is derived: it is not the command log, the retention authority or the control plane. `TursoAdmin`'s projection control verifies, deletes and rebuilds a projection by replaying the log, and the same replay recovers a lost Turso file (ADR-013).
+5. **Visibility is the contract's.** A claim observes every acknowledged write, `read` and `scan` are fresh, and only `stats` and `aggregate` may be torn (API-006 V1–V5). A short or empty claim is a successful poll, bounded by the progress rule C5a. TD-016 and TD-017 design how the implementation meets these rules while the projection applies behind the log.
+6. **Tests use the same code paths.** Queue-semantics tests and small non-durable benches open Turso on `:memory:`, which has the same schema, SQL and apply path as a file. Tests of checkpoint, reopen and rebuild use a temporary Turso file. No other projection engine counts as coverage of this implementation.
+7. **Evidence names its source.** A measured rate or latency is attributed to the commit and configuration that produced it and is never quoted as a property of another build.
 
 ## Alternatives
 
-| Option | Pros | Cons | Evaluation |
-|--------|------|------|------------|
-| Keep the 2026-09-17 12-cell amendment, including Strict | Matches the last written desired state before this ADR | Contradicts `RETIRED_STORAGE_CELL` and the shipped `v0.31.30` binary | Rejected for the public product |
-| Treat the eleven retired pairs and Strict as a roadmap behind the one open cell | Preserves the amendment as future work | Makes a fail-closed retirement look unfinished | Rejected; they are not a roadmap |
-| **s3 log × turso projection, AsyncProjection only** | Matches the shipped gate, the release notes, and `projection_control` rebuild from the object log | One cell; claim is a poll | **Selected** |
+| Option | Evaluation |
+|--------|------------|
+| A public storage matrix of log and projection selectors | Rejected. Every cell multiplies conformance, evidence and support, and no consumer needs more than one durable implementation. |
+| A caller-selectable visibility barrier | Rejected. API-006 fixes one visibility contract for every implementation. |
+| PostgreSQL storage plugged in at the engine ports | Rejected. The seam is the contract (ADR-007). A PostgreSQL implementation of `Store` remains possible later. |
+| A filesystem object log in production | Rejected. It serves one process and has no shared store for handoff. |
 
 ## Consequences
 
 | Type | Impact |
 |------|--------|
-| Positive | Vision, PRD, contracts, and the server have one storage law and one barrier to cite. |
-| Positive | Class A durability stays on the object log; Turso remains disposable and rebuildable. |
-| Negative | Callers cannot select a filesystem log, a memory projection, Postgres storage, or Strict. |
-| Negative | Callers cannot ask for read-your-writes via Strict. Empty claim means poll again. (Replaced by API-006 V2 and V3: claims observe every acknowledged write, and `read` and `scan` are fresh.) |
-| Neutral | Object-log filesystem publication and Turso `:memory:` stay available inside the engine for protocol tests and non-durable benches. |
-| Neutral | Older ADRs keep their historical sentences only where a later edit marks them historical. This ADR wins on current selectors. |
+| Positive | Vision, PRD, contracts and designs cite one implementation, and the suite and gates run on one composition. |
+| Positive | Turso state stays disposable and rebuildable from the log. |
+| Negative | A deployment without S3-compatible object storage cannot run Fireweed. |
+| Negative | Commit latency always includes the object-log linger and S3 round trips (ADR-001). |
+| Neutral | Filesystem publication and Turso `:memory:` remain test tools inside the implementation. |
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| A reader cites the 2026-09-17 amendment as the current product | M | H | This ADR supersedes that amendment for public selectors. Normative sections cite ADR-024. |
-| Server `start` still assembles a retired family the facade rejects | H | H | `Server::validate_for_start` must reject every pair except s3 × turso with `RETIRED_STORAGE_CELL` before I/O. |
-| A missing object-log authority or async spec is filled in silently | M | H | On this cell, missing `ObjectLogAuthority::NativeConditionalWrite` or `AsyncProjectionSpec` is a validation error. `StorageConfig::s3_turso` sets both. |
-| Capacity numbers from another cell are quoted as this pin | M | M | Absolute rates stay attributed to the commit and cell that produced them. `v0.31.30` is a source preview, not a qualification pin. |
+| A test on the filesystem adapter is cited as evidence about S3 | M | H | Evidence records name the adapter; S3 behavior is qualified against MinIO or S3. |
+| An operator path treats the Turso file as the command log | L | H | Rebuild goes only through projection control; live-versus-rebuild comparisons in the suite. |
+| The implementation misses a performance gate at scale | M | H | TD-017 §13 gates at 10M records and at 100 queues × 1M records per file. |
 
 ## Validation
 
 | Success Metric | Review Trigger |
 |----------------|----------------|
-| `StorageConfig::validate` and `Server::validate_for_start` accept only s3 × turso and reject every other pair with `RETIRED_STORAGE_CELL` before I/O | A second public cell, or a server path that assembles a family the check already rejected. |
-| `ResponseBarrier` has only `AsyncProjection` | A Strict constructor, variant, or required-cell count returns. |
-| Turso rebuild goes through `projection_control` and replays the object log | A test or operator path that treats the Turso file as the command log. |
-| Missing `NativeConditionalWrite` authority or missing `AsyncProjectionSpec` fails closed; `s3_turso` still sets both | `unwrap_or` substitution on the open path. |
-
-## Supersession
-
-- **Supersedes**: the 2026-09-17 12-cell amendment for public selectors,
-  including the copies on the product vision, the PRD storage boundary,
-  ADR-012, and ADR-016, and the requirement that Strict cover those twelve
-  cells. ADR-012's orthogonal composition model remains the historical
-  design of how a log and a projection are assembled. It does not keep
-  twelve current cells. ADR-016 remains the decision that Turso is a derived
-  projection and not a SQLite differential oracle. It does not keep Turso as
-  a default among three public projections.
-- **Does not restore**: SQLite log or projection selectors, a Strict barrier,
-  or the eleven retired axis pairs.
-- **Aligned with**: ADR-013's rule that the log is the single source of
-  truth, narrowed so Class A durability is the object log, and with the
-  alignment review `AR-2026-09-21-repo`, which asked for this decision
-  before any further spec or code edit.
+| The `fireweed` public API is the eight `Store` ops, the S3×Turso constructor and `TursoAdmin` | A storage selector, second constructor family or backend type becomes public. |
+| The contract suite passes on S3×Turso through `run_all` (API-006 CS1) | A scenario needs a backend knob or a per-implementation clause. |
+| A rebuild through projection control matches the live projection | Any divergence between rebuilt and live state. |
 
 ## Concern Impact
 
-- `resilience`: the object log is the durable record. Turso state is
-  disposable and is rebuilt through `projection_control`.
-- `technology-radar`: the supported embedded projection mode remains Turso
-  local ordinary WAL. Remote replicas, sync, and experimental Turso modes
-  are not public. The other projection engines are not waiting as a matrix.
+- `resilience`: the object log is the durable record; the Turso projection is rebuilt through projection control.
+- `technology-radar`: the projection mode is Turso embedded and local, in ordinary WAL; remote replicas, sync and experimental Turso modes are not used.
 
 ## References
 
-- `RETIRED_STORAGE_CELL` in `crates/fireweed/src/lib.rs`
-- `docs/helix/06-iterate/alignment-reviews/AR-2026-09-21-repo.md`
-- `docs/releases/v0.31.30.md`
-- `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md`
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
 - `docs/helix/02-design/adr/ADR-013-log-single-source-of-truth.md`
 - `docs/helix/02-design/adr/ADR-016-turso-derived-projection.md`
+- `docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`
+- `docs/helix/02-design/technical-designs/TD-017-kernel-projection-storage-layout.md`
+- `docs/helix/02-design/technical-designs/TD-018-partitioned-object-log.md`

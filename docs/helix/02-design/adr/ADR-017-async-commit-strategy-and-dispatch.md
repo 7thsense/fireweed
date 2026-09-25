@@ -3,13 +3,13 @@ ddx:
   id: adr-async-commit-strategy-and-dispatch
   depends_on:
     - adr-full-async-storage-boundaries
-    - adr-orthogonal-log-projection-composition
     - adr-log-single-source-of-truth
+    - api-fireweed-kernel-contract
     - concerns
   links:
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
-    - {kind: informed_by, to: adr-orthogonal-log-projection-composition}
     - {kind: informed_by, to: adr-log-single-source-of-truth}
+    - {kind: informed_by, to: api-fireweed-kernel-contract}
     - {kind: informed_by, to: concerns}
   status: accepted
   review:
@@ -22,164 +22,75 @@ ddx:
     reviewed_at: "2026-07-20T00:01:24Z"
 ---
 
-# ADR-017: Async composition injects commit strategy and owned-task dispatch
-
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
+# ADR-017: Mutations commit log-first through owned-task dispatch
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-07-18 | Accepted | Project owner | ADR-012, ADR-013, ADR-015, TD-001, TD-010 | High |
+| 2026-09-24 | Accepted | Project owner | API-006, ADR-002, ADR-013, ADR-015, TD-010, TD-016 | High |
 
 ## Context
 
-ADR-015 requires runtime-neutral async storage, per-queue serialization, atomic-store transactions,
-eventual-apply repair, and started commits that survive caller cancellation. Shared-receiver async log and
-projection traits are necessary for unrelated queues to progress, but they cannot determine whether two
-separate `append().await` and `apply().await` calls form one atomic transaction. An ordinary async block
-also stops when its caller future is dropped; a queue gate alone does not preserve started work.
-
-The generic composition therefore needs explicit authority for both the commit mechanism and task
-ownership. Inferring either from `durability_class()` produces type-correct implementations that can lose
-atomicity or cancellation safety.
+- ADR-015 makes every storage boundary async and requires that a submitted mutation survive its caller's cancellation. An ordinary async block stops when its caller drops the future, so a started commit could be abandoned halfway.
+- The S3×Turso implementation has no transaction that spans the object log and the Turso projection. The log commit is the durable boundary (ADR-013), and the projection applies afterwards.
+- One node serves many queues (ADR-002). A hot or stalled queue must not stop unrelated queues, and buffered mutation bytes must stay bounded, whatever callers do.
 
 ## Decision
 
-`AsyncComposedBackend` will receive two explicit construction-time capabilities:
-
-1. A typed commit strategy:
-   - `UnifiedAtomicCommit` owns one substrate transaction that commits log append, projection state,
-     cursor/frontier, and replay outcome together.
-   - `SeparateReplayCommit` is legal only for `EventualApply`; it durably appends first, repairs projection
-     state from the log, and enforces the selected public response barrier.
-2. A runtime-neutral owned-task dispatcher. Already-formed raw commits complete strategy preparation before
-   queue gating and submission. State-dependent typed operations acquire their queue gate before submission,
-   but currently perform authoritative planning and finite byte admission inside dispatcher-owned work.
-   Submission transfers the owned request and commit capability to the dispatcher; the caller awaits only a
-   result channel. A dropped caller cannot cancel submitted work.
-
-Async storage axes use `&self`, require `Send + Sync`, and put per-queue or per-connection synchronization
-inside adapters. The composition holds a queue-local gate across validation, idempotency planning,
-selection, commit, projection visibility, and replay-outcome recording. It does not hold a process-global
-storage lock across I/O.
-
-Admission is bounded separately from running capacity. Queue-gate waiters do not consume all running
-permits, and keyed gate entries are weak/LRU-reclaimed rather than backed by one permanent task,
-connection, or loop per queue. Shutdown closes admission, cancels work that has not been submitted, and
-drains submitted tasks within the configured bound.
-
-For object-log mutations, admission has a second, byte-oriented capability. The generic
-`PreparedAsyncCommitStrategy` turns an already-formed raw request into an owned prepared request before
-`AsyncComposedBackend::submit_commit` enters its queue gate or dispatcher. Object-log preparation serializes
-once, applies the configured finite-reject or async-wait policy, and attaches the resulting permit; unified
-atomic strategies use identity preparation. A service selecting async waiting races the composed submission
-future with its own deadline. Direct `SeparateReplayCommitter::commit_replayable` remains a finite non-waiting
-fallback because callers of that lower-level interface may already hold dispatcher ownership. Typed
-operations are different: their state-dependent `RawCommitRequest` does not exist until authoritative
-planning under the queue gate. They currently plan under that gate inside dispatcher-owned work, serialize
-once, and use finite non-waiting `Reject` admission there; they never wait for byte capacity while holding the
-gate. Mandatory typed pre-dispatch preparation remains full-async activation work. The adapter acquires a node-global and
-optional uniform tenant-scoped byte permit for the
-retained records plus the temporary seal frame, and transfers that non-cloneable permit with the accepted
-request. The permit remains owned through queue wait and seal/CAS resolution; after actor submission the
-accepted actor job owns it independently of the coordinator response future. Caller cancellation cannot
-release resident bytes. A per-queue waiting-byte cap prevents one stalled queue
-from capturing the node budget. Runtime-neutral budget futures contain no timer: the service races them with
-its runtime deadline and maps timeout/exhaustion to typed retryable backpressure; the finite production
-default rejects immediately when the budget is exhausted.
-
-Supported product compositions are native async. Raw generic
-`AsyncComposedBackend` submission is structurally prepared before queue gating
-and dispatch. State-dependent typed operations plan inside dispatcher-owned work
-under their queue gate and use finite non-waiting byte admission; moving that
-planning to an equivalent pre-dispatch prepared boundary remains optimization
-work, not permission to route the product through synchronous composition or a
-process-wide facade pool.
-
-Commit strategy and response barrier are construction inputs. ADR-024 is the
-public selector law: one cell, S3 object-log × Turso projection, and
-`ResponseBarrier` has only `AsyncProjection`. `Strict` is not a public barrier
-and is not a roadmap item. `AsyncProjection` may defer Turso apply. The
-acknowledged mutation is durable on the object log. A later claim polls applied
-rows and may be empty; that empty result is not a command failure. Deferred
-apply remains bounded, ordered, replayable, and poison-aware. The barrier is
-not an extra projection selector. Class A durability is the object log. Turso
-is rebuildable through `projection_control` and is not the command log.
-
-Immediate memory implementations may use an immediate dispatcher only when the complete typed commit
-resolves in one poll. Blocking stores dispatch one whole transaction to a bounded actor/executor. Native
-async stores await their drivers inside the owned task.
+1. **Commit is log-first.** A mutation's commands are durably appended to the object log before the Turso projection applies them, and the projection applies them in log order. The projection records its applied position in the same Turso transaction as the applied state, so after a crash the log replays whatever the projection lacks (ADR-013).
+2. **Submitted work is owned by the dispatcher.** Submitting a mutation transfers the owned request and its commit capability to a dispatcher-owned task. The caller awaits only a result channel. Dropping the caller cannot cancel submitted work, and a missing receiver discards only the response, never the outcome. The dispatcher is runtime-neutral: the engine has no Tokio dependency.
+3. **Planning is serialized per queue, never globally.** Validation, request-id replay, candidate selection and commit planning for one queue run in order under that queue's sequencer (TD-016). No process-global storage lock is held across awaited I/O, so unrelated queues progress.
+4. **Admission is bounded in bytes.** Before a mutation enters the pipeline it takes a permit for its serialized bytes from a node-wide budget and, when configured, from a uniform per-tenant budget. A per-queue cap on waiting bytes keeps one stalled queue from taking the node's budget. The permit moves with the request and is released only when the log commit resolves, so caller cancellation cannot free bytes that are still buffered. Exhaustion is `Busy { retry_after }` (API-006 E1), and the production default rejects at once instead of waiting.
+5. **Nothing is allocated per queue for good.** Per-queue sequencer and gate entries are reclaimed when idle; there is no permanent task, loop or connection per queue (ADR-002).
+6. **Shutdown is bounded.** Shutdown closes admission, cancels work that was not submitted, and drains submitted tasks within a configured bound. A command that became durable before the process ended is resolved by replay on restart, and its caller resolves the lost response by request id or `read` (API-006 E2).
 
 ## Alternatives
 
-| Option | Pros | Cons | Evaluation |
-|--------|------|------|------------|
-| Sequential async append then apply | Simple generic composition | Cannot provide atomic-store rollback; cancellation can strand append-only state | Rejected |
-| One global async mutex around log and projection | Preserves coarse ordering | Serializes unrelated queues and hides adapter concurrency | Rejected |
-| Spawn directly with Tokio inside `fireweed-engine` | Straightforward cancellation ownership | Violates runtime-neutral domain boundary and makes embedded runtimes non-portable | Rejected |
-| **Injected commit strategy plus owned-task dispatcher** | Makes atomicity, replay ordering, runtime ownership, and capacity explicit | Adds construction types and adapter-specific implementations | **Selected** |
+| Option | Evaluation |
+|--------|------------|
+| Await the log append and the projection apply in the caller's future | Rejected. A dropped caller could strand a durable append that no one applies or reports. |
+| One global async mutex around log and projection | Rejected. It serializes unrelated queues and hides adapter concurrency. |
+| Spawning with Tokio inside the engine | Rejected. It breaks the runtime-neutral engine boundary (ADR-015). |
+| Waiting for byte capacity while holding the queue's planning order | Rejected. A full budget would stall the whole queue behind one request. |
+| **Log-first commit with an owned-task dispatcher and byte admission** | **Selected.** Atomic ordering, cancellation safety and bounded memory are explicit. |
 
 ## Consequences
 
 | Type | Impact |
 |------|--------|
-| Positive | Atomic and eventual-apply compositions cannot be accidentally assembled through the wrong commit sequence. |
-| Positive | Started-commit cancellation semantics are enforceable without a Tokio dependency in `fireweed-engine`. |
-| Positive | Shared receivers and adapter-owned concurrency permit unrelated queues to progress. |
-| Negative | Memory, blocking, and native-async adapters require explicit strategy and dispatcher wiring. |
-| Negative | The residual facade bridge cannot be removed until every supported cell has explicit runtime-safety and progress evidence. |
+| Positive | A submitted mutation always reaches a determinate outcome, even if its caller goes away. |
+| Positive | Unrelated queues progress while one queue is hot or stalled. |
+| Positive | Buffered mutation bytes are bounded per node, per tenant and per queue. |
+| Negative | Callers see `Busy` under load and must retry after the hinted delay. |
+| Negative | The projection trails the log, so the read path must meet API-006 V1–V3 over applied state plus the unapplied tail (TD-016). |
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Queue gate covers only append/apply, allowing duplicate claim planning | M | H | Gate the complete logical mutation and test two concurrent claims. |
-| Submitted work outlives shutdown indefinitely | M | H | Bounded admission, dispatcher drain bound, and unresolved-outcome replay. |
-| Hot-queue waiters starve unrelated queues | M | H | Queue gate before running permit or fair keyed scheduling; cross-queue heartbeat tests. |
-| Adapter claims atomicity while implementing separate transactions | L | H | Construction-time strategy type and atomic rollback/crash conformance. |
+| Planning is serialized for only part of a mutation, so two claims select the same record | M | H | Serialize the whole plan per queue; test two concurrent claims. |
+| Submitted work outlives shutdown | M | H | Bounded admission, a drain bound, and replay of unresolved outcomes. |
+| A hot queue starves unrelated queues | M | H | Per-queue waiting caps and fair scheduling; cross-queue heartbeat tests. |
+| A byte permit is released before its bytes leave memory | L | H | The permit moves with the request through every cancellation, fence and publication path; conservation tests. |
 
 ## Validation
 
 | Success Metric | Review Trigger |
 |----------------|----------------|
-| Atomic compositions expose only `UnifiedAtomicCommit` | Any atomic composition calls separate append/apply operations. |
-| Eventual compositions recover every durable append and preserve the response barrier | Any lost accepted command or read-after-success gap. |
-| Submitted commits resolve after caller cancellation | Any started task stops when its response waiter is dropped. |
-| A blocked queue does not stop another queue's read or mutation heartbeat | Any process-global storage lock spans awaited I/O. |
-| Buffered-byte permits conserve global and tenant charges through every cancellation/fence/CAS path | Any retained serialized command has no permit, a permit is released before its bytes, or charged bytes exceed a configured cap. |
-
-## Supersession
-
-- **Supersedes**: None. This specializes ADR-015's accepted async-boundary decision.
-- **Superseded by**: None.
+| A submitted commit resolves after its caller is dropped | A started task stops when its response waiter is dropped. |
+| Every durable append is applied after a crash | A lost acknowledged command, or an applied position ahead of its state. |
+| A blocked queue does not stop another queue's reads or writes | A process-global storage lock spans awaited I/O. |
+| Byte permits conserve node and tenant charges on every path | A buffered command without a permit, a permit released before its bytes, or charges above a configured cap. |
 
 ## Concern Impact
 
-- `concurrency-model`: shared receivers, queue-local critical sections, fair bounded dispatch, and no
-  process-global awaited storage lock are mandatory.
-- `resilience`: submission is the queued-to-started durability boundary; cancellation and shutdown
-  behavior are explicit.
-- `rust-cargo`: the engine remains runtime-neutral and unsafe-free.
+- `concurrency-model`: per-queue planning order, fair bounded dispatch, and no process-global lock across awaited I/O.
+- `resilience`: submission is the point after which a mutation always resolves; cancellation and shutdown behavior are explicit.
+- `rust-cargo`: the engine stays runtime-neutral and free of unsafe code.
 
 ## References
 
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-013-log-single-source-of-truth.md`
 - `docs/helix/02-design/adr/ADR-015-full-async-storage-boundaries.md`
-- `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
 - `docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md`
-- `docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md` — binds
-  queue-local serialization and cross-queue progress to the single public
-  `Fireweed` type; process-wide blocking dispatch is not the product model.
-- `crates/fireweed-engine/src/async_store.rs`
-- `crates/fireweed-engine/src/commit.rs`
+- `docs/helix/02-design/technical-designs/TD-016-unified-packed-mutation-path.md`

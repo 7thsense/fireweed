@@ -1,10 +1,6 @@
 ---
 ddx:
   id: spike-record-key-storage
-  depends_on:
-    - external-interface-kernel-contract-draft
-  links:
-    - {kind: informed_by, to: external-interface-kernel-contract-draft}
   status: draft
 ---
 

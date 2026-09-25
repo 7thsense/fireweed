@@ -2,7 +2,7 @@
 ddx:
   id: api-fireweed-kernel-contract
   depends_on:
-    - external-interface-kernel-contract-draft
+    - adr-kernel-records-contract
     - spike-record-key-storage
     - spike-record-field-storage
     - spike-claim-path-at-scale
@@ -16,19 +16,19 @@ ddx:
 **Type**: normative kernel contract (Rust, in-process, transport-neutral)
 **Version**: v1
 **Status**: accepted
-**Related**: API-001, API-002, API-003, API-004 and API-005 (this contract supersedes all five as of 2026-09-24); ADR-025 (the decision that adopts this contract, with its decision log); `external-interface-kernel-contract-draft` (design history and execution mapping); SPIKE-002 to SPIKE-006
+**Related**: ADR-025 (the decision this contract implements, with its reasons); API-003 (how Snorri and Seventh Sense use this contract); TD-017 and TD-018 (the S3×Turso design); SPIKE-002 to SPIKE-006
 
 ## 1. Purpose and scope
 
 This contract defines what Fireweed promises a consumer: the record model, the eight operations of the data-plane `Store` trait with their errors and idempotency, the queue definition, and the rules for durability, visibility, atomicity, ordering and leases that hold across all of them. Every implementation meets it exactly and passes one black-box conformance suite (§9).
 
 - **In scope:** the types of the `fireweed-contract` crate, the `Store` trait, the separate `Operator` trait, the contract constants, and the inputs of the conformance suite.
-- **Out of scope:** how an implementation stores, logs, places, snapshots or compacts data; the remote API; and everything listed in §8. The S3×Turso execution design lives in the technical designs and in the draft's execution mapping, not here.
-- **Consumers adapt.** The contract is not bent to fit any consumer's current code. Snorri and Seventh Sense migrate to it (owner decision, 2026-09-23 design discussion).
+- **Out of scope:** how an implementation stores, logs, places, snapshots or compacts data; the remote API; and everything listed in §8. The S3×Turso design lives in TD-017 (the Turso projection layout) and TD-018 (the partitioned object log), not here.
+- **Consumers adapt.** The contract is not bent to fit any consumer's current code. Snorri and Seventh Sense migrate to it; API-003 maps their workloads onto it.
 
 All types live in the I/O-free crate `fireweed-contract`: the DTOs, the `Store` and `Operator` traits, the errors, the `Clock` trait, the constants (§6.8), validation, `fingerprint`, the canonical encoder that every byte limit is measured with (LIM1), the ESF index-key encoder and the order comparators. Every implementation uses the encoders verbatim. `Store` is object-safe, and the public `fireweed::Fireweed` wraps `Arc<dyn Store>` and delegates 1:1.
 
-MUST, MUST NOT and MAY are used as in RFC 2119. Each clause has a stable id (for example W4) that the conformance suite cites. Retired ids (W6, R2) are never reused.
+MUST, MUST NOT and MAY are used as in RFC 2119. Each clause has a stable id (for example W4) that the conformance suite cites. Clause ids are never reused.
 
 ## 2. Overview
 
@@ -36,7 +36,7 @@ MUST, MUST NOT and MAY are used as in RFC 2119. Each clause has a stable id (for
 
 **Records.** A record is addressed by a key that the upstream system chooses and keeps unique within the queue. The whole model is: add records (insert or upsert), claim them for work, update them, repeat. A record lives until the consumer deletes it or closes its queue; records never expire.
 
-**Stages.** Every record is in exactly one of its queue's declared stages. An insert lands in the first stage unless it names another, and any write may move a record to any declared stage. No stage is special: there is no terminal flag and no Completed or Failed state. A stage that nothing claims is effectively "done", but the engine neither knows nor cares.
+**Stages.** Every record is in exactly one of its queue's declared stages. An insert lands in the first stage unless it names another, and any write may move a record to any declared stage. No stage is special: there is no terminal flag and no Completed or Failed state. A stage that nothing claims is "done" to the consumer; the engine does not track it.
 
 **Rank.** One `i64` per record orders claims within a stage and decides when the record becomes claimable. A claim takes records whose rank is at most the claim's *horizon* (by default, now in µs), lowest rank first; equal ranks go in insertion order. The default rank is the insertion time in µs, which gives FIFO. A future rank schedules a record, and a priority bucket is an offset added to the rank. Rank ordering is the product's core: it is simple, and it is fast (C9).
 
@@ -45,7 +45,7 @@ MUST, MUST NOT and MAY are used as in RFC 2119. Each clause has a stable id (for
 - A **write** addresses records by key. Without a token, it serves records you already know: an upsert, an external event that names its record, a correction, a stage move decided elsewhere. With the claim's token, it settles what you claimed. While a record is claimed only the holder writes it, until the holder releases it or the lease expires.
 - Rule of thumb: if you are asking "what is next?", claim. If you already know the key, write.
 
-**Fields.** Fields are declared when the queue is created, each with a type. A queue may declare many fields; values may be large (up to 64 KiB, for example a profile); most are rarely updated. Some fields are indexed, and the indexes are declared at creation too. Indexes serve `scan` and `aggregate`; claims are always in rank order (§8). The engine places values itself: there is no "large" flag and no separate payload.
+**Fields.** Fields are declared when the queue is created, each with a type. A queue may declare many fields; values may be large (up to 64 KiB, for example a profile); most are rarely updated. Some fields are indexed, and the indexes are declared at creation too. Indexes serve `scan` and `aggregate`; claims are always in rank order (§8). The engine places values itself: there is no "large" flag and no separate payload. `claim` and `read` may name the fields they want back, so a claim does not pay for large values it does not need (F4).
 
 **Gates and pause.** A record may carry up to 8 gate keys. While any of them is Blocked, the record is not claimable. The reserved gate `"*"` pauses the whole queue.
 
@@ -65,7 +65,7 @@ MUST, MUST NOT and MAY are used as in RFC 2119. Each clause has a stable id (for
 
 Internal attributes, never returned:
 - the **insertion sequence** (ORD1), the tie-break after rank;
-- **`free_since`**, the time the record last became a Free member of its current stage: at insert, on a stage move of a Free record, on release, on force-clear, and on reclaim (set to the expired `until`). Only S2 uses it, through `ready_since = max(rank, free_since)`.
+- **`free_since`**, the time the record last became a Free member of its current stage: at insert, on a stage move of a Free record, on release, on force-clear, and on reclaim (set to the expired `until`). Only S2 reads it, for `oldest_ready_since`.
 
 `Timestamp` is UTC epoch microseconds (`i64`).
 
@@ -241,7 +241,6 @@ pub enum Rejection { Exists { version: Version }, NotFound, VersionMismatch { cu
   - On an existing record, in any stage: only what the patch names changes. Under `Release` the record ends Free, under `Held` it stays attached, and under `None` it stays Free.
   - **Stage moves.** `stage: Some(s)`, with s different from the current stage, moves the record to s. Any declared stage may follow any other, and the insertion sequence is kept (ORD1). A held move (`{Held(t), Put{stage: s}}`) keeps the record Leased under t, so it is not a candidate of s until it is Free.
   - **Settling is a write.** Finishing, failing and retrying are stage moves or rank changes, usually with `Release(t)`; per-transition history travels in the same patch as fields. No stage is special.
-- **W6.** Retired.
 - **W7. `Delete`:** removes the record, in any stage, and detaches it from its claim. A Leased record requires `Release(t)`; `None` gives `Leased` (W4). An absent key with `Expect` `Any` or `Absent` gives `Deleted { existed: false }`. The key is free at once; a re-insert gets a version greater than any the key held (§3), a new insertion sequence and `attempts: 0`.
 - **W8. Patch semantics:**
   - `clear_fields` empties the field map before `fields` applies. Fields the patch does not name are untouched; `None` removes a field.
@@ -276,7 +275,8 @@ Why it exists: it is the only op that selects rather than addresses, and the onl
 
 ```rust
 pub struct ClaimRequest { pub request_id: Option<RequestId>, pub stage: Stage, pub select: Select,
-                          pub max_records: u32, pub lease: Duration, pub horizon: Option<i64> /* default: now µs */ }
+                          pub max_records: u32, pub lease: Duration, pub horizon: Option<i64> /* default: now µs */,
+                          pub fields: Option<Vec<FieldName>> /* None = all fields (F4) */ }
 pub enum Select { Next, WholeGroups { max_groups: u32 }, Keys(Vec<Key>) }
 pub struct ClaimResponse { pub lease: Option<ClaimLease>, pub records: Vec<Record>,
                            pub skipped: Vec<(Key, Skip)>, pub partial_group: Option<GroupKey>, pub replayed: bool }
@@ -295,7 +295,7 @@ pub enum Skip { NotFound, OtherStage(Stage), Leased, Blocked, NotAttempted }
   - Every distinct key is reported exactly: claimed, or in `skipped` with a reason. C5's omission allowance does not apply.
   - Skip reasons, in precedence order: `NotFound`, `OtherStage(s)` (the record is in stage s), `Leased`, `Blocked` (a gate or pause).
   - If C7's byte limit stops the claim, each remaining key is `NotAttempted`.
-- **C3. One claim per response.** A claim that returns at least one record creates one claim: a fresh unguessable token and `until` = now + `lease` (1 ms..=1 h), returned in `lease`. Each returned record is attached to it, becomes Leased, gets `attempts + 1` and a new version. The claim and all its leases are durable before the response returns. A claim that returns no record creates nothing and returns `lease: None`.
+- **C3. One claim per response.** A claim that returns at least one record creates one claim: a fresh unguessable token and `until` = now + `lease` (1 ms..=1 h), returned in `lease`. Each returned record is attached to it, becomes Leased, gets `attempts + 1` and a new version, and carries the fields that `fields` selects (F4). The claim and all its leases are durable before the response returns. A claim that returns no record creates nothing and returns `lease: None`.
 - **C4. Order,** always within the claim's stage:
   - `Next`: `(rank asc, insertion sequence asc)`.
   - `WholeGroups { max_groups }`:
@@ -314,20 +314,19 @@ pub enum Skip { NotFound, OtherStage(Stage), Leased, Blocked, NotAttempted }
   - A different fingerprint returns `RequestIdConflict`.
   - Without an id, a lost response leaks its claim until the lease expires.
 - **C9. Cost.** A `Next` claim MUST cost O(log n + k + b), where n is the number of records in the queue, k the number returned and b the number of candidates skipped for Blocked gates. Records of other stages, Leased records and records with `rank > horizon` MUST NOT be visited. This clause is verified by the implementation's performance gates, not by the black-box suite.
-- Errors: `Invalid` (an undeclared stage; `max_records` of 0 or over 1000; `max_groups` of 0; a lease out of bounds; more than 1000 keys; `Keys` with `max_records` below the number of distinct keys), `QueueNotFound`, `QueueClosed`, `RequestIdConflict`, `RequestExpired`, and E3.
+- Errors: `Invalid` (an undeclared stage; `max_records` of 0 or over 1000; `max_groups` of 0; a lease out of bounds; more than 1000 keys; `Keys` with `max_records` below the number of distinct keys; a `fields` list that F4 rejects), `QueueNotFound`, `QueueClosed`, `RequestIdConflict`, `RequestExpired`, and E3.
 
 ### 4.4 `read`
 
 Why it exists: point loads by key, in any stage, and the queue's definition and metadata (the read half of a metadata CAS). There is no key-prefix listing; list records through a declared index with `scan`.
 
 ```rust
-pub struct ReadRequest { pub keys: Vec<Key>, pub queue: bool }
+pub struct ReadRequest { pub keys: Vec<Key>, pub fields: Option<Vec<FieldName>> /* None = all fields (F4) */, pub queue: bool }
 pub struct ReadResponse { pub records: Vec<Option<Record>>, pub queue: Option<QueueState> }
 pub struct QueueState { pub definition: QueueDef, pub metadata: BTreeMap<String, Value>, pub metadata_version: u64 }
 ```
 
-- **R1.** At most 1000 keys. The response has one positional `Option<Record>` per requested key, in any stage and lease state.
-- **R2.** Retired.
+- **R1.** At most 1000 keys. The response has one positional `Option<Record>` per requested key, in any stage and lease state. Each record carries the fields that `fields` selects (F4).
 - **R3.** A read observes every write, gate op and metadata op acknowledged before it was issued (V3). It never mutates and never returns tokens.
 - **R4.** `queue: true` also returns the normalized definition and the metadata with its version. A request with no keys and `queue: false` is `Invalid`.
 - Errors: `QueueNotFound`, `QueueClosed`, `Invalid`, `TooLarge` (a response over 16 MiB), and E3.
@@ -346,10 +345,11 @@ pub struct GroupStats { pub ready_groups: u32, pub oldest_ready_since: Option<Ti
 
 - **S1.** `stages` has one entry per declared stage, in declaration order, counting every record by stage and lease state. `paused` means `"*"` is Blocked. The values observe every acknowledged write but MAY be torn (V3), and reflect lease reclaim within Δ (V4).
 - **S2.** `groups.stage` MUST be a declared stage, and `groups.horizon`, when given, MUST NOT be earlier than now on the implementation `Clock`; either violation is `Invalid`. A caller that wants now omits the horizon.
-  - `ready_groups = min(limit, number of distinct groups that have a Free record in that stage with rank <= horizon)`. Ungrouped records are not counted.
-  - `oldest_ready_since` is the minimum `ready_since = max(rank, free_since)` over those records (§3).
+  - The *ready records* are the grouped Free records in that stage with `rank <= horizon`. Ungrouped records are never counted.
+  - `ready_groups = min(limit, number of distinct groups that have a ready record)`.
+  - `oldest_ready_since` is the minimum `free_since` over the ready records (§3): when the longest-waiting ready record became Free. Rank is never read as a time, so a priority offset in rank does not shift it. It is `None` when there is no ready record.
   - Both ignore gates, pause and Leased members, so they can overcount the groups a `WholeGroups` claim can take.
-  - The cost MUST be O(log n + `limit`), where n is the number of records in the queue. Like C9, this cost bound is verified by the implementation's performance gates, not by the black-box suite (CS2).
+  - The cost MUST be O(log n + `limit` + s), where n is the number of records in the queue and s the number of grouped Free records in that stage with `rank > horizon`. Like C9, this cost bound is verified by the implementation's performance gates, not by the black-box suite (CS2).
 - **S3.** `stats` never mutates.
 - Errors: `QueueNotFound`, `QueueClosed`, `Invalid`, and E3.
 
@@ -414,12 +414,18 @@ pub enum DeletePolicy { ArchiveOnly /* default */, AllowFull } // fixed at const
 `QueueDef` has three parts, and the engine interprets all three:
 - **`stages`:** an ordered list of 1..=32 names. The first is the insert default. With no list given, the stages are `[INITIAL, COMPLETED]`. Every record is in exactly one stage, every claim names one (C1), `stats` counts by stage (S1), and indexes and aggregates may key on it. No stage is special.
 - **`fields`:** at most 256 typed fields. The types are `Int` (i64), `Float` (finite f64), `Bool`, `Time` (µs), `Str` (UTF-8) and `Bytes`.
-- **`indexes`:** at most 32 typed indexes, each over 1..=8 keys drawn from the declared fields and the built-ins `Stage`, `Rank` and `Group`. Indexed values are meant to be small scalars: an index's encoded key is at most 1024 B (W1, W8). Lease state, `until`, `attempts` and `version` cannot be index keys: they change on every claim and reclaim, and `stats` and `Dim::Lease` already read the lease.
+- **`indexes`:** at most 32 typed indexes, each over 1..=8 keys drawn from the declared fields and the built-ins `Stage`, `Rank` and `Group`. A field of any declared type may be an index key, `Str` and `Bytes` included. The bound is on the whole encoded index key, all keys of one index together: at most 1024 B (W1, W8). Lease state, `until`, `attempts` and `version` cannot be index keys: they change on every claim and reclaim, and `stats` and `Dim::Lease` already read the lease.
 
 Field rules:
 - **F1.** A record carries only declared fields, each with a value of its declared type. A write that names an undeclared field, or gives a value of another type, is `Invalid` (W1).
 - **F2.** A `Str` or `Bytes` value is at most 64 KiB, and an encoded record (key and fields) at most 4 MiB, both measured as LIM1 states. Every value within these bounds behaves the same in every op: there is no caller-visible "large" flag, no separate payload, and no size-dependent semantics. Where values are physically placed is the implementation's choice.
 - **F3.** A record may lack any declared field. `None` in a patch, or `clear_fields`, makes a field absent, and an absent field keeps the record out of every index keyed on it (Q1).
+- **F4. Field projection.** `claim` and `read` take `fields: Option<Vec<FieldName>>`.
+  - `None` returns every field the record has. `Some(names)` returns only the named fields the record has; a named field the record lacks is absent from its map (F3). `Some(vec![])` returns no fields.
+  - Every name MUST be a declared field and appear at most once, else `Invalid`.
+  - Projection changes only the returned `fields` map. The other record attributes are always returned, and which records a claim takes, and what it does to them (C3), are the same with or without a projection.
+  - The response limits (C7, and E3 for `read`) measure the projected response (LIM1).
+  - Whatever the physical placement (F2), a projected `claim` or `read` MUST NOT read the stored value of a field it does not return, except where that value shares storage with a returned field. With `Some(vec![])` it reads no field storage at all. Like C9, this rule is verified by the implementation's performance gates, not by the black-box suite (CS2).
 
 Fields are the only per-record data. Metadata for a transition (history, audit, acknowledgements) travels in the write that settles the record and is stored in its fields. There are no side records.
 
@@ -472,7 +478,7 @@ The bound keeps it configuration, such as a consumer's shard manifest. It is not
 Rank conventions (non-normative): the default is the insertion time in µs; a scheduled record's rank is its not-before time; a priority bucket is an offset added to the rank, negative to run sooner and positive to run later. The engine interprets rank only through ordering and the horizon test.
 
 ### 6.6 Leases and claims
-- **L1.** A claim is the unit of leasing: one token, one expiry `until`, and the set of records attached to it. The token is opaque and unguessable, returned only by the `claim` that created it (and its replays), and never readable through `read`, `scan`, `stats` or `aggregate`.
+- **L1.** A claim is the unit of leasing: one token, one expiry `until`, and the set of records attached to it. The token is opaque and unguessable, returned only by the `claim` that created it (and its replays), and never readable through `read`, `scan`, `stats` or `aggregate`. A claim has no holder identity: the holder is whoever presents the token.
 - **L2.** A claim is **live** while `until > now` and at least one record is attached to it. A record is Leased iff it is attached to a live claim, subject to the V4 window.
 - **L3.** While a record is Leased, only its holder writes it (`Held` or `Release` with the token), no lease-free write applies to it (W4), and no claim returns it (C1, C2). `Operator::force_clear` (§7) is the only exception, and it is not part of `Store`.
 - **L4.** `Extend` renews the whole claim (W14). `Release` and `Delete` detach one record, and the claim's other records stay attached. A claim ends when its `until` passes or its last record is detached.
@@ -523,7 +529,7 @@ The key, value and field bounds rest on measurement (non-normative evidence; the
 
 ## 7. The `Operator` trait and the admin handle
 
-Force-clear ends a lease without its token. It exists only for on-call repair, in a trait of its own that no data-plane handle reaches (owner decision, 2026-09-23 design discussion).
+Force-clear ends a lease without its token. It exists only for on-call repair, in a trait of its own that no data-plane handle reaches.
 
 ```rust
 pub trait Operator: Send + Sync + 'static {
@@ -551,8 +557,8 @@ pub enum ForceOutcome { Applied { cleared: bool, write: Option<WriteOutcome> }, 
 
 ## 8. What the contract deliberately excludes
 
-- **A remote API.** The contract is in-process. The RESP adapter is deleted; a network front may be rebuilt later as a pure transport over `Store`, under its own contract.
-- **Cohorts.** Deleted. An atomic group insert, a `WholeGroups` claim and a caller count check serve the use case.
+- **A remote API.** The contract is in-process. There is no network front; one may be built later as a pure transport over `Store`, under its own contract.
+- **Cohorts.** There are none. An atomic group insert, a `WholeGroups` claim and a caller count check serve the use case.
 - **Retention and expiry.** There is no `expires_at`, retention setting, reaper or key tombstone. Records live until the consumer deletes them or closes their queue. A future delete-by-filter op may serve bulk retention; it is not part of this contract.
 - **`due`.** There is no not-before attribute and no "claimable only by key" state. `rank` carries both order and schedule (C1).
 - **Index-ordered claims.** `rank` is the only claim order (C4). There is no claim in declared-index order: a consumer finds records through `scan` and claims them with `Keys`, or gives each kind of work its own stage or group.
@@ -571,7 +577,7 @@ pub enum ForceOutcome { Applied { cleared: bool, write: Option<WriteOutcome> }, 
   - `Δ` is the instance's documented bound;
   - `clock` is a manual `Clock` that drives V4, the default rank and the default horizon;
   - `fault_hook` makes the next acknowledgement fail with `Unavailable` after commit, to test resolution by resend and by `read` (E2, RQ2, RQ4). It exists only in test builds.
-- **CS2.** The suite has at least one scenario per MUST clause of §4 and §6, each citing its clause id. Two cost clauses are left to performance gates: C9 and the S2 cost bound.
+- **CS2.** The suite has at least one scenario per MUST clause of §4, §5 and §6, each citing its clause id. Three cost rules are left to performance gates: C9, the S2 cost bound, and F4's rule that a projection reads no unreturned field value.
 - **CS3.** Every scenario runs twice: directly, and through a torn-read adversary that serves `stats` and `aggregate` from a mix of pre- and post-write state while writes are concurrent. `read` and `scan` get no lag wrapper.
 - **CS4.** There are no per-backend clauses, backend knobs or capability probes. Every implementation passes or fails the same suite.
 - **CS5.** The suite never links the `Operator` trait or the admin handle (OP4). OP1–OP3 are tested by a separate operator suite that takes the admin handle.
@@ -585,8 +591,10 @@ pub enum ForceOutcome { Applied { cleared: bool, write: Option<WriteOutcome> }, 
   - `WholeGroups` exclusivity across stages (C6a), including against a concurrent `Next` claim of another stage;
   - `attempts` unchanged across a release and a reschedule;
   - F1–F3: undeclared field and wrong type rejected; 64 KiB `Str` and `Bytes` values round-trip through `write`, `claim` and `read`, and after `reopen`; 256 B non-UTF-8 keys;
+  - F4: `claim` and `read` with `fields: None` return every field; with `Some([a])` only `a`, and an empty map for a record that lacks `a`; with `Some([])` no fields, while the claim still leases, bumps `attempts` and the version as unprojected; an undeclared or repeated name is `Invalid`; records of about 4 MiB each, claimed with `Some([])`, come back up to `max_records` where an unprojected claim stops at C7's byte limit;
+  - `Str` and `Bytes` index keys: a `scan` over an index keyed on a `Bytes` field returns hits in bytewise order; a write whose encoded index key exceeds 1024 B is `Invalid` (W1, W8);
   - a metadata CAS in one unit with record writes, and its rejection rolling the unit back; `read{queue}` freshness;
-  - a claim, `stats`, a stage move, then `stats` again; release, then `stats.oldest_ready_since`;
+  - a claim, `stats`, a stage move, then `stats` again; release, then `stats.oldest_ready_since`, which reports the release time; with a horizon later than now, a ready record ranked after now reports its `free_since`, not its rank;
   - `delete_queue` under both policies, on a non-empty queue with a live claim: `NotPermitted` under `ArchiveOnly` for a full delete, on an open queue and again on an archived one; `QueueClosed` for every other op afterwards, including after `reopen`; `already_closed` on repeat;
   - `stats.groups` with a horizon earlier than now is `Invalid`; `-0.0` round-trips as `+0.0`; a `Ranges` with unsorted bounds and a zero `TimeBucket` width are `Invalid`, and an empty `Dims` returns one total group.
 - **CS7. Mandatory for every implementation:**

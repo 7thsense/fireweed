@@ -5,13 +5,14 @@ ddx:
     - prd
     - concerns
     - adr-cqrs-log-projection-storage-model
+    - api-fireweed-kernel-contract
   links:
     - {kind: informed_by, to: prd}
     - {kind: informed_by, to: concerns}
     - {kind: informed_by, to: adr-cqrs-log-projection-storage-model}
+    - {kind: informed_by, to: api-fireweed-kernel-contract}
     - {kind: informed_by, to: adr-rust-workspace-and-toolchain-policy}
     - {kind: informed_by, to: adr-hexagonal-architecture-and-two-interfaces}
-    - {kind: informed_by, to: adr-orthogonal-log-projection-composition}
     - {kind: informed_by, to: adr-log-single-source-of-truth}
   status: accepted
   review:
@@ -25,164 +26,76 @@ ddx:
 
 # ADR-015: Full-async storage boundaries
 
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
-
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-07-18 | Accepted | Project owner | ADR-003, ADR-007, ADR-012, ADR-013, TD-001 | High |
+| 2026-07-18 | Accepted | Project owner | API-006, ADR-003, ADR-007, ADR-013, ADR-016, ADR-017 | High |
 
 ## Context
 
-TD-001 specifies asynchronous storage calls and ADR-003 selects Tokio for asynchronous I/O, but
-ADR-012 and the realized engine retain a synchronous write core: `LogWriter`, `ProjectionWriter`, and
-the closure passed to `Backend::write` run under `std::sync::Mutex<Inner<L, P>>`. Native-async stores
-therefore require blocking bridges, and blocking stores can run work on a runtime worker unless each
-composition root adds its own defensive wrapper. The split is observable as duplicated
-`spawn_blocking` logic, eager ready futures, and an inability to integrate an async database without
-either blocking a worker or nesting a runtime.
-
-The external operation ports are already future-returning. The unresolved decision is whether the
-storage axes and atomic commit boundary remain synchronous internally or become asynchronous through
-the complete engine path.
+- `Store` is async: every op returns a boxed `Send` future (API-006 §4.0). Behind it, the S3×Turso implementation talks to S3, to Turso and to the control plane, all of which do I/O.
+- A synchronous storage core under a mutex forces native-async drivers through blocking bridges, lets blocking work run on a runtime worker, and spreads defensive `spawn_blocking` wrappers across composition roots.
+- Cancellation has to be safe: a caller may drop its future at any point, and a dropped future must never leave a half-applied change or lose an acknowledged one.
 
 ## Decision
 
-All storage-facing engine boundaries will be asynchronous. Domain traits remain runtime-neutral: they
-return `Send` futures and expose no Tokio type. A native-async adapter awaits its driver directly; an
-in-memory adapter may return an immediately-ready future; a blocking adapter executes the entire
-transaction on a bounded blocking executor or owned storage actor below the async port.
+Every storage-facing boundary is asynchronous, from `Store` down through the engine's ports to the object log, the Turso projection and the control plane. The contract crate and the engine's ports are runtime-neutral: they return `Send` futures and expose no Tokio type.
 
-The generic user-supplied `Backend::write` closure will not become an async closure. It will be replaced
-by typed, backend-owned async operations, including a typed raw commit used by conformance and fault
-injection. Backend-owned operations preserve the legal suspension points and transaction lifetime and
-prevent arbitrary code from awaiting while it holds a transaction or global lock.
+- A native-async adapter awaits its driver directly.
+- A blocking adapter runs one whole begin, apply and commit-or-rollback unit on a bounded blocking executor or an owned storage actor below the async port.
+- The engine exposes typed, backend-owned async operations, never a user-supplied closure that runs inside a transaction. That keeps the legal suspension points fixed and stops arbitrary code from awaiting while it holds a transaction or a lock.
 
-The following rules are normative:
+Normative rules:
 
 1. No `std::sync::MutexGuard` or borrowed blocking transaction is held across `.await`.
-2. Blocking adapters offload one complete begin/apply/commit-or-rollback unit, never individual SQL
-   statements from the same transaction.
-3. Serialization is per queue or per connection where the substrate requires it; network or object-store
-   I/O does not hold a process-global storage lock.
-4. Dropping a future before commit leaves no durable effect. Cancellation during commit is an
-   unknown-outcome case: the owned commit continues to a determinate result and `request_id` replay
-   resolves a lost response.
-5. Atomic stores commit log append, projection apply, cursor advance, and replay outcome together.
-   Eventual-apply stores durably append first and repair the projection from the log, while preserving the
-   API response barrier defined by ADR-013.
-6. Backend construction, recovery, snapshots, inspection, repair, deferred apply, and shutdown are async
-   when they can perform I/O.
-7. Capability accessors that are immutable after construction stay synchronous and never acquire an
-   async lock.
-
-### Commit ownership and cancellation
-
-Mutation dispatch has three explicit phases:
-
-1. **Queued**: validation is complete, but no transaction or durable append has started. Cancellation
-   removes the request from the bounded queue and leaves no effect.
-2. **Started**: the backend transfers owned request data and an owned connection/transaction capability
-   into a backend-owned commit task. The task, not the caller future, begins and owns the transaction.
-   The caller awaits a result channel; dropping that awaiter does not cancel the task.
-3. **Resolved**: the task atomically persists the command/projection outcome for atomic stores, or the
-   command and replay outcome at the durable-log boundary for eventual-apply stores, then publishes the
-   result. A missing receiver discards only the response, never the outcome.
-
-Starting a task is bounded by per-queue admission and global backend capacity. Each started task registers
-its `request_id` and lifecycle in an owned commit registry. Graceful shutdown stops new admission, cancels
-queued work, and drains started tasks for the configured shutdown bound. If the process ends first,
-database rollback handles uncommitted atomic transactions and restart/replay resolves any durable outcome.
-No detached task may hold only a borrowed connection, transaction, mutex guard, or caller-owned buffer.
-
-Native drivers are awaited directly *inside* the owned commit task. Reads and pre-commit planning do not
-need this task boundary because their cancellation has no durable effect.
-
-The migration reached async-only product composition in v0.24: supported
-log-by-projection cells assemble through async products. A residual facade bridge
-may still dispatch a public operation through blocking compatibility code while
-individual adapters become runtime-safe, but it is not the product execution
-model and must not grow new call sites. Removal requires per-cell conformance,
-same-queue serialization, cross-queue heartbeat progress, and shutdown/drain
-proof. Removing that bridge does not create a second public facade type.
-
-ADR-024 is the public barrier law. `ResponseBarrier` has only
-`AsyncProjection` on the s3 × turso cell. `Strict` is not a public barrier.
-`AsyncProjection` may defer Turso apply. The acknowledged mutation is durable
-on the object log. A later claim polls applied rows. Owned commit tasks,
-bounded admission, request-id outcome replay, and the per-queue gate still
-apply. None of them permits a process-global lock across awaited I/O.
+2. A blocking adapter offloads a complete transaction, never individual statements of one transaction.
+3. Serialization is per queue, per partition or per connection, where the substrate requires it. The Turso writer is one connection per file behind a mutex (TD-017 §12). Network and object-store I/O never holds a process-global storage lock.
+4. Dropping a future before its mutation is submitted leaves no effect. After submission the mutation continues to a determinate outcome (ADR-017). A lost response is an unknown outcome (API-006 E2), resolved by resending with the request id or by `read` (RQ2, RQ4).
+5. The durable log commit comes first, and the projection is applied from the log afterwards and repaired from it after a crash (ADR-013).
+6. Construction, recovery, projection control and shutdown are async whenever they can perform I/O.
 
 ## Alternatives
 
-| Option | Pros | Cons | Evaluation |
-|--------|------|------|------------|
-| Keep synchronous storage axes | Smallest code change; natural fit for rusqlite | Blocks native async drivers and spreads reactor-safety wrappers across composition roots | Rejected |
-| Make `Backend::write` accept an arbitrary async closure | Superficially preserves the existing seam | Complex lifetimes and boxing; arbitrary suspension while transaction state is borrowed | Rejected |
-| Put every store behind a blocking actor | One uniform call shape | Throws away native async I/O and adds scheduling/failure boundaries | Rejected |
-| **Typed async storage operations with explicit sync adapters** | Native async path, controlled cancellation, runtime-neutral ports | Staged migration and temporary dual contracts | **Selected** |
+| Option | Evaluation |
+|--------|------------|
+| Synchronous storage ports | Rejected. They block native async drivers and spread reactor-safety wrappers across composition roots. |
+| A generic write that accepts an arbitrary async closure | Rejected. Complex lifetimes, boxing, and arbitrary suspension while transaction state is borrowed. |
+| Every store behind a blocking actor | Rejected. It discards native async I/O and adds scheduling and failure boundaries. |
+| **Typed async storage operations, with whole-transaction offload for blocking stores** | **Selected.** Native async paths, controlled cancellation and runtime-neutral ports. |
 
 ## Consequences
 
 | Type | Impact |
 |------|--------|
-| Positive | Native async databases and clients no longer require nested runtimes or reactor blocking. |
-| Positive | Cancellation and unknown outcomes become testable storage contracts instead of wrapper behavior. |
-| Negative | The migration touches the generic composition and every storage adapter. |
-| Negative | A residual facade bridge remains until every adapter is runtime-safe and its per-cell progress/closure evidence passes. |
-| Neutral | SQLite, object-log filesystem, and other blocking implementations remain supported through bounded whole-transaction offload. |
+| Positive | Native async drivers need no nested runtime and never block the reactor. |
+| Positive | Cancellation and unknown outcomes are testable storage behavior, not wrapper behavior. |
+| Negative | Every adapter must state its own serialization and cancellation behavior. |
+| Neutral | Blocking implementations still work through bounded whole-transaction offload. |
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Cancellation interrupts a commit after its outcome becomes durable | M | H | Owned commit task plus request-id outcome replay tests at every cancellation cut. |
-| Async conversion weakens transaction affinity | M | H | Typed operations; whole-transaction blocking wrappers; no per-statement offload. |
-| Global async lock serializes unrelated queues | M | H | Per-queue serialization and queue-density/heartbeat tests. |
-| Residual facade bridge persists indefinitely | M | M | Per-cell inventory, source guards, and removal gates forbid new bridge call sites. |
+| Cancellation interrupts a commit after its outcome became durable | M | H | Owned commit tasks (ADR-017) and request-id replay tests at every cancellation point. |
+| Async conversion weakens transaction affinity | M | H | Typed operations; whole-transaction offload; no per-statement offload. |
+| A global async lock serializes unrelated queues | M | H | Per-queue and per-partition serialization, and queue-density heartbeat tests. |
 
 ## Validation
 
 | Success Metric | Review Trigger |
 |----------------|----------------|
-| No blocking storage call runs directly on a Tokio worker | A single-thread runtime heartbeat stalls during storage conformance. |
-| All cancellation cut tests converge to zero or one committed outcome | Any duplicate, lost accepted mutation, or cursor-ahead state. |
-| No legacy sync storage seam remains after migration | `rg` finds `Backend::write`, `LogWriter`, `ProjectionWriter`, or eager wrapper-only storage futures. |
-| Existing backend conformance remains green | A backend changes API-001 success, replay, fencing, or response-barrier behavior. |
-
-## Supersession
-
-- **Supersedes**: ADR-012's synchronous `Backend::write(f)` and
-  `std::sync::Mutex<Inner<L, P>>` unit-of-work mechanism only. ADR-012's orthogonal axes and atomicity
-  requirements remain accepted.
-- **Superseded by**: None.
+| No blocking storage call runs directly on a Tokio worker | A single-thread runtime heartbeat stalls during the contract suite. |
+| Every cancellation-point test converges to zero or one committed outcome | A duplicate, a lost acknowledged mutation, or a projection position ahead of its state. |
+| No synchronous storage seam remains | A search finds a closure-based write seam or a sync log or projection writer trait. |
+| The contract suite passes on S3×Turso | Any change to success, replay, fencing or visibility behavior. |
 
 ## Concern Impact
 
-- `concurrency-model`: storage suspension and serialization are now explicit async contracts.
-- `resilience`: cancellation, timeout, rollback, and unknown-outcome recovery are required conformance
-  cases.
-- No library practice is overridden; the runtime-neutral port shape preserves ADR-007 dependency
-  direction.
+- `concurrency-model`: suspension points and serialization are explicit async rules.
+- `resilience`: cancellation, timeout, rollback and unknown-outcome recovery are required test cases.
+- The runtime-neutral port shape keeps ADR-007's dependency direction.
 
 ## References
 
-- `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
-- `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md`
-- `docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md` — public
-  `Fireweed` product path: native-async end-state; `BlockingLibBackend` is a
-  residual facade bridge, not architecture.
-- `crates/fireweed-engine/src/port.rs`
-- `crates/fireweed-engine/src/compose.rs`
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-017-async-commit-strategy-and-dispatch.md`
+- `docs/helix/02-design/technical-designs/TD-017-kernel-projection-storage-layout.md`

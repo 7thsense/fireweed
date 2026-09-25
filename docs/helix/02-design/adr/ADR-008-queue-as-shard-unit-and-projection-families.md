@@ -3,6 +3,8 @@ ddx:
   id: adr-queue-as-shard-unit-and-projection-families
   depends_on:
     - prd
+    - adr-cqrs-log-projection-storage-model
+    - adr-kernel-records-contract
   status: accepted
   review:
     self_hash: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
@@ -11,164 +13,55 @@ ddx:
     reviewed_at: "2026-07-20T00:01:20Z"
 ---
 
-# Architecture Decision Record
+# ADR-008: The queue is the unit of atomicity; each queue is assigned one partition
 
-> **Under revision per ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, OD-13).
-> "The queue is the unit of sharding" stands. Placement changes: the control plane maps each queue to one
-> partition instead of choosing an owner by HRW over queues; the partition fixes the queue's node and log
-> residency; and queues are never rebalanced across partitions (owner decision, 2026-09-23 design discussion).
-> TD-018 designs the partition cell; Decisions 1 and 3 are amended when it is accepted.
-
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
-
-**ADR ID**: ADR-008
-**Title**: The queue is the unit of sharding; projections are an axis; the control plane is optional
-**Status**: accepted
-**Related**: PRD (FR-13), ADR-001 (CQRS log/projection), ADR-004 (granularity & claim domain),
-ADR-007 (hexagonal & two interfaces), TD-001 (backend contracts), TD-002 (relational `postgres_native`),
-TD-003 (sharding & ownership), TD-006 (RESP), TD-007 (durability), ADR-013 (single-source-of-truth
-amendment to the projection-family authority claim),
-`docs/helix/04-build/coordinated-log-relational-projection-plan.md`
+| Date | Status | Deciders | Related | Confidence |
+|------|--------|----------|---------|------------|
+| 2026-09-24 | Accepted | Project owner | PRD, API-006, ADR-001, ADR-013, ADR-025, TD-003, TD-017, TD-018 | High for the placement model; the partition cell's commit path is measurement-gated (TD-018) |
 
 ## Context
 
-The original storage model (ADR-001) and its technical designs specify **intra-queue sharding**: a queue is
-split into `shard_count` shards, items are placed by `hash(group_key | client_item_key) mod shard_count`
-(ADR-004 / TD-003), and a queue-global claim **fans out across all of a queue's shards and k-way-merges**
-their candidates, with a queue-global progress bound aggregated across shards (TD-001/TD-003). That buys
-*single-queue* horizontal scale (PRD FR-13; TP-002 E2: one queue over 8 shards ≥ 4× one deployment).
-
-Two costs surfaced in review:
-
-1. **Scatter-gather per claim.** A queue-global claim must probe the top of every shard — across owner nodes
-   — and merge. That is expensive, stall-prone, and taxes priority specifically (cheap claims would require
-   relaxing ordering). For a priority work queue this undercuts the core value at exactly the scale where it
-   should hold up.
-2. **ADR-007's projection premise contradicts the standing designs.** ADR-007 consolidated storage to "one
-   shared in-memory projection + swappable log stores" and recorded that *"the 'fused vs split' special case
-   disappears (a backend is just a durability class)."* But TD-002 still specifies the relational
-   `fireweed_items` projection with an SQL `FOR UPDATE SKIP LOCKED` claim — a genuinely different projection.
-   The code shipped the one-projection version (PHASE-7: `ShardId::ZERO`, an in-memory projection,
-   `postgres_native` rebuilt as a log-store rather than the relational projection), leaving large queues
-   RAM-bound to a single process and the multi-shard horizontal envelope unbuildable.
-
-E0 requires a single owner to preserve exact outcomes, queue-global progress,
-and bounded resources under load. "Many queues across many owners" provides
-aggregate headroom while the at-least-1,001-active-queue density run exercises
-one hot queue and at least 1,000 cold queues. The product owner has decided to trade single-queue
-horizontal scale for single-hop, no-stall claims: **"Queue is the unit of sharding. If you want more
-sharding, create more queues."**
+- A queue split into shards needs every claim to probe each shard and merge the candidates. That costs a scatter-gather per claim, stalls on the slowest shard, and weakens rank order exactly where scale matters. The owner's rule: "Queue is the unit of sharding. If you want more sharding, create more queues."
+- Queues are cheap and one per job type (ADR-025 §2), so a deployment has many of them. With one log index document per queue, commit cost grows with the number of active queues, and every commit rewrites a document that grows without bound (TD-018, Findings 4 and 5).
+- Placement is not part of the contract: `define_queue` has no placement input, and API-006 §8 excludes storage layout and partition placement.
 
 ## Decision
 
-1. **The queue is the unit of sharding.** There is no intra-queue sharding. A whole queue is owned by exactly
-   one node at a time, placed by a deterministic function of `(tenant_id, queue_id)` over the live owner set
-   (HRW/rendezvous hashing, TD-003) — **per queue**, not per a fixed bucket count. Placement is
-   **client-invisible** (ADR-004's "`shard_id` is never a client-visible ordering/progress key" holds).
-   **`shard_count` is removed from the contract** (API-001 `CreateQueue`, the config-identity hash,
-   idempotent-create). Horizontal scale is **cross-queue** — distributing queues across nodes; a producer
-   needing more than one owner's throughput for a logical stream partitions it across multiple queues at the
-   application layer.
+1. **The queue is the unit of atomicity.** Every op addresses one queue, every atomic unit stays inside it, and nothing is atomic across queues (API-006 A1–A4, ISO1). Claim order and progress are defined per queue and per stage (C4, C5a) and are computed on the queue's one owner; nothing is merged across owners.
+2. **A queue is never split.** There are no partitions or shards inside a queue. A producer that needs more than one queue's throughput spreads its work over several queues.
+3. **The control plane assigns each queue one partition, by mapping.** The assignment is made when the queue is first defined and never changes. It fixes the queue's node and its object-log residency. It is a control-plane decision (a default policy with an admin override on `TursoAdmin`), not a hash of the queue's name, and it is invisible through `Store`.
+4. **Tenants are independent of partitions.** A partition holds queues of many tenants, and one tenant's queues may span many partitions.
+5. **Many queues share a partition.** A partition has one log, one head document and one Turso projection file (TD-017 §1). One head update publishes every queue a commit carries, instead of one index update per queue, and an idle queue costs a directory entry and a few rows, with no per-queue document on the commit path.
+6. **Queues are never rebalanced.** A queue never moves between partitions. A hot partition is relieved by moving the whole partition to another node. A single queue's ceiling is one partition's committer and one Turso writer.
+7. **Ownership is per partition: one writer, fenced by an epoch.** Each partition has one control-plane lease. Its owner's epoch lives in the partition's head, and the log rejects a commit made under a stale epoch (ADR-013). A handoff follows TD-003's sequence per partition: drain, release or expire the old lease, acquire the next epoch, read the head fresh, fence, hydrate the Turso file, then serve. How partitions are assigned to nodes is the control plane's choice.
+8. **The control plane is pluggable.** A single-node deployment runs it in-process; a multi-node deployment uses an external store (ADR-001). It holds assignments and leases and is never on the per-command path.
+9. **Measure first.** TD-018 designs the partition cell. Its commit path is built only after TD-018's commit-cost measurements, starting with today's per-queue commit cost on MinIO at 1, 10, 100 and 1,000 queues. Compaction, snapshots and truncation, splitting a log by partition range, and full-delete garbage collection are proposals that need their own measurement and owner decision.
 
-   (A relational store MAY *physically* hash-partition its item table — e.g. Postgres declarative partitioning
-   by `hash(tenant_id, queue_id) % N`, `N` default 16, power-of-2 — purely for vacuum/index-size isolation.
-   That is an internal TD-002 **storage** optimization, **not** an ownership, routing, or client-visible
-   unit, and it does not bound how many nodes the queue population spreads across.)
+## Alternatives
 
-2. **One projection axis, one behavior and transaction contract.** The public
-   projection values are `memory`, `sqlite`, and `postgres`, independently
-   selectable across the five public logs: the exact 5×3 matrix.
-   Implementations may use in-memory
-   state machines or relational/DB-resident query paths; those are internal
-   strategies, not projection-family products. They share **behavior, not
-   necessarily code**: the **conformance suite is the contract** that holds them
-   interchangeable. Partition principle: the **core** suite is all observable queue behavior
-   *independent of durability substrate* — ordering, eligibility, claim atomicity, idempotency, lease/epoch
-   fencing, success/error/unknown-outcome semantics, read-after-success visibility, and the per-queue progress bound — which **every** projection passes; the **log** suite is
-   replay-from-log, snapshot+tail recovery, and segment/manifest commit, which
-   only Class A durable logs run; Class B proves only its declared projection
-   persistence boundary. A durable relational projection additionally runs a
-   **reconnect-after-crash durability** test. This
-   **retracts** ADR-007's "fused vs split disappears" premise (ADR-007:71).
-
-3. **Ownership is per-queue single-writer with an epoch fence.** For multi-owner
-   deployments, retain TD-003's mechanism — a control-plane lease,
-   deterministic HRW/rendezvous owner placement over the live owner set, and
-   the **Single Authoritative Fencing Rule** (the durable log is the epoch/fence
-   authority; the selected owner must durably acquire/fence its epoch before it
-   serves,
-   append rejects any non-current epoch) — **re-scoped from per-`(queue,shard)` to per-`(tenant,queue)`**: the
-   owned unit is the whole queue, and the lease / epoch / HRW key is `(tenant_id, queue_id)`. There is **no
-   cross-shard machinery**: no fan-out/k-way-merge claim, no cross-shard progress aggregation, no resharding/
-   cohort-split. The progress bound — both `oldest_eligible_age_ms` and `progress_bound_risk_count` — is a
-   **local per-queue property**, not a cross-shard aggregate or sum.
-
-4. **The control plane is optional and pluggable.** `ControlPlaneStore`
-   provides queue definitions and, where the topology has multiple owners,
-   membership, placement, and owner leases. In-process and Postgres
-   implementations are valid choices; Postgres is not implied by any log or
-   projection cell. Epoch/fence authority remains with the selected log, even
-   when a unified Postgres transaction implements both facets. A future
-   object-store membership/lease implementation may support a no-Postgres
-   multi-owner topology, but its multi-object acquire/fence atomicity remains
-   unqualified until proven. That aspiration neither bans Postgres nor turns
-   S3 coordination into a present-tense product guarantee.
+| Option | Evaluation |
+|--------|------------|
+| Shards inside a queue, with fan-out claims | Rejected. Scatter-gather per claim, stalls, and weaker rank order, for single-queue scale that more queues already provide. |
+| Hashed placement (HRW over queue names) | Rejected. The control plane could not pack or separate queues by measured load, and adding partitions would move queues. |
+| One log index document per queue | Rejected. Commit cost grows with active queues, and the documents grow without bound (TD-018). |
+| Rebalancing queues between partitions | Rejected. A move would copy a queue's log and projection state and re-fence it; whole-partition moves and placement at creation cover the need. |
+| A placement input on `define_queue` | Rejected. Placement is deployment control on the admin handle, not a contract matter (API-006 §7, §8). |
 
 ## Consequences
 
-- **Removed across the cascade:** intra-queue item-to-shard placement (`hash(group_key) mod shard_count`),
-  cross-shard claim fan-out/k-way-merge, cross-shard queue-global progress aggregation, resharding/cohort-
-  split. `group_key` becomes an **ordering/compatibility** concern only (never placement).
-  `group_co_residency` is **removed from the contract and the config-identity hash** (co-residency now holds
-  by construction); the per-item `group_key`-required rule and `whole_group`/`whole_cohort` atomicity become
-  **unconditional queue properties**, gated only by `cohort_policy.enabled` / `compatibility.group_batching`
-  config, never by a `group_co_residency` flag. `metrics.oldest_eligible_age_ms` and
-  `progress_bound_risk_count` are per-queue on its one owner (not cross-shard).
-- **TP-002 E2 is reframed** from single-queue-N-shard to **cross-queue scale-out** —
-  N queues across N owners, with exact work, logical progress, single ownership,
-  fencing, and bounded shared resources preserved as owner and queue counts rise.
-- **Gains:** claims are single-hop (no scatter-gather, no stalls); the relational projection removes the
-  in-RAM ceiling; ownership/coordination collapses to one lease per queue — replacing the per-`(queue,shard)`
-  lease, while keeping the external control-plane choice independent from the
-  public storage cell.
-- **Trade-off accepted:** a single queue cannot exceed one owner's capacity — mitigated by app-level
-  multi-queue fan-out. E0 qualifies behavior under load; measured rates are
-  capacity evidence for the declared owner topology, not a portable contract.
-- **Supersedes / amends:** ADR-004 (item-to-shard placement; `group_co_residency`), TD-003 (the cross-shard
-  model), ADR-007 (retract the "fused vs split disappears" claim, ADR-007:71). It **amends ADR-001** — which
-  already states "Postgres is preferred; a backend-specific control plane may be supported later but must
-  justify" — by **adding a concrete pluggable `ControlPlaneStore` seam** (the object-store impl is the
-  deferred candidate that must clear ADR-001's justification bar, not a removal of the bar) and by
-  establishing projection as an independent **axis** with a behavior contract; ADR-001's `ControlPlaneStore`
-  capability row (shard assignment / shard-owner leases) is re-scoped per-queue. The PRD was amended first
-  (FR-13, FR-11/12, FR-48, Success Metrics) so the source of truth leads the cascade.
+| Type | Impact |
+|------|--------|
+| Positive | Claims are single-hop index seeks on one owner, with no merge across owners. |
+| Positive | Commit cost follows commits per partition, not active queues, so queues stay cheap. |
+| Positive | One lease and one epoch cover every queue of a partition. |
+| Negative | A single queue cannot exceed one partition's committer and one Turso writer. |
+| Negative | A poor placement is permanent for that queue; a hot partition moves as a whole or not at all. |
+| Negative | A handoff moves every queue of the partition at once. |
 
-## Alternatives considered
+## References
 
-- **Keep intra-queue sharding (the existing TD-003 model).** More capable — a single queue scales across
-  shards — but pays the scatter-gather/stall cost on every queue-global claim, taxes priority, and mandates a
-  transactional control plane. Rejected: consumer simplicity + no stalls + a no-Postgres option outweigh
-  single-queue horizontal scale, which the floor math makes narrow.
-- **Async-behind projection (log leads, projection trails).** Retained only as
-  the explicit `AsyncProjection` response barrier on applicable Class A
-  object-log cells. The operation's acknowledged result remains visible through
-  the serving projection; bounded durable-projection lag is internal and cannot
-  require caller repair. Class A requires its durable log. Class B deliberately
-  uses the memory log and may persist only through a durable projection; it does
-  not inherit Class A replay claims.
-- **Routing via a separately-distributed owner map.** Unnecessary: owner placement is deterministic (HRW over
-  the live owner set), so the map is *computable*, and a stale route is safe (the fenced append rejects a
-  deposed owner) — so a lazy `MOVED`-style redirect-on-miss suffices.
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`
+- `docs/helix/02-design/technical-designs/TD-003-sharding-and-shard-ownership.md`
+- `docs/helix/02-design/technical-designs/TD-017-kernel-projection-storage-layout.md`
+- `docs/helix/02-design/technical-designs/TD-018-partitioned-object-log.md`

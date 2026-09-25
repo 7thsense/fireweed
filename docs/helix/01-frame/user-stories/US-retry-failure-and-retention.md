@@ -9,24 +9,14 @@ kind: user-story
 
 # US: Retry, Failure, and Retention
 
-> **Acceptance superseded in part by API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`).
-> These lines predate API-006. Where one conflicts with the Behavior section of [the parent feature](../features/FEAT-retry-failure-and-retention.md),
-> or cites a requirement the PRD marks **Retired (API-006)**, the feature and API-006 govern. The public-cell
-> sentence is implementation wording (ADR-024).
-
-As a queue caller on the public cell, I can rely on retry, failure, and retention without choosing another storage cell.
-
-The public cell is one cell: an S3 object log, a Turso projection, and AsyncProjection. Other selectors fail closed before I/O.
+As a worker engineer, I retry, fail and repeat work with ordinary writes, and I remove records when I no longer need them.
 
 ## Acceptance
 
-Retry carries retry count, retry metadata, and not-before (FR-36).
-Queue policy defines when retryable items become terminal failed (FR-37).
-Terminal complete and failed outcomes are durable (FR-38).
-Retention of terminal and idempotency records is bounded (FR-39).
-A queue may be recurring and an item may be re-armed (FR-49).
-Re-arm does not count as retry exhaustion (FR-50).
-A recurring item is one logical item per logical key (FR-51).
-A recurring item ends only by explicit terminal finalize or purge (FR-52).
-Recurring inventory is observable separately from live work (FR-53).
-A re-armed item uses the same queue-global progress bound once it is eligible (FR-54).
+- A retry is `{Release(t), Put{rank}}` with a future rank. The record is claimable again once the horizon reaches that rank, with `attempts` kept (FR-36).
+- A worker that sees `attempts` above its own limit moves the record to a failure stage the queue declares (FR-36).
+- A recurring record settled with `{Release(t), Put{rank: next run}}` stays one record per key across any number of cycles, and its version increases every cycle (FR-49, FR-51).
+- A recurring record ends when it is deleted or moved to a stage nothing claims (FR-52).
+- Idle (future-ranked) and ready records are counted apart with `stats` and an `aggregate` over rank (FR-53).
+- A re-ranked record is claimed in rank order like any other record once its rank is at or below the horizon (FR-54).
+- A record stays until the consumer deletes it or closes its queue; nothing expires it (FR-23, FR-57).

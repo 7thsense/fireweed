@@ -7,20 +7,15 @@ ddx:
 kind: user-story
 ---
 
-# US: Eligibility and Metadata
+# US: Eligibility and Fields
 
-> **Acceptance superseded in part by API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`).
-> These lines predate API-006. Where one conflicts with the Behavior section of [the parent feature](../features/FEAT-eligibility-and-metadata.md),
-> or cites a requirement the PRD marks **Retired (API-006)**, the feature and API-006 govern. The public-cell
-> sentence is implementation wording (ADR-024).
-
-As a queue caller on the public cell, I can rely on eligibility and metadata without choosing another storage cell.
-
-The public cell is one cell: an S3 object log, a Turso projection, and AsyncProjection. Other selectors fail closed before I/O.
+As a worker engineer, I store typed data on each record and control when records become claimable, so a claim returns exactly the work that is ready and only the data the worker needs.
 
 ## Acceptance
 
-A claim returns the highest-priority eligible items under the queue ordering (FR-14).
-Eligibility follows lifecycle, lease, schedule, and gate state (FR-15).
-Items carry opaque payload and metadata (FR-16).
-Metadata gates can keep an otherwise high-priority item unclaimed (FR-17).
+- A record is a candidate only when it is in the claim's stage, Free, ranked at or below the horizon, and carries no Blocked gate, while `"*"` is Open (FR-14, FR-15).
+- Blocking a gate makes every record that carries it unclaimable at once, without changing any record; opening it makes them claimable again. Blocking `"*"` pauses the queue (FR-17).
+- A write that names an undeclared field, or gives a value of the wrong type, is `Invalid` and records nothing (FR-16).
+- A 64 KiB `Str` or `Bytes` value round-trips through `write`, `claim` and `read`, and after a restart (FR-16).
+- An index may be keyed on a `Str` or `Bytes` field, and a write whose encoded index key exceeds 1024 B is `Invalid` (FR-16).
+- `claim` and `read` with a field list return only the named fields. With an empty list they return no fields, while the claim leases the same records and increments `attempts` as it would without the list. An undeclared or repeated name is `Invalid` (FR-59).

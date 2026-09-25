@@ -4,8 +4,9 @@ ddx:
   depends_on:
     - prd
     - concerns
-    - api-native-client-interface
+    - api-fireweed-kernel-contract
     - adr-queue-as-shard-unit-and-projection-families
+  status: accepted
   review:
     self_hash: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
     deps:
@@ -16,232 +17,63 @@ ddx:
     reviewed_at: "2026-07-20T00:01:22Z"
 ---
 
-# ADR-002: Auth, Tenancy, and Storage Isolation
+# ADR-002: Auth, tenancy and storage isolation
 
-## Public cell (ADR-024)
-
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
-
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
+| Date | Status | Deciders | Related | Confidence |
+|------|--------|----------|---------|------------|
+| 2026-09-24 | Accepted | Project owner | API-006, ADR-008, ADR-009, ADR-017, ADR-025, TD-017 | High |
 
 ## Context
 
-fireweed is intended to work as an embedded Rust library and as a stateless
-service. The service form must not rely only on an outer application auth gate:
-tenant boundaries need to reach API authorization, control-plane routing, and
-storage predicates so noisy or unauthorized tenants cannot read, mutate, or
-starve each other.
-
-The core product should remain generally usable and open-source friendly. It
-must not bake in a human signup flow, a specific identity provider, or
-Seventh Sense-specific account concepts. API-001 already requires `tenant_id`
-for service mode and defines principal-to-tenant authorization as a service
-responsibility. TD-001 and TD-002 require `tenant_id` in storage keys.
-
-## Decision Drivers
-
-- Preserve provider-neutral auth for open-source and embedded use.
-- Enforce tenant scope before every data-returning or state-changing operation.
-- Carry tenant identity into storage keys and indexes.
-- Support queue namespaces that are distinct from tenant/account identity.
-- Keep machine-to-machine service deployments first-class.
-- Avoid weakening native API semantics for compatibility adapters.
-- Make noisy-neighbor isolation testable at queue and tenant boundaries.
+- Fireweed is an in-process library. Its interface is API-006's `Store`, and there is no network front; a transport over `Store` may be built later under its own contract (ADR-025).
+- Many tenants' queues can share one process, one partition and one Turso file (ADR-008). Tenants must not read, change or starve each other's queues.
+- The product must stay provider-neutral: it must not embed a signup flow, an identity provider or a consumer's account model.
 
 ## Decision
 
-fireweed will use a layered auth and tenancy model:
+1. **Tenant and queue are namespaces.** Every op addresses one queue by `QueueKey { tenant, queue }` (API-006 §4.0). A tenant groups queues for authorization, admission budgets and operations. It is not a placement unit: one partition holds many tenants' queues, and one tenant's queues may span partitions (ADR-008).
+2. **`Store` performs no authentication and no authorization.** The embedding host resolves its principal and authorizes the tenant, the queue and the op before it calls `Store`.
+   - A multi-tenant host is deny-by-default. It authorizes before any call and never reveals whether a queue it refuses exists.
+   - A trusted single-tenant embedder may use one fixed principal.
+   - A future network transport brings its own authentication and authorization as part of its contract. It adds no semantics to `Store`.
+3. **Privileged handles stay separate.** The admin handle (for S3×Turso, `TursoAdmin`) carries the `Operator`, projection control and queue placement (API-006 §7). A host never hands it to a data-plane principal, and CI bans it in Snorri, the workload and loadgen crates and the contract suite (OP4).
+4. **Queues are isolated by contract.** An op on one queue never observes or changes another queue's records, claims, gates, metadata or definition, and a token is valid only on the queue whose claim created it (API-006 ISO1). Storage keys every row by queue: the Turso projection uses a per-queue integer surrogate, and every statement binds it (TD-017).
+5. **Noisy neighbors are bounded by shared resources.** A node runs at least 1,000 concurrently active cold queues plus one hot queue (PRD) without per-queue resource growth.
+   - Per-queue background work (lease reclaim, request-id expiry, projection apply and the purge of closed queues) runs on bounded, shared per-node pools and sweepers, never one task, loop or connection per queue.
+   - A node-wide byte budget and an optional uniform per-tenant budget bound the mutations in flight; exhaustion is `Busy` (ADR-017).
+   - Enforcing a caller's downstream rate limits is not Fireweed's job. Callers pace their own claims with `max_records`, claim cadence, rank and gates.
+6. **Security rules.**
+   - Lease tokens are stored only as hashes, and a claim has no holder identity: whoever presents the token is the holder (API-006 L1).
+   - Field values and queue metadata are caller data. They are validated against the declared types and limits (F1, F2) and are not written to logs or traces by default.
+   - Every storage statement is parameterized.
+   - Mutating ops emit trace identifiers without their field values.
 
-1. **Principal**: authenticated actor resolved by the host service or embedding
-   application. Examples: service account, machine token, user session, or local
-   embedded principal.
-2. **Tenant**: storage and authorization boundary named by `tenant_id`.
-3. **Queue namespace**: client-visible queue identifier named by `queue_id`,
-   unique within a tenant.
-4. **Queue ownership**: the queue is the unit of sharding (ADR-008) — a whole
-   queue is owned by exactly one node at a time, placed by a deterministic
-   function of `(tenant_id, queue_id)`. An optional internal item-table partition
-   (`hash(tenant_id, queue_id) % N`, TD-002) is a client-invisible storage detail,
-   never an ownership/routing/authorization unit.
-5. **Group**: `group_key` is a client-visible logical ordering/compatibility
-   partition within a queue (ADR-004). Claim result order is exact per-group
-   order on any queue, because every item of a `group_key` is co-resident on the
-   queue's single owner by construction (ADR-008). `group_key` carries no
-   progress-bound meaning (progress is queue-global, computed locally on the
-   owner).
+## Alternatives
 
-The core queue engine requires an already-resolved `PrincipalContext` for
-service-mode operations. It does not implement login, signup, session storage,
-or external IdP integration. Provider-specific authentication is a host-service
-adapter concern.
-
-Authorization is deny-by-default. A principal must be authorized for the tenant,
-queue, and operation before the operation reads control-plane, log, projection,
-or snapshot state.
-
-## Permission Model
-
-The first service implementation uses operation-scoped permissions:
-
-| Permission | Applies To |
-|------------|------------|
-| `queue:create` | `CreateQueue` |
-| `queue:read` | queue definition and metrics reads; `DiscoverActiveScopes` |
-| `item:push` | `BatchPush` |
-| `item:update` | `BatchUpdate` |
-| `item:claim` | `BatchClaim` |
-| `lease:renew` | `BatchRenewLeases` |
-| `item:finalize` | `BatchFinalize` |
-| `item:update` (native purge) | native per-key `PurgeItems` (API-001, recurring teardown) |
-| `operator:inspect` | API-002 operator reads (`GetItem`, `ListItems`, `GetQueueAdminState`, `GetOperation`, `ListOperations`) |
-| `operator:repair` | API-002 repair/redrive/archive/retention/pause/resume |
-| `operator:purge` | API-002 bulk operator `PurgeQueueItems` (most destructive; may require a distinct grant) |
-| `admin:queue` | queue placement / ownership handoff and backend migration (migration design) |
-
-The operator surface (`operator:inspect`/`operator:repair`/`operator:purge`) is
-defined by API-002. Operator mutations may act on leased and terminal items and
-therefore require these stronger, deny-by-default grants distinct from the
-API-001 data-plane permissions.
-
-The policy engine may be RBAC, ABAC, or host-provided callback. The fireweed
-service surface sees only a policy decision:
-
-```rust
-pub struct PrincipalContext {
-    pub principal_id: String,
-    pub tenant_scopes: Vec<TenantScope>,
-    pub authn_method: AuthnMethod,
-}
-
-pub trait Authorizer {
-    async fn authorize(
-        &self,
-        principal: &PrincipalContext,
-        tenant_id: &TenantId,
-        queue_id: Option<&QueueId>,
-        permission: Permission,
-    ) -> Result<(), AuthorizationError>;
-}
-```
-
-Embedded/local deployments may use a fixed local principal and fixed default
-tenant. That shortcut is not valid for multi-tenant service deployments.
-
-## Storage Isolation
-
-Every storage backend must include `tenant_id` in durable records, projection
-records, idempotency records, metrics, and snapshots. Backend implementations
-must make cross-tenant access explicit enough to test.
-
-The Postgres implementation uses shared tables with leading
-`tenant_id, queue_id` keys and mandatory tenant predicates. Equivalent tenant
-scoping is required from every log, projection, and control-plane
-implementation. Stronger isolation is allowed by deployment policy without
-creating a separate storage product:
-
-| Isolation Level | Use |
-|-----------------|-----|
-| Shared tables with tenant predicates | Default open-source and small deployments. |
-| Shared database with tenant partitions/schemas | Hot tenants or stricter operational isolation. |
-| Dedicated database or cluster per tenant class | Large, regulated, or noisy tenants. |
-
-When a deployment uses an external control plane, it may assign queues or
-tenants to different Postgres databases, clusters, object buckets, or log
-partitions through queue-owner assignment metadata. Embedded and single-owner
-deployments may use the in-process control plane. The control plane is optional
-and orthogonal to the selected 5×3 log-by-projection cell; neither Postgres nor
-another external coordinator is implied by the native queue API.
-
-## Noisy-Neighbor Controls
-
-Noisy-neighbor isolation is both a capacity and correctness concern. The design
-requires:
-
-- queue and tenant identifiers in metrics;
-- configurable max batch size and lease duration per queue;
-- selected log, projection, and optional control-plane topology per queue;
-- fireweed deployment/tenant rate-limit and capacity outcomes in API-001 error
-  semantics (the envelope rate-limit error and the per-item `rate_limited`
-  partial-batch status protect the fireweed deployment, not a caller's downstream
-  API);
-- progress-bound metrics per queue;
-- load tests where one hot queue does not prevent another queue from claiming
-  eligible work within its configured limits;
-- queue density: a single node MUST support at least 1000 concurrently active
-  queues without cross-queue degradation. This makes noisy-neighbor isolation a
-  density concern as well as a capacity one: per-queue background work
-  (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring
-  rearm, idempotency/retention GC) MUST be multiplexed onto bounded shared
-  per-node resources (worker pools, connection pools, sweeper batches), never one
-  task, loop, or connection per queue, so that
-  the 1000th active queue costs no more than bounded incremental resource and
-  every active queue still meets its progress bound.
-
-fireweed deployment-level rate limits, quotas, and tenant capacity controls are P1
-product features, but v1 storage and metrics must not make them impossible.
-Enforcing a caller's downstream API rate limits or quotas is a permanent
-non-goal of the fireweed engine; callers pace their own claim output (claim batch
-size, claim cadence, `not_before`, and group selection) and fireweed performs no
-downstream-rate admission.
-
-## Security Rules
-
-- Resolve the principal before route handling reaches fireweed core.
-- Authorize before loading queue data or returning whether an unauthorized queue
-  exists.
-- Tenant-wide reads (discovery) MUST authorize `queue:read` per candidate queue
-  and MUST exclude unauthorized queues from results without leaking their
-  existence; a request naming an unauthorized queue MUST return
-  forbidden/not-found. Enumeration and per-queue auth fanout MUST be bounded by
-  pagination or a documented per-tenant queue ceiling. The
-  `Authorizer::authorize(..., queue_id: Option<&QueueId>, ...)` signature already
-  supports both tenant-wide (`None`) and per-queue cases.
-- Never trust `worker_id` as an authenticated principal.
-- Store lease tokens only as hashes.
-- Treat payload and metadata as caller data; validate queue-owned fields and
-  size limits.
-- Use parameterized queries and typed storage APIs.
-- Emit audit/trace identifiers for mutating operations without leaking payloads
-  into logs by default.
+| Option | Evaluation |
+|--------|------------|
+| An `Authorizer` and permission model inside the library | Rejected. `Store` is in-process, so the host already owns the trust boundary; an in-library policy engine would duplicate it and still need the host's principal. |
+| Tenant as the placement or ownership unit | Rejected. Placement is per partition and mapped by the control plane (ADR-008); a tenant-to-partition rule would stop the control plane packing queues by load. |
+| A dedicated projection file per tenant | Rejected as the default. Queues are cheap and share a partition's file; separating a heavy tenant is a placement choice on the admin handle. |
 
 ## Consequences
 
-Positive:
+| Type | Impact |
+|------|--------|
+| Positive | The queue semantics are independent of any identity provider, and embedding stays simple. |
+| Positive | Isolation between queues is a contract clause with conformance scenarios, not a convention of one backend. |
+| Negative | A multi-tenant host must authorize every call itself; Fireweed cannot enforce a policy it never sees. |
+| Negative | Shared files make isolation depend on every statement binding its queue; tests must check it. |
 
-- Core queue semantics remain independent of auth providers.
-- Tenant isolation is testable at the API and storage layer.
-- Embedded/library mode remains simple.
-- Service deployments can use machine tokens, sessions, or external IdPs.
+## Required tests
 
-Negative:
+- ISO1: an op on one queue observes and changes nothing of another queue, and a token used on another queue gets `StaleLease` (API-006 CS6).
+- Every Turso statement on a queue's rows binds the queue surrogate (TD-017 performance and statement-form checks).
+- A hot queue does not stop 1,000 cold queues on the same node from claiming (TP-002 E2).
 
-- The service layer must thread `PrincipalContext` through every route.
-- Shared-table isolation depends on strong query discipline and negative tests.
-- Dedicated tenant placement remains a deployment/control-plane concern rather
-  than a native API feature.
+## References
 
-## Required Tests
-
-- Tenant A cannot create, read, push, update, claim, renew, finalize, or view
-  metrics for tenant B.
-- Unauthorized queue IDs return forbidden/not-found without leaking data.
-- `worker_id` cannot authorize lease renewal or finalization without the
-  principal's permission.
-- Storage queries include tenant scope for control plane, log, projection,
-  idempotency, and metrics.
-- A hot tenant/queue load test does not break another queue's progress-bound
-  behavior under the same declared composition and deployment topology.
-
-## Status
-
-Accepted as the initial auth and tenancy boundary. Provider-specific
-authentication remains a host-service adapter decision.
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-008-queue-as-shard-unit-and-projection-families.md`
+- `docs/helix/02-design/adr/ADR-009-engine-enforced-coordination-and-encapsulated-library-surface.md`
+- `docs/helix/02-design/technical-designs/TD-017-kernel-projection-storage-layout.md`

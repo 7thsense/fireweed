@@ -2,11 +2,11 @@
 ddx:
   id: adr-engine-enforced-coordination-and-encapsulated-library-surface
   depends_on:
-    - adr-embedded-engine-integration-and-public-surface
     - adr-hexagonal-architecture-and-two-interfaces
     - adr-queue-as-shard-unit-and-projection-families
     - adr-auth-tenancy-and-storage-isolation
-    - td-sharding-and-shard-ownership
+    - adr-kernel-records-contract
+    - api-fireweed-kernel-contract
   status: accepted
   review:
     self_hash: 36c73add90f1c464172040dd7c926608f49c5a263b2bf03d9dd03103d8a5b6c2
@@ -19,176 +19,55 @@ ddx:
     reviewed_at: "2026-07-20T00:01:28Z"
 ---
 
-# Architecture Decision Record
+# ADR-009: The engine enforces coordination below `Store`; the contract is the only external surface
 
-> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
-> Decision 2 is superseded for the external surface: that surface is `fireweed-contract` (the object-safe `Store`
-> and `Operator` traits and the DTOs), the `fireweed` wrapper over `Arc<dyn Store>`, and one constructor per
-> implementation, so the `dyn` erasure this ADR rejects is now the design (API-006 §1). Engine ports and backends
-> stay off the external surface. Decision 7's `ItemId` leaves the contract: the record key is caller-owned.
-> Decisions 1 and 3–6 are S3×Turso internals, not contract matters; target affinity follows mapped placement
-> (ADR-025 OD-13), and the RESP references are moot. Where this ADR conflicts with API-006, API-006 governs.
-
-**ADR ID**: ADR-009
-**Title**: The engine enforces coordination below the ports; the library is the only encapsulated external surface
-**Status**: accepted (status updated 2026-07-05 — this ADR is cited as committed by the accepted
-ADR-011 and is **partially realized**: the library facade, backend constructors, and ownership/session
-code exist, but the Decision 2 publish topology is not yet enforced — no crate manifest sets
-`publish = false` and no guard test asserts it — and the Decision 4/5 epoch-collapse and
-fence-threading items remain sequenced build work. All are tracked as beads, not open design)
-**Related**: ADR-002 (auth & deny-by-default), ADR-006 (embedded surface), ADR-007 (hexagonal & two
-interfaces — this ADR *refines*, does not supersede), ADR-008 (queue as shard unit & pluggable control
-plane), TD-003 (sharding & ownership), TD-006 (RESP `route`), TD-007 (durability & durable state),
-`docs/helix/04-build/library-canonical-coordination-design.md` (the converged design this records)
+| Date | Status | Deciders | Related | Confidence |
+|------|--------|----------|---------|------------|
+| 2026-09-24 | Accepted | Project owner | API-006, ADR-002, ADR-003, ADR-007, ADR-008, ADR-013, ADR-025, TD-003, TD-018 | High |
 
 ## Context
 
-ADR-007 ships two driving interfaces over one engine — the in-process Rust library (`fireweed` crate,
-`Fireweed<B>`) and the RESP wire front (`fireweed-resp`) — as **co-equal driving adapters over the engine
-ports**. ADR-008 makes the **queue** the unit of single-writer ownership with a control-plane lease and
-an epoch fence (the Single Authoritative Fencing Rule). Reviewing the realized code against those
-decisions surfaced three gaps that are individually small and collectively let an embedder silently
-violate the ownership model:
-
-1. **The library does not coordinate.** `Fireweed<B>` (`crates/fireweed/src/lib.rs`) holds
-   `{ backend, clock, ids }`, has **no owner identity**, and **never** calls `resolve_queue_owner` /
-   `acquire_and_fence`. Every method delegates straight to `backend.push/claim/finalize`. Its bound
-   (`LibBackend`) already *requires* `ControlPlaneStore` — the capability is present and unused. Only the
-   RESP `route` decision (`fireweed-resp/src/routing.rs`) assembles `authorize → resolve → serve/redirect`.
-
-2. **The data plane never self-fences.** The real `PushPort`/`ClaimPort`/`FinalizePort` write paths
-   **self-stamp the queue's current epoch** as `expected_epoch` (`ownership.rs:14-21`, `port.rs:33-34`,
-   sqlite `append_durable`), so a superseded owner's claim is **not** rejected. Only the raw
-   `LogWriter::append` seam checks a caller-supplied epoch (BQ-20), and no driving adapter routes through
-   it. Worse, the control-plane lease epoch and the storage append-fence epoch are **two separate durable
-   counters even on Postgres** (`postgres/src/control_plane.rs:16-19`, `port.rs:480-484`) — there is no
-   atomic acquire→fence on any backend today.
-
-3. **The ports are an open external surface.** `pub fn Fireweed::new(Arc<B>, clock)` hands `B` *in*, leaving
-   a client holding an `Arc<B>: ClaimPort` it can call directly; no workspace crate sets `publish`, so a
-   client can `cargo add fireweed-engine` and use `ClaimPort` with no friction. "Use the library" is a
-   convention, not a constraint — the same reach-around hazard ADR-007 sought to remove, reintroduced at
-   the client boundary.
-
-The unifying question is **where** the ownership/fence model is enforced and **how** an external consumer
-is constrained to it. This ADR decides both. It does not re-decide the ownership model (ADR-008/TD-003);
-it locates its enforcement and seals the surface.
+- Ownership is per partition: one control-plane lease and one epoch per partition, and the log rejects a commit made under a stale epoch (ADR-008, ADR-013). That model is safe only if no consumer path can write around it.
+- The public surface used to expose about 100 entry points, including engine ports, backend constructors, ownership calls, log positions and capability probes (ADR-025). A consumer that can reach a port or a backend type can bypass fencing and couples itself to one implementation.
+- The contract is object-safe (`Arc<dyn Store>`), so a single public handle can hide the implementation completely.
 
 ## Decision
 
-1. **Coordination is an engine responsibility, enforced below the ports.** Ownership resolution and epoch
-   fencing are *coordination* (a property of >1 instance sharing a queue), not *security*, and are
-   independent of transport. They live in `fireweed-engine` (consistent with ADR-007: "the engine owns …
-   fencing … validation") and are **invoked identically by every driving adapter**. Because the fence is
-   enforced *below* the ports, neither adapter can skip it. This **refines ADR-007** (it names the engine,
-   not either adapter, as the coordination locus) and does **not** make `fireweed-resp` depend on the
-   `fireweed` crate; both adapters consume the same engine session.
+1. **Coordination lives inside the implementation, below `Store`.** Routing a queue to its partition, holding and renewing partition leases, and fencing commits by epoch are the S3×Turso engine's job. `Store` exposes no owner, epoch, redirect or placement. A fenced or superseded owner surfaces to the caller as `Unavailable`, an unknown outcome that the caller resolves by resending with its request id or by `read` (API-006 E2, RQ2, RQ4).
+2. **The fence is checked at commit.** An owner captures its epoch when it acquires the partition lease and carries that value, never a re-read of the current epoch, to the log's conditional publication. One durable epoch, stored in the partition head, serves both the handoff and the append fence (TD-018). So lease loss fails closed on the data path: an owner that stalled while a peer took its partition cannot commit.
+3. **Lease renewal is bounded per node.** One renewal driver per node renews every partition the node owns. After a renewal or acquire timeout the node re-reads the lease state; it never blindly retries an acquire.
+4. **The external surface is the contract.** A consumer reaches Fireweed only through:
+   - `fireweed-contract`: the `Store` and `Operator` traits, the DTOs, errors, `Clock`, the contract constants and the encoders (API-006 §1);
+   - `fireweed`: `Fireweed` over `Arc<dyn Store>`, delegating 1:1, and one constructor per implementation that returns the `Fireweed` handle together with the implementation's admin handle.
 
-2. **The published library is the only external surface to the engine.** A downstream crate reaches the
-   engine **only** through `Fireweed`. The raw ports and concrete backends are not a usable external
-   construction-or-call surface. Mechanisms (all required): (a) backend construction is via static,
-   feature-gated, per-backend constructors — `Fireweed::open_postgres(cfg) -> Fireweed<impl LibBackend>` —
-   that build the backend internally and return an **opaque** handle; (b) `Fireweed::new(Arc<B>, …)` becomes
-   crate-private; (c) `fireweed` is the **only** `publish = true` crate — `fireweed-engine`, `fireweed-projection`,
-   `fireweed-conformance`, and the adapter crates are `publish = false`; (d) port traits are `#[doc(hidden)]`
-   with a doc-hidden marker supertrait (hygiene — true sealing is barred by the dependency-direction guard,
-   and the load-bearing wall is (c)); (e) split guard tests assert the publish topology (manifest scan) and
-   the absence of any public path to a port-bearing handle (`cargo-public-api`/`trybuild`). A single,
-   feature-gated, loudly-documented `internal` escape hatch is permitted for custom adapters/tests:
-   strong-by-default, not absolute, never `unsafe`. No `dyn`-erased backend (the ports are not object-safe);
-   a single runtime `open(cfg)` switch is therefore out of scope.
+   No engine port, backend type, log or projection position, capability flag, storage selector or alias is reachable from either crate. The implementation crates are `publish = false`. Guard tests check the publish topology from the manifests and the public API of both crates.
+5. **The admin handle is separate from the data plane.** For S3×Turso it is `TursoAdmin`, which carries the `Operator`, projection control and queue placement. No `Store` value converts into it (OP1), and CI bans it in Snorri, the workload and loadgen crates and the contract suite (OP4).
+6. **Authorization stays out of the library.** The library performs no authentication or authorization; the embedding host authorizes before it calls (ADR-002).
+7. **Identity comes from the caller and the log.** A record's identity is the caller's key (API-006 §3). The engine mints no public item id. Internal identities (the insertion sequence, versions, claim ids) are derived from the log, so a rebuild or a handoff reproduces them (ADR-013).
 
-3. **The library coordinates per op, with target-affinity.** `Fireweed` holds an `OwnerId` and a
-   control-plane handle; per queue-addressed op it resolves ownership and operates under a cached
-   `OwnedSession{lease_epoch, fence_epoch}`. Acquisition is restricted to the rendezvous `target_owner`
-   (the engine's `acquire` stays cooperative; the **library policy layer** imposes target-affinity to
-   prevent the epoch ping-pong livelock a free-contention default causes). A queue held by a different live
-   owner yields an `OwnedElsewhere{owner, epoch}` **value** (the engine resolution that RESP renders as
-   `-MOVED`); the library **never** contends by acquiring a live lease — online handoff is `begin_drain`
-   (TD-003), not a contended acquire. A draining owner serves in-flight ops and refuses a new claim. A
-   single, **bounded, per-node** renew/heartbeat driver (never one task per queue — ADR-002 density rule)
-   keeps leases live; after a renew/acquire timeout the library **re-resolves**, it does not blindly retry
-   the non-idempotent `acquire`.
+## Alternatives
 
-4. **The fence is sourced from the cached session and checked at commit (and requires a single durable
-   epoch).** The owner's cached `OwnedSession.fence_epoch` (captured at acquire, **never** re-read from
-   `current_epoch` — re-reading makes the check a no-op) is threaded through the data-plane ports into the
-   backend's atomic unit of work and checked **at commit time** (closing the resolve→commit TOCTOU). This
-   makes lease liveness **fail closed on the data path**: a host stall that lets the lease expire and a
-   peer reclaim it ⇒ the stalled instance's next append is `EpochFenced`, independent of its renew loop.
-   This is only meaningful when the lease epoch and the storage append-fence epoch are **one durable
-   value advanced atomically at acquire**; collapsing today's two counters is a prerequisite. This
-   **reverses** the `port.rs:33-34` "in-process owners pass current epoch, never self-fence" contract.
-
-5. **Multi-instance shared-store competition requires a single atomic acquire→fence epoch — and the
-   object log is the committed way to provide it per queue.** It is correct only on a backend that
-   presents a single atomic acquire→fence epoch. **No backend provides this today.** memory (per-process
-   control plane) and sqlite (no shared control plane) are single-process. Postgres becomes safe **once**
-   the single durable epoch (Decision 4 prerequisite) and the data-plane fence threading land. For the
-   object log, the design intent (product-owner decision, 2026-07-05) is that **the object log itself
-   provides multi-node fencing and coordination at the per-queue level**: the manifest conditional-PUT
-   series is already both the CAS and the epoch fence for appends (TD-004), and extending it to an atomic
-   per-queue acquire→fence (epoch-fence manifest entry published before any data segment, per TD-003's
-   Single Authoritative Fencing Rule) is sequenced build work, not an open question. Until that lands the
-   object log remains single-owner, and the library **runtime-refuses** multi-owner construction on any
-   backend that does not present the atomic acquire→fence capability.
-
-6. **Authorization stays out of the library, bounded by ADR-002.** The library performs **no authn** and
-   **no authz itself**: the embedding host owns its trust boundary. Per ADR-002 deny-by-default, a
-   **multi-tenant** host MUST authorize (tenant, queue, op) before calling the library; the library neither
-   relaxes nor substitutes for that. Trusted single-tenant embedders may pass a fixed principal (ADR-002
-   embedded mode). RESP adds network authentication (`HELLO`/ACL) and the wire codec — and **only** those —
-   on top of the same engine coordination.
-
-7. **Structured `ItemId`, minted locally by the owning node** (recorded here for traceability — this
-   decision previously lived only in the library-canonical-coordination design and the code). An
-   `ItemId` packs `[epoch:24][node:8][counter:32]`: the owner-tenure epoch, a **configured** `node_id`
-   (sourced by the deployment, e.g. Helm), and a per-tenure monotonic counter
-   (`crates/fireweed-core/src/domain.rs` ItemId packing; counters in `QueueCounters`). Ids are minted
-   locally by the queue's single owner with no coordination on the mint path — uniqueness follows from
-   per-queue single-writer ownership (ADR-008) plus the epoch component across tenures. Ids are stable,
-   orderable within a tenure, and never reused across epochs.
+| Option | Evaluation |
+|--------|------------|
+| Coordination in each driving adapter | Rejected. Every adapter would have to repeat it, and one that forgot would be an unfenced path. |
+| A generic `Fireweed<B>` with public ports behind a documented escape hatch | Rejected. The backend type leaks into consumers, and the escape hatch becomes a second surface. |
+| Ownership, epochs and redirects on the public surface | Rejected. They are deployment plumbing; the contract states semantics only (API-006 §8). |
+| Documenting the boundary as a convention | Rejected. A boundary that is not structural erodes; the publish topology and guard tests make it structural. |
 
 ## Consequences
 
-- **New work this licenses (sequenced):** (i) collapse the control-plane lease epoch and the storage
-  append-fence epoch into one durable atomically-advanced value on Postgres (the Decision-4 prerequisite,
-  bead BQ-23 scope); (ii) thread the cached `fence_epoch` through `PushPort`/`ClaimPort`/`FinalizePort`,
-  checked at commit (Decision 4); (iii) give `Fireweed` an owner identity, session, resolve ladder, drain
-  split, and bounded renew driver (Decision 3); (iv) encapsulate the published surface (Decision 2).
-  (i)+(ii) also unblock the deferred RESP server acquire-runtime (`pqueue-c33c367e`), which MUST apply the
-  same target-affinity (Decision 3) so the two adapters cannot thrash a queue.
-- **Contract text to rewrite:** `port.rs:33-34` and the `append_durable` BQ-20 notes (they prescribe the
-  always-current self-stamp that Decision 4 reverses). Existing single-owner `Fireweed` constructions and
-  tests are preserved via a degenerate sole-owner session (constant ownership, constant always-current
-  epoch) so the change is behavior-preserving for the single-instance case.
-- **Refines ADR-007** (engine, not "the library," is the coordination locus; "the library is the contract"
-  means the encapsulated external *surface*, not that RESP stacks on the library). **Builds on ADR-008/
-  TD-003** (re-scoped per-queue ownership is reused as-is). **Bounded by ADR-002** (authz delegation is
-  valid only in embedded/trusted mode; multi-tenant hosts still authorize). **Amends ADR-006** by making
-  the embedded public surface *enforced* (publish topology + private constructor) rather than conventional.
-- **Honest scope:** multi-instance shared-store competition does not work today and is not claimed to;
-  Postgres is gated on the single-durable-epoch + fence-threading work, and object-log multi-owner is out
-  until the manifest-CAS acquire→fence lands — but the latter is committed direction (the object log is
-  the intended per-queue multi-node fencing/coordination substrate), not a deferred maybe.
-- **Trade-offs accepted:** `fireweed` becomes a thin composition root that fans into feature-gated adapter
-  crates (an explicit dependency inversion, kept minimal by `optional` deps); the encapsulation wall is
-  strong-by-default but a determined embedder can still path-depend on an internal crate (acceptable — the
-  goal is preventing *accidental* reach-around, with a deliberate escape hatch for advanced use).
+| Type | Impact |
+|------|--------|
+| Positive | No consumer path can skip the epoch fence. |
+| Positive | Consumers depend on the contract, never on an implementation's types, so implementations can change internally without breaking them. |
+| Positive | Operator force-clear and projection control cannot leak into data paths. |
+| Negative | A fenced owner looks like an ordinary `Unavailable` to the caller, who must resolve it by request id or `read`. |
+| Negative | A deliberate embedder can still path-depend on an unpublished crate; the guard tests catch it only inside this workspace. |
 
-## Alternatives considered
+## References
 
-- **RESP consumes the `fireweed` library crate (the literal "network consumes the Rust interface").**
-  Rejected: it would couple the wire protocol to the library's ergonomic API and make one driving adapter
-  depend on another, contradicting ADR-007's co-equal-adapter structure (which would itself need
-  superseding). Putting coordination in the engine below the ports achieves the same anti-reach-around goal
-  *more* strongly (the fence is unskippable for both adapters) without the coupling.
-- **Leave coordination per-adapter (status quo: RESP coordinates, library doesn't).** Rejected: it is
-  exactly the gap this ADR closes — an embedder gets an unfenced, non-resolving god-mode API while the
-  network front is fenced, with nothing forcing the two to reconcile.
-- **Enforce encapsulation by `dyn`-erased backend behind one `Fireweed::open(cfg)`.** Rejected as infeasible:
-  `Backend::write<R,F>` is a generic method and the async ports return RPITIT, so the ports are not
-  object-safe; runtime backend selection would require an erased-shim port redesign, deferred.
-- **Document the library-vs-ports boundary as convention only.** Rejected: convention is what failed (the
-  ports are publishable today). The boundary must be structural (publish topology + private constructor +
-  guard tests) or it will erode again.
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-007-hexagonal-architecture-and-two-interfaces.md`
+- `docs/helix/02-design/adr/ADR-008-queue-as-shard-unit-and-projection-families.md`
+- `docs/helix/02-design/technical-designs/TD-003-sharding-and-shard-ownership.md`
+- `docs/helix/02-design/technical-designs/TD-018-partitioned-object-log.md`

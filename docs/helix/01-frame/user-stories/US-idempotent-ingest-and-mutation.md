@@ -9,19 +9,14 @@ kind: user-story
 
 # US: Idempotent Ingest and Mutation
 
-> **Acceptance superseded in part by API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`).
-> These lines predate API-006. Where one conflicts with the Behavior section of [the parent feature](../features/FEAT-idempotent-ingest-and-mutation.md),
-> or cites a requirement the PRD marks **Retired (API-006)**, the feature and API-006 govern. The public-cell
-> sentence is implementation wording (ADR-024).
-
-As a queue caller on the public cell, I can rely on idempotent ingest and mutation without choosing another storage cell.
-
-The public cell is one cell: an S3 object log, a Turso projection, and AsyncProjection. Other selectors fail closed before I/O.
+As a producer engineer, I add and change records by key, retry any write safely, and resolve an unknown outcome without duplicating work.
 
 ## Acceptance
 
-Clients push one or more items idempotently with a request id (FR-18).
-Duplicate pushes for the same logical item key converge on one item (FR-19).
-Clients can batch-update priority, not-before, payload, and metadata (FR-20).
-Batch push and update return per-item results (FR-21).
-The queue defines an idempotency retention window (FR-22).
+- A record's key is opaque bytes of 1..=256 B chosen upstream, and a queue holds at most one record per key, in any stage (FR-18).
+- An insert with `Expect::Absent` of an existing key reports `Exists { version }` and changes nothing; `Expect::Any` upserts (FR-19).
+- A write resent with the same `request_id` and body returns the recorded outcome with `replayed: true`; the same id with a different body is `RequestIdConflict` (FR-19, FR-22).
+- A sparse patch changes only the stage, rank, gates and fields it names, and `Expect::Version` of a stale version reports `VersionMismatch` (FR-20).
+- A lease-free write to a leased record is rejected with `Leased` (FR-20).
+- Each unit of a write request applies atomically or not at all, and a rejected unit reports its failing write and the reason without affecting the other units (FR-21).
+- A write that failed with `Unavailable` is resolved by resending it with its `request_id` or, without one, by reading the keys it touched (FR-22).

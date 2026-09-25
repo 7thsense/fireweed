@@ -5,7 +5,6 @@ ddx:
   depends_on:
     - api-fireweed-kernel-contract
     - adr-kernel-records-contract
-    - external-interface-kernel-contract-draft
     - spike-record-key-storage
     - spike-record-field-storage
     - spike-claim-path-at-scale
@@ -20,7 +19,6 @@ ddx:
   links:
     - {kind: informed_by, to: api-fireweed-kernel-contract}
     - {kind: informed_by, to: adr-kernel-records-contract}
-    - {kind: informed_by, to: external-interface-kernel-contract-draft}
     - {kind: informed_by, to: spike-record-key-storage}
     - {kind: informed_by, to: spike-record-field-storage}
     - {kind: informed_by, to: spike-claim-path-at-scale}
@@ -32,12 +30,12 @@ ddx:
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: td-unified-packed-mutation-path}
     - {kind: informed_by, to: td-partitioned-object-log}
-  status: draft
+  status: accepted
 ---
 
 # Technical Design: TD-017 Kernel projection storage layout
 
-**Status**: Draft
+**Status**: Accepted
 **Contract**: API-006 | **ADR**: ADR-013, ADR-016, ADR-024, ADR-025 | **TD**: TD-010, TD-016, TD-018 | **Evidence**: SPIKE-002 to SPIKE-006
 **Scope**: the Turso projection schema and SQL statement forms that implement API-006 on S3×Turso
 
@@ -49,16 +47,16 @@ In scope:
 - the projection tables, their columns and their indexes;
 - the statement forms that every hot path must use;
 - the connection policy: WAL, checkpoint, cache size and the single writer;
-- the performance checks, including the ones that verify API-006 C9 and the S2 cost bound, mapped to the TP-003 gates that own their pass bars;
+- the performance checks, including the ones that verify API-006's cost rules (C9, the S2 cost bound and F4's projection read rule), mapped to the TP-003 gates that own their pass bars;
 - the known risks.
 
 Out of scope:
-- The write pipeline: generations, the overlay, log-first claims, routing, and the order of append and apply. TD-016 owns those mechanics, and this design does not change them. TD-016's mapping of ops onto engine lifecycle states, terminal stages and cohort claims, the draft §7.2 execution mapping, and TD-010's claim microbatch limits (800 rows, 4 MiB) all predate API-006. The op mapping without terminal stages, at API-006's limits (C7, §6.8), is not yet written (Open items); this design assumes only that each packed vector applies in one transaction (§11, rule 6).
-- The object log, partition assignment, snapshots, compaction, log splitting and full-delete garbage collection. These are proposed and must be measured before commitment (owner decision, 2026-09-23 design discussion).
+- The write pipeline: generations, the overlay, log-first claims, routing, the order of append and apply, and how ops are packed into vectors. TD-016 owns those mechanics. This design assumes only that each packed vector applies in one transaction (§11, rule 6), and that a claim's records and response stay within API-006's limits (C7, §6.8).
+- The object log, partition assignment, snapshots, compaction, log splitting and full-delete garbage collection. TD-018 designs them, and its designs are proposed and measurement-gated. The placement model they build on (mapped, one partition per queue, no rebalancing) is decided (ADR-025 §5).
 - API-006 semantics. If this design seems to disagree with API-006, API-006 wins.
 - A second implementation. ADR-025 commits to none; §15 only notes what would carry over.
 
-**Relation to the draft.** Where the draft's §7.2 names physical columns or indexes (`fireweed_items`, `lifecycle_state`, `priority_sort`, `lease_token_hash`, `fields TEXT`, `terminal_at`, `stage_since`, the terminal-stage mapping), this design replaces it. API-006 has no terminal stages, so nothing here depends on one. The draft's perf gates are restated in kernel terms (§13). Fireweed is pre-production, so this layout replaces today's `fireweed_items` family outright and there is no migration (owner decision, 2026-09-23 design discussion).
+Fireweed is pre-production, so this layout has no data migration (API-006 §8).
 
 ## Evidence
 
@@ -88,13 +86,14 @@ Configuration values (page size, cache size, thresholds, API-006 limits) are set
 - One stage-prefixed claim index, partial on `claim_id IS NULL`.
 - Keys stored as opaque `BLOB`, unique per queue, with the unique index maintained on every insert.
 - Fields in a cold binary map keyed by declared field id. Any value over 4 KiB spills to a values table.
+- Claims and reads fetch only the fields their projection names; an empty projection reads no field storage (§6.3).
 - Declared indexes in one shared table of ESF keys.
 - The definition and the metadata in their own per-queue rows, off the small registry row.
 - Every hot statement names its index. Key lookups are one statement per key. A whole claim is finished in bulk by `claim_id`. Each change runs in one explicit transaction and reuses its prepared statements.
 - One writer connection per file behind a `Mutex`, and a Passive checkpoint cap on the WAL.
 
 **Trade-offs.**
-- Gain: claim cost does not depend on how many fields a record has or how large they are; extend and expiry discovery cost O(claims), not O(records); a new queue is a few inserted rows.
+- Gain: claim cost does not depend on how many fields a record has or how large they are, beyond the fields the claim returns; extend and expiry discovery cost O(claims), not O(records); a new queue is a few inserted rows.
 - Lose: a full record read touches up to three tables; a field update rewrites the cold map and also bumps the version on the hot row, one statement more than a colocated layout; descending index scans need a second B-tree.
 - Rejected:
   - fields on the hot row (SPIKE-006 layouts A and B, §2);
@@ -105,7 +104,7 @@ Configuration values (page size, cache size, thresholds, API-006 limits) are set
 
 ## 1. File and queue model
 
-- The control plane assigns each queue to one partition, and queues are never moved between partitions (owner decision, 2026-09-23 design discussion). Each partition has one Turso projection file, so many queues share a file; that is this design's choice, shared with TD-018, which designs the partitions and their log. Writer parallelism comes from more partition files per node, not from more writers per file (§12).
+- The control plane assigns each queue to one partition, and queues are never moved between partitions (ADR-025 §5). Each partition has one Turso projection file, so many queues share a file; that is this design's choice, shared with TD-018, which designs the partitions and their log. Writer parallelism comes from more partition files per node, not from more writers per file (§12).
 - The object log is the authority (ADR-013). The file is derived, and it is rebuilt from the log through projection control on the admin handle (TD-010; API-006 §7). Every value a client observes or sends back, or that a later check compares, comes from the log: the insertion sequence, versions, and for each claim its id and the hash of its token (never the token itself). A rebuild therefore reproduces them, and live tokens stay valid across a rebuild or a handoff. File-local surrogates (`queue_no`, group ids, gate ids) never leave the file, and a rebuild need not reproduce them.
 - Per-queue physical tables are ruled out. With 100, 1,000 and 10,000 queues, schema creation took 2.12 s, 140.5 s and 13,111.3 s (3.64 h), and opening the file took 5.6 ms, 202.8 ms and 26.64 s (MEASURED, SPIKE-006 F7). In this layout a new queue is a few inserted rows.
 
@@ -140,7 +139,7 @@ CREATE TABLE items (
 | `free_since` | Set at insert, on a stage move of a Free record, on release, on force-clear, and on reclaim (to the expired `until`), as API-006 §3 defines. |
 | `grp`, `gates` | File-local ids (§9). `grp` is fixed after insert (W8). |
 
-**Version.** API-006's `Version` is opaque, ordered per key only (its §4.0). This layout encodes it from `(seq, ver)`: it strictly increases across delete and re-insert because `seq` does (INFERRED design; the draft's §7.3 uses the same shape). Versions of different keys therefore happen to order by insertion; the contract gives that order no meaning, and nothing may depend on it.
+**Version.** API-006's `Version` is opaque, ordered per key only (its §4.0). This layout encodes it from `(seq, ver)`: it strictly increases across delete and re-insert because `seq` does (INFERRED design). Versions of different keys therefore happen to order by insertion; the contract gives that order no meaning, and nothing may depend on it.
 
 **Why no field bytes.** A 100-record claim on a 97-field workload took a median 4.4 ms when the claim row held no fields (layout C), 7.3 ms with the field map on the claim row (layout B), and 2,800.9 ms with JSON fields on it (layout A): 228.45, 137.14 and 0.46 claims/s (MEASURED, SPIKE-006 F2). An inline 64 KiB value cut a claim-style walk from 55,041 to 14,013 claims/s (MEASURED, SPIKE-005) and cost 3.5–9× on updates (MEASURED, SPIKE-003).
 
@@ -153,7 +152,6 @@ CREATE TABLE claims (
     queue_no     INTEGER NOT NULL,
     claim_id     INTEGER NOT NULL,     -- unique per queue, from the log (below)
     token_hash   BLOB    NOT NULL,     -- carried in the claim's log entry
-    holder       TEXT,                 -- NULL; see Open items
     expires_at   INTEGER NOT NULL,     -- the claim's `until`, µs
     record_count INTEGER NOT NULL,     -- records still attached
     PRIMARY KEY (queue_no, claim_id)
@@ -162,7 +160,7 @@ CREATE INDEX claims_expires_idx ON claims (expires_at);
 CREATE INDEX items_claim_id_idx ON items (queue_no, claim_id) WHERE claim_id IS NOT NULL;
 ```
 
-This is SPIKE-004's L2 design, which the owner chose (owner decision, 2026-09-23 design discussion). It adds `queue_no` to the owner's column list and to the key, so that claim ids need only be unique per queue, a token cannot act on another queue (API-006 ISO1), and `delete_queue` finds a queue's claims by key prefix. SPIKE-004 keyed `claims` by an `INTEGER PRIMARY KEY`; the composite key is INFERRED to seek at the same cost.
+This is SPIKE-004's L2 design (ADR-025 §2). The table is keyed by `(queue_no, claim_id)`, so claim ids need only be unique per queue, a token cannot act on another queue (API-006 ISO1), and `delete_queue` finds a queue's claims by key prefix. SPIKE-004 keyed `claims` by an `INTEGER PRIMARY KEY`; the composite key is INFERRED to seek at the same cost. A claim has no holder identity (API-006 L1), so the table has no holder column.
 
 - **One row per claim.** A claim that returns at least one record inserts one row (C3). A claim that returns nothing inserts none.
 - **Claim id and token.** `claim_id` is unique per queue and derived from the queue's own log stream: the offset of the append that carries the claim in that queue's stream, and the claim's ordinal within that append. TD-018 keeps per-queue dense offsets, and its partition-wide `commit_seq` is not used, so two queues in one file can share a `claim_id` without colliding. The token is `claim_id` followed by at least 128 random bits. The claim's log entry carries `token_hash`, a hash of the whole token, and never the token; the table stores the same hash. A rebuild restores every `claims` row, live tokens included, from those log entries. A token check is a primary-key seek on `(queue_no, claim_id)`, with `queue_no` taken from the request's queue, and a constant-time hash compare (INFERRED design).
@@ -189,7 +187,7 @@ CREATE INDEX items_claim_idx ON items (queue_no, stage, rank, seq) WHERE claim_i
 - **C9.** The stage prefix excludes other stages, the partial predicate excludes Leased records, and the rank bound excludes `rank > horizon`, so none of them is visited. When the queue has no Blocked gate (the usual case), the walk reads the index only. When some gate is Blocked, each candidate's `gates` is read from its row, and a skipped candidate costs one row read. The cost is O(log n + k + b). A paused queue returns before the walk (INFERRED; SPIKE-004 did not model gates).
 - **Bind the stage.** Without `stage = ?`, the same query sorts every Free record of the queue: 406,186.9 µs against 62.2 µs at p50 (6,530×) at 1M records, and 4,105,957.5 µs at 10M (MEASURED, SPIKE-004 F5, F6).
 - **Size.** 26,386,432 B (25.16 MiB) per 1M Free records, about 26.4 B per record (MEASURED, SPIKE-004 F7). That is about 2.5 GiB at 100M records (INFERRED). This index is what outgrows the cache first (§12, risk 1).
-- **Scale.** 626.2 claims/s at 1M records and 649.0 at 10M, flat (MEASURED, SPIKE-004 F1, F6). At 100 queues × 1M records with field bytes on the claim row, 351.6 claims/s (MEASURED, SPIKE-004 F8; risk 1).
+- **Scale.** 626.2 claims/s at 1M records and 649.0 at 10M, flat (MEASURED, SPIKE-004 F1, F6). At 100 queues × 1M records in one file, 620.9 claims/s with this layout's lean row, against 351.6 with field bytes on the claim row (MEASURED, SPIKE-004 F8, F9; risk 1).
 
 ## 5. Keys
 
@@ -199,7 +197,7 @@ CREATE UNIQUE INDEX items_key_idx ON items (queue_no, key);
 
 - **Queue surrogate.** An integer `queue_no` replaces the `(tenant, queue)` text columns on every row: 10.7–20.7% smaller rows for every key shape (MEASURED, SPIKE-002 F2). The registry maps names to numbers (§8).
 - **`BLOB` key.** API-006 keys are opaque bytes, stored verbatim. `BLOB` and `TEXT` cost the same for the same bytes. A 64-bit integer as an 8-byte `BLOB` is 11.4% smaller than its decimal text, and a UUID as 16 bytes is 17.8% smaller than its 36-byte text (MEASURED, SPIKE-002 F2). Upstream gets that saving by sending compact binary keys.
-- **No engine-side hashing.** API-006 caps keys at 256 B, and upstream hashes larger natural keys (owner decision, 2026-09-23 design discussion). SPIKE-002's hash layout would save 32.7% at 256 B (741.7 against 499.1 B per row), but it needs a collision re-check on every conflict. Key cost is linear, 2.156 B of storage per extra key byte, with no cliff (MEASURED, SPIKE-002 F2).
+- **No engine-side hashing.** API-006 caps keys at 256 B, and upstream hashes larger natural keys (ADR-025 §2). SPIKE-002's hash layout would save 32.7% at 256 B (741.7 against 499.1 B per row), but it needs a collision re-check on every conflict. Key cost is linear, 2.156 B of storage per extra key byte, with no cliff (MEASURED, SPIKE-002 F2).
 - **Maintained during ingest.** The unique index exists before the first insert and is never dropped for a bulk load, a backfill or a projection rebuild. Built after the load, `CREATE UNIQUE INDEX` over 100M rows took 84.65 of the build's 120.55 minutes, 12.5× the time of the non-unique claim index over the same rows (MEASURED, SPIKE-004 F8). Why it is slower (random key order or the uniqueness check) was not isolated (INFERRED). Maintained during ingest instead, the lean 100M build took 52.06 minutes against 120.55 (MEASURED, SPIKE-004 F9).
 - **Lookups.** One statement per key:
 
@@ -257,8 +255,23 @@ CREATE TABLE item_values (
    WHERE queue_no = ?1 AND seq = ?2 AND field_id = ?3;
   ```
   Never use `UPDATE … FROM (VALUES …)` on this table (§11, rule 7).
-- **Reads.** API-006 claims and reads return every field, so they also fetch the record's spilled values: `SELECT field_id, value FROM item_values INDEXED BY sqlite_autoindex_item_values_1 WHERE queue_no = ?1 AND seq = ?2`. Each spilled value read costs about 50–70 µs more than an inline one (MEASURED, SPIKE-005; risk 3).
+- **Reads.** A claim or read fetches only the spilled values its projection returns (§6.3). Each spilled value read costs about 50–70 µs more than an inline one (MEASURED, SPIKE-005; risk 3).
 - **Bound.** Every measured operation completed at bounded cost with 64 KiB values, the API-006 maximum (MEASURED, SPIKE-005).
+
+### 6.3 Field projection
+
+`claim` and `read` return only the fields their `fields` list names (API-006 F4). Under this hot/cold layout, projection limits the cold-field fetch to the requested fields:
+
+| `fields` | Work per returned record |
+|---|---|
+| `None` | Read the `item_fields` row and every spilled value: `SELECT field_id, value FROM item_values INDEXED BY sqlite_autoindex_item_values_1 WHERE queue_no = ?1 AND seq = ?2`. |
+| `Some(names)`, not empty | Read the `item_fields` row and decode only the named entries. For each named field whose entry is a spill marker, one primary-key seek: `… WHERE queue_no = ?1 AND seq = ?2 AND field_id = ?3`. Unrequested spilled values are never read. |
+| `Some([])` | Nothing beyond the hot row. A claim reads and writes `items`, `claims` and the counters; a read reads `items` alone. Neither touches `item_fields` or `item_values`. |
+
+- **Shared storage.** Inline values (4,096 B or less each) share the map row, so a non-empty projection reads that row whole. API-006 F4 allows this: a value that shares storage with a returned field may be read. Every value over 4,096 B is in its own `item_values` row and is read only when requested.
+- **Cost.** Layout C's claim, which read each record's map row and returned its small fields, took a median 4.4 ms per 100-record claim (MEASURED, SPIKE-006 F2). An empty projection skips the map read, so it costs less (INFERRED). A 100-record claim that also returns 2 spilled values per record adds about 10–14 ms (INFERRED from SPIKE-005's 50–70 µs per spilled read).
+- **Response size.** The 16 MiB response cap (C7) counts the projected records, so a claim that leaves large fields out is not shortened by them.
+- **Writes do not project.** A write reads the map whenever it patches fields, for the W8 size check and index rekeys (§6.1, §7).
 
 ## 7. Declared indexes: the shared index table
 
@@ -274,7 +287,7 @@ CREATE INDEX item_index_desc_idx ON item_index (queue_no, idx, esf_key DESC, seq
 ```
 
 - **One table.** It serves every declared index of every queue in the file (the SPIKE-003 and SPIKE-006 shape), with no per-queue objects (§1).
-- **Key.** `esf_key` is the `fireweed-contract` ESF encoding of the index's keys in declared order: field values, the stage by its declaration position, the rank, and the group key. A record has an entry iff every key has a value (Q1).
+- **Key.** `esf_key` is the `fireweed-contract` ESF encoding of the index's keys in declared order: field values of any declared type (`Str` and `Bytes` included), the stage by its declaration position, the rank, and the group key. A record has an entry iff every key has a value (Q1).
 - **Maintenance.**
   - An insert adds the record's entries, and a delete removes them.
   - A write that changes any key of an index (a field, the stage or the rank; the group is fixed) deletes the old entry and inserts the new one. The old key comes from stored values the write has already read: the hot row and the map.
@@ -283,7 +296,7 @@ CREATE INDEX item_index_desc_idx ON item_index (queue_no, idx, esf_key DESC, seq
 - **Scans (Q2, ORD3).** An ascending scan walks the primary-key autoindex. A descending scan walks `item_index_desc_idx`. Both give `seq` ascending among equal keys. The cursor is `(esf_key, seq)`. A hit joins `items` by `(queue_no, seq)` for the key, stage and lease.
 - **`aggregate`** walks the range and groups by decoded key components. `Dim::Lease` reads `items.claim_id`. Layout C counted about 50,000 records in 501 groups in 9.24 ms p50 (MEASURED, SPIKE-006 F5).
 - **Second tree.** The descending index doubles the write cost of each entry (INFERRED). The ascending/descending pair is today's `fireweed_item_index` shape (`crates/fireweed-relational/src/schema.rs`); see risk 4.
-- **Index-cell overflow.** An index cell spills above ((usable − 12) × 64 / 255) − 23 bytes (`vendor/turso_core/storage/btree.rs`), which is 1,002 B at a 4 KiB page (INFERRED arithmetic). An ESF key near the 1024 B limit therefore overflows. Indexed values are meant to be small scalars (API-006 §5.1), so this is a tail cost.
+- **Index-cell overflow.** An index cell spills above ((usable − 12) × 64 / 255) − 23 bytes (`vendor/turso_core/storage/btree.rs`), which is 1,002 B at a 4 KiB page (INFERRED arithmetic). An ESF key near the 1024 B limit therefore overflows. Keys of numbers, short strings and binary ids stay far below it, so the overflow is a tail cost of long `Str` or `Bytes` keys (INFERRED).
 
 ## 8. Queue definition, metadata and lifecycle
 
@@ -309,12 +322,12 @@ CREATE TABLE queue_meta (queue_no INTEGER PRIMARY KEY, version INTEGER NOT NULL,
   - The apply sets `state`. Every op checks the cached state first, so from that transaction on every op other than `delete_queue` fails with `QueueClosed`, and every token of the queue is dead (DQ2–DQ5).
   - A background task then removes the queue's rows from every table in bounded batches. Each batch is its own transaction under the checkpoint cap.
   - The `queues` row is kept, so `queue_no` is never reused (a closed key is retired for good, DQ3) and leftover rows stay unreachable.
-  - Archive and full delete differ only in the log: an archive keeps the queue's log and drops its projection (owner decision, 2026-09-23 design discussion).
+  - Archive and full delete differ only in the log: an archive keeps the queue's log and drops its projection (ADR-025 §2).
   - The purge cost is not measured (INFERRED), and full-delete garbage collection of the log is pending measurement.
 
 ## 9. Groups, gates, counts and request ids
 
-The spikes did not model these structures: SPIKE-004 left gates, groups and attempts out of scope. They carry the draft's §7.2 mechanisms (group-head index, per-stage counters, gate state, request outcomes) onto `queue_no` and `seq`. Everything in this section is INFERRED, and the §13 capacity runs (P1–P4, P2p–P4p) measure it.
+The spikes did not model these structures: SPIKE-004 left gates, groups and attempts out of scope. Everything in this section is INFERRED, and the §13 capacity runs (P1–P4, P2p–P4r) measure it.
 
 ```sql
 CREATE TABLE groups (
@@ -329,16 +342,16 @@ CREATE UNIQUE INDEX groups_key_idx ON groups (queue_no, group_key);
 CREATE INDEX items_group_idx ON items (queue_no, grp, stage, rank, seq)
     WHERE claim_id IS NULL AND grp IS NOT NULL;
 CREATE TABLE group_heads (
-    queue_no        INTEGER NOT NULL,
-    stage           INTEGER NOT NULL,
-    grp             INTEGER NOT NULL,
-    head_rank       INTEGER NOT NULL,  -- first Free record of the group in the stage
-    head_seq        INTEGER NOT NULL,
-    min_ready_since INTEGER NOT NULL,  -- min(max(rank, free_since)) over those records
+    queue_no  INTEGER NOT NULL,
+    stage     INTEGER NOT NULL,
+    grp       INTEGER NOT NULL,
+    head_rank INTEGER NOT NULL,  -- first Free record of the group in the stage
+    head_seq  INTEGER NOT NULL,
     PRIMARY KEY (queue_no, stage, grp)
 );
 CREATE INDEX group_heads_order_idx ON group_heads (queue_no, stage, head_rank, head_seq);
-CREATE INDEX group_heads_ready_idx ON group_heads (queue_no, stage, min_ready_since);
+CREATE INDEX items_ready_idx ON items (queue_no, stage, free_since, rank)
+    WHERE claim_id IS NULL AND grp IS NOT NULL;
 
 CREATE TABLE gates (
     queue_no INTEGER NOT NULL,
@@ -374,17 +387,25 @@ CREATE INDEX requests_retain_idx ON requests (retain_until);
   - `leased` changes on claim, release, delete, force-clear and reclaim.
   - A `WholeGroups` claim walks `group_heads_order_idx` for `(queue_no, stage)` while `head_rank <= horizon`, skips groups with `leased > 0` (C6a), and reads each group's candidates from `items_group_idx`, dropping gated ones.
   - A group whose head is gated has its first candidate later than its head. The walk keeps fetched groups in a heap ordered by first candidate and emits a group only once that candidate precedes the next unvisited head, so groups come out in C4 order.
-- **Group heads.** A row exists iff the group has a Free record in the stage. Each apply batch recomputes the rows of the `(stage, group)` pairs it touched, set-based, through `items_group_idx`. That costs O(members of the pair), the cost the draft's risk 13 names.
-- **`stats.groups` (S2).** API-006 S2 rejects a horizon earlier than now, so both values are exact at O(log n + `limit`):
-  - `ready_groups` counts `group_heads_order_idx` entries with `head_rank <= horizon`, up to `limit`. The head holds the group's lowest rank, so this is exact for any horizon.
-  - `oldest_ready_since` is the first entry of `group_heads_ready_idx`, or none if that entry exceeds the horizon. That is exact because `free_since <= now <= horizon`: a Free record is ready iff `max(rank, free_since) <= horizon`, and a record ranked beyond the horizon has a `ready_since` above every ready record's.
+- **Group heads.** A row exists iff the group has a Free record in the stage. Each apply batch recomputes the rows of the `(stage, group)` pairs it touched, set-based, through `items_group_idx`. That costs O(members of the pair) (risk 5).
+- **`stats.groups` (S2).** Both values are exact:
+  - `ready_groups` counts `group_heads_order_idx` entries with `head_rank <= horizon`, up to `limit`: O(log n + `limit`). The head holds the group's lowest Free rank in the stage, so a group has a ready record iff its head does.
+  - `oldest_ready_since` walks `items_ready_idx` for `(queue_no, stage)` in `free_since` order and returns the first entry with `rank <= horizon`, or none when the walk ends. `rank` is an index column, so a skipped entry costs one index entry and no row read: O(log n + s), where s is the grouped Free records of the stage ranked beyond the horizon, as API-006 S2 bounds it. Rank is compared only with the horizon, never used as a time.
+
+  ```sql
+  SELECT free_since FROM items INDEXED BY items_ready_idx
+   WHERE queue_no = ?1 AND stage = ?2 AND claim_id IS NULL AND grp IS NOT NULL AND rank <= ?3
+   ORDER BY free_since
+   LIMIT 1;
+  ```
+- **Ready index.** `items_ready_idx` holds only grouped Free records, so claims and releases of ungrouped records never touch it. For grouped records it adds one index write to each claim, release, reclaim, stage move and rank change (risk 5).
 - **Gates.** Gate keys are interned per queue, and the hot row holds their ids. `queues.blocked_gates` and `queues.paused` let a claim skip gate checks when nothing is Blocked. Each connection keeps the set of Blocked ids per queue in memory, refreshed at apply. A gate op (W9) upserts a `gates` row and adjusts the counter; it changes no record.
   - `carriers` counts the records that carry the gate. Insert, delete and every gate edit adjust it (at most 8 gates per record).
   - A `gates` row is deleted when its gate is Open and no record carries it: by the gate op that opens it with `carriers` at 0, or by the write that drops the last carrier of an Open gate. A Blocked gate that no record carries keeps its row, because API-006 W9 must remember that it is Blocked.
-- **Stage counts (S1).** Every apply transaction updates the rows of the stages whose free or leased counts it changed: inserts, deletes, claims, releases, reclaims, stage moves and force-clears. This is the draft's risk 11.
+- **Stage counts (S1).** Every apply transaction updates the rows of the stages whose free or leased counts it changed: inserts, deletes, claims, releases, reclaims, stage moves and force-clears (risk 5).
 - **Request ids (RQ1–RQ4).**
   - The scope `(queue, request_id)` is shared by `write`, `claim` and `force_clear`.
-  - The row is written in the same apply transaction as the effects. The log envelope carries the outcome too, so a rebuild restores it (draft §7.1).
+  - The row is written in the same apply transaction as the effects. The log envelope carries the outcome too, so a rebuild restores it.
   - A claim's outcome records `claim_id`, the returned `seq` values, `skipped` and `partial_group`, and a replay renders the records from current state.
   - Rows are swept after `retain_until` (R ≥ 24 h) in bounded batches.
 
@@ -402,11 +423,11 @@ The pipeline (TD-016) decides which connection and which transaction run each st
 | Extend | `UPDATE claims INDEXED BY sqlite_autoindex_claims_1 SET expires_at = ? WHERE queue_no = ? AND claim_id = ?` (a primary-key seek). |
 | Gate op | Upsert `gates`, or delete the row when it opens a gate no record carries; adjust `queues.blocked_gates` or `queues.paused`. |
 | Metadata op | Read and write `queue_meta`. |
-| `claim` `Next` | The candidate walk (§4). Then, per `seq`, one prepared lease `UPDATE` by primary key; insert `claims`; update `groups.leased`, `stage_counts` and `group_heads`; fetch hot rows, maps and spills. |
+| `claim` `Next` | The candidate walk (§4). Then, per `seq`, one prepared lease `UPDATE` by primary key; insert `claims`; update `groups.leased`, `stage_counts` and `group_heads`; fetch the hot rows, then only the maps and spilled values the projection needs (§6.3). |
 | `claim` `WholeGroups` | The §9 walk, then lease as `Next`. |
 | `claim` `Keys` | One `items_key_idx` lookup per key. Classify as `NotFound`, `OtherStage`, `Leased` or `Blocked`, then lease as `Next`. |
-| `read` | One key lookup per key, then the map and the spills. `queue: true` adds `queue_defs` and `queue_meta`. |
-| `stats` | The queue's `stage_counts` rows, `queues.paused` and the §9 group-head reads. |
+| `read` | One key lookup per key, then only the maps and spilled values the projection needs (§6.3). `queue: true` adds `queue_defs` and `queue_meta`. |
+| `stats` | The queue's `stage_counts` rows, `queues.paused`, and the §9 reads of `group_heads_order_idx` and `items_ready_idx`. |
 | `scan` | The `item_index` range on the primary-key autoindex or on `item_index_desc_idx`; each hit joins `items`. |
 | `aggregate` | The `item_index` range, grouped by decoded key components; `Dim::Lease` joins `items.claim_id`. |
 | `delete_queue` | §8. |
@@ -475,11 +496,11 @@ These rules are not tuning. Each one was necessary to get the measured numbers, 
 
 ## 13. Performance gates
 
-TP-003 §3.12 owns every pass bar. This section maps each check of this layout to the TP-003 gate that decides it, and lists the capacity runs that are reported but never gate. API-006 leaves two cost clauses to performance gates: C9 and the S2 cost bound (its CS2).
+TP-003 §3.12 owns every pass bar. This section maps each check of this layout to the TP-003 gate that decides it, and lists the capacity runs that are reported but never gate. API-006 leaves three cost rules to performance gates (its CS2): C9, the S2 cost bound, and F4's rule that a projection reads no unreturned field value.
 
 | Check | Shape | TP-003 gate | Evidence |
 |---|---|---|---|
-| Plans | §11, rule 8, on the production schema: every hot statement uses its named index, with no `SCAN items` and no sorter on the claim walk; the `stats.groups` reads seek `group_heads_order_idx` and `group_heads_ready_idx` and visit at most `limit` groups | AC-PERF-1, AC-PERF-4 | The failure shape is SPIKE-004 F5's `USE SORTER FOR ORDER BY`. |
+| Plans | §11, rule 8, on the production schema: every hot statement uses its named index, with no `SCAN items` and no sorter on the claim walk; the `stats.groups` reads seek `group_heads_order_idx`, visiting at most `limit` groups, and `items_ready_idx` with no sorter; a claim with `fields: Some([])` reads no `item_fields` or `item_values` row, and one with a projection reads only the named spilled values (§6.3) | AC-PERF-1, AC-PERF-4 | The failure shape is SPIKE-004 F5's `USE SORTER FOR ORDER BY`. |
 | Claims table | Extend and expiry discovery cost O(claims); a whole claim is finished in bulk by claim (§3, §11 rule 5) | AC-PERF-3 | SPIKE-004 F2, F3, F6 |
 | Schema | The lean `items` row; per-field spill over 4,096 B; the 4 KiB page; the `queue_no` surrogate and the `BLOB` key; no per-queue schema object | AC-PERF-5, AC-PERF-8 | SPIKE-002, SPIKE-005, SPIKE-006 F2, F7 |
 | 1M to 10M | `Next` claim and bulk finish on one queue at 1M and 10M records, interleaved in one run | AC-PERF-2 | 626.2 and 649.0 claims/s (MEASURED, SPIKE-004 F1, F6) |
@@ -489,45 +510,38 @@ TP-003 §3.12 owns every pass bar. This section maps each check of this layout t
 - G-100M also records build time and file size. For reference, the 100M build with fields on the claim row took 120.55 minutes and produced a 45,093,863,424 B file (MEASURED, SPIKE-004 F8). These are not pass criteria.
 
 **Capacity runs.** These are reported with their topology and never gate (TP-003 §3.12; TP-005 owns the capacity matrix). Whether any becomes a same-run gate is TP-003's call.
-- **P1–P4.** `ss_phased_capacity`, N = 10,000, ported to kernel shapes: declared fields instead of `payload` and `metadata`, ordinary stages, and `rank` instead of `priority` and `not_before`. The draft's reference run was on `filesystem--turso`, which is not the ADR-024 public cell: 14,493 / 18,843 / 13,367 / 17,086 per s (MEASURED, evidence `1788659385`). They are a regression reference for this layout, not a product bar.
+- **P1–P4.** `ss_phased_capacity`, N = 10,000, on kernel shapes: declared fields, ordinary stages and `rank`. The reference run was on `filesystem--turso`, which is not the ADR-024 public cell: 14,493 / 18,843 / 13,367 / 17,086 per s (MEASURED, evidence `1788659385`). They are a regression reference for this layout, not a product bar.
   - P2's profile is 1,024 B (`PROFILE_BYTES`, `crates/fireweed/tests/support/ss_capacity.rs`). Ported to a declared `Bytes` field, it stays in the cold map, so P1–P4 do not exercise the spill.
-- **P2p, P3p and P4p**, on a Snorri-shaped queue. The draft's gate 2, restated in kernel terms:
+- **P2p, P3p, P4p and P4r**, on a Snorri-shaped queue:
   - 22 declared indexes, two of them keyed on `Stage`;
-  - Snorri's large state and audit values as declared fields, so the ones over 4 KiB spill; there is no `payload`;
+  - Snorri's large state and audit values as declared fields, so the ones over 4 KiB spill;
   - P2p mixes lease-free stage moves between ordinary stages into the updates;
   - P4p is a claim, then a settle that moves the record to another ordinary stage with `Release(t)` and a field patch, rekeying the `Stage`-keyed indexes;
-  - the draft's P4r becomes a claim, then a settle that sets a new rank with `Release(t)`.
-- **32 queues per file.** The draft's gate 3, the 32-shard workflow qualification, run as 32 queues in one partition file.
-- **Snorri transition bench.** The draft's gate 4: `WholeGroups` claims on the transition stage, the hydrating instance read, the instance record's `Expect::Version` write, and settles that move stages with history in fields, sized with Snorri's measured audit and state bytes.
+  - P4r is a claim, then a settle that sets a new rank with `Release(t)`;
+  - claims run both unprojected and with a projection that leaves out the large fields (§6.3).
+- **32 queues per file.** The 32-shard workflow qualification, run as 32 queues in one partition file.
+- **Snorri transition bench.** `WholeGroups` claims on the transition stage, the hydrating instance read, the instance record's `Expect::Version` write, and settles that move stages with history in fields, sized with Snorri's measured audit and state bytes.
 
 ## 14. Risks
 
 1. **Cache pressure on the 100M claim.**
    - MEASURED: with about 300 B of fields on the claim row, 100 queues × 1M records in one file cut claims 45.8% (649.0 to 351.6 claims/s) and raised p99 52× (1,806.9 to 94,559.5 µs) against 10M records in one queue. Finish, extend and sweep held flat (SPIKE-004 F8).
-   - MEASURED, resolved in the spike: with the lean claim row, the same shape runs claims at 620.9/s (within 4.3% of the 10M control) with p99 2,395 µs (1.33× the control, down 39.5× from the fat row). Finish, extend and sweep stay flat, and a 1 GiB cache brings no gain on claim, finish or sweep (SPIKE-004 F9). The lean row removes table-page pressure; the claim index is no narrower, and at this scale that was enough.
-   - Still required: TP-003 AC-PERF-6, run in the G-100M shape (§13) on the product implementation, not the spike.
-   - If the lean row is not enough: a larger writer cache for many-queue files, or fewer Free records per file (more partitions per node). SPIKE-004's other suggestion, leasing a claim's rows with one `IN (…)` `UPDATE`, is contraindicated: `IN` on a composite key's second column does not seek (SPIKE-002 F1).
+   - MEASURED: with this design's lean claim row, the same shape runs claims at 620.9/s (within 4.3% of the 10M control) with p99 2,395 µs (1.33× the control, 39.5× below the fat row). Finish, extend and sweep stay flat, and a 1 GiB cache brings no gain on claim, finish or sweep (SPIKE-004 F9). The lean row removes table-page pressure; the claim index is no narrower, and at this scale that is enough.
+   - MEASURED, mechanism not isolated: `extend` ran 43.4% slower at a 1 GiB cache than at 128 MiB (SPIKE-004 F9). It is one more reason to keep the 128 MiB default (§12).
+   - The spike is not the product: TP-003 AC-PERF-6 runs the G-100M shape (§13) on the product implementation.
+   - If the product misses the envelope: a larger writer cache for many-queue files, or fewer Free records per file (more partitions per node). Leasing a claim's rows with one `IN (…)` `UPDATE` does not help: `IN` on a composite key's second column does not seek (SPIKE-002 F1).
 2. **SPIKE-006's layout B anomaly.**
    - MEASURED: layout B put the field map on the claim row, and its updates ran 7–35× slower than layout C's on a run with flat load. `update_small` ran at 131.43/s against 1,838.35/s, with 67–203% spreads and p99s of 122–242 ms (SPIKE-006 F3).
    - INFERRED: the proposed mechanism, claim churn evicting the blob pages of the shared table before the updates needed them, was not isolated.
    - Why it matters here: (a) C's claim advantage over B (1.7×) is explained, but its update advantage is not; (b) it is plausibly the same mechanism as risk 1, where field bytes also sat on the claim row; (c) so nothing field-shaped goes back onto `items` without a new measurement. A `spike diag`-style isolation is the follow-up if a B-like layout is ever reconsidered.
-3. **Claims and reads return every field.**
-   - SPIKE-006 measured claims that returned only the small fields. API-006 has no field projection on `claim` or `read`, so claiming a record with spilled values also reads them.
-   - Each spilled value costs about 50–70 µs more to read than an inline one (MEASURED, SPIKE-005). A 100-record claim with 2 spilled values per record would add about 10–14 ms to layout C's measured 4.4 ms (INFERRED). C7's 16 MiB response cap bounds the count.
-   - Mitigation: a field projection on `claim` and `read`. API-006 does not have one; adding it is the owner's call.
+3. **Unprojected claims read every spilled value.**
+   - A claim or read with `fields: None` fetches every spilled value of every returned record. Each costs about 50–70 µs more to read than an inline one (MEASURED, SPIKE-005). A 100-record claim with 2 spilled values per record adds about 10–14 ms to layout C's measured 4.4 ms (INFERRED), and C7's 16 MiB response cap can shorten the batch.
+   - Mitigation: a consumer that does not need its large fields on the claim path names the fields it needs (API-006 F4, §6.3). The P2p–P4r capacity runs measure both shapes (§13).
 4. **The descending index tree** doubles `item_index` write cost (INFERRED). P2p and P3p measure it. An alternative is one ascending tree with descending pages that re-sort ties by `seq`, but ties can be large (an index on `Stage` alone), so it is not proposed.
-5. **Unmeasured structures (§9):** gate filtering, group heads (the draft's risk 13), stage counts (the draft's risk 11), the request table, and the `members` and `carriers` counters. The §13 capacity runs measure them.
+5. **Unmeasured structures (§9):** gate filtering; group heads, whose recomputation costs O(members) of each touched `(stage, group)` pair; stage counts, updated in every apply transaction; `items_ready_idx`, one more index write per claim and release of a grouped record; the request table; and the `members` and `carriers` counters. The §13 capacity runs measure them.
 6. **Host noise.** Every spike ran on a shared WSL2 host with 1-minute load averages of 5–43. The gates re-measure on the release host, and absolute spike numbers are not SLAs.
 7. **`delete_queue` purge.** Removing a large queue's rows costs writer time on the file. The background batches bound it per transaction, but the total is not measured.
 
 ## 15. A second implementation (non-normative)
 
 ADR-025 commits to no second implementation, so this design specifies none. If a direct PostgreSQL implementation is ever built, it would implement `Store` against `fireweed-contract` only and pass the same suite. Most of this layout's logical shape would carry over: a lean claim row, a claims table, a stage-prefixed partial claim index, a per-field spill table beside one binary field map (PostgreSQL's TOAST rewrites a whole changed column, so the spill table would still be needed), and one shared index table with no per-queue tables. Its concurrency, group-exclusivity and counter designs would be its own, and none of it has been measured. Any such design must keep `stats` reads unlagged (API-006 V3).
-
-## Open items
-
-- **`holder`.** The owner's `claims` column list includes `holder`, but API-006's `ClaimRequest` has no holder input, so the column is always NULL. ADR-025 KC-14 asks the owner: an optional holder input for observability, or drop the column.
-- **Field projection on `claim` and `read`.** API-006 has none; the owner decides whether to add one (ADR-025 KC-11; risk 3).
-- **Lean-row results.** Landed (SPIKE-004 F9): the 128 MiB default stands and the proposed AC-PERF-6 envelope was met in the spike (risk 1). One unexplained wrinkle: `extend` ran 43.4% slower at 1 GiB than at 128 MiB; the mechanism was not isolated.
-- **The write-pipeline op mapping.** TD-016's mapping onto lifecycle states, terminal stages and cohort claims, and TD-010's 800-row and 4 MiB claim microbatch limits, predate API-006. A pipeline design at API-006's limits, with no terminal stages, is not yet written, and this layout depends on it only through §11, rule 6.
-- **Resolved in review.** S2 with an early horizon: API-006 S2 now rejects a horizon earlier than now (ADR-025 KC-15), so `oldest_ready_since` is exact from `group_heads_ready_idx`.

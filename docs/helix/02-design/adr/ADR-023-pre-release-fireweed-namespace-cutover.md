@@ -3,8 +3,6 @@ ddx:
   id: adr-023-pre-release-fireweed-namespace-cutover
   links:
     - {kind: informed_by, to: name-and-positioning-analysis}
-    - {kind: supersedes, to: adr-020-public-namespace-and-compatibility}
-    - {kind: enables, to: adr-concrete-fireweed-facade-and-optional-controls}
   status: accepted
 ---
 
@@ -12,13 +10,13 @@ ddx:
 
 | Date | Status | Deciders | Related | Confidence |
 | --- | --- | --- | --- | --- |
-| 2026-07-25 | Accepted | Project maintainers | ADR-020, ADR-022, API-005 | High |
+| 2026-07-25 | Accepted | Project maintainers | ADR-021, ADR-025, name-and-positioning-analysis | High |
 
 ## Context
 
 | Aspect | Description |
 | --- | --- |
-| Problem | ADR-020 preserved `pqueue` compatibility aliases, persisted names, paths, and wire identifiers. Those exceptions repeatedly reintroduced the retired name into current Fireweed work. |
+| Problem | Keeping `pqueue` compatibility aliases, persisted names, paths, and wire identifiers repeatedly reintroduces the retired name into current Fireweed work. |
 | Current State | Fireweed has not had a public stable release. There is no supported installed base or persisted format that requires a dual-name migration period. |
 | Requirements | One Fireweed identity; a backend-opaque `Fireweed` Rust interface; fresh test schemas and storage namespaces; immutable execution history remains auditable. |
 | Decision Drivers | Pre-release freedom to break formats, the cost of a permanent compatibility surface, and the need for a residue gate that cannot hide current runtime names. |
@@ -30,7 +28,7 @@ We will make a hard pre-release cutover from the retired `pqueue` identity to Fi
 Current executable and generated surfaces use Fireweed names only:
 
 - Rust crates, types, modules, features, binaries, commands, package metadata, repository coordinates, images, services, charts, and release artifacts;
-- environment variables, configuration keys, telemetry, error text, HTTP headers, RESP extensions, and other wire-visible identifiers;
+- environment variables, configuration keys, telemetry, error text, and any wire-visible identifier;
 - SQL tables, indexes, triggers, functions, schemas, migration objects, object-store prefixes, filesystem paths, and generated evidence directories;
 - test fixtures, temporary paths, database schemas, buckets, examples, and active operator documentation.
 
@@ -48,7 +46,7 @@ Those exceptions do not authorize executable aliases, accepted configuration, cu
 
 | Option | Pros | Cons | Evaluation |
 | --- | --- | --- | --- |
-| Preserve ADR-020 compatibility through `v0.20.0` | Lower migration risk for existing installations | Invents an installed-base constraint before release; doubles the supported namespace; masks residue | Rejected |
+| Preserve `pqueue` compatibility aliases through a migration release | Lower migration risk for existing installations | Invents an installed-base constraint before release; doubles the supported namespace; masks residue | Rejected |
 | Rename public packaging but retain storage and wire identifiers | Smaller immediate diff | Leaves the retired identity in every deployment and schema; requires a later migration | Rejected |
 | Hard pre-release cutover | One coherent identity and one testable contract | Existing development databases and local paths must be recreated | Selected |
 
@@ -65,7 +63,7 @@ Those exceptions do not authorize executable aliases, accepted configuration, cu
 
 | Risk | Prob | Impact | Mitigation |
 | --- | --- | --- | --- |
-| Partial SQL rename compiles but fails at runtime | M | H | Rename definitions, queries, triggers, probes, and tests atomically; run the complete SQLite, PostgreSQL, Turso, and object-log durability matrices. |
+| Partial SQL rename compiles but fails at runtime | M | H | Rename definitions, queries, triggers, probes, and tests atomically; run the object-log, Turso projection and control-plane durability tests. |
 | Broad replacement corrupts bead IDs or historical evidence | M | H | Replace explicit runtime token classes; never globally replace `pqueue-`; retain exact `pqueue-[0-9a-f]{8}` audit IDs. |
 | Allowlist continues masking current residue | M | H | Reduce it to exact immutable-history and negative-test paths; make every other retired token fail CI. |
 
@@ -75,13 +73,8 @@ Those exceptions do not authorize executable aliases, accepted configuration, cu
 | --- | --- |
 | The identity residue verifier reports zero unapproved retired-name occurrences | Any new allowlist entry covering executable/runtime code or a broad subtree |
 | Public crate-boundary tests reject retired Rust symbols and constructors | A downstream crate can compile using a retired symbol |
-| Fresh SQLite, PostgreSQL, object-log, and Turso schemas pass functional and close/reopen durability tests | Any backend requires an old table, path, prefix, or environment variable |
+| Fresh object-log namespaces, Turso schemas and control-plane schemas pass functional and close/reopen durability tests | Any component requires an old table, path, prefix, or environment variable |
 | Fireweed and Snorri release workflows consume only `FIREWEED_*` and Fireweed coordinates | A release path accepts or emits an old-name alias |
-
-## Supersession
-
-- **Supersedes**: ADR-020
-- **Superseded by**: None
 
 ## Concern Impact
 
@@ -91,5 +84,3 @@ Those exceptions do not authorize executable aliases, accepted configuration, cu
 
 - `docs/helix/00-discover/name-and-positioning-analysis.md`
 - `docs/helix/02-design/public-namespace-migration.yaml`
-- `docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md`
-- `docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md`

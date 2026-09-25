@@ -11,95 +11,85 @@ ddx:
 
 ## Mission Statement
 
-fireweed is a batch-centric state-machine queue engine for applications that need
-ordered, recoverable work execution at scale. It provides one external
-transaction contract on one storage cell (ADR-024): accepted mutations are
-durable on the object log at the `AsyncProjection` barrier,
-rejected mutations have no committed effect, and ambiguous retries are resolved
-by request identity rather than by caller-side storage choreography. Durability
-after process death follows the selected log class instead of being overstated
-as uniform. Seventh Sense is the first validation use case: timestamp-ordered
-delivery work with idempotent writes, durable claims, batch execution, and no
-lost work.
+fireweed is a batch-centric durable queue engine for applications that need
+ordered, recoverable work execution at scale. It gives one transaction
+contract (API-006): a successful write is durable, a rejected write has no
+effect, and an unknown outcome is resolved by request identity or by reading
+what it touched, never by caller-side storage choreography. Seventh Sense is
+the first validation use case: time-ordered delivery work with idempotent
+writes, durable claims, batch execution, and no lost work.
 
 ## Positioning
 
-For engineers building high-volume scheduling and execution systems, fireweed is a
-durable queue that orders eligible work by a queue-defined priority model and
-maps that workflow onto the right backing store without exposing the storage
-protocol to callers. Unlike FIFO queues with scheduler logic layered around them,
-fireweed makes priority, eligibility, claim leases, retries, final state, and
-transaction integrity part of the queue contract.
+For engineers building high-volume scheduling and execution systems, fireweed
+is a durable queue whose records are claimed in rank order within declared
+stages, without exposing its storage to callers. Unlike FIFO queues with
+scheduler logic layered around them, fireweed makes rank, claimability, claim
+leases, retries, and transaction integrity part of the queue contract.
 
 ## Vision
 
-When fireweed succeeds, applications have one dependable primitive for accepting,
-ordering, claiming, retrying, and completing work.
+When fireweed succeeds, applications have one dependable primitive for adding,
+ordering, claiming, retrying, and settling work.
 
-**North Star**: Every accepted item is executed according to its queue's
-priority, progress, and selected durability-class guarantees, with no lost work
-inside that boundary, no concurrent execution of the same claim, and an
-explicit final state.
+**North Star**: Every accepted record is claimed in rank order within its
+stage, with no lost work and no concurrent execution of the same claim, and it
+stays in the stage its consumer chose until the consumer moves or deletes it.
 
-### Storage product law
+### Implementation
 
-ADR-024 is the storage law. The public product is one cell: an object-log
-published to S3, a Turso projection, and `AsyncProjection`. There is no public
-storage matrix. Class A durability is the object log. The Turso projection is
-rebuildable through `Fireweed::projection_control` and is not the command log.
-The control plane is not a storage cell and is not a mandatory PostgreSQL tier.
+ADR-024 fixes the one production implementation of the contract: an S3 object
+log with a Turso projection.
 
-The log engine is `fireweed-objectlog`. Filesystem publication is an adapter
-inside that engine for one process on local disk. S3 publication is the public
-adapter. A filesystem log test is not a Fireweed support cell.
+- The object log (`fireweed-objectlog`) is the durable authority. Its
+  filesystem publication adapter tests the log protocol without MinIO; it is
+  not a supported deployment.
+- The Turso projection is derived. It serves claims and reads, and it is
+  rebuilt from the log through projection control on the implementation's
+  admin handle.
+- The control plane maps each queue to one partition. It is not a storage
+  tier.
 
-Queue-semantics tests and small non-durable benches use Turso `:memory:`
-(`TursoConfig::in_memory`), the same SQL projection with no WAL file. WAL,
-reopen, and rebuild tests use a temporary Turso file. The separate
-`InMemoryProjection` map is not a product projection and is not coverage of
-this cell.
-
-A successful mutation is durable on the object log. A later claim polls applied
-Turso rows; an empty claim is a poll, not a failure of the mutation. Public
-reads may wait projection coverage. Selectors other than this cell reject
-before storage I/O (`RETIRED_STORAGE_CELL`). That error is fail-closed
-construction, not a list of products to restore.
+The contract never names any of this. A second implementation would implement
+the `Store` trait directly and pass the same conformance suite.
 
 ## User Experience
 
-Engineers create a queue with a priority model, push or update work
-idempotently, claim compatible batches of eligible items, and record outcomes.
+Engineers declare a queue's stages, fields, and indexes; add and update
+records idempotently by key; claim batches of one stage in rank order, as
+whole groups, or by key; and settle each claimed record with a write that
+moves, re-ranks, or deletes it.
 
 ## Target Market
 
 | Attribute | Description |
 |-----------|-------------|
 | Who | Engineers building durable, high-volume async work systems |
-| Pain | FIFO queues and ad hoc scheduler tables do not model priority, eligibility, leases, batching, and retries as one contract |
+| Pain | FIFO queues and ad hoc scheduler tables do not model order, schedule, leases, batching, and retries as one contract |
 | Current Solution | Message brokers, sorted sets, database tables, and worker-specific retry logic |
-| Why They Switch | Priority-aware execution, durable lifecycle state, group-aware batching, and horizontal scale beyond a single database belong in the queue primitive, on infrastructure that infrastructure teams already operate. Horizontal scale is a v1 commitment substantiated by portable TP-002 evidence: queue-global progress, correctness, bounded shared resources, and same-run behavior as queues, owners, and load increase. Machine-specific capacity is published for declared topologies, not used as a universal release gate. |
+| Why They Switch | Rank-ordered execution, durable lease state, group-aware batching, and horizontal scale beyond a single database belong in the queue primitive, on infrastructure that infrastructure teams already operate. Horizontal scale is a v1 commitment substantiated by portable TP-002 evidence: per-queue progress, correctness, bounded shared resources, and same-run behavior as queues, nodes, and load increase. Machine-specific capacity is published for declared topologies, not used as a universal release gate. |
 
 ## Key Value Propositions
 
 | Value Proposition | Customer Benefit |
 |-------------------|------------------|
-| Configurable priority ordering | Queues can model timestamp, numeric, score, or other ordered work without changing worker code |
-| Bounded progress guarantees | Relaxed priority ordering can scale without starving eligible work |
-| Durable execution lifecycle | Work remains recoverable across worker and process failures |
-| Batch and group-aware claims | Workers can efficiently satisfy downstream API batch constraints |
-| Composition-independent transaction integrity | The public cell (ADR-024) preserves commit, rejection, and request-id replay; restart recovery replays the object log into Turso through `projection_control`. Empty claim is a poll, not a lost mutation |
-| Tunable durability economics | Operators can configure the object-log segment size target and maximum flush latency to trade batching delay against request cost and batch density |
-| One durable cell | Operators run S3 object-log durability with a rebuildable Turso projection (ADR-024). That pairing is the product, not one row of a larger matrix |
+| One rank for order and schedule | Timestamps, numeric priorities, priority offsets, and future schedules are all one `i64` rank, without changing worker code |
+| Strict order at logarithmic cost | Every claim takes its stage's lowest-ranked claimable records at a cost logarithmic in queue size, with a progress guarantee, so order is never traded for throughput |
+| Durable execution | Work survives worker and process failures; an expired lease returns records to their place in claim order |
+| Batch and group-aware claims | Workers meet downstream batch constraints with batch claims, whole-group claims, and claims by key |
+| Transaction integrity | Success is durable, rejection has no effect, request-id replay is exact, and a claim observes every acknowledged write. An empty claim is a successful poll, not a lost mutation |
+| Tunable durability economics | Operators set the object log's commit-latency bound to trade write latency against request cost and batch density |
+| One production implementation | S3 object-log durability with a rebuildable Turso projection (ADR-024) |
 
 ## Success Definition
 
 | Criterion | Definition |
 |-----------|------------|
-| Priority correctness | Claims follow the queue's configured priority and progress contract |
-| Durable execution safety | No accepted item is lost or concurrently held by multiple active claims |
-| Transaction contract | The public cell satisfies one mutation, rejection, and request-replay contract. Class A success survives on the object log. Claim polls applied rows under `AsyncProjection` |
-| Scale readiness | Hot queues with 10M resident items remain writable, claimable, observable, and exactly recoverable under ordinary concurrent load. Horizontal deployments distribute **queues across independent owner nodes** while preserving queue-global progress, claim safety, and bounded shared resources. A node exercises at least 1000 concurrently active queues without lost or duplicate work. Same-run baseline/load comparisons detect material degradation; absolute rates and latency percentiles are capacity evidence tied to the declared host and topology, never portable release bars. Substantiated by TP-002 E1 single-deployment, E2 cross-queue and density, and E3 object-log evidence. |
-| Seventh Sense validation | Timestamp-ascending delivery queues meet Seventh Sense scheduling, idempotency, batch, and latency requirements |
+| Order correctness | Claims follow rank order within a stage and the progress rule (API-006 C4, C5a) |
+| Durable execution safety | No accepted record is lost or held by two live claims |
+| Transaction contract | The S3×Turso implementation passes the API-006 conformance suite: durable success, effect-free rejection, exact request-id replay, and claims that observe every acknowledged write |
+| Scale readiness | Hot queues with 10M resident records remain writable, claimable, observable, and exactly recoverable under ordinary concurrent load. Horizontal deployments distribute **queues across independent nodes** while preserving per-queue progress, claim safety, and bounded shared resources. A node exercises at least 1000 concurrently active queues without lost or duplicate work. Same-run baseline/load comparisons detect material degradation; absolute rates and latency percentiles are capacity evidence tied to the declared host and topology, never portable release bars. Substantiated by TP-002 E1 single-deployment, E2 cross-queue and density, and E3 object-log evidence. |
+| Seventh Sense validation | Delivery queues ranked by scheduled time meet Seventh Sense scheduling, idempotency, batch, and latency requirements |
 
 ## Why Now
 

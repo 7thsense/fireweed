@@ -3,9 +3,8 @@ ddx:
   id: adr-hexagonal-architecture-and-two-interfaces
   depends_on:
     - adr-cqrs-log-projection-storage-model
-    - adr-embedded-engine-integration-and-public-surface
-    - api-native-client-interface
-    - api-operator-repair-contract
+    - adr-kernel-records-contract
+    - api-fireweed-kernel-contract
   status: accepted
   review:
     self_hash: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
@@ -17,99 +16,48 @@ ddx:
     reviewed_at: "2026-07-20T00:01:27Z"
 ---
 
-# Architecture Decision Record
+# ADR-007: Hexagonal architecture; implementations plug in at the kernel contract
 
-> **Under revision per ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`).
-> "Two interfaces (RESP + Rust library)" becomes one in-process interface, API-006's `Store`. The RESP adapter is
-> deleted, and a network front may be rebuilt later as a pure transport over `Store`, under its own contract
-> (owner decision, 2026-09-23 design discussion). Where this ADR conflicts with API-006, API-006 governs.
-
-**ADR ID**: ADR-007
-**Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
-**Status**: accepted (status updated 2026-07-05 — the migration this ADR specifies is built:
-service/client/kafka deleted; `fireweed-resp`, the `fireweed` facade, and `fireweed-server` shipped).
-Partial supersessions: the "one shared projection" consequence was retracted by ADR-008 and the
-projection framing further refined by ADR-012 (composition axes) and ADR-013 (log single source of
-truth).
-**Related**: ADR-001 (CQRS log/projection), ADR-006 (embedded surface), ADR-008 (queue-as-shard-unit &
-two projection families — supersedes the one-shared-projection consequence below), API-001, API-002,
-TD-006 (RESP surface), TD-007 (durability), `docs/helix/04-build/hexagonal-migration-plan.md`
+| Date | Status | Deciders | Related | Confidence |
+|------|--------|----------|---------|------------|
+| 2026-09-24 | Accepted | Project owner | API-006, ADR-001, ADR-003, ADR-009, ADR-024, ADR-025 | High |
 
 ## Context
 
-fireweed began with an HTTP/REST native interface (API-001 HTTP binding), an HTTP client crate, and a
-Kafka producer wire adapter (ADR-005), over a CQRS log+projection storage layer. As the product
-focus narrowed to "fireweed as an embeddable priority work queue," three problems surfaced:
-
-1. **Interface sprawl.** Three partial driving surfaces (HTTP, Kafka, SDK) each re-expressed the
-   native operations, none was authoritative, and domain logic (auth, idempotency, lease fencing,
-   queue pause) had accreted inside the HTTP service crate as in-memory state.
-2. **Storage seam mismatch.** The embedded SQLite backend bypassed the `ProjectionStore` trait
-   rather than composing with it, producing a "fused vs split" special case and a double-attempts
-   hazard on the claim path.
-3. **No client ecosystem.** The bespoke HTTP/JSON surface required hand-written SDKs for adoption.
-
-This is pre-launch software with no external compatibility obligations, so a clean re-architecture
-is preferable to incremental patching.
+- The engine ports (`LibBackend`, a 21-trait bound that includes log and snapshot traits) served as the seam for storage backends. When a PostgreSQL backend was plugged in there, the seam absorbed it: lowest-common-denominator defaults, capability flags exported as API, and dialect forks (ADR-025).
+- A driving adapter that binds those ports directly, as a RESP front did, offers its own subset of the semantics. Two driving interfaces then mean two contracts.
+- The external contract is API-006: eight operations on an object-safe `Store` trait, one black-box conformance suite, and no capability flags (ADR-025). The architecture has to make that contract the only place an implementation plugs in.
 
 ## Decision
 
-Adopt **hexagonal architecture (ports and adapters)** with **exactly two driving interfaces**:
+1. **The seam is the kernel contract.** `fireweed-contract` defines the object-safe `Store` and `Operator` traits and everything they exchange (API-006 §1). An implementation plugs in by implementing `Store`, providing an admin handle that carries its `Operator`, and passing the conformance suite (API-006 §9). Nothing else is a plug-in point.
+2. **There is one driving interface, in-process.** `fireweed::Fireweed` wraps `Arc<dyn Store>` and delegates 1:1 to the eight ops. A CLI or a service is a consumer of `Fireweed`, not a second interface. A network front, if one is built, is a pure transport over `Store` under its own contract; it adds no semantics and exposes nothing the contract does not.
+3. **Each implementation is hexagonal inside.** The S3×Turso implementation (ADR-024) has an engine that defines ports for the object log, the Turso projection and the control plane, and adapters that implement them. The engine owns the claim path, validation, request-id replay, fencing (ADR-009) and lease reclaim. Only the implementation's constructor names concrete adapter types.
+4. **Internal ports are never a seam.** The engine's ports belong to S3×Turso. They are not public, no other implementation is built on them, and changing them needs no contract change. A second implementation, such as an isolated PostgreSQL unit, implements `Store` directly and depends only on `fireweed-contract` (ADR-025 commits to none).
+5. **Dependencies point inward.** `fireweed-contract` depends on no Fireweed crate; implementation crates depend on it; inside an implementation, adapters depend on the engine's ports. A dependency-direction test enforces this (ADR-003).
 
-1. **A RESP wire adapter** — a fireweed-native server speaking a **stock Redis Streams-compatible
-   worker subset** (produce/claim/ack/reclaim), so off-the-shelf Redis clients drive the hot path
-   with no custom commands. Limited but contract-faithful ("fireweed-flavored Redis"); see TD-006.
-2. **A Rust library** — the full-power interface for everything the RESP subset intentionally omits
-   (filtered claim, gates, cohorts, rich finalize, mutable priority, operator repair).
+## Alternatives
 
-The library is, by design, strictly more capable than the RESP surface; this asymmetry is recorded,
-not accidental. A CLI is a library consumer, not a third interface.
-
-Structure:
-- **Domain** (`fireweed-core` types + `fireweed-engine` execution/ports) depends on nothing outward and
-  defines all ports. The engine owns the single *logical* claim path, the migrated domain logic
-  (auth/idempotency/fencing/pause/validation), and the `ReclaimDriver`.
-- **Driven adapters** (`fireweed-memory`, `-sqlite`, `-postgres`, `-objectlog`) implement the storage
-  ports; classified by durability class (TD-007).
-- **Driving adapters** (`fireweed-resp`, `fireweed` library) and the **composition root**
-  (`fireweed-server`) are the only places that name concrete types.
-- A dependency-direction test forbids any domain→adapter edge.
-
-The migration is a **clean cutover**: `fireweed-service`, `fireweed-client`, and `fireweed-kafka` are
-deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the migration plan).
+| Option | Evaluation |
+|--------|------------|
+| Keep the engine ports as the seam for every backend | Rejected. A shared mid-level abstraction grows to fit every design plugged into it, and its capability differences leak into the API. |
+| Two driving interfaces: a RESP subset and the Rust library | Rejected. Two interfaces with different semantics are two contracts to specify and test. A later transport carries `Store` unchanged. |
+| An HTTP/REST interface with hand-written SDKs | Rejected. It is a third surface with no consumer that needs it now. |
+| One generic `Fireweed<B>` over a backend type parameter | Rejected. The backend type leaks into every consumer's types; `Store` is object-safe, so `Arc<dyn Store>` hides it. |
 
 ## Consequences
 
-**Positive:**
-- One authoritative operation model behind two well-separated interfaces; domain logic lives in the
-  domain, not in a transport crate.
-- Off-the-shelf Redis clients (and `redis-cli`) drive the worker hot path; no SDK to maintain for the
-  common case.
-- Storage backends are driven adapters classified by durability class. (**Superseded in part by
-  ADR-008:** the "fused vs split disappears / one shared projection" framing is retracted — there are
-  **two projection families**, an in-memory log-replay projection and a relational / DB-resident
-  projection, held identical by the conformance suite, not a single shared projection. A backend is a
-  durability class *and* a projection family.)
-- Modularity is mechanically enforced (dependency-direction test, behavioral no-stub conformance).
+| Type | Impact |
+|------|--------|
+| Positive | One contract, one suite and one seam: an implementation is certified without sharing engine code. |
+| Positive | The engine's ports can change for performance without touching consumers. |
+| Positive | Domain logic lives in the engine, not in a transport crate. |
+| Negative | A second implementation reimplements the whole contract; it cannot reuse the S3×Turso engine. |
+| Negative | Consumers that need a network front, such as Seventh Sense (Scala), wait for a transport over `Store`. |
 
-**Negative / accepted costs:**
-- The RESP surface is deliberately limited; advanced capability requires the library (recorded
-  asymmetry, capability matrix in TD-006).
-- "fireweed-flavored Redis" diverges from literal Redis in named, documented ways (priority delivery
-  order, upsert `XADD`, lease-generation-fenced `XACK`); semantic contracts hold but bit-identical
-  behavior does not (TD-006 §3).
-- The queue is the unit of sharding (ADR-008): a queue is owned by one node and horizontal scale is cross-queue (per-queue ownership + routing, TD-003/TD-006). There is no intra-queue/multi-shard coordination to build; the ports admit per-queue ownership and cross-queue distribution.
-- A net-new RESP server, `ReclaimDriver`, and `UpsertPort` must be built, and durable state migrated
-  off in-memory `Mutex` storage (TD-007).
+## References
 
-## Alternatives considered
-
-- **Keep HTTP/REST + SDKs.** Rejected: no client ecosystem, domain logic stranded in the transport
-  crate, three partial surfaces.
-- **RESP-framed custom commands as the primary surface.** Rejected: forfeits stock
-  Redis client compatibility — the main reason to speak RESP at all.
-- **Faithful Redis only (FIFO, no priority/upsert).** Rejected: discards fireweed's core value
-  (priority, enforced uniqueness). The "semantic-contract fidelity" middle path keeps both, with
-  documented flavor differences, and is validated by an off-the-shelf-client e2e suite.
-- **Incremental in-place refactor.** Rejected: pre-launch, a clean cutover avoids a permanent
-  legacy-compatibility tail.
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`
+- `docs/helix/02-design/adr/ADR-009-engine-enforced-coordination-and-encapsulated-library-surface.md`
+- `docs/helix/02-design/adr/ADR-024-s3-turso-public-cell.md`

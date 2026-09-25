@@ -1,9 +1,6 @@
 ---
 ddx:
   id: external-interface-contract-research
-  depends_on:
-    - api-fireweed-rust-facade
-    - api-native-client-interface
   status: draft
 ---
 

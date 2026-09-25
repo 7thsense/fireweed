@@ -4,22 +4,19 @@ ddx:
   links:
     - {kind: informed_by, to: prd}
     - {kind: informed_by, to: discover-meta-asynchronous-computing-learnings}
+    - {kind: informed_by, to: api-fireweed-kernel-contract}
 ---
 
 # Choosing Fireweed Instead of a Stream
 
-> **Partly historical; see API-006** (`docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`). The
-> choice this guide describes still holds, but its vocabulary predates API-006: read "priority" and
-> `not_before` as `rank` (a future rank schedules a record), "complete, retry, fail, or release" as a
-> settling write (a stage move, a new rank or a delete), and "groups and cohorts" as groups claimed whole with
-> `WholeGroups`; cohorts are deleted.
+Use Fireweed when the application owns durable work state that changes per
+record: its rank, its stage, its lease, and its fields. Use an immutable
+sequential stream when consumers only need ordered append records, offset
+progress, replay, and fan-out over the same record sequence.
 
-Use Fireweed when the application owns durable work state whose eligibility,
-priority, lease, retry, and completion state can change per item. Use an
-immutable sequential stream when consumers only need ordered append records,
-offset progress, replay, and fan-out over the same record sequence.
-
-This guide applies the product boundary in the [PRD](../prd.md) and the local
+This guide applies the product boundary in the [PRD](../prd.md), the
+[kernel contract](../../02-design/contracts/API-006-fireweed-kernel-contract.md)
+and the local
 [Meta Async discovery note](../../00-discover/meta-asynchronous-computing-learnings.md).
 That discovery note is evidence for the primitive selection boundary; it is not
 a compatibility or performance claim about FOQS or Fireweed.
@@ -28,26 +25,28 @@ a compatibility or performance claim about FOQS or Fireweed.
 
 | Need | Choose Fireweed when | Choose a stream when |
 |---|---|---|
-| Mutable or arbitrary priority | Workers must claim the highest-priority eligible item, and producers may update priority before terminal completion. | Record order is append order or partition order, and changing priority would mean writing another event for consumers to interpret. |
-| `not_before` scheduling | Each item can become eligible at a future timestamp, and workers should skip ineligible items without advancing past them forever. | Consumers can read every record in sequence and decide locally whether to defer action. |
-| Leases | Work must be claimed by one active worker at a time, recovered after lease expiry, and finalized with complete, retry, fail, or release semantics. | Consumers keep their own processing state, and the storage primitive only needs to expose records and committed offsets. |
-| Item-level delayed retry | A failed item needs its own retry delay, attempt state, and later re-entry into claim order. | Retry is a consumer concern, often expressed by writing a new event, seeking, or handling a side channel. |
-| Groups and cohorts | Claims must batch compatible work by account, connector, job, campaign, domain, or another grouping key while still preserving queue progress. | A partition key or topic layout already provides the needed cohort ordering, and consumers do not need item-level claim selection. |
-| Immutable sequential batches | Batches are selected by queue eligibility, priority, and group compatibility rather than by contiguous log position. | Consumers should process contiguous records in append order or partition order. |
-| Offsets | Worker progress is lease/finalize state on individual items, not a durable consumer offset in an immutable log. | Each consumer or group advances an offset through a record sequence. |
-| Replay | Operational recovery replays Fireweed's durable state changes to rebuild queue state; application workers should not use that log as their consumption API. | Consumers are expected to replay historical records as part of normal application behavior. |
-| Broadcast consumption | One work item should be completed once by one worker, unless the producer intentionally enqueues separate items per recipient. | Multiple independent consumer groups should each observe the same record stream. |
+| Mutable or arbitrary order | Workers must claim the lowest-ranked claimable record of a stage, and producers may change a record's rank at any time before it is settled. | Record order is append order or partition order, and changing order would mean writing another event for consumers to interpret. |
+| Scheduling | A record ranked in the future is skipped by claims until the claim horizon reaches its rank, and then takes its place in claim order. | Consumers can read every record in sequence and decide locally whether to defer action. |
+| Leases | Work must be claimed by one holder at a time, come back after lease expiry, and be settled by a write: a stage move, a new rank, or a delete. | Consumers keep their own processing state, and the storage primitive only needs to expose records and committed offsets. |
+| Per-record delayed retry | A failed record needs its own backoff and attempt count, and re-enters claim order at its new rank. | Retry is a consumer concern, often expressed by writing a new event, seeking, or handling a side channel. |
+| Groups | Claims must take compatible work whole, by account, connector, job, lead, or another group key, or by keys found through a declared index. | A partition key or topic layout already provides the needed grouping, and consumers do not need per-record claim selection. |
+| Immutable sequential batches | Batches are selected by stage, rank, gates, and groups rather than by contiguous log position. | Consumers should process contiguous records in append order or partition order. |
+| Offsets | Worker progress is the stage and lease state of individual records, not a durable consumer offset in an immutable log. | Each consumer or group advances an offset through a record sequence. |
+| Replay | Fireweed rebuilds its own serving state from its durable log; application workers do not consume that log. | Consumers are expected to replay historical records as part of normal application behavior. |
+| Broadcast consumption | One record is settled once by one holder, unless the producer writes separate records per recipient. | Multiple independent consumer groups should each observe the same record stream. |
 
 ## Use Fireweed
 
-- Scheduled delivery or action execution where `not_before`, priority updates,
-  idempotent writes, leases, and delayed item retry are part of the work state.
-- Connector, enrichment, or API work that must be claimed in account,
-  connector, job, or campaign cohorts so downstream batches are compatible.
-- Recovery-sensitive work where a worker crash must leave a lease to expire and
-  return the same item to eligible claim order without duplicate active owners.
-- A mutable backlog where operators or callers need to reschedule, retry,
-  release, fail, or complete individual items.
+- Scheduled delivery or action execution where the scheduled time is a rank
+  that may change, and idempotent writes, leases, and per-record delayed retry
+  are part of the work state.
+- Connector, enrichment, or API work that must be claimed as whole groups
+  (account, connector, job, lead) so downstream batches are compatible.
+- Recovery-sensitive work where a worker crash must let its lease expire and
+  return the same records to their place in claim order, never to two live
+  holders.
+- A mutable backlog where operators or callers reschedule, retry, move, or
+  delete individual records by key.
 
 ## Do Not Use Fireweed
 
@@ -56,22 +55,23 @@ a compatibility or performance claim about FOQS or Fireweed.
 - Audit logs, analytics ingestion, or CDC pipelines where immutable append
   order, offsets, retention, and replay are the main contract.
 - Workloads where consumers can process sequential batches and do not need
-  arbitrary priority, per-item leases, or item-level delayed retry.
+  arbitrary order, per-record leases, or per-record delayed retry.
 - Transport or scheduler problems such as downstream API rate tokens,
   downstream quotas, worker-runtime placement, or load balancing. Keep those
-  policies in the caller or adjacent scheduler/router layer; Fireweed's own
+  policies in the caller or an adjacent scheduler/router layer; Fireweed's own
   deployment and tenant capacity controls are a separate product concern.
 
 ## Change Log Versus Stream Consumption
 
-Fireweed has a durable change log internally because supported storage profiles
-must recover and rebuild queue state without losing committed mutations. That
-log records queue state transitions such as push, update, claim, finalize, and
-repair operations. It is not the worker consumption model.
+Fireweed has a durable log internally. Every acknowledged write, claim, and
+queue close is recorded in its S3 object log, and its serving projection is
+rebuilt from that log. The log is not the worker consumption model, and the
+contract exposes no log position or history: the only change-feed promise is
+that a record's `version` strictly increases (API-006 §6.7).
 
-Workers consume Fireweed by claiming eligible items under leases and finalizing
-those items. They do not advance offsets through Fireweed's internal log, and
-they should not depend on replaying that log as an application event stream. If
-the application contract is "every consumer group reads the same ordered
-history," use a stream and keep Fireweed for the mutable work queues that need
-leased execution.
+Workers consume Fireweed by claiming records under leases and settling them
+with writes. They do not advance offsets through Fireweed's internal log, and
+they cannot replay it as an application event stream. If the application
+contract is "every consumer group reads the same ordered history," use a
+stream and keep Fireweed for the mutable work queues that need leased
+execution.

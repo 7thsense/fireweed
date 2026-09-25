@@ -9,7 +9,6 @@ ddx:
     - adr-s3-turso-public-cell
     - td-sharding-and-shard-ownership
     - td-object-log-turso-projection
-    - td-heat-aware-whole-queue-placement
     - tp-scale-substantiation
     - spike-record-key-storage
     - spike-claim-path-at-scale
@@ -22,7 +21,6 @@ ddx:
     - {kind: informed_by, to: adr-s3-turso-public-cell}
     - {kind: informed_by, to: td-sharding-and-shard-ownership}
     - {kind: informed_by, to: td-object-log-turso-projection}
-    - {kind: informed_by, to: td-heat-aware-whole-queue-placement}
     - {kind: informed_by, to: tp-scale-substantiation}
     - {kind: informed_by, to: spike-record-key-storage}
     - {kind: informed_by, to: spike-claim-path-at-scale}
@@ -33,7 +31,7 @@ ddx:
 # Technical Design: TD-018 Partitioned Object Log
 
 **Status**: Proposed; measurement-gated. Nothing here is committed until the spikes in "Measurement plan" report and the owner accepts the result.
-**Contract**: API-006 (unaffected) | **ADR**: ADR-001, ADR-008, ADR-024, ADR-025 | **TD**: TD-003, TD-010, TD-015, TD-017 | **Evidence**: SPIKE-002, SPIKE-004, SPIKE-006
+**Contract**: API-006 (unaffected) | **ADR**: ADR-001, ADR-008, ADR-024, ADR-025 | **TD**: TD-003, TD-010, TD-017 | **Evidence**: SPIKE-002, SPIKE-004, SPIKE-006
 **Scope**: the S3×Turso object-log layout, its commit path, its placement unit, and how its storage grows.
 
 ## Scope
@@ -53,31 +51,29 @@ Out of scope:
 - a remote transport;
 - implementation beads. None are filed before the owner reviews the spike results.
 
-## Owner model
+## Decided placement model
 
-These points are binding (owner decision, 2026-09-23 design discussion; ADR-025 OD-13 and OD-14):
+These points are decided (ADR-025 §5) and bind this design:
 
 - **No partitions inside a queue.** A queue is never split.
 - **Mapped, not hashed.** Each queue is assigned one partition by the control plane. The assignment fixes the queue's node and its object-log residency.
 - **Tenants are independent of partitions.** One partition holds queues of many tenants, and one tenant's queues may span many partitions.
-- **Shared log and head.** Many queues share a partition's log (the owner's "log stream"; this design calls it the partition log) and a single head/index document, which replaces today's per-queue index documents.
+- **Shared log and head.** Many queues share a partition's log (ADR-025's "log stream"; this design calls it the partition log) and a single head/index document, which replaces today's per-queue index documents.
 - **No rebalancing.** A queue never moves between partitions.
 - **Measure first.** Compaction, snapshots and truncation, log splitting by partition range, and full-delete GC are proposals that must be measured before anyone commits to them: "be very careful and measure first; get proper performance in place first". The first step is measuring today's per-queue commit cost on MinIO at 1, 10, 100 and 1,000 queues.
 
-These are this design's choices. They come from the earlier partition design input, not from the owner, and are open to review:
+These are this design's own choices, open to review:
 
-- **A partition** also has one Turso projection file, and one control-plane lease and epoch.
+- **A partition** has one control-plane lease and epoch. It also has one Turso projection file, which TD-017 §1 fixes.
 - **Group commit** covers all of the partition's queues.
 - **Per-queue dense offsets are preserved**: each queue keeps its own stream inside the partition log.
-
-An earlier design brief assumed hash placement (`partition_of(queue) = hash(...) mod P`). This design corrects it to mapped placement.
 
 ## Terms
 
 | Term | Meaning in this design |
 |---|---|
 | Partition | The Fireweed placement and storage cell, identified by a `PartitionId` that the control plane assigns. |
-| Partition log | The partition's one log: one `LogEngine`, its data objects and its head. The owner's decisions call it the partition's "log stream". |
+| Partition log | The partition's one log: one `LogEngine`, its data objects and its head. ADR-025 calls it the partition's "log stream". |
 | Stream | object-log's `PartitionKey`. Today there is one per queue, named `tenant\0queue` (`crates/fireweed-objectlog/src/log_engine_store.rs:79-85`). It **stays per queue** inside a partition log. This design says "stream" only for this per-queue `PartitionKey`, to avoid the name clash. |
 | Head | The one CAS-updated document per partition. It replaces per-queue index documents, the catalog, epoch documents and high-water hints. |
 | Namespace | The S3 prefix of one deployment. |
@@ -98,7 +94,7 @@ object-log line references below are to tag `v0.3.3` of the object-log repositor
 | 7 | **Open cost grows with every queue in the namespace**, not with the queues a node owns. `ManifestSequencer::open` GETs the catalog and then each index document serially, and `load_meta` LISTs and GETs every definition serially. | object-log `src/manifest_sequencer.rs:77-100`; `log_engine_store.rs:906-935` | Start-up and handoff time is O(all queues). |
 | 8 | **Server bug: a new namespace on every process start.** The S3×Turso server open builds the namespace from the pid and the current time (`fw-s3-turso-{pid}-{nanos}`), so a restarted server never sees its earlier log. The facade uses the stable `StorageConfig.namespace` instead. | `crates/fireweed-server/src/lib.rs:2872-2879` (inside `open_objectlog_s3_turso_backend`, `:2859-2891`) | A server restart loses every acknowledged write as far as that server can tell. This is a correctness blocker for any restartable deployment, independent of this design. |
 | 9 | **Stale-index handoff bug** (read from code, not tested). `ManifestSequencer::lookup` serves only its in-memory index and never re-reads a document. On a CAS conflict, `fence_epoch` returns an error without refreshing its cached copy, so every retry fails the same way until the store is reopened. `fence_epoch` also returns `Ok` without writing anything when the queue is unknown in memory or has no cached document. | object-log `src/manifest_sequencer.rs:503-518` (`lookup`), `:444-500` (`fence_epoch`; the no-op returns at `:456-463`, the conflict error at `:495-499`) | A new owner whose store opened before the previous owner's last commits reads a stale tail, and cannot fence until it reopens. If the queue was created after it opened, the "fence" succeeds without bumping the durable epoch. The old owner can then keep committing, and the new owner's commits are rejected. Safety holds through the commit-time CAS and the projection gap check; liveness does not. |
-| 10 | **Placement is per queue.** Leases, epochs and highest-random-weight (HRW) placement are keyed by queue. The public S3×Turso backend uses a process-local control plane; multi-node ownership exists only through an injection path. | `crates/fireweed-engine/src/control_plane.rs:62-79` (`QueueLease`), `:558-589` (`rendezvous_weight`, `resolve_target`); ADR-008 Decision 1 and 3; TD-015 recommendation (`TD-015:53`); `crates/fireweed/src/turso_compose.rs:3118`; `crates/fireweed-server/src/lib.rs:3313` | Moving to partitions amends ADR-008 and TD-003 and replaces TD-015's per-queue disposition. |
+| 10 | **Placement is per queue.** Leases, epochs and highest-random-weight (HRW) placement are keyed by queue. The public S3×Turso backend uses a process-local control plane; multi-node ownership exists only through an injection path. | `crates/fireweed-engine/src/control_plane.rs:62-79` (`QueueLease`), `:558-589` (`rendezvous_weight`, `resolve_target`); `crates/fireweed/src/turso_compose.rs:3118`; `crates/fireweed-server/src/lib.rs:3313` | Partitions move the lease, the epoch and the placement key from the queue to the partition. |
 | 11 | **No snapshot or compaction exists.** `snapshot_now` records an empty payload as a position marker, `compact_log_behind_snapshot` returns `Unavailable`, retention is "not yet rewired to LogEngine", and a projection rebuild is a genesis replay. Hydration for ownership replays from the local Turso high-water. | `crates/fireweed/src/lib.rs:4635-4640`; `crates/fireweed/src/facade.rs:1394-1418`; `crates/fireweed-objectlog/src/maintenance.rs:7`; `crates/fireweed/src/turso_compose.rs:4984-5002` (`rebuild_projection`), `:3296-3350` (`recover_async`), `:1865-1910` (hydration) | The log grows forever, and a node with no local Turso file replays from genesis. ADR-001 (`:127-129`, `:235-236`, `:290`) always intended "snapshot to object storage, then expire segments". |
 
 **Inferred, not measured: the committer stalls above a handful of active queues on S3.** A commit groups at most 8 finished data objects (object-log `src/engine.rs:974-986`), so it covers about 8 × 20 ms = 160 ms of arrivals. It costs one catalog GET plus one GET and one conditional PUT for each distinct queue. With a CAS round trip c ≈ 40 ms, the committer falls behind once more than about 160 ms / c ≈ 4 queues are active in every window. Latency then grows until the 30 s pre- and post-position timeouts (`log_engine_store.rs:127-129`) poison queues. Finding 5 makes this worse over time, because every CAS moves a larger document. Spike A must confirm or refute this.
@@ -144,10 +140,10 @@ Per-queue streams stay inside the partition log, so the engine and projection in
 - **Routing.** A node resolves queue → partition from the directory and caches the answer. The partition never changes, and the close is enforced inside the partition, so a stale cache still routes correctly and gets `QueueClosed`. A cache miss costs one GET.
 - **Policy.** Choosing a partition is a control-plane and admin concern. A reasonable default is the least-loaded open partition, with an admin override (for example, a set of partitions reserved for a tenant class). The policy is not part of the contract, and it is not a hash.
 - **Mapping versus hashing.** Mapping costs a directory lookup on a routing miss. In return, the control plane can pack queues by load, co-locate or separate them on purpose, and add partitions without rehashing any queue.
-- **No rebalancing.** A queue's partition is permanent. So a hot partition is relieved only by moving the whole partition to another node, or by proposal P2. A single queue's ceiling is one partition's committer and one Turso writer, which is ADR-008's one-owner ceiling, unchanged.
-- **Partition to node.** Each partition has a control-plane lease. Whether the target node is assigned explicitly or chosen by HRW over partition ids (TD-015's evaluation, applied to partitions) is an open question. A partition moves only on node failure, drain, or cluster expansion.
+- **No rebalancing.** A queue's partition is permanent. So a hot partition is relieved only by moving the whole partition to another node, or by proposal P2. A single queue's ceiling is one partition's committer and one Turso writer, which is ADR-008's one-owner ceiling.
+- **Partition to node.** Each partition has a control-plane lease. Whether the target node is assigned explicitly or chosen by HRW over partition ids is an open question. A partition moves only on node failure, drain, or cluster expansion.
 
-**Queues stay cheap** (owner decision, 2026-09-23 design discussion: one queue per job type). An idle queue costs one directory entry, a few bytes in its partition's index runs, and its Turso rows. It has no per-queue document on the commit path, and no CAS.
+**Queues stay cheap** (ADR-025 §2: one queue per job type). An idle queue costs one directory entry, a few bytes in its partition's index runs, and its Turso rows. It has no per-queue document on the commit path, and no CAS.
 
 ### The head document (`HeadSequencer`)
 
@@ -200,8 +196,8 @@ Two forces pull in opposite directions, and only measurement settles them:
 - **The PUT floor favors few, busy partitions.** A busy partition costs about 2/L PUT/s whatever its queue count: about 100 PUT/s ($1,314/month) at 20 ms, and 20 PUT/s ($263/month) at 100 ms.
 - **Turso favors more, smaller files.**
   - Each file has exactly one writer. Independent writer connections fail with `SQLITE_BUSY` at N = 32, so the `Mutex<Connection>` writer is mandatory, and a node gets writer parallelism only from more partition files (`docs/helix/02-design/spikes/SPIKE-004-claim-path-at-scale.md`, Finding 8).
-  - Many queues in one file cost claim throughput. At 100 queues × 1M records in one file, with field bytes on the claim row, claim throughput fell 45.8% and p99 rose 52× from page-cache pressure (SPIKE-004, Finding 8). SPIKE-006's lean claim row is expected to fix this. That is **inferred**, and a follow-up run is measuring it (`docs/helix/02-design/spikes/SPIKE-006-declared-field-storage-layout.md`).
-  - Snapshot size and rehydration time grow with the partition's records (P1). The 100M-row file in SPIKE-004 Finding 8 was 45.09 GB.
+  - Many queues in one file hold their claim throughput only with a lean claim row. At 100 queues × 1M records in one file, with field bytes on the claim row, claim throughput fell 45.8% and p99 rose 52× from page-cache pressure (SPIKE-004, Finding 8). With TD-017's lean claim row, the same shape claims within 4.3% of a 10M single-queue control, with p99 at 1.33× the control (SPIKE-004, Finding 9). Larger files are not measured.
+  - Snapshot size and rehydration time grow with the partition's records (P1). The lean 100M-record file in SPIKE-004 Finding 9 was 47.91 GB.
 
 The number of partitions per node, and how many queues and records a partition holds, are therefore measured placement parameters, not constants of this design.
 
@@ -248,7 +244,7 @@ What the table says:
 - **Storage is the other cost.** 1,000 queues × 10 cmd/s × 1 KiB is about 26.9 TB a month of ingress. With no truncation, storage alone reaches about $7.4k/month by month 12 and keeps rising; with 24 h retention it is about $20/month. Only P1 bounds it.
 - **Snapshot uploads are negligible in PUTs:** a few multipart uploads a day per partition.
 
-All of these figures are modelled, not measured. Spikes A and B replace them, and the TP-002 generator must be rewritten from this model (see "Documents to amend on acceptance").
+All of these figures are modelled, not measured. Spikes A and B replace them, and the TP-002 generator must be rewritten from this model (see "Effect on other documents").
 
 ## External contract
 
@@ -275,14 +271,14 @@ Each proposal below needs its spike and an explicit owner decision. None is part
 - **What it changes:**
   - Genesis rebuild ends. `projection_control` rebuild becomes "latest snapshot plus retained tail".
   - Bead `fireweed-f500277e` requires that "a lost Turso file must still rebuild from the log". Changing that needs the owner's approval.
-  - ADR-024 (`:80-83`, "Loss of the Turso file is recovered by replaying the object log") and TP-003 AC-TXN-1 need rewording to "rebuilt from the latest snapshot plus the retained tail".
+  - ADR-024's recovery rule (loss of the Turso file is recovered by replaying the object log) and TP-003 AC-TXN-1 would read "rebuilt from the latest snapshot plus the retained tail".
 - **Unknowns for Spike C:**
   - Can vendored Turso 0.7.2 produce a consistent copy while the writer applies? The options are a checkpoint and copy under the writer mutex (which stalls the writer for the copy), `VACUUM INTO` if it is supported, or a backup API.
-  - Upload and download time at partition sizes up to the 45 GB shape, against TD-003's recovery budget.
+  - Upload and download time at partition sizes up to the 48 GB shape, against TD-003's recovery budget.
 
 ### P2. Log splitting by partition range
 
-The owner's example is to split 1–255 into 1–127 and 128–255 when the cluster grows.
+For example, a log that carries partitions 1–255 splits into 1–127 and 128–255 when the cluster grows.
 
 - **Reading.** A partition log carries a contiguous range of partition ids and is split in two, so each half can move to its own node. Queues keep their partition id, and only the mapping from range to partition log changes. So this is not queue rebalancing.
 - **Relation to the v1 cell.** In v1 each partition has its own partition log, so expansion is a whole-partition handoff with no data copy (the log is already in S3), as long as there are more partitions than nodes. A split is needed only if partition logs carry ranges. Ranges lower the PUT floor on small clusters, with one committer per range instead of one per partition. That is the per-node shared-data-object option v1 rejects.
@@ -309,7 +305,7 @@ API-006 DQ1–DQ5 define the observable behavior: archive keeps records in durab
 
 ## Measurement plan
 
-The spikes change no product code. Spike A comes first (owner decision, 2026-09-23 design discussion).
+The spikes change no product code. Spike A comes first (ADR-025 §5).
 
 | Spike | Question | Method | Outputs | Decision it gates |
 |---|---|---|---|---|
@@ -323,7 +319,7 @@ Proposed pass bars for review:
 
 The owner may replace these bars.
 
-One more input comes from outside these spikes: the SPIKE-004/SPIKE-006 follow-up measuring 100 queues × 1M records in one file with the lean claim row. It sets how many queues and records a partition's Turso file can hold.
+Partition sizing also takes SPIKE-004 Finding 9 as an input: with the lean claim row, 100 queues × 1M records in one Turso file claim within 4.3% of a single-queue 10M control. Files beyond that size are unmeasured.
 
 ## Indicative sequence after the spikes
 
@@ -335,20 +331,19 @@ This sequence is not authorized. No beads are filed until the owner accepts the 
 | S1 | Upstream `HeadSequencer` with versioned CAS; bump the Fireweed pin. | object-log repository; `crates/fireweed-objectlog/Cargo.toml` | Spike B's proofs as tests. | B |
 | S2 | Partition cell, queue directory and router in the log store. | `crates/fireweed-objectlog/src/{log_engine_store.rs, compose_log.rs}`, new `partition.rs` | Open reads only owned partitions (count the GETs); 2 PUTs per commit at 1,000 queues; reopen works without epoch and high-water documents. | S1 |
 | S3 | One Turso file per partition, with a router and lazy open. | The Turso composition, after the kernel contract moves it | Per-queue ops route to their partition; live reads match a rebuild. | S2 |
-| S4 | Ownership by partition. Amend ADR-008 and TD-003 first. | `crates/fireweed-engine/src/{control_plane.rs, ownership.rs}`, `crates/fireweed-postgres/src/control_plane.rs` | A handoff opens fresh, fences, hydrates, then serves; a stale owner's commit is rejected. | S2 |
+| S4 | Ownership by partition. Update ADR-008 and TD-003 first. | `crates/fireweed-engine/src/{control_plane.rs, ownership.rs}`, `crates/fireweed-postgres/src/control_plane.rs` | A handoff opens fresh, fences, hydrates, then serves; a stale owner's commit is rejected. | S2 |
 | S5 | P1, only if accepted. | New snapshot module; `maintenance.rs`; the rebuild path | Storage stays bounded under constant load; kill-and-move restores state exactly. | S3, S4, C |
 | S6 | Replace the FWSG cost model and regenerate TP-002. | `crates/fireweed-release/src/lib.rs:2700-2900`; docs | The economics table above reproduces from measured inputs. | A, B |
 
 The critical path is B → S1 → S2 → S3. S3 and S4 touch different files, but both need the server crate, so `crates/fireweed-server/src/lib.rs` belongs to S0, S2 and S4 only. These slices will conflict with the kernel contract's execution slices, which move the Turso composition, so they are sequenced after them.
 
-## Documents to amend on acceptance
+## Effect on other documents
 
-- **ADR-008**, Decisions 1 and 3: placement and the lease, epoch and HRW key change from per queue to per partition, and queue → partition becomes a control-plane mapping. The one-owner-per-queue ceiling stays.
-- **TD-003:** the assignment function (`TD-003:178`) and the authority-record key.
-- **TD-015:** its static per-queue HRW disposition either applies to partitions or is superseded.
+Accepting the partition cell changes:
+- **ADR-008 and TD-003:** the ownership lease, the epoch and the fencing key belong to the partition, not the queue, and TD-003's assignment function and authority-record key follow. The one-owner-per-queue ceiling stays.
 - **TD-010:** the object-log serving protocol.
-- **TP-002:** regenerate `docs/perf/tp002-objectlog-granularity-economics.md` from a rewritten cost model.
-- **P1 only:** ADR-024 `:80-83`, ADR-001's snapshot wording, and TP-003 AC-TXN-1.
+- **TP-002:** `docs/perf/tp002-objectlog-granularity-economics.md` is regenerated from a rewritten cost model.
+- **P1 only:** ADR-024's recovery rule, ADR-001's snapshot wording, and TP-003 AC-TXN-1.
 
 ## Risks
 
@@ -357,7 +352,7 @@ The critical path is B → S1 → S2 → S3. S3 and S4 touch different files, bu
 | The head, or its CAS latency, grows with 10,000 queues in a partition. | M | H | Per-stream state lives in immutable runs; the head holds only a bounded tail; Spike B measures head bytes and commit latency. |
 | A hot partition cannot shed queues, because there is no rebalancing. | M | H | Load-aware placement at creation; whole-partition moves; P2 if measured necessary; ADR-008's per-queue ceiling stays explicit. |
 | A poor placement decision is permanent. | M | M | Admin override at creation; placement inputs come from measured load. The owner accepts this trade by ruling out rebalancing. |
-| Many queues in one Turso file slow claims (SPIKE-004, Finding 8). | M | H | The lean claim row (SPIKE-006) and its follow-up measurement; bounded queues and records per partition; more partitions per node. |
+| A partition's Turso file outgrows the measured shape, and claims slow from page-cache pressure (SPIKE-004, Finding 8). | M | H | The lean claim row, measured flat at 100 queues × 1M records per file (SPIKE-004, Finding 9); bounded queues and records per partition; more partitions per node. |
 | Snapshot size and rehydration time exceed the recovery budget. | M | H | Spike C; partition size limits; P1 stays a proposal until it is measured. |
 | Turso cannot produce a consistent copy while it serves. | M | H | Spike C evaluates checkpoint and copy, `VACUUM INTO`, and a backup API before P1 is accepted. |
 | One engine per partition costs threads (up to 8 flush-runtime threads each, object-log `src/engine.rs:770-774`). | M | M | Tune `OBJECT_LOG_FLUSH_RUNTIME_THREADS`; keep partitions per node moderate. |

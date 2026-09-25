@@ -2,7 +2,9 @@
 ddx:
   id: adr-typed-payload-schemas-and-indexes-via-axon-esf
   depends_on:
-    - adr-per-queue-secondary-indexes
+    - api-fireweed-kernel-contract
+    - adr-kernel-records-contract
+  status: accepted
   review:
     self_hash: bc29e64f6e6f89932496a4803282d3e388bea665db6c526a92ba17fe49422347
     deps:
@@ -10,175 +12,49 @@ ddx:
     reviewed_at: "2026-07-20T00:01:22Z"
 ---
 
-# ADR-011: Typed Payload Schemas and Secondary Indexes via the Shared `axon-esf` ESF Vocabulary
+# ADR-011: Declared typed fields, with index keys in the axon-esf encoding
 
-> **Amended by ADR-025 (2026-09-24)** (`docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`, Supersession).
-> Superseded: the JSON Schema `entity_schema` and its payload validation, which declared typed fields replace
-> (API-006 F1–F3); axon's `IndexType`, `IndexDef`, `CompoundIndexDef` and `unique`; and the `QueueIndex` wrapper.
-> Standing: the ESF canonical, order-preserving index-key encoding. `fireweed-contract` now provides it, every
-> implementation uses it verbatim, and it must be extended to `Bytes` values and to the `Stage`, `Rank` and
-> `Group` built-ins.
+| Date | Status | Deciders | Related | Confidence |
+|------|--------|----------|---------|------------|
+| 2026-09-24 | Accepted | Project owner | API-006, ADR-003, ADR-025, TD-017, axon ADR-002 | High |
 
-- Status: Accepted / Implemented
-- Date: 2026-06-28
-- Supersedes: ADR-010's **declaration shape** (`IndexSpec { name, fields: Vec<String>, unique }` — the untyped, byte-keyed interim form). ADR-010's maintain-on-apply mechanism, per-queue scope, and in-memory-first phasing **stand**.
-- Relates: ADR-008 (queue as shard unit + two projection families), ADR-009 (encapsulated library surface + structured ItemId), FAC-1 (`update_fields`), CONTRACT-007 (consumer "cayce" index/schema needs), and **axon ADR-002** (ESF = JSON Schema 2020-12 entity bodies + Axon vocabulary).
-- Driver: ADR-010 shipped *untyped* indexes (values are opaque `Bytes`; keys sort lexically). The consumer surfaced the obvious question — "is everything a string?" — and the answer pulled in the long-deferred payload-schema question. We resolve both: fireweed adopts **axon's Entity Schema Format (ESF) as the single source of truth** for typed payload schemas *and* typed secondary indexes, consumed through the thin `axon-esf` leaf crate.
+## Context
 
-## 1. Context
+- Records carry typed data, and consumers look records up and count them by typed values: `scan` and `aggregate` over declared indexes (API-006 §4.6, §4.7).
+- An index key must sort the same way in every implementation, and its size must be measured the same way everywhere, because the 1024 B bound on an encoded index key is a contract limit (API-006 LIM1).
+- Axon is the house schema-first data substrate. Its Entity Schema Format (ESF, axon ADR-002) defines typed index declarations and a canonical, order-preserving index-key encoder, published in the thin leaf crate `axon-esf`. Reimplementing that encoding would drift from axon on its subtle parts: float order, time order and missing values.
 
-ADR-010 Phase 1 shipped per-queue secondary indexes in the in-memory projection family
-(`crates/fireweed-projection/src/lib.rs`), declared as `IndexSpec { name, fields: Vec<String>, unique }` and
-keyed on opaque field **bytes** (`len‖bytes` per field). That works, but:
+## Decision
 
-- field values are untyped, so a numeric field sorts lexically (`"10" < "9"`) — no typed equality/range,
-- the query key is raw `&[Vec<u8>]` — the caller owns all encoding,
-- the DB-resident relational family (ADR-008) can only store the key as a generic blob, not a native typed
-  column with a real SQL index.
+1. **Fields are declared, typed and the only per-record data.** A queue's definition declares at most 256 fields, each of type `Int` (i64), `Float` (finite f64), `Bool`, `Time` (µs), `Str` (UTF-8) or `Bytes` (API-006 §5.1). A write is checked against the declaration before any effect (F1, W1). There is no JSON Schema, no entity document and no separate payload.
+2. **Indexes are declared with the fields.** A queue declares at most 32 indexes, each over 1..=8 keys drawn from its fields of any type and the built-ins `Stage`, `Rank` and `Group`. The key is the only uniqueness, so no index is unique (ADR-025 §2). Indexes serve `scan` and `aggregate`; claims order only by rank.
+3. **Index keys use the ESF encoding.** `fireweed_contract::esf_index_key` encodes every index key with axon-esf's canonical, order-preserving encoding, and every implementation uses it verbatim. It is also the measure of the 1024 B bound on a whole encoded index key.
+4. **The encoding fixes the order.** Within a type, values sort in their natural order: `Str` and `Bytes` bytewise, `Float` numerically with `-0.0` stored as `+0.0`. Across types, values sort in declaration order. `Stage` values sort by the stage's declaration position, not by name. The encoded order matches the `Value` order that API-006 §4.0 states.
+5. **`fireweed-contract` extends the encoding where axon-esf stops.** It adds `Bytes` values and the `Stage`, `Rank` and `Group` built-ins, with ordering and round-trip tests, and it keeps the encoding of every type axon-esf covers byte-identical to axon's.
+6. **axon-esf is a git dependency pinned to an axon release tag.** No Fireweed crate uses a path dependency on axon, and no crate depends on the full `axon-schema`.
 
-Separately, "axon" (`/Users/erik/Projects/axon`) is becoming the house **schema-first data substrate**. Its
-**ESF** (axon ADR-002) is layered and — by deliberate design — keeps the entity body as **pure JSON Schema
-Draft 2020-12** (it explicitly rejected `x-` extensions), with axon-specific vocabulary (links, lifecycles,
-**index definitions**, named queries) living in *sibling* fields, never mixed into the entity schema. So
-axon already separates exactly the layer fireweed needs (the typed entity schema + the typed index
-declarations) from the graph-store machinery fireweed does not.
+## Alternatives
 
-A spike (`SPIKE: axon-schema as an external dep`) established the feasibility and the costs:
-depending on the *full* `axon-schema` crate drags `axon-core` + `axon-cypher-ast` (a Cypher AST) and — via
-`jsonschema`'s default features — the `reqwest → hyper → tower-http` stack (~148 transitive crates). But the
-*reusable core* is small, and `jsonschema` compiled-once validates at **~83 ns/record** (vs ~9 µs when
-recompiled per call).
+| Option | Evaluation |
+|--------|------------|
+| A JSON Schema entity document per queue, validated on every write | Rejected. It is a second typing concept beside declared fields, and declared types already give validation and index typing. |
+| Fireweed's own index-key encoder | Rejected. It would drift from axon on float, time and missing-value order. |
+| Mirroring axon's ESF types in Fireweed | Rejected. Two copies of the same vocabulary drift. |
+| Depending on the full `axon-schema` crate | Rejected. It pulls `axon-core`, a Cypher AST and an HTTP client stack into the contract crate. |
+| Untyped byte keys | Rejected. Numbers sort lexically, and every caller must encode keys itself. |
 
-## 2. Decision
+## Consequences
 
-fireweed adopts axon's ESF vocabulary **by depending on a thin, shared leaf crate `axon-esf`** — not by
-mirroring its types, and not by depending on the full `axon-schema`.
+| Type | Impact |
+|------|--------|
+| Positive | Every implementation agrees on key order and on where the 1024 B bound falls. |
+| Positive | For the types axon covers, Fireweed's index keys are byte-identical to axon's. |
+| Negative | `fireweed-contract` depends on a pre-1.0 crate from another repository; the pin and co-ownership of both repositories contain the risk. |
+| Negative | The `Bytes` and built-in extensions live outside axon and need their own ordering tests. |
 
-1. **Typed payload schema.** `QueueDefinition` carries an `EntitySchemaDocument` (axon ESF Layer 1 = JSON
-   Schema 2020-12). At `create_queue` the queue compiles a `CompiledSchema` once; every `push` / `upsert` /
-   `update_fields` validates the item's payload/fields against it **pre-commit, with format assertions on**
-   (email/uuid/date-time enforced) — a violation rejects with a structured error and appends nothing.
+## References
 
-2. **Typed secondary indexes.** The interim `IndexSpec` is replaced by axon's typed ESF Layer-4 vocabulary —
-   `IndexType { String, Integer, Float, Datetime, Boolean }`, `IndexDef { field, index_type, unique }`,
-   `CompoundIndexDef { fields: Vec<CompoundIndexField>, unique }` (with leftmost-prefix matching). **Index
-   keys are encoded by `axon_esf::index_key`** (the canonical, order-preserving encoder — requested in axon
-   bead `axon-a1c87cb1`), so fireweed's keys are **byte-identical to axon's** and cannot drift.
-
-3. **Single source of truth.** A cayce ESF `CollectionSchema` document drives **both** axon and fireweed:
-   fireweed consumes its `entity_schema` (validation) and its index declarations (indexing) from the *same*
-   document. No parallel fireweed copy of either the schema or the index defs.
-
-4. **Consumed as a git dependency**, pinned to axon release tag `v0.3.2` — **no path dependencies**
-   (`axon-esf = { git = "https://github.com/DocumentDrivenDX/axon", tag = "v0.3.2" }`). This also sets
-   the direction to move fireweed's other sibling path-deps (fjord/object-log/heimq) onto git pins over
-   time.
-
-5. **Named fireweed indexes wrap ESF declarations.** ESF single and compound index declarations do not carry
-   fireweed's query name, so fireweed stores them as `QueueIndex { name, declaration }`. The `declaration` is
-   axon's ESF type; `name` is the fireweed lookup handle used by `IndexQueryPort` and the public facade.
-
-This supersedes ADR-010's `IndexSpec`. ADR-010's maintain-on-apply pattern, per-queue scope, unique-conflict
-pre-commit validation, and in-memory-first phasing are unchanged — only the declaration/key *vocabulary*
-becomes axon's, and validation gains the typed entity schema.
-
-## 3. Rationale
-
-- **Drift is preventable, so we prevent it.** Mirroring `IndexType`/`IndexDef` into `fireweed-core` would make
-  two copies that *must* stay identical — latent drift. Worse, re-implementing key *encoding* would drift on
-  the subtle parts (float/datetime sort order, nested-path resolution, missing-field rules). A shared crate
-  for both the types **and** the encoder removes the seam entirely.
-- **It is the cleanest possible alignment with axon.** fireweed consumes axon ESF Layer 1 (pure JSON Schema)
-  + Layer 4 (typed index defs) verbatim — exactly the layers axon kept reusable. No `x-` extension hazard.
-- **The dependency is thin and verified.** `axon-esf` (axon `v0.3.2`) depends on `serde` + `serde_json` +
-  `jsonschema` only; the axon workspace pins `jsonschema = { default-features = false }`, and dependency
-  proof below shows **no** reqwest/hyper/tower/axon-core/cypher-ast in fireweed's `fireweed-core` tree.
-- **The typed model is what indexing wanted all along.** `IndexType` *is* the field typing the "is it
-  strings?" question was really asking for; adopting it answers that question instead of inventing a parallel
-  one.
-
-## 4. Alternatives considered
-
-| Option | Why rejected |
-|---|---|
-| **Mirror** axon's ESF type structs in `fireweed-core` | Two copies → drift; and key *encoding* would still be re-implemented (the real drift surface). |
-| **DIY typed fields** in fireweed (own `FieldType`) | Reinvents schema *evolution* + validation; diverges from axon's format; no shared key encoding. |
-| Depend on the **full `axon-schema`** | Drags `axon-core` + `axon-cypher-ast` + the `jsonschema` HTTP stack (~148 crates) into fireweed's lean public surface (and transitively cayce's). |
-| **Plain `jsonschema` only**, ignore axon's index vocabulary | Gets typed *validation* but fireweed re-invents the index declaration + key encoding → drift from axon. |
-
-## 5. Compatibility edges (limiting to ESF)
-
-- **Entity/type layer: near-zero risk.** Both axon and fireweed validate the entity body with the **same
-  `jsonschema` crate + Draft 2020-12**, from the same `axon-esf::CompiledSchema`. Identical validation.
-- **Format assertions ON** — `format` is annotation-only by default in 2020-12; fireweed enables the format
-  vocabulary to match axon, or it would accept a malformed email/uuid axon rejects.
-- **Canonical value encoding** — the payload is stored/validated as canonical JSON (`serde_json::Value`), so
-  values round-trip to axon; index keys come from the shared `index_key` encoder (byte-identical).
-- **Non-coverage, not conflict** — axon's links / lifecycles / named-queries are *outside* fireweed's view (a
-  queue is not a graph). fireweed's own lifecycle (Pending/Leased/terminal) coexists with axon's at the app
-  layer; not a schema incompatibility.
-
-## 6. Consequences
-
-- `QueueDefinition` gains an optional `entity_schema` (ESF) + typed index declarations; existing definitions
-  default both to empty (`#[serde(default)]`) — no churn for non-schema queues.
-- JSON compatibility is preserved. Existing byte-oriented callers can continue using payload/field
-  carriers and the legacy `IndexSpec` path; typed queues add optional `entity_document`/`entity` JSON
-  carriers. `update_fields` with no replacement entity preserves the existing document, while a supplied
-  JSON entity is schema-validated and rekeys typed indexes pre-commit.
-- **Write-path cost:** payload validation per push/upsert/update_fields. Compile-once → ~83 ns/record;
-  acceptable. (Hot-path-skippable when a queue declares no schema.)
-- **Dependency surface:** fireweed's published surface re-acquires a dependency on **pre-release axon**
-  (`axon-esf`), inherited transitively by cayce. Mitigated by rev-pinning, both being pre-1.0, and co-
-  ownership of both repos — but it is a deliberate re-coupling (fireweed had shed sibling couplings; ADR-009).
-- Sets the **no-path-deps** direction for fireweed's sibling dependencies generally.
-- Relational backends store typed index rows in a side table keyed by canonical ESF bytes. SQLite and
-  Postgres relational backends maintain those rows on push, update, replace-pending/upsert, and purge.
-  Postgres additionally uses a partial unique SQL index for atomic unique-key enforcement across backend
-  instances.
-
-## 7. Implementation status
-
-- **Dependency pin:** implemented with workspace dependency `axon-esf` at axon tag `v0.3.2`.
-- **Entity schema storage:** `QueueDefinition.entity_schema` embeds the ESF `EntitySchemaDocument` and is
-  serialized through queue definitions and command/replay paths.
-- **Typed index declarations:** `QueueDefinition.typed_indexes` stores `Vec<QueueIndex>`, preserving
-  fireweed names around ESF single/compound declarations.
-- **Write validation:** push, request-id push, upsert/replace-pending, update-fields, and commit lifecycle
-  insert paths validate typed entity documents before any append/apply side effect.
-- **Index semantics:** string, integer, float, datetime, boolean, compound, sparse missing-field behavior,
-  unique conflicts, update rekeying, purge cleanup, and log replay/reconnect behavior are covered in shared
-  or backend-specific conformance.
-- **Relational parity:** sqlite and postgres relational backends implement `IndexQueryPort`; postgres live
-  verification remains env-gated by `FIREWEED_PG_TEST_URL` and skips loudly when absent.
-
-## 8. Verification evidence
-
-Run on 2026-06-30:
-
-```bash
-cargo test -p fireweed-conformance -- --nocapture
-cargo test -p fireweed-memory adr011_ -- --nocapture
-cargo test -p fireweed-sqlite --test conformance adr011_ -- --nocapture
-cargo test -p fireweed-sqlite --test relational_conformance adr011_ -- --nocapture
-cargo test -p fireweed-postgres --test relational_conformance adr011_ -- --nocapture
-cargo test -p fireweed --test secondary_indexes -- --nocapture
-cargo test --workspace -- --nocapture
-```
-
-The Postgres ADR-011 relational tests compile and report explicit `FIREWEED_PG_TEST_URL` skips when no live
-database URL is present.
-
-Dependency proof:
-
-```bash
-cargo tree -p fireweed-core | rg 'axon-core|axon-schema|axon-cypher-ast|reqwest|hyper|tower'
-rg 'path = .*axon|../axon|/Users/.*/axon' Cargo.toml crates/*/Cargo.toml
-```
-
-Both commands return no matches. `cargo tree -p fireweed-core | rg axon` shows only the pinned
-`axon-esf v0.3.2` dependency.
-
-## 9. Remaining follow-up
-
-The general path-dep to git-pin migration for other sibling dependencies remains separate work.
+- `docs/helix/02-design/contracts/API-006-fireweed-kernel-contract.md`
+- `docs/helix/02-design/adr/ADR-025-kernel-records-contract.md`
+- `docs/helix/02-design/technical-designs/TD-017-kernel-projection-storage-layout.md`
+- axon ADR-002 (ESF), in the axon repository

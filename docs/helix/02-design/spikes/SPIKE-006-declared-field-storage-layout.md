@@ -2,12 +2,10 @@
 ddx:
   id: spike-declared-field-storage-layout
   depends_on:
-    - external-interface-kernel-contract-draft
     - spike-record-field-storage
     - spike-turso-value-size-boundary
     - spike-claim-path-at-scale
   links:
-    - {kind: informed_by, to: external-interface-kernel-contract-draft}
     - {kind: informed_by, to: spike-record-field-storage}
     - {kind: informed_by, to: spike-turso-value-size-boundary}
     - {kind: informed_by, to: spike-claim-path-at-scale}
