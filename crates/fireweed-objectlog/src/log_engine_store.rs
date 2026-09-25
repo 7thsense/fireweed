@@ -1384,7 +1384,11 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                     expected_epoch,
                 )
                 .await
-                .map_err(store_err)?;
+                .map_err(|error| match error {
+                    // The partition's fence moved past this epoch; nothing was committed.
+                    object_log::ObjectLogError::Fenced { .. } => EngineError::EpochFenced,
+                    other => store_err(other),
+                })?;
             let produce_us = produce_started.elapsed().as_micros();
             post_phase = "high-water metadata";
             let metadata_started = Instant::now();
@@ -1408,6 +1412,11 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         };
         match tokio::time::timeout(post_timeout, produced).await {
             Ok(Ok(positions)) => Ok(positions),
+            // A fenced commit assigned no offset, so the outcome is definite and the shard is
+            // not poisoned.
+            Ok(Err(EngineError::EpochFenced)) => {
+                Err(PackedAppendError::BeforePosition(EngineError::EpochFenced))
+            }
             Ok(Err(error)) => Err(PackedAppendError::PostPositionAmbiguous {
                 shard: shard.clone(),
                 reason: format!("{error}; store={}", self.store_tag),
@@ -2685,8 +2694,8 @@ mod tests {
         // The fence completed first, so the lingering epoch-one append must not publish.
         let a_result = a_append.await.unwrap();
         assert!(
-            a_result.is_err(),
-            "an append still unpublished when its epoch is fenced must fail, got {a_result:?}"
+            matches!(a_result, Err(EngineError::EpochFenced)),
+            "an append still unpublished when its epoch is fenced must be fenced, got {a_result:?}"
         );
         let b_positions = b_append.await.unwrap().unwrap();
         assert_eq!(fence_during_seal, a_epoch + 1);

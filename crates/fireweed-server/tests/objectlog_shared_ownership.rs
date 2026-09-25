@@ -21,8 +21,8 @@ use fireweed_core::{
     TenantId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
-    ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneConfig, ControlPlaneStore, LeaseState,
-    ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
+    ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneConfig, ControlPlaneStore,
+    EngineError, LeaseState, ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
 };
 use fireweed_objectlog::head_publish_pause::HeadPublishPause;
 use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment, shared_s3_test_env};
@@ -282,11 +282,11 @@ fn greater_epoch_owner_hydrates_snapshot_tail_before_serving() {
         let stale = a_backend
             .push(&queue, vec![spec("stale")], ts(21), Some(a_epoch))
             .await;
-        assert!(
-            stale.is_err(),
-            "a stale-epoch push must not be acknowledged"
+        assert_eq!(
+            stale,
+            Err(EngineError::EpochFenced),
+            "a stale-epoch push must be fenced"
         );
-        eprintln!("E2_FAILOVER_SEAM stale_push_error={:?}", stale.unwrap_err());
         assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 4);
 
         let first = b_backend
@@ -407,10 +407,9 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
 
             let stale = stale_push.await.unwrap();
             assert!(
-                stale.is_err(),
-                "an append whose head publish follows the takeover must not be acknowledged"
+                matches!(stale, Err(EngineError::EpochFenced)),
+                "an append whose head publish follows the takeover must be fenced, got {stale:?}"
             );
-            eprintln!("E2_FAILOVER_SEAM stale_push_error={:?}", stale.unwrap_err());
             stage(&current, "stale_result_fenced");
 
             b_backend

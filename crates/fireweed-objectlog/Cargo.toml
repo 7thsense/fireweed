@@ -17,7 +17,7 @@ fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }
 # Vendored log implementation, including Fireweed fixes, for every consuming workspace.
-object-log = { version = "0.3.4", git = "https://github.com/7thsense/object-log.git", tag = "v0.3.4", features = ["s3"] }
+object-log = { version = "0.3.6", git = "https://github.com/7thsense/object-log.git", tag = "v0.3.6", features = ["s3"] }
 # Create-only PutObject (If-None-Match: *) for queue-definition authority; object-log
 # BlobStore is overwrite-only put, so Fireweed owns the conditional create path.
 aws-sdk-s3 = { version = "1.122", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
