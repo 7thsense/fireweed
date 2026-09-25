@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{
     AggregateGroup, BoundedMutationRequest, ClaimByQueryRequest, ClaimRef, CommitEntry,
     CommitRequest, DeclaredBucketSegmentRequest, EligibilityPolicy, FilterOp, FinalizeKind,
@@ -18,7 +19,6 @@ use fireweed_core::{
     CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex,
 };
 use fireweed_engine::{EngineError, HotProjectionQueryPort};
-use crate::ManualClock;
 use serde_json::{Value, json};
 
 fn qkey() -> fireweed::QueueKey {

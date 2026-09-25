@@ -724,14 +724,14 @@ mod tests {
         let mut env = map(&[
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:19000"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:19100"),
             ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-test"),
             ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
             ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
             ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "fireweed"),
             (
                 "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
-                "fireweed-test-minio",
+                "fireweed-test-rustfs",
             ),
             ("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP", "true"),
         ]);

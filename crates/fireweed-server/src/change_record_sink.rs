@@ -347,14 +347,15 @@ struct ParsedEndpoint {
 struct ParsedKafkaEndpoint {
     // Only read by the `external-kafka` (rskafka) sink; the default build parses the endpoint solely to
     // classify the delivery mode (`kafka://` → ExternalKafka), so the resolved bootstrap is unused there.
-    #[cfg_attr(not(feature = "external-kafka"), allow(dead_code))]
+    // The rskafka sink itself is retired with the derived changelog (5e2726ea).
+    #[allow(dead_code)]
     bootstrap_servers: String,
 }
 
 #[derive(Debug, Clone)]
 enum ParsedDeliveryEndpoint {
     Http(ParsedEndpoint),
-    #[cfg_attr(not(feature = "external-kafka"), allow(dead_code))]
+    #[allow(dead_code)] // Read only by the retired rskafka sink (5e2726ea).
     Kafka(ParsedKafkaEndpoint),
 }
 
@@ -512,6 +513,7 @@ fn change_record_headers(record: &fireweed_engine::ChangeRecord) -> Vec<(&'stati
 /// One committed command, encoded as one Kafka record. The offset is the
 /// command sequence. The value is the command envelope. This is the history
 /// stream. It is not a [`fireweed_engine::ChangeRecord`].
+#[allow(dead_code)] // Command-log Kafka stream encoder; not yet wired into the server.
 pub struct CommandLogKafkaRecord {
     pub tenant_id: String,
     pub queue_id: String,
@@ -521,6 +523,7 @@ pub struct CommandLogKafkaRecord {
     pub envelope_json: Vec<u8>,
 }
 
+#[allow(dead_code)] // Command-log Kafka stream encoder; not yet wired into the server.
 pub fn encode_command_log_batch(records: &[CommandLogKafkaRecord]) -> EngineResult<Vec<u8>> {
     let mut kafka_records = Vec::with_capacity(records.len());
     for record in records {
@@ -722,6 +725,7 @@ impl FjordChangeRecordSink {
 /// Gated behind the `external-kafka` cargo feature.
 #[cfg(feature = "external-kafka")]
 #[derive(Clone)]
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 pub struct ExternalKafkaChangeRecordSink {
     client: Arc<rskafka::client::Client>,
     partitions: Arc<
@@ -732,6 +736,7 @@ pub struct ExternalKafkaChangeRecordSink {
 }
 
 #[cfg(feature = "external-kafka")]
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 impl ExternalKafkaChangeRecordSink {
     pub fn new(config: &ChangeRecordSinkConfig) -> EngineResult<Self> {
         if !config.enabled {
@@ -877,6 +882,7 @@ pub(crate) fn change_record_sink_is_embedded(config: &ChangeRecordSinkConfig) ->
 
 /// Build the runtime sink for the resolved mode. The `Embedded` mode is wired to the shared embedded-broker
 /// `log` handle; `Http` and `ExternalKafka` ignore it (they deliver out of process).
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 fn build_change_record_sink(
     config: &ChangeRecordSinkConfig,
     log: Arc<dyn LogBackend>,
@@ -899,6 +905,7 @@ fn build_change_record_sink(
 /// `external-kafka` cargo feature (default-off); without it, selecting a `kafka://` endpoint is a config
 /// error that names the feature instead of silently falling back.
 #[cfg(feature = "external-kafka")]
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 fn build_external_kafka_sink(
     config: &ChangeRecordSinkConfig,
 ) -> EngineResult<Arc<dyn ChangeRecordSink>> {
@@ -1174,6 +1181,7 @@ where
     })
 }
 
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 fn backend_supports_change_record_cursor<B>(backend: &B) -> bool
 where
     B: ChangeRecordEmissionBackend + ?Sized,
@@ -1181,6 +1189,7 @@ where
     backend.supports_change_record_emission_cursor()
 }
 
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 fn enabled_boot_queues(queues: &[QueueDefinition]) -> Vec<QueueDefinition> {
     queues
         .iter()
@@ -1189,6 +1198,7 @@ fn enabled_boot_queues(queues: &[QueueDefinition]) -> Vec<QueueDefinition> {
         .collect()
 }
 
+#[allow(dead_code)] // Derived-changelog emitter retired (5e2726ea); kept until the command-log Kafka stream is wired.
 fn change_record_sink_requires_durable_cursor<B>(backend: &B) -> EngineResult<()>
 where
     B: ChangeRecordEmissionBackend + ?Sized,

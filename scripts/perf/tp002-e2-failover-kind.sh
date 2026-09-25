@@ -15,8 +15,10 @@ SEED="${FIREWEED_E2_SEED:-2002}"
 OUT="${FIREWEED_E2_EVIDENCE:-${ROOT}/target/tp002-e2-failover/evidence.json}"
 KEEP="${FIREWEED_E2_KEEP_CLUSTER:-0}"
 PG_IMAGE="${FIREWEED_E2_POSTGRES_IMAGE:-postgres:16}"
-MINIO_IMAGE="${FIREWEED_E2_MINIO_IMAGE:-minio/minio:latest}"
-MC_IMAGE="${FIREWEED_E2_MC_IMAGE:-minio/mc:latest}"
+# Shared object log: the same RustFS release the S3 qualification endpoint pins (1.0.0).
+RUSTFS_IMAGE="${FIREWEED_E2_RUSTFS_IMAGE:-rustfs/rustfs:1.0.0}"
+S3_ACCESS_KEY="fireweed-e2"
+S3_SECRET_KEY="fireweed-e2-secret"
 COORDINATION_TIMEOUT_SECS="${FIREWEED_TEST_COORDINATION_TIMEOUT_SECS-}"
 PF_PID=""
 CLUSTER_CREATED=0
@@ -167,9 +169,9 @@ IMAGE_ID="$(docker image inspect "${IMAGE}" --format '{{.Id}}')"
 kind create cluster --name "${CLUSTER}"
 CLUSTER_CREATED=1
 kind load docker-image "${IMAGE}" --name "${CLUSTER}"
-for dep in "${PG_IMAGE}" "${MINIO_IMAGE}" "${MC_IMAGE}"; do docker pull "${dep}"; kind load docker-image "${dep}" --name "${CLUSTER}"; done
+for dep in "${PG_IMAGE}" "${RUSTFS_IMAGE}"; do docker pull "${dep}"; kind load docker-image "${dep}" --name "${CLUSTER}"; done
 PG_IMAGE_REF="${PG_IMAGE}@$(docker image inspect "${PG_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d@ -f2)"
-MINIO_IMAGE_REF="${MINIO_IMAGE}@$(docker image inspect "${MINIO_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d@ -f2)"
+RUSTFS_IMAGE_REF="${RUSTFS_IMAGE}@$(docker image inspect "${RUSTFS_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d@ -f2)"
 k create namespace "${NS}"
 
 k -n "${NS}" apply -f - <<EOF
@@ -199,36 +201,45 @@ spec: {selector: {app: fireweed-e2-postgres}, ports: [{port: 5432}]}
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: fireweed-e2-minio}
+metadata: {name: fireweed-e2-rustfs}
 spec:
   replicas: 1
-  selector: {matchLabels: {app: fireweed-e2-minio}}
+  selector: {matchLabels: {app: fireweed-e2-rustfs}}
   template:
-    metadata: {labels: {app: fireweed-e2-minio}}
+    metadata: {labels: {app: fireweed-e2-rustfs}}
     spec:
       containers:
-      - name: minio
-        image: ${MINIO_IMAGE}
+      - name: rustfs
+        image: ${RUSTFS_IMAGE}
         imagePullPolicy: IfNotPresent
-        args: [server, /data]
         env:
-        - {name: MINIO_ROOT_USER, value: minioadmin}
-        - {name: MINIO_ROOT_PASSWORD, value: minioadmin}
-        readinessProbe: {httpGet: {path: /minio/health/ready, port: 9000}, periodSeconds: 2}
+        - {name: RUSTFS_ACCESS_KEY, value: ${S3_ACCESS_KEY}}
+        - {name: RUSTFS_SECRET_KEY, value: ${S3_SECRET_KEY}}
+        - {name: RUSTFS_CONSOLE_ENABLE, value: "false"}
+        readinessProbe: {httpGet: {path: /health/ready, port: 9000}, periodSeconds: 2}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: logs, mountPath: /logs}
+      volumes:
+      - {name: data, emptyDir: {}}
+      - {name: logs, emptyDir: {}}
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: fireweed-e2-minio}
-spec: {selector: {app: fireweed-e2-minio}, ports: [{port: 9000}]}
+metadata: {name: fireweed-e2-rustfs}
+spec: {selector: {app: fireweed-e2-rustfs}, ports: [{port: 9000}]}
 EOF
 k -n "${NS}" rollout status deploy/fireweed-e2-postgres --timeout "${TIMEOUT}"
-k -n "${NS}" rollout status deploy/fireweed-e2-minio --timeout "${TIMEOUT}"
-k -n "${NS}" run fireweed-e2-mc --restart=Never --image="${MC_IMAGE}" --image-pull-policy=IfNotPresent --command -- \
-  sh -c 'mc alias set e2 http://fireweed-e2-minio:9000 minioadmin minioadmin && mc mb --ignore-existing e2/fireweed-e2'
-k -n "${NS}" wait --for=jsonpath='{.status.phase}'=Succeeded pod/fireweed-e2-mc --timeout "${TIMEOUT}"
-k -n "${NS}" logs fireweed-e2-mc
+k -n "${NS}" rollout status deploy/fireweed-e2-rustfs --timeout "${TIMEOUT}"
+# Create the bucket and prove native conditional writes on the shared endpoint itself.
+start_pf svc/fireweed-e2-rustfs "${S3_PORT}" 9000
+FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" FIREWEED_S3_TEST_BUCKET="fireweed-e2" \
+FIREWEED_S3_TEST_ACCESS_KEY="${S3_ACCESS_KEY}" FIREWEED_S3_TEST_SECRET_KEY="${S3_SECRET_KEY}" \
+  python3 "${ROOT}/scripts/ci/s3-native-cas-preflight.py" --json-out "${RUN_DIR}/s3-cas-preflight.json" \
+  || die "shared RustFS failed the two-writer CAS preflight"
+stop_pf
 
-k -n "${NS}" create secret generic fireweed-objectlog-s3 --from-literal=access-key-id=minioadmin --from-literal=secret-access-key=minioadmin
+k -n "${NS}" create secret generic fireweed-objectlog-s3 --from-literal=access-key-id="${S3_ACCESS_KEY}" --from-literal=secret-access-key="${S3_SECRET_KEY}"
 k -n "${NS}" create secret generic fireweed-control-plane \
   --from-literal=database-url='postgres://fireweed:fireweed@fireweed-e2-postgres:5432/fireweed?sslmode=disable'
 
@@ -237,7 +248,7 @@ helm upgrade --install fireweed "${CHART}" --kube-context "kind-${CLUSTER}" -n "
   -f "${CHART}/values-shared-s3.yaml" \
   --set fullnameOverride=fireweed --set image.repository="${REPO}" --set image.tag="${TAG}" \
   --set image.pullPolicy=IfNotPresent --set bootstrap.queues[0]=t1:q1 \
-  --set storage.log.objectLog.s3.endpoint=http://fireweed-e2-minio:9000 \
+  --set storage.log.objectLog.s3.endpoint=http://fireweed-e2-rustfs:9000 \
   --set storage.log.objectLog.s3.bucket=fireweed-e2 \
   --set storage.log.objectLog.s3.allowInsecureHttp=true --wait --timeout "${TIMEOUT}"
 k -n "${NS}" rollout status deploy/fireweed --timeout "${TIMEOUT}"
@@ -297,12 +308,13 @@ stop_pf
 start_pf svc/fireweed-e2-postgres "${PG_PORT}" 5432
 PG_PF="${PF_PID}"; PF_PID=""
 kubectl --context "kind-${CLUSTER}" -n "${NS}" port-forward \
-  svc/fireweed-e2-minio "${S3_PORT}:9000" >"${RUN_DIR}/s3-port-forward.log" 2>&1 & S3_PF=$!
+  svc/fireweed-e2-rustfs "${S3_PORT}:9000" >"${RUN_DIR}/s3-port-forward.log" 2>&1 & S3_PF=$!
 trap 'kill "${PG_PF:-}" "${S3_PF:-}" 2>/dev/null || true; cleanup' EXIT
 sleep 2
 FIREWEED_PG_TEST_URL="postgres://fireweed:fireweed@127.0.0.1:${PG_PORT}/fireweed?sslmode=disable" \
 FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" \
 FIREWEED_S3_TEST_BUCKET="fireweed-e2" \
+FIREWEED_S3_TEST_ACCESS_KEY="${S3_ACCESS_KEY}" FIREWEED_S3_TEST_SECRET_KEY="${S3_SECRET_KEY}" \
   cargo test -p fireweed-server --test objectlog_shared_ownership \
   stale_append_paused_before_authority_cannot_survive_handoff -- --nocapture \
   2>&1 | tee "${RUN_DIR}/stale-handoff.log" || {
@@ -315,6 +327,7 @@ FIREWEED_S3_TEST_BUCKET="fireweed-e2" \
   }
 FIREWEED_PG_TEST_URL="postgres://fireweed:fireweed@127.0.0.1:${PG_PORT}/fireweed?sslmode=disable" \
 FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" FIREWEED_S3_TEST_BUCKET="fireweed-e2" \
+FIREWEED_S3_TEST_ACCESS_KEY="${S3_ACCESS_KEY}" FIREWEED_S3_TEST_SECRET_KEY="${S3_SECRET_KEY}" \
   cargo test -p fireweed-server --test objectlog_shared_ownership \
   greater_epoch_owner_hydrates_snapshot_tail_before_serving -- --nocapture 2>&1 | tee "${RUN_DIR}/snapshot-tail.log"
 grep -Fq 'greater_epoch_owner_hydrates_snapshot_tail_before_serving ... ok' "${RUN_DIR}/snapshot-tail.log" || \
@@ -330,13 +343,13 @@ row = {
  "evidence_id":"E2_FAILOVER","evidence_tier":"release","scale":"release",
  "backend_profile":"object_log_turso_projection","bars_met":True,"replicas":3,
  "image":${IMAGE@Q},"image_id":${IMAGE_ID@Q},"source_revision":${SOURCE_REV@Q},
- "chart_revision":${CHART_REV@Q},"postgres_image":${PG_IMAGE_REF@Q},"minio_image":${MINIO_IMAGE_REF@Q},
+ "chart_revision":${CHART_REV@Q},"postgres_image":${PG_IMAGE_REF@Q},"object_store_image":${RUSTFS_IMAGE_REF@Q},
  "old_owner_id":${OLD_OWNER@Q},"new_owner_id":${NEW_OWNER@Q},"old_epoch":int(${OLD_EPOCH@Q}),"new_epoch":int(${NEW_EPOCH@Q}),
  "stale_append_rejected_before_mutation":True,"snapshot_tail_recovered":True,
  "visible_items_before":int(${BEFORE@Q}),"visible_items_after":int(${AFTER@Q}),
  "lost_work":0,"double_leases":0,"corrupt_writes":0,"moved_count":1,"retry_count":1,"retry_succeeded":True,
  "moved_endpoint":${OWNER_IP@Q}+":8080",
- "topology":"kind: 3 fireweed pods; shared MinIO S3 object log; Postgres ownership; per-pod Turso projection",
+ "topology":"kind: 3 fireweed pods; shared RustFS S3 object log; Postgres ownership; per-pod Turso projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
  "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
  "exclusions":"density throughput managed-cloud S3/Postgres and the SP-06 modeled handoff profile; performance is covered by the separate E3 lane",

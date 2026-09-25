@@ -217,9 +217,7 @@ where
     T: Send,
 {
     match parse_cell(cell) {
-        Ok((log, _)) if matches!(log, "filesystem" | "s3") => {
-            fireweed_objectlog::block_on_objectlog_future(fut)
-        }
+        Ok(("filesystem" | "s3", _)) => fireweed_objectlog::block_on_objectlog_future(fut),
         Ok((_, "turso")) => fireweed_objectlog::block_on_objectlog_future(fut),
         _ => futures::executor::block_on(fut),
     }

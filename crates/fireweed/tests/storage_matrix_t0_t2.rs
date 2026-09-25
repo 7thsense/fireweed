@@ -22,8 +22,10 @@ static FIXTURE_ORDINAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogAxis {
+    #[allow(dead_code)] // Retired cell; the public matrix is s3 × turso.
     Memory,
     Postgres,
+    #[allow(dead_code)] // Retired cell; the public matrix is s3 × turso.
     Filesystem,
     S3,
 }
@@ -177,10 +179,6 @@ impl Drop for FixtureRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
-}
-
-fn segments() -> SegmentConfig {
-    SegmentConfig::new(1024 * 1024, 5).expect("valid segments")
 }
 
 fn queue_definition(queue_slug: &str) -> QueueDefinition {
@@ -677,7 +675,6 @@ async fn storage_matrix_t0_t2_all_twelve_cells() {
     let mut class_a = 0usize;
     let mut class_b = 0usize;
     let mut local_turso_ran = 0usize;
-    let mut local_turso_skipped = 0usize;
 
     for cell in cells {
         if cell.is_class_a() {
@@ -691,9 +688,6 @@ async fn storage_matrix_t0_t2_all_twelve_cells() {
             && !cell.needs_live_s3();
         if skip_reason(cell).is_some() {
             skipped += 1;
-            if is_local_turso {
-                local_turso_skipped += 1;
-            }
             // Still invoke so skip is eprintln'd consistently and the cell is "registered".
             run_cell_t0_t2(cell).await;
             continue;
@@ -912,7 +906,7 @@ async fn run_filesystem_cell_t0_t3(cell: MatrixCell) {
 /// `storage_matrix_t0_t2_all_twelve_cells`.
 #[tokio::test]
 async fn s3_log_three_cells_t0_t3_contract() {
-    let root = FixtureRoot::new("retired-s3-pairs");
+    let _root = FixtureRoot::new("retired-s3-pairs");
     for projection in [ProjectionAxis::Memory, ProjectionAxis::Postgres] {
         let mut cfg = StorageConfig::memory();
         cfg.log = LogConfig::S3 {

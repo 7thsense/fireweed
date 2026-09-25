@@ -44,7 +44,9 @@ pub struct FailoverEvidence {
     pub source_revision: String,
     pub chart_revision: String,
     pub postgres_image: String,
-    pub minio_image: String,
+    /// Shared object-store image. Historical rows recorded the retired MinIO image as `minio_image`.
+    #[serde(alias = "minio_image")]
+    pub object_store_image: String,
     pub old_owner_id: String,
     pub new_owner_id: String,
     pub old_epoch: u64,
@@ -80,7 +82,7 @@ pub fn validate(row: &FailoverEvidence) -> Result<(), Vec<String>> {
         ("source_revision", row.source_revision.as_str()),
         ("chart_revision", row.chart_revision.as_str()),
         ("postgres_image", row.postgres_image.as_str()),
-        ("minio_image", row.minio_image.as_str()),
+        ("object_store_image", row.object_store_image.as_str()),
         ("old_owner_id", row.old_owner_id.as_str()),
         ("new_owner_id", row.new_owner_id.as_str()),
         ("moved_endpoint", row.moved_endpoint.as_str()),

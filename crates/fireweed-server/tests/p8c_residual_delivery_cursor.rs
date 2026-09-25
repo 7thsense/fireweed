@@ -140,19 +140,9 @@ fn kafka_sink() -> ChangeRecordSinkConfig {
     }
 }
 
-#[cfg_attr(feature = "external-kafka", allow(dead_code))]
-#[cfg(not(feature = "external-kafka"))]
-const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
-     the default in-process embedded surface needs no endpoint";
-
-fn pg_url() -> Option<String> {
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-            None
-        }
-    }
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 fn url_with_schema(url: &str, schema: &str) -> String {
@@ -191,25 +181,6 @@ async fn drop_schema(url: &str, schema: &str) {
         }
     })
     .await;
-}
-
-async fn redis_xadd(addr: std::net::SocketAddr) {
-    let client = redis::Client::open(format!("redis://{addr}")).expect("redis url");
-    let mut con = client
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::new()
-                .set_response_timeout(Some(Duration::from_secs(10))),
-        )
-        .await
-        .expect("redis connect");
-    let _: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(1)
-        .query_async(&mut con)
-        .await
-        .expect("XADD");
 }
 
 async fn smoke_embedded_cell(mut config: Config, cell: &str) {
@@ -281,10 +252,7 @@ async fn p8c_residual_class_b_delivery_mode_negatives_and_disabled() {
         .err()
         .expect("memory × memory is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
 
     // Enabled Embedded on Class B → durability rejection.
     let mut embedded = base_config(BackendSpec {
@@ -413,10 +381,7 @@ async fn p8c_residual_class_a_non_pg_embedded_delivery_smokes() {
 /// Postgres-axis Class A cells (env-gated): Embedded delivery smokes through Server lifecycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
     let _guard = RESIDUAL_SERVER_LOCK.lock().await;
 
     // postgres × memory
@@ -461,10 +426,7 @@ async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
             .err()
             .expect("postgres × turso is not a public cell");
         let text = err.to_string();
-        assert!(
-            text.contains("s3") || text.contains("retired"),
-            "{text}"
-        );
+        assert!(text.contains("s3") || text.contains("retired"), "{text}");
         let _ = std::fs::remove_file(&proj);
         drop_schema(&url, &schema).await;
     }
@@ -528,12 +490,9 @@ async fn p8c_residual_class_a_http_delivery_smoke_through_spawned_task() {
         .err()
         .expect("filesystem × memory is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     let _ = std::fs::remove_dir_all(&log_path);
-    let _ = acceptor;
+    acceptor.abort();
 }
 
 // ── Per-axis cursor lifecycle fixtures (synthetic durable-log, no catalog replay) ─
@@ -645,10 +604,7 @@ async fn p8c_residual_filesystem_log_cursor_lifecycle() {
 /// Postgres-log cursor lifecycle (env-gated; synthetic, cursor-store only).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8c_residual_postgres_log_cursor_lifecycle() {
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = pg_url();
     let schema = unique_tag("pg_cursor").replace('-', "_");
     create_schema(&url, &schema).await;
 

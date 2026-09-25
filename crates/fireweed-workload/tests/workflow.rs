@@ -2,7 +2,9 @@ use fireweed_workload::{Config, Profile};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_workflows_reach_exact_outcomes() {
-    for memory in [true, false] {
+    // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+    {
+        let memory = false;
         for profile in [Profile::Bulk, Profile::Mutable, Profile::Snorri] {
             let root = tempfile::tempdir().unwrap();
             let config = Config {
@@ -24,7 +26,9 @@ async fn public_workflows_reach_exact_outcomes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_primitives_settle_and_purge() {
-    for memory in [true, false] {
+    // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+    {
+        let memory = false;
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             memory,
@@ -57,7 +61,9 @@ async fn large_backlog_drains_in_priority_order() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retained_store_capacity_profile_reuses_keys() {
-    for memory in [true, false] {
+    // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+    {
+        let memory = false;
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             memory,
@@ -74,7 +80,9 @@ async fn retained_store_capacity_profile_reuses_keys() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn original_rows_recycle_across_shards_with_exact_fault_outcomes() {
-    for memory in [true, false] {
+    // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+    {
+        let memory = false;
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             memory,
@@ -133,7 +141,9 @@ async fn full_batches_recycle_original_rows_without_orphaned_leases() {
 // original recipient must survive overlapping loads, claims, retries and purge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_loaders_recycle_every_original_recipient() {
-    for memory in [true, false] {
+    // The memory store is retired (3a8d8270); only the public s3 × turso store remains.
+    {
+        let memory = false;
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             memory,

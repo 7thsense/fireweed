@@ -13,9 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use fireweed::{
-    ClaimRef, Clock, CommitEntry, CommitRequest, EngineResult, EntryOutcome, FinalizeKind,
-    LogConfig, NewItem, ProjectionStoreConfig, QueueDefinition, QueueKey, RecoveryPolicy,
-    RequestId, ResponseBarrier, SegmentConfig, StorageConfig, TenantId, UtcTimestamp, open,
+    ClaimRef, Clock, CommitEntry, CommitRequest, EngineResult, EntryOutcome, FinalizeKind, NewItem,
+    QueueDefinition, QueueKey, RequestId, SegmentConfig, StorageConfig, TenantId, UtcTimestamp,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, Metadata, MetadataValue, OrderingMode, PriorityDirection,

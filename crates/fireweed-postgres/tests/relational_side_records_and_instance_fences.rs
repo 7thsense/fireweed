@@ -88,10 +88,8 @@ fn read_instance_fence(url: &str, schema: &str, instance_key: &[u8]) -> Option<i
 
 #[test]
 fn write_side_records_and_advance_instance_fence_persist_and_survive_reconnect() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let shard = qkey();
 

@@ -1,6 +1,5 @@
 use fireweed::*;
 use fireweed_workload::*;
-use std::path::Path;
 use std::time::Duration;
 
 fn durable_commit(claim: ClaimRef) -> CommitRequest {
@@ -62,20 +61,6 @@ fn acknowledged_child() {
     });
 }
 
-fn copy_tree(source: &Path, target: &Path) {
-    std::fs::create_dir_all(target).unwrap();
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        let dst = target.join(entry.file_name());
-        if path.is_dir() {
-            copy_tree(&path, &dst);
-        } else {
-            std::fs::copy(path, dst).unwrap();
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn acknowledged_log_rebuild_preserves_ids_payloads_leases_and_receipts() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -96,13 +81,14 @@ async fn acknowledged_log_rebuild_preserves_ids_payloads_leases_and_receipts() {
                 .unwrap();
         let expected: Vec<ItemId> = serde_json::from_value(oracle["ids"].clone()).unwrap();
         let original_claim: ClaimRef = serde_json::from_value(oracle["claim"].clone()).unwrap();
-        // Crash-loss: the child exited without dropping Fireweed, and only the
-        // log is copied. This is RecoveryAction-on-open, not a live
-        // ProjectionLifecycle substitute.
+        // Crash-loss: the child exited without dropping Fireweed. Only its S3 log
+        // survives; reopen that log with an empty projection directory. This is
+        // RecoveryAction-on-open, not a live ProjectionLifecycle substitute.
         let rebuilt = tempfile::tempdir().unwrap();
-        copy_tree(&original.path().join("log"), &rebuilt.path().join("log"));
         let clock = TestClock::at(200);
-        let fw = open_store(rebuilt.path(), false, clock.clone()).unwrap();
+        let fw =
+            open_store_with_projection_root(original.path(), false, clock.clone(), rebuilt.path())
+                .unwrap();
         let q = create_queue(&fw, "recovery").await.unwrap();
         let replay = fw
             .push_batch_with_request_id(
@@ -283,10 +269,12 @@ async fn original_row_enrichments_and_outcomes_rebuild_from_log_alone() {
                 .unwrap();
         let ids: Vec<ItemId> = serde_json::from_value(oracle["ids"].clone()).unwrap();
         let remaining: Vec<ItemId> = serde_json::from_value(oracle["remaining"].clone()).unwrap();
+        // Rebuild from the S3 log alone into an empty projection directory.
         let rebuilt = tempfile::tempdir().unwrap();
-        copy_tree(&original.path().join("log"), &rebuilt.path().join("log"));
         let clock = TestClock::at(200);
-        let fw = open_store(rebuilt.path(), false, clock.clone()).unwrap();
+        let fw =
+            open_store_with_projection_root(original.path(), false, clock.clone(), rebuilt.path())
+                .unwrap();
         let q = create_queue(&fw, "basic-recovery").await.unwrap();
         let m = fw.metrics(&q).await.unwrap();
         assert_eq!((m.pending, m.leased, m.complete, m.failed), (0, 40, 16, 8));

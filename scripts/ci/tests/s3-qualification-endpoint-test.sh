@@ -11,12 +11,9 @@ MANIFEST="$REPO_ROOT/docs/helix/04-build/storage-authority-manifest.json"
 
 SECRET_DIR=$(mktemp -d /tmp/fireweed-s3-secrets-test-XXXXXX)
 export FIREWEED_S3_SECRET_DIR="$SECRET_DIR"
-CONTAINER_NAME="fireweed-s3-qual-test-$$"
-export FIREWEED_S3_QUAL_CONTAINER="$CONTAINER_NAME"
 
 cleanup() {
   bash "$QUAL" teardown >/dev/null 2>&1 || true
-  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   rm -rf "$SECRET_DIR"
 }
 trap cleanup EXIT
@@ -27,7 +24,7 @@ pass() { echo "PASS: $*"; }
 echo "=== s3-qualification-endpoint contract tests ==="
 
 # ---------------------------------------------------------------------------
-# Static contracts (no docker required beyond later live section)
+# Static contracts (no network required before the live section)
 # ---------------------------------------------------------------------------
 [[ -x "$QUAL" || -f "$QUAL" ]] || fail "qualification script missing"
 [[ -f "$PREFLIGHT" ]] || fail "preflight script missing"
@@ -58,21 +55,21 @@ print("manifest capability + s3_fields + forbidden path: ok")
 PY
 pass "manifest capability schema consumed without edit"
 
-# Image pin constants present and digest-shaped.
-grep -q 'MINIO_IMAGE_DIGEST="sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"' "$QUAL" \
-  || fail "MinIO image digest pin missing or drifted"
-grep -q 'MINIO_IMAGE_TAG="quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z"' "$QUAL" \
-  || fail "official MinIO registry or release tag drifted"
-grep -q 'MINIO_IMAGE_PINNED="quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"' "$QUAL" \
-  || fail "official digest-pinned image form missing"
+# RustFS release pin constants present and checksum-shaped.
+grep -q 'RUSTFS_SHA256="c30a95b76546f25122c9ca387090ddb30c391ca5605621b0d7c881703c0f21c8"' "$QUAL" \
+  || fail "RustFS sha256 pin missing or drifted"
+grep -q 'RUSTFS_URL="https://github.com/rustfs/rustfs/releases/download/1.0.0/rustfs-linux-x86_64-musl-v1.0.0.zip"' "$QUAL" \
+  || fail "RustFS release URL drifted"
+grep -q 'RUSTFS_VERSION="1.0.0"' "$QUAL" || fail "RustFS version pin missing"
 grep -q 'S3-NATIVE-CAS-CAPABILITY-ATTESTATION' "$QUAL" || fail "capability id missing from script"
-pass "image digest pin + capability id constants"
+pass "release checksum pin + capability id constants"
 
-# Survey rejects Garage and names MinIO.
+# Survey rejects Garage, retires MinIO and names RustFS.
 SURVEY_OUT=$(bash "$QUAL" survey)
 echo "$SURVEY_OUT" | grep -q 'Garage v2.2.0' || fail "survey missing Garage candidate"
 echo "$SURVEY_OUT" | grep -q 'REJECTED' || fail "survey must reject Garage"
-echo "$SURVEY_OUT" | grep -q 'Hermetic MinIO' || fail "survey missing MinIO candidate"
+echo "$SURVEY_OUT" | grep -q 'Hermetic RustFS' || fail "survey missing RustFS candidate"
+echo "$SURVEY_OUT" | grep -q 'RETIRED' || fail "survey must retire MinIO"
 echo "$SURVEY_OUT" | grep -q 'S3-NATIVE-CAS-CAPABILITY-ATTESTATION' || fail "survey missing capability id"
 pass "survey candidates"
 
@@ -95,9 +92,7 @@ pass "refuses in-repo secret directory"
 # ---------------------------------------------------------------------------
 # Live provision → two-writer CAS preflight → attestation → teardown
 # ---------------------------------------------------------------------------
-if ! command -v docker >/dev/null 2>&1; then
-  fail "docker is required for live P1s qualification"
-fi
+command -v curl >/dev/null 2>&1 || fail "curl is required for live P1s qualification"
 
 echo "--- live provision + CAS preflight ---"
 bash "$QUAL" provision
@@ -129,7 +124,8 @@ for k in ("FIREWEED_S3_TEST_ACCESS_KEY", "FIREWEED_S3_TEST_SECRET_KEY"):
 assert doc["capability_id"] == "S3-NATIVE-CAS-CAPABILITY-ATTESTATION"
 assert doc["plan_key"] == "P1s"
 assert doc["bead_id"] == "fireweed-f5fa7380"
-assert doc["s3"]["provider"] == "minio"
+assert doc["s3"]["provider"] == "rustfs"
+assert doc["s3"]["artifact_sha256"] == "c30a95b76546f25122c9ca387090ddb30c391ca5605621b0d7c881703c0f21c8"
 assert doc["s3"]["native_atomic_conditional_create"] is True
 assert doc["s3"]["native_atomic_conditional_update"] is True
 assert doc["s3"]["bucket_ownership_acknowledgement"] == secrets["FIREWEED_S3_TEST_BUCKET"]
@@ -142,6 +138,7 @@ assert doc["preflight"]["sequential_create_only"]["second_status"] == 412
 assert doc["preflight"]["two_writer_create_only_race"]["winner_status"] in (200, 204)
 assert doc["results"]["selected"] is True
 assert any(c["provider"] == "garage" and c["selectable"] is False for c in doc["results"]["rejected_candidates"])
+assert any(c["provider"] == "minio" and c["selectable"] is False for c in doc["results"]["rejected_candidates"])
 print("attestation content + redaction: ok")
 PY
 pass "attestation keyed to approved capability id with redaction"
@@ -153,12 +150,13 @@ pass "verify-isolation post-provision"
 bash "$QUAL" preflight
 pass "repeat preflight from secret file"
 
-# Teardown must remove the container.
+# Teardown must stop the RustFS process and remove its data.
+pid=$(cat "$SECRET_DIR/state/pid")
 bash "$QUAL" teardown
-if docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" >/dev/null 2>&1; then
-  running=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")
-  [[ "$running" != "true" ]] || fail "container still running after teardown"
+if kill -0 "$pid" 2>/dev/null && grep -q rustfs "/proc/${pid}/cmdline" 2>/dev/null; then
+  fail "RustFS pid ${pid} still running after teardown"
 fi
+[[ ! -e "$SECRET_DIR/state/data" ]] || fail "RustFS data dir left behind after teardown"
 pass "bounded teardown"
 
 echo "=== all s3-qualification-endpoint contract tests passed ==="

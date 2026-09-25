@@ -56,55 +56,20 @@ fn unique_tag(tag: &str) -> String {
     )
 }
 
-fn require_s3() -> Option<(String, String, String, String, String)> {
-    let endpoint = match std::env::var("FIREWEED_S3_TEST_ENDPOINT") {
-        Ok(value) if !value.is_empty() => value,
-        _ => {
-            eprintln!(
-                "SKIP: FIREWEED_S3_TEST_ENDPOINT is required for live S3 setup; not a product S3 dispatch failure"
-            );
-            return None;
-        }
-    };
-    let Some(bucket) = std::env::var("FIREWEED_S3_TEST_BUCKET")
-        .ok()
-        .filter(|value| !value.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_S3_TEST_BUCKET is required for live S3 setup; not a product S3 dispatch failure"
-        );
-        return None;
-    };
-    let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
-    let Some(access) = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-        .ok()
-        .filter(|value| !value.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_S3_TEST_ACCESS_KEY is required for live S3 setup; not a product S3 dispatch failure"
-        );
-        return None;
-    };
-    let Some(secret) = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-        .ok()
-        .filter(|value| !value.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_S3_TEST_SECRET_KEY is required for live S3 setup; not a product S3 dispatch failure"
-        );
-        return None;
-    };
-    Some((endpoint, bucket, region, access, secret))
+fn require_s3() -> (String, String, String, String, String) {
+    let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT")
+        .expect("FIREWEED_S3_TEST_ENDPOINT required for P8cs (fail-closed live S3; no LOUD skip)");
+    let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").expect("FIREWEED_S3_TEST_BUCKET");
+    let region =
+        std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("FIREWEED_S3_TEST_ACCESS_KEY");
+    let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("FIREWEED_S3_TEST_SECRET_KEY");
+    (endpoint, bucket, region, access, secret)
 }
 
-fn pg_url() -> Option<String> {
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-            None
-        }
-    }
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required for P8cs s3×postgres (fail-closed; no LOUD skip)")
 }
 
 fn url_with_schema(url: &str, schema: &str) -> String {
@@ -308,9 +273,7 @@ fn p8cs_delivery_mode_resolution_matrix() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_log_cursor_lifecycle_native_cas() {
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
+    let (endpoint, bucket, region, access, secret) = require_s3();
     let tag = unique_tag("log-cursor");
     let data_prefix = format!("fwlog-{tag}/");
     let meta_prefix = format!("fwmeta-{tag}/");
@@ -433,9 +396,7 @@ async fn smoke_s3_embedded_cell(mut config: Config, cell: &str, stream: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_memory_embedded_emitter_lifecycle() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
+    let (endpoint, bucket, region, access, secret) = require_s3();
     let def = qdef_named("p8cs", &unique_tag("mem"));
     let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
     let config = base_config(
@@ -454,13 +415,8 @@ async fn p8cs_s3_memory_embedded_emitter_lifecycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_postgres_embedded_emitter_lifecycle() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let (endpoint, bucket, region, access, secret) = require_s3();
+    let url = pg_url();
     let schema = unique_tag("s3_pg").replace('-', "_");
     create_schema(&url, &schema).await;
     let def = qdef_named("p8cs", &unique_tag("pg"));
@@ -504,55 +460,14 @@ async fn p8cs_s3_memory_http_delivery_smoke_through_spawned_task() {
     .err()
     .expect("s3 × memory is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
-    return;
-    let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let acceptor = tokio::spawn(accept_one_http_ok(listener));
-
-    let def = qdef_named("p8cs", &unique_tag("http"));
-    let stream = format!("{}:{}", def.tenant_id.as_str(), def.queue_id.as_str());
-    let mut config = base_config(
-        BackendSpec {
-            log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
-        },
-        vec![def],
-    );
-    config.change_record_sink = http_sink(port);
-    let server = start(config)
-        .await
-        .expect("s3×memory HTTP delivery must start");
-    redis_xadd(server.addr(), &stream).await;
-
-    tokio::time::timeout(Duration::from_secs(10), acceptor)
-        .await
-        .expect("HTTP sink must receive at least one delivery from the spawned emitter")
-        .expect("acceptor join");
-
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_postgres_http_delivery_smoke_through_spawned_task() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let (endpoint, bucket, region, access, secret) = require_s3();
+    let url = pg_url();
     let schema = unique_tag("s3_http_pg").replace('-', "_");
     create_schema(&url, &schema).await;
 
@@ -598,9 +513,7 @@ async fn p8cs_external_kafka_feature_off_rejects_s3_class_a() {
     }
     #[cfg(not(feature = "external-kafka"))]
     {
-        let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
+        let (endpoint, bucket, region, access, secret) = require_s3();
         let mut config = base_config(
             BackendSpec {
                 log: s3_log_spec(&endpoint, &bucket, &region, &access, &secret),
@@ -630,9 +543,7 @@ async fn p8cs_external_kafka_feature_off_rejects_s3_class_a() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
+    let (endpoint, bucket, region, access, secret) = require_s3();
 
     // Opt-out: enabled sink + emit_change_records=false still starts (no emitter work).
     let mut opted_out = qdef_named("p8cs", &unique_tag("opt"));
@@ -752,13 +663,8 @@ async fn p8cs_s3_memory_opt_out_isolation_and_reap_coupling() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8cs_s3_postgres_cursor_failover_resume() {
     let _guard = P8CS_SERVER_LOCK.lock().await;
-    let Some((endpoint, bucket, region, access, secret)) = require_s3() else {
-        return;
-    };
-    let Some(url) = pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let (endpoint, bucket, region, access, secret) = require_s3();
+    let url = pg_url();
     let schema = unique_tag("s3_pg_cur").replace('-', "_");
     create_schema(&url, &schema).await;
     let scoped = url_with_schema(&url, &schema);

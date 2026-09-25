@@ -180,10 +180,8 @@ fn batch_resolution_is_one_statement_and_orders_present_and_missing_rows() {
 
 #[test]
 fn concurrent_reverse_order_batches_do_not_deadlock_or_shorten_leases() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let mut client = Client::connect(&url, NoTls).expect("connect");
     client
@@ -234,10 +232,8 @@ fn concurrent_reverse_order_batches_do_not_deadlock_or_shorten_leases() {
 
 #[test]
 fn expired_batch_renewal_racing_takeover_is_fenced_at_epoch_two() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let mut client = Client::connect(&url, NoTls).expect("connect");
     client
@@ -299,10 +295,8 @@ fn qk(q: &str) -> QueueKey {
 
 /// Run `body` against a fresh schema, or LOUD-skip when no live DB is configured.
 fn with_cp(_name: &str, body: impl FnOnce(PostgresControlPlane)) {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let mut c = Client::connect(&url, NoTls).expect("connect");
     c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -475,10 +469,8 @@ fn resolve_reports_deterministic_target_and_durable_epoch() {
 /// (two live writers at one epoch). Env-gated; LOUD-skips without a DB.
 #[test]
 fn genesis_concurrent_acquire_has_a_single_winner() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let mut c = Client::connect(&url, NoTls).expect("connect");
     c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))

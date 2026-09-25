@@ -66,7 +66,7 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minio
+  name: object-log-fixture
   labels:
     app.kubernetes.io/name: object-log-fixture
     app.kubernetes.io/part-of: fireweed-kind-smoke
@@ -116,7 +116,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio
+  name: object-log-fixture
   labels:
     app.kubernetes.io/name: object-log-fixture
     app.kubernetes.io/part-of: fireweed-kind-smoke

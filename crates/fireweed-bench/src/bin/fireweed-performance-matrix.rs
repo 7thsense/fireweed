@@ -257,11 +257,9 @@ where
     // Object-log products need the shared multi-thread reactor. Turso products also need a
     // reactor, but never nest a Tokio handle on the same thread as the sync postgres client
     // (Drop of postgres::Client panics with "runtime from within a runtime").
-    let route = parse_cell(cell).map(|(log, proj)| (log, proj));
+    let route = parse_cell(cell);
     match route {
-        Ok((log, _)) if matches!(log, "filesystem" | "s3") => {
-            fireweed_objectlog::block_on_objectlog_future(fut)
-        }
+        Ok(("filesystem" | "s3", _)) => fireweed_objectlog::block_on_objectlog_future(fut),
         Ok((_, "turso")) => fireweed_objectlog::block_on_objectlog_future(fut),
         _ => futures::executor::block_on(fut),
     }

@@ -11,6 +11,8 @@ mod async_product;
 mod async_projection_apply;
 pub mod commit_surface;
 pub mod compose_log;
+#[doc(hidden)]
+pub mod head_publish_pause;
 mod log_engine_store;
 pub mod maintenance;
 pub mod object_store_observability;
@@ -25,8 +27,8 @@ mod recovery_stats;
 mod request_id_probe;
 mod s3_create_only;
 pub use s3_create_only::S3CreateOnlyPut;
-pub mod test_minio;
-pub use test_minio::{S3TestEnv, shared_s3_test_env};
+pub mod test_s3;
+pub use test_s3::{S3TestEnv, shared_s3_test_env};
 mod segment_config;
 pub mod storage_generation;
 

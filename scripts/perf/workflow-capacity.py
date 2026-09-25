@@ -101,9 +101,9 @@ def file_attributes(root):
     return {"available": True, "exit_code": result.returncode,
             "stdout": result.stdout, "stderr": result.stderr}
 
-minio_data = repo / "target" / "minio-data"
-minio_data.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("FIREWEED_MINIO_DATA", str(minio_data))
+rustfs_data = repo / "target" / "rustfs-data"
+rustfs_data.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("FIREWEED_RUSTFS_DATA", str(rustfs_data))
 
 with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     started = time.monotonic()
@@ -132,7 +132,7 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         ) if key in os.environ},
         "runtime_configuration": {
             "OBJECT_LOG_FLUSH_RUNTIME_THREADS": os.environ.get("OBJECT_LOG_FLUSH_RUNTIME_THREADS"),
-            "FIREWEED_MINIO_DATA": os.environ.get("FIREWEED_MINIO_DATA"),
+            "FIREWEED_RUSTFS_DATA": os.environ.get("FIREWEED_RUSTFS_DATA"),
         },
         "filesystem": mount,
         "storage": storage_usage(data_root),

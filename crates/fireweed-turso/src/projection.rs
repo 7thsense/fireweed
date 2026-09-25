@@ -4834,7 +4834,7 @@ mod committed_pool_helper_tests {
             expected_epoch: Some(1),
 
             request_id: None,
-};
+        };
         let grouped = PreparedClaimedResult::from_rendered(&request, &ids, items.clone(), None)
             .expect("grouped retained")
             .into_claimed();

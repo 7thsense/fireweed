@@ -19,7 +19,6 @@ use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_engine::QueueKey;
 use fireweed_server::{
     BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, ResponseBarrierSpec,
     resolve_postgres_log, start,
@@ -69,11 +68,6 @@ fn qdef_named(queue_id: &str) -> QueueDefinition {
         typed_indexes: vec![],
         emit_change_records: true,
     }
-}
-
-fn append_query_parameter(url: &str, parameter: &str) -> String {
-    let separator = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{separator}{parameter}")
 }
 
 /// The `Backend::PostgresNative` variant is selectable and a `Config` carrying it is constructible without
@@ -250,9 +244,7 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
     .await
     .expect("start() must not hang on a refused postgres connection");
 
-    let err = result
-        .err()
-        .expect("postgres × memory must not start");
+    let err = result.err().expect("postgres × memory must not start");
     let text = err.to_string();
     assert!(
         text.contains("s3") || text.contains("retired"),
@@ -277,227 +269,7 @@ async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_slee
     .err()
     .expect("postgres is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
-    return;
-    let Ok(base_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let schema = format!("fireweed_pool_0b249abb_{}_{}", std::process::id(), unique);
-    let application_name = format!("fireweed_pool_0b249abb_{}", std::process::id());
-    let pool_size = 2usize;
-    let queue_a = "pool_a";
-    let queue_a_key = QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new(queue_a).unwrap());
-    let queue_b = (0..100)
-        .map(|index| format!("pool_b_{index}"))
-        .find(|candidate| {
-            let key = QueueKey::new(
-                TenantId::new("t1").unwrap(),
-                QueueId::new(candidate).unwrap(),
-            );
-            fireweed_engine::queue_worker_partition(&key, pool_size)
-                != fireweed_engine::queue_worker_partition(&queue_a_key, pool_size)
-        })
-        .expect("two queue keys must cover both pool members");
-
-    let observer_url = base_url.clone();
-    let create_schema = schema.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut observer =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(observer_url))
-                .expect("connect postgres observer");
-        observer
-            .batch_execute(&format!("CREATE SCHEMA {create_schema}"))
-            .expect("create isolated pool schema");
-    })
-    .await
-    .unwrap();
-
-    let pool_url = append_query_parameter(
-        &append_query_parameter(&base_url, &format!("options=-csearch_path%3D{schema}")),
-        &format!("application_name={application_name}"),
-    );
-    let mut queues = vec![qdef_named(queue_a), qdef_named(&queue_b)];
-    queues.extend((0..62).map(|index| qdef_named(&format!("density_{index}"))));
-    let mut config = Config::new(
-        pg_spec(pool_url, None),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        queues,
-    );
-    config.postgres_pool_size = pool_size;
-    let server = start(config)
-        .await
-        .expect("one pooled postgres production server starts");
-
-    let setup_url = base_url.clone();
-    let setup_schema = schema.clone();
-    let setup_application = application_name.clone();
-    let setup_a = queue_a.to_string();
-    let setup_b = queue_b.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut observer =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(setup_url))
-                .expect("connect postgres observer");
-        let connections: i64 = observer
-            .query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
-                &[&setup_application],
-            )
-            .expect("count production pool connections")
-            .get(0);
-        assert_eq!(connections as usize, pool_size);
-        observer
-            .batch_execute(&format!(
-                "SET search_path TO {setup_schema};
-                 CREATE TABLE pool_hold(queue_id TEXT PRIMARY KEY);
-                 INSERT INTO pool_hold(queue_id) VALUES('{setup_a}');
-                 CREATE FUNCTION pool_sleep_gate() RETURNS trigger LANGUAGE plpgsql AS $$
-                 BEGIN
-                   IF NEW.queue = '{setup_a}' THEN
-                     WHILE EXISTS (SELECT 1 FROM pool_hold WHERE queue_id = '{setup_a}') LOOP
-                       PERFORM pg_sleep(0.01);
-                     END LOOP;
-                   ELSIF NEW.queue = '{setup_b}' THEN
-                     DELETE FROM pool_hold WHERE queue_id = '{setup_a}';
-                   END IF;
-                   RETURN NEW;
-                 END $$;
-                 CREATE TRIGGER pool_sleep_gate BEFORE INSERT ON log_entries
-                   FOR EACH ROW EXECUTE FUNCTION pool_sleep_gate();"
-            ))
-            .expect("install causal pg_sleep gate");
-    })
-    .await
-    .unwrap();
-
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut a_connection = client.get_multiplexed_async_connection().await.unwrap();
-    let a_stream = format!("t1:{queue_a}");
-    let a_push = tokio::spawn(async move {
-        redis::cmd("XADD")
-            .arg(a_stream)
-            .arg("*")
-            .arg("priority")
-            .arg(1)
-            .query_async::<String>(&mut a_connection)
-            .await
-    });
-
-    let wait_url = base_url.clone();
-    let wait_application = application_name.clone();
-    let a_reached_sleep = tokio::task::spawn_blocking(move || {
-        let mut observer =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(wait_url))
-                .expect("connect postgres observer");
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            let sleeping: bool = observer
-                .query_one(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
-                     WHERE application_name=$1 AND wait_event='PgSleep')",
-                    &[&wait_application],
-                )
-                .expect("observe pg_sleep")
-                .get(0);
-            if sleeping {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
-    })
-    .await
-    .unwrap();
-    if !a_reached_sleep {
-        let release_url = base_url.clone();
-        let release_schema = schema.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut observer = fireweed_postgres::connect(
-                fireweed_postgres::PostgresConnectConfig::new(release_url),
-            )
-            .expect("connect precondition cleanup observer");
-            observer
-                .batch_execute(&format!(
-                    "DELETE FROM {release_schema}.pool_hold WHERE queue_id='{queue_a}'"
-                ))
-                .expect("release failed precondition gate");
-        })
-        .await
-        .unwrap();
-        server.shutdown_and_drain(Duration::from_secs(10)).await;
-        panic!("queue A never reached the production connection's pg_sleep gate");
-    }
-
-    let mut b_connection = client.get_multiplexed_async_connection().await.unwrap();
-    let b_stream = format!("t1:{queue_b}");
-    let b_push = tokio::spawn(async move {
-        redis::cmd("XADD")
-            .arg(b_stream)
-            .arg("*")
-            .arg("priority")
-            .arg(2)
-            .query_async::<String>(&mut b_connection)
-            .await
-    });
-    // B's trigger deletes the row that keeps A sleeping. Neither request can finish unless the one
-    // production wrapper actually drives both fixed pool connections concurrently.
-    let causal_result = tokio::time::timeout(Duration::from_secs(30), async {
-        b_push.await.unwrap().expect("queue B push");
-        a_push.await.unwrap().expect("queue A push after B release");
-    })
-    .await;
-    if causal_result.is_err() {
-        // Release the database-side gate before failing so an implementation regression cannot strand a
-        // sleeping sync driver or make later tests inherit an orphaned accepted mutation.
-        let release_url = base_url.clone();
-        let release_schema = schema.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut observer = fireweed_postgres::connect(
-                fireweed_postgres::PostgresConnectConfig::new(release_url),
-            )
-            .expect("connect cleanup observer");
-            observer
-                .batch_execute(&format!(
-                    "DELETE FROM {release_schema}.pool_hold WHERE queue_id='{queue_a}'"
-                ))
-                .expect("release failed causal gate");
-        })
-        .await
-        .unwrap();
-        server.shutdown_and_drain(Duration::from_secs(10)).await;
-        panic!("causal pool proof deadlocked");
-    }
-
-    let count_url = base_url.clone();
-    let count_application = application_name.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut observer =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(count_url))
-                .expect("connect postgres observer");
-        let connections: i64 = observer
-            .query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
-                &[&count_application],
-            )
-            .expect("recount production pool connections")
-            .get(0);
-        assert_eq!(connections as usize, pool_size);
-    })
-    .await
-    .unwrap();
-
-    server.shutdown_and_drain(Duration::from_secs(10)).await;
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
 }
 
 /// Live smoke: env-gated on `FIREWEED_PG_TEST_URL`. Boots the server over `Backend::PostgresNative` and drives
@@ -515,95 +287,5 @@ async fn postgres_native_live_push_claim_ack_over_resp() {
     .err()
     .expect("postgres is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
-    return;
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
-    // A unique search_path so reruns and parallel suites never collide on the shared queue tables.
-    let schema = format!("fireweed_native_{}", std::process::id());
-    let url = if url.contains("?options=") || url.contains("&options=") {
-        url
-    } else if url.contains('?') {
-        format!("{url}&options=-csearch_path%3D{schema}")
-    } else {
-        format!("{url}?options=-csearch_path%3D{schema}")
-    };
-    // Pre-create the schema so the connection's `SET search_path` target exists.
-    {
-        let create = url.clone();
-        let schema = schema.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut client =
-                fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(create))
-                    .expect("connect to create schema");
-            client
-                .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
-                .expect("create schema");
-        })
-        .await
-        .unwrap();
-    }
-
-    let server = start(Config::new(
-        pg_spec(url.clone(), None),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .expect("postgres_native server starts against a live DB");
-
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-
-    let produced: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(7)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-
-    let reply: redis::streams::StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(reply.keys[0].ids.len(), 1, "claim returns the pushed item");
-    assert_eq!(reply.keys[0].ids[0].id, produced);
-
-    let acked: i64 = redis::cmd("XACK")
-        .arg("t1:q1")
-        .arg("g")
-        .arg(&produced)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(acked, 1, "ack finalizes the claimed item");
-
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-
-    // Best-effort cleanup of the test schema.
-    let drop_url = url.clone();
-    let drop_schema = schema.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(drop_url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {drop_schema} CASCADE;"));
-        }
-    })
-    .await;
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
 }

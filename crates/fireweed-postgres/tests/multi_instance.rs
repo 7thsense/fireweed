@@ -58,10 +58,8 @@ fn fresh_schema() -> String {
 
 #[test]
 fn two_instances_compete_over_shared_postgres() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let mut c = Client::connect(&url, NoTls).expect("connect");
     c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -147,10 +145,8 @@ fn two_instances_compete_over_shared_postgres() {
 /// durable epoch fence — the complete production multi-instance guarantee.
 #[test]
 fn relational_multi_instance_has_item_visibility_and_fence() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let mut c = Client::connect(&url, NoTls).expect("connect");
     c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))

@@ -6,11 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, ClientItemKey,
-    EligibilityPolicy, Fireweed, LogConfig, NewItem, ObjectLogAuthority, ObjectLogRuntimeConfig,
+    EligibilityPolicy, Fireweed, NewItem, ObjectLogAuthority, ObjectLogRuntimeConfig,
     ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, ProjectionConfig, ProjectionStoreConfig, QueueDefinition,
-    QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
-    SegmentConfig, StorageConfig, SystemClock, TenantId, WorkerId, open, open_product,
+    PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition, QueueId, QueueKey,
+    RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SegmentConfig,
+    SystemClock, TenantId, WorkerId, open_product,
 };
 
 fn queue_definition() -> QueueDefinition {

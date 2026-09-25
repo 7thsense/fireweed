@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{
     AsyncProjectionSpec, CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig,
     ComposedStorageConfig, CreateQueue, EligibilityPolicy, EngineError, ObjectLogAuthorityConfig,
@@ -18,7 +19,6 @@ use fireweed::{
     QueueCreationPolicy, QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RetryPolicy,
     SecretValue, SegmentSettings, TenantId,
 };
-use crate::ManualClock;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())

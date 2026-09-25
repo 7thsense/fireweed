@@ -569,7 +569,7 @@ async fn atomic_turso_concurrent_batch_updates_retain_success_and_conflict_recei
     let live = fw.live_item(&q, key).await.unwrap().unwrap();
     assert_eq!(live.item_id, id);
     assert!(
-        live.item_version >= version + 1,
+        live.item_version > version,
         "winner must increment version, got {}",
         live.item_version
     );

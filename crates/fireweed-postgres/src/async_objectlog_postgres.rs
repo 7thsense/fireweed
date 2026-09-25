@@ -2038,10 +2038,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_projection_both_barriers_and_ordered_watermark_catch_up() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
         let (strict_schema, strict_root) = fixture("strict");
         let strict = open(&url, &strict_schema, &strict_root, None).await;
@@ -2096,10 +2094,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_projection_common_bounds_and_poison_fail_closed() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
         let cases = [
             (
@@ -2194,10 +2190,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_projection_reopen_resumes_transactional_cursor_without_duplicates() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let (schema, root) = fixture("reopen");
         let backend = open(&url, &schema, &root, Some(spec())).await;
         let shard = create(&backend).await;
@@ -2247,10 +2241,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn all_async_products_preserve_ambiguous_durable_reservations() {
-        let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let (schema, root) = fixture("s3f-poison");
         let backend = open(&url, &schema, &root, Some(spec())).await;
         let shard = create(&backend).await;

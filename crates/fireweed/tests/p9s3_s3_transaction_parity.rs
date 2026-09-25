@@ -49,14 +49,9 @@ fn require_s3_env() -> (String, String, String, String, String) {
     (endpoint, bucket, region, access, secret)
 }
 
-fn require_pg_url() -> Option<String> {
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-            None
-        }
-    }
+fn require_pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required for P9S3 s3×postgres (zero skips)")
 }
 
 fn load_attestation() -> Value {
@@ -237,10 +232,7 @@ async fn s3_turso_strict_p9_transaction_parity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_postgres_strict_p9_transaction_parity() {
     require_p1s_native_cas_provenance();
-    let Some(pg) = require_pg_url() else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let pg = require_pg_url();
     let ns = unique_ns("s3-postgres");
     let config = s3_log_config(
         ns,

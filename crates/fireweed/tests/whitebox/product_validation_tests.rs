@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use crate::ManualClock;
 use bytes::Bytes;
 use fireweed::{
     ActiveScope, AuthContext, ClaimCompatibility, ClaimRef, ClientItemKey, CommitEntry,
@@ -39,7 +40,6 @@ use fireweed_core::{
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::QueueKey;
-use crate::ManualClock;
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -47,10 +47,7 @@ use crate::ManualClock;
 
 /// A fresh in-memory single-node deployment + a manual clock (so a workflow can advance wall-clock time
 /// deterministically). Returns the handle and the clock.
-fn deployment() -> (
-    RuntimeCore<crate::TursoMemoryBackend>,
-    Arc<ManualClock>,
-) {
+fn deployment() -> (RuntimeCore<crate::TursoMemoryBackend>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), clock.clone());
     (fireweed, clock)
@@ -600,7 +597,10 @@ async fn scheduled_action_delivery_e2e() {
     let _ = std::fs::remove_dir_all(&dir);
     let object_clock = Arc::new(ManualClock::at(0));
     let objectlog = RuntimeCore::new(
-        Arc::new(crate::open_objectlog_turso_files(&dir, &dir.join("projection.turso"))),
+        Arc::new(crate::open_objectlog_turso_files(
+            &dir,
+            &dir.join("projection.turso"),
+        )),
         object_clock.clone(),
     );
     let object = scheduled_batch_delivery_profile(&objectlog, object_clock, "sched-obj").await;
@@ -2491,7 +2491,10 @@ async fn worker_crash_recovery_e2e() {
     // ----- build durable state, then "crash" (drop the handle) -----
     let (complete_before, accounted_before) = {
         let fireweed = RuntimeCore::new(
-            Arc::new(crate::open_objectlog_turso_files(&dir, &dir.join("projection.turso"))),
+            Arc::new(crate::open_objectlog_turso_files(
+                &dir,
+                &dir.join("projection.turso"),
+            )),
             Arc::new(ManualClock::at(0)),
         );
         fireweed
@@ -2528,7 +2531,10 @@ async fn worker_crash_recovery_e2e() {
     let _ = std::fs::remove_dir_all(&fresh_dir);
     {
         let fresh = RuntimeCore::new(
-            Arc::new(crate::open_objectlog_turso_files(&fresh_dir, &fresh_dir.join("projection.turso"))),
+            Arc::new(crate::open_objectlog_turso_files(
+                &fresh_dir,
+                &fresh_dir.join("projection.turso"),
+            )),
             Arc::new(ManualClock::at(0)),
         );
         // The queue itself isn't known to a fresh backend (no create_queue command in its empty log).
@@ -2548,7 +2554,10 @@ async fn worker_crash_recovery_e2e() {
 
     // ----- RECOVERY: reopen the SAME on-disk log; the projection is rebuilt from disk -----
     let fireweed = RuntimeCore::new(
-        Arc::new(crate::open_objectlog_turso_files(&dir, &dir.join("projection.turso"))),
+        Arc::new(crate::open_objectlog_turso_files(
+            &dir,
+            &dir.join("projection.turso"),
+        )),
         Arc::new(ManualClock::at(0)),
     );
     let m = fireweed

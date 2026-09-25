@@ -49,8 +49,8 @@ use std::thread;
 use std::time::Instant;
 
 use fireweed::{
-    ConfigSecret, Fireweed, NewItem, PostgresMode, PostgresRuntimeConfig, open_memory,
-    open_objectlog, open_postgres_runtime,
+    ConfigSecret, Fireweed, NewItem, PostgresMode, PostgresRuntimeConfig, open_objectlog,
+    open_postgres_runtime, open_product,
 };
 use fireweed_core::{
     EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
@@ -212,7 +212,7 @@ fn measure_residency(
     batch: usize,
 ) -> ResidencyPoint {
     measure_residency_on(
-        || open_memory(Arc::new(SysClock)),
+        || open_product(Arc::new(SysClock)),
         density,
         cold_each,
         hot_items,
@@ -234,7 +234,7 @@ fn measure_hot_under_concurrent_load(
     hot_items: u64,
     batch: usize,
 ) -> (f64, f64, u64) {
-    let fireweed = Arc::new(open_memory(Arc::new(SysClock)));
+    let fireweed = Arc::new(open_product(Arc::new(SysClock)));
     futures::executor::block_on(async {
         for i in 0..cold {
             fireweed
@@ -608,15 +608,9 @@ fn queue_density_single_node_durable_tests() {
     // demonstrate the same shape holds on a third durable backend. The object_log and
     // filesystem_log_turso_projection substrates at 1000 above are the required deliverable; this is a
     // supporting, honestly-reduced point. Missing FIREWEED_PG_TEST_URL is a hard failure (no LOUD skip).
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
-        eprintln!(
-            "SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
+        "FIREWEED_PG_TEST_URL required for postgres durable density point (fail-closed live postgres; no LOUD skip)",
+    );
     assert!(
         !url.trim().is_empty(),
         "FIREWEED_PG_TEST_URL must be non-empty (fail-closed live postgres; no LOUD skip)"

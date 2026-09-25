@@ -405,6 +405,145 @@ async fn turso_batch_update_apply_is_operation_shaped() {
     }
 }
 
+// Replayed logs from 2026-09-04..09-17 address BatchUpdate rows by key with item_id 0.
+#[tokio::test]
+async fn turso_item_id_zero_key_lookups_bind_the_full_active_key() {
+    use fireweed_relational::{ACTIVE_KEY_PAYLOAD_UPSERT_SQL, active_key_item_ids_sql};
+
+    const PUSHED: usize = 200;
+    const UPDATED: usize = 150;
+    let mut definition = qdef();
+    definition.max_push_batch_size = 1_000;
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let store = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+    let (pushed, ids, _) = batch_fixture(PUSHED);
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![CommandPosition::new(shard.clone(), 0, 0)],
+        vec![envelope(
+            QueueCommand::Push(PushCommand { items: pushed }),
+            ids.clone(),
+        )],
+    )
+    .await
+    .unwrap();
+    let tenant = turso::Value::Text(shard.tenant_id.as_str().to_string());
+    let queue = turso::Value::Text(shard.queue_id.as_str().to_string());
+    let key = |index: usize| turso::Value::Text(format!("batch-key-{PUSHED}-{index}"));
+
+    let lookup = active_key_item_ids_sql(100);
+    let mut lookup_params = vec![tenant.clone(), queue.clone()];
+    lookup_params.extend((0..100).map(key));
+    let upsert_params = vec![
+        turso::Value::Blob(b"plan".to_vec()),
+        tenant.clone(),
+        queue.clone(),
+        key(0),
+    ];
+    for (sql, params) in [
+        (lookup.as_str(), lookup_params.clone()),
+        (ACTIVE_KEY_PAYLOAD_UPSERT_SQL, upsert_params),
+    ] {
+        let rows = store
+            .query(format!("EXPLAIN QUERY PLAN {sql}"), params)
+            .await
+            .unwrap();
+        let plans: Vec<_> = rows
+            .iter()
+            .map(|row| match &row.values[3] {
+                turso::Value::Text(text) => text.as_str(),
+                other => panic!("unexpected plan: {other:?}"),
+            })
+            .collect();
+        assert!(
+            plans
+                .iter()
+                .any(|plan| plan.contains("fireweed_items_active_key")
+                    && plan.contains("client_item_key=")),
+            "active-key lookup must bind client_item_key: {plans:?}"
+        );
+        assert!(
+            !plans
+                .iter()
+                .any(|plan| plan.contains("fireweed_items_retained_numeric_idx")),
+            "queue-prefix scan: {plans:?}"
+        );
+    }
+    let resolved = store.query(lookup, lookup_params).await.unwrap();
+    assert_eq!(resolved.len(), 100);
+    for row in &resolved {
+        let turso::Value::Text(found) = &row.values[1] else {
+            panic!("client_item_key was not text")
+        };
+        let index: usize = found.rsplit('-').next().unwrap().parse().unwrap();
+        assert_eq!(row.values[0], turso::Value::Text(ids[index].to_string()));
+    }
+
+    // Expected versions decline the API-001 fast path, so keys resolve before the read.
+    let updates = (0..UPDATED)
+        .map(|index| UpdateFieldsCommand {
+            item_id: ItemId::from_u64(0),
+            field_ops: BTreeMap::new(),
+            payload: PayloadUpdate::Set(Some(Bytes::from(format!("replayed-{index}")))),
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: None,
+            set_fields: None,
+            set_metadata: Some(Metadata::default()),
+            set_gate_keys: None,
+            api001_batch: true,
+            client_item_key: Some(
+                ClientItemKey::new(format!("batch-key-{PUSHED}-{index}")).unwrap(),
+            ),
+            expected_item_version: Some(1),
+        })
+        .collect::<Vec<_>>();
+    let command = envelope(
+        QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+        ids[..UPDATED].to_vec(),
+    );
+    let position = CommandPosition::new(shard.clone(), 0, 1);
+    AsyncProjectionStore::apply_live(&store, vec![position.clone()], vec![command.clone()])
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_recovery(&store, vec![position], vec![command])
+        .await
+        .unwrap();
+    let rows = store
+        .query(
+            "SELECT i.item_id,i.item_version,p.payload FROM fireweed_items i \
+             LEFT JOIN fireweed_item_payloads p \
+             ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
+             WHERE i.tenant_id=?1 AND i.queue_id=?2",
+            vec![tenant, queue],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), PUSHED);
+    for row in rows {
+        let turso::Value::Text(item_id) = &row.values[0] else {
+            panic!("item_id was not text")
+        };
+        let index = ids
+            .iter()
+            .position(|id| id.to_string() == *item_id)
+            .unwrap();
+        if index < UPDATED {
+            assert_eq!(row.values[1], turso::Value::Integer(2), "item {index}");
+            assert_eq!(
+                row.values[2],
+                turso::Value::Blob(format!("replayed-{index}").into_bytes()),
+                "item {index}"
+            );
+        } else {
+            assert_eq!(row.values[1], turso::Value::Integer(1), "item {index}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn turso_grouped_schedule_fast_path_preserves_summary_order_and_recovery() {
     let directory = tempfile::tempdir().unwrap();

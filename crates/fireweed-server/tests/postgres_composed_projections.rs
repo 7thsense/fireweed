@@ -89,51 +89,13 @@ async fn drop_schema(url: &str, schema: &str) {
     .await;
 }
 
-async fn push_claim_finalize_over_resp(addr: std::net::SocketAddr) {
-    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-
-    let produced: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(7)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-
-    let reply: redis::streams::StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(reply.keys[0].ids.len(), 1, "claim returns the pushed item");
-    assert_eq!(reply.keys[0].ids[0].id, produced);
-
-    let acked: i64 = redis::cmd("XACK")
-        .arg("t1:q1")
-        .arg("g")
-        .arg(&produced)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(acked, 1, "finalize (ack) commits the claimed item");
-}
-
 /// Composed postgres-log + sqlite-projection backend, driven end to end under a real Tokio runtime: proves
 /// the `spawn_blocking` + whole-operation boundary covers this combo the same way it covers postgres/inmemory
 /// (no reactor-thread panic on the sync postgres `connect`/`recover`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_turso_combo_runs_under_tokio() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = format!("fireweed_pgsqlite_{}", std::process::id());
     let scoped_url = url_with_schema(&url, &schema);
     create_schema(&url, &schema).await;
@@ -167,10 +129,7 @@ async fn postgres_turso_combo_runs_under_tokio() {
     .err()
     .expect("postgres × turso is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     let _ = std::fs::remove_file(&sqlite_path);
     drop_schema(&url, &schema).await;
 }
@@ -178,10 +137,8 @@ async fn postgres_turso_combo_runs_under_tokio() {
 /// Unified atomic postgres/postgres backend through the production fixed-pool selector.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_postgres_combo_runs_under_tokio() {
-    let Some(url) = std::env::var("FIREWEED_PG_TEST_URL").ok().filter(|url| !url.is_empty()) else {
-        eprintln!("SKIP: FIREWEED_PG_TEST_URL is required for this live Postgres test; not a product failure");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = format!("fireweed_pgpg_atomic_{}", std::process::id());
     let atomic_url = url_with_schema(&url, &schema);
     create_schema(&url, &schema).await;
@@ -207,9 +164,6 @@ async fn postgres_postgres_combo_runs_under_tokio() {
     .err()
     .expect("postgres × postgres is not a public cell");
     let text = err.to_string();
-    assert!(
-        text.contains("s3") || text.contains("retired"),
-        "{text}"
-    );
+    assert!(text.contains("s3") || text.contains("retired"), "{text}");
     drop_schema(&url, &schema).await;
 }

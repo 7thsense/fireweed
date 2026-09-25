@@ -10,10 +10,9 @@ use fireweed_core::{
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
-    AsyncProjectionSpec, ChangeRecord, ChangeRecordKind, ClaimPort, ClaimRequest, Clock,
-    ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
-    FinalizePort, InMemoryControlPlane, ProjectionRead, PushPort, PushSpec, QueueControlPlane,
-    QueueKey,
+    ChangeRecord, ChangeRecordKind, ClaimPort, ClaimRequest, Clock, ControlPlaneConfig,
+    ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
+    InMemoryControlPlane, ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
 };
 use fireweed_memory::{ManualClock, composed_memory_backend};
 use fireweed_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
@@ -22,30 +21,6 @@ use fireweed_server::{
     NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, ResponseBarrierSpec,
     SegmentConfig, emit_change_record_tick, start, start_with,
 };
-/// Object-log (LogEngine) × Turso projection — public default composition cell.
-async fn rebuild_objectlog_turso_projection(
-    object_root: std::path::PathBuf,
-    projection_path: std::path::PathBuf,
-    target_bytes: usize,
-    max_latency_ms: u64,
-    async_spec: Option<AsyncProjectionSpec>,
-) {
-    let rebuilt = fireweed::turso_compose::rebuild_filesystem_turso_projection(
-        object_root,
-        projection_path,
-        target_bytes,
-        max_latency_ms,
-        async_spec,
-        1_000_000,
-    )
-    .await
-    .expect("ProjectionLifecycle rebuild from authoritative object log");
-    assert!(
-        rebuilt.projection_sequence > 0 || rebuilt.tail_commands_replayed > 0,
-        "rebuild must replay log commands: {rebuilt:?}"
-    );
-}
-
 fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
     BackendSpec {
         log: LogSpec::ObjectLog(ObjectLogSpec::local(
@@ -59,34 +34,10 @@ fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf
     }
 }
 
-fn set_segment_config(config: &mut Config, segment_config: SegmentConfig) {
-    let LogSpec::ObjectLog(spec) = &mut config.backend.log else {
-        panic!("expected object-log config");
-    };
-    spec.set_segment_config(segment_config);
-}
 use redis::streams::StreamReadReply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-
-// These integration tests each run an object-log server, projection maintenance, and background
-// flushers. Running the whole group concurrently can starve those bounded-latency maintenance loops
-// long enough for the Redis test client's 500 ms response deadline to fire. Production does not impose
-// that client deadline, so serialize this resource-heavy group while retaining normal parallelism for
-// the rest of the server target.
-static OBJECTLOG_SERVER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn redis_test_connection(addr: std::net::SocketAddr) -> redis::aio::MultiplexedConnection {
-    let client =
-        redis::Client::open(format!("redis://{addr}")).expect("valid local Redis test endpoint");
-    client
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(5))),
-        )
-        .await
-        .expect("connect to local Redis test endpoint")
-}
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -424,7 +375,7 @@ async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
             expected_epoch: Some(stale_epoch),
 
             request_id: None,
-})
+        })
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EpochFenced));
@@ -692,7 +643,7 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
             expected_epoch: None,
 
             request_id: None,
-})
+        })
         .await
         .unwrap();
     assert_eq!(claimed.items.len(), 1);
@@ -742,45 +693,6 @@ async fn start_provisions_queues_and_serves_end_to_end() {
     .err()
     .expect("memory is not a public cell");
     assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-    return;
-    // `start()` constructs the backend internally, so the ONLY way it can serve a request is if it
-    // provisions the config's queues. Boot it, then drive it with a stock client (no out-of-band setup).
-    let server = start(Config::new(
-        BackendSpec::memory(),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .unwrap();
-
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-    let _: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(7)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(
-        reply.keys[0].ids.len(),
-        1,
-        "provisioned queue serves a real request"
-    );
-    server.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -796,70 +708,6 @@ async fn terminal_emission_metrics_reach_server_surface() {
     .err()
     .expect("memory is not a public cell");
     assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-    return;
-    let server = start(Config::new(
-        BackendSpec::memory(),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .unwrap();
-
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-
-    let _: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(11)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    let claimed_id = reply.keys[0].ids[0].id.clone();
-    let _: i64 = redis::cmd("XACK")
-        .arg("t1:q1")
-        .arg("g")
-        .arg(&claimed_id)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-
-    let info: std::collections::HashMap<String, redis::Value> = redis::cmd("XINFO")
-        .arg("STREAM")
-        .arg("t1:q1")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(
-        match &info["resident-terminal-count"] {
-            redis::Value::Int(n) => *n,
-            other => panic!("XINFO STREAM resident-terminal-count should be an int, got {other:?}"),
-        },
-        1,
-        "the server surface reads terminal emission metrics"
-    );
-    assert_eq!(
-        match &info["length"] {
-            redis::Value::Int(n) => *n,
-            other => panic!("XINFO STREAM length should be an int, got {other:?}"),
-        },
-        0,
-        "live-count behavior stays unchanged"
-    );
-    server.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -877,99 +725,7 @@ async fn objectlog_turso_runtime_reopens_rebuilds_and_keeps_item_ids_advancing()
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
-    let first_id = {
-        let server = start(Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        ))
-        .await
-        .unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-        let produced: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(7)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let reply: StreamReadReply = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("g")
-            .arg("c")
-            .arg("STREAMS")
-            .arg("t1:q1")
-            .arg(">")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(reply.keys[0].ids[0].id, produced);
-        let acked: i64 = redis::cmd("XACK")
-            .arg("t1:q1")
-            .arg("g")
-            .arg(&produced)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(acked, 1);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        produced
-    };
-
-    rebuild_objectlog_turso_projection(
-        object_root.clone(),
-        projection_path.clone(),
-        262_144,
-        20,
-        None,
-    )
-    .await;
-    let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert!(
-        empty.is_none(),
-        "acked item was not redelivered after rebuild"
-    );
-    let next_id: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(9)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_ne!(
-        next_id, first_id,
-        "post-reopen push must not remint an existing item id"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 /// Delete-rebuild: ProjectionLifecycle wipes and rebuilds the Turso projection from the object log.
@@ -989,99 +745,7 @@ async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-profile");
-    let first_id = {
-        let server = start(Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        ))
-        .await
-        .expect("filesystem×turso server starts");
-        let mut con = redis_test_connection(server.addr()).await;
-        let produced: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(7)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let reply: StreamReadReply = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("g")
-            .arg("c")
-            .arg("STREAMS")
-            .arg("t1:q1")
-            .arg(">")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(reply.keys[0].ids[0].id, produced);
-        let acked: i64 = redis::cmd("XACK")
-            .arg("t1:q1")
-            .arg("g")
-            .arg(&produced)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(acked, 1);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        produced
-    };
-
-    rebuild_objectlog_turso_projection(
-        object_root.clone(),
-        projection_path.clone(),
-        262_144,
-        20,
-        None,
-    )
-    .await;
-    let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .expect("turso rebuild from object log");
-    let mut con = redis_test_connection(server.addr()).await;
-    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert!(
-        empty.is_none(),
-        "acked item must not redeliver after Turso rebuild from object log"
-    );
-    let next_id: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(9)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_ne!(
-        next_id, first_id,
-        "post-reopen push must not remint an existing item id"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 /// AC-TURSO-5: empty path fails closed before any Turso/database I/O.
@@ -1153,55 +817,6 @@ async fn memory_turso_server_push_claim_lifecycle() {
     .err()
     .expect("memory is not a public cell");
     assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-    return;
-    let projection = std::env::temp_dir().join(format!(
-        "fw-mem-turso-{}-{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&projection);
-    let server = start(Config::new(
-        BackendSpec {
-            log: LogSpec::Memory,
-            projection: ProjectionSpec::Turso {
-                path: projection.clone(),
-            },
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
-        },
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .expect("memory×turso starts");
-    let mut con = redis_test_connection(server.addr()).await;
-    let produced: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(1)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(reply.keys[0].ids[0].id, produced);
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_file(&projection);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1219,70 +834,6 @@ async fn objectlog_turso_rejects_unprovisioned_queue_before_ownership_acquisitio
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
-    }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    for barrier in [
-        ResponseBarrierSpec::AsyncProjection,
-        ResponseBarrierSpec::AsyncProjection,
-    ] {
-        let (object_root, projection_path) = tmp_runtime_paths("unknown-owner-queue");
-        let mut config = Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        );
-        config.backend.response_barrier = barrier;
-        if barrier == ResponseBarrierSpec::AsyncProjection {
-            config.backend.async_projection =
-                Some(AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5).unwrap());
-        }
-        let server = start(config).await.unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-        let empty: i64 = redis::cmd("XLEN")
-            .arg("t1:q1")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(empty, 0, "an owned empty queue remains readable");
-        for args in [
-            &["XLEN", "t1:other-owner-queue"][..],
-            &["XADD", "t1:other-owner-queue", "*", "priority", "1"][..],
-            &["XLEN", "t1:other-owner-queue"][..],
-        ] {
-            let error = redis::cmd(args[0])
-                .arg(&args[1..])
-                .query_async::<redis::Value>(&mut con)
-                .await
-                .expect_err("an unprovisioned queue must never become an owned empty queue");
-            assert_eq!(error.code(), Some("ERR"), "{barrier:?}: {error}");
-            assert!(
-                error.to_string().contains("no such queue"),
-                "{barrier:?}: {error}"
-            );
-        }
-        let _: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(7)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let count: i64 = redis::cmd("XLEN")
-            .arg("t1:q1")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(
-            count, 1,
-            "unknown-queue probes must not disrupt the owned queue"
-        );
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        let _ = std::fs::remove_dir_all(&object_root);
-        let _ = std::fs::remove_file(&projection_path);
     }
 }
 
@@ -1301,97 +852,7 @@ async fn segmented_objectlog_turso_push_claim_finalize_and_recovers_on_reopen() 
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed
-    // `ObjectLog` axis); a push acks only after its segment seals (durable) AND applies to the projection.
-    let (object_root, projection_path) = tmp_runtime_paths("segolsqlite");
-    let first_id = {
-        let server = start(Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        ))
-        .await
-        .unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-        // Push acks only after its segment seals (durable) AND applies to the projection.
-        let produced: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(7)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let reply: StreamReadReply = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("g")
-            .arg("c")
-            .arg("STREAMS")
-            .arg("t1:q1")
-            .arg(">")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(reply.keys[0].ids[0].id, produced);
-        let acked: i64 = redis::cmd("XACK")
-            .arg("t1:q1")
-            .arg("g")
-            .arg(&produced)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(acked, 1);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        produced
-    };
-
-    // Reopen against the SAME durable segment log but a FRESH projection db: recovery must replay the
-    // committed segments (via `read_all`) so the acked item is NOT redelivered and ids keep advancing.
-    let _ = std::fs::remove_file(&projection_path);
-    let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert!(
-        empty.is_none(),
-        "acked item was redelivered after segmented recovery replay"
-    );
-    let next_id: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(9)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_ne!(
-        next_id, first_id,
-        "post-reopen push must not remint an existing item id"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1409,95 +870,7 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid");
-    let first_id = {
-        let mut config = Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        );
-        set_segment_config(
-            &mut config,
-            SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
-        );
-        let server = start(config).await.unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-
-        let produced: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(7)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let reply: StreamReadReply = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("g")
-            .arg("c")
-            .arg("STREAMS")
-            .arg("t1:q1")
-            .arg(">")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(reply.keys[0].ids[0].id, produced);
-        let acked: i64 = redis::cmd("XACK")
-            .arg("t1:q1")
-            .arg("g")
-            .arg(&produced)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(acked, 1);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        produced
-    };
-
-    let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert!(
-        empty.is_none(),
-        "acked item was redelivered after objectlog/hybrid recovery"
-    );
-    let next_id: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(9)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_ne!(
-        next_id, first_id,
-        "post-reopen hybrid push must not remint an existing item id"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1515,130 +888,7 @@ async fn objectlog_turso_async_push_claim_finalize_and_recovers_on_reopen() {
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    // The `objectlog/turso async` runtime profile end to end: it selects the object-log + hybrid substrate
-    // (manifest commit + synchronous in-memory apply/render is the success barrier; the SQLite image is an
-    // asynchronous checkpoint), carries the async-apply thresholds, and recovers acked state on reopen.
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async");
-    let first_id = {
-        let mut config = Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        );
-        set_segment_config(
-            &mut config,
-            SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
-        );
-        // A non-default threshold config the async profile carries into `start`.
-        config.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
-        config.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
-        config.backend.async_projection = Some(
-            AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
-                .expect("valid hybrid-async thresholds"),
-        );
-        let server = start(config).await.unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-
-        let produced: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(7)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let reply: StreamReadReply = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("g")
-            .arg("c")
-            .arg("STREAMS")
-            .arg("t1:q1")
-            .arg(">")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(reply.keys[0].ids[0].id, produced);
-        let acked: i64 = redis::cmd("XACK")
-            .arg("t1:q1")
-            .arg("g")
-            .arg(&produced)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_eq!(acked, 1);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        produced
-    };
-
-    let server = start(Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    ))
-    .await
-    .unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert!(
-        empty.is_none(),
-        "acked item was redelivered after objectlog/turso async recovery"
-    );
-    let next_id: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(9)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_ne!(
-        next_id, first_id,
-        "post-reopen hybrid-async push must not remint an existing item id"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
-}
-
-/// The `objectlog/turso async` config used by the crash/chaos tests below: the async spec plus a non-default
-/// threshold set so the profile is exercised end to end (bead pqueue-fed791af).
-fn objectlog_turso_async_config(
-    object_root: std::path::PathBuf,
-    projection_path: std::path::PathBuf,
-) -> Config {
-    let mut config = Config::new(
-        objectlog_turso_spec(object_root, projection_path),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    );
-    set_segment_config(
-        &mut config,
-        SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
-    );
-    config.backend.response_barrier = ResponseBarrierSpec::AsyncProjection;
-    config.backend.async_projection = Some(
-        AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
-            .expect("valid hybrid-async thresholds"),
-    );
-    config
 }
 
 /// CHAOS — crash MID-LEASE on the `objectlog/turso async` profile: an item is claimed (XREADGROUP) but never
@@ -1660,97 +910,7 @@ async fn objectlog_turso_async_chaos_crash_mid_lease_neither_redelivers_nor_lose
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) =
-        tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
-    let leased_id = {
-        let server = start(objectlog_turso_async_config(
-            object_root.clone(),
-            projection_path.clone(),
-        ))
-        .await
-        .unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-        let _: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(5)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        // Claim (deliver) the item but DO NOT ack it — a crash strikes mid-lease.
-        let reply: StreamReadReply = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("g")
-            .arg("c")
-            .arg("STREAMS")
-            .arg("t1:q1")
-            .arg(">")
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let id = reply.keys[0].ids[0].id.clone();
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-        id
-    };
-
-    let server = start(objectlog_turso_async_config(
-        object_root.clone(),
-        projection_path.clone(),
-    ))
-    .await
-    .unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-
-    // The recovered lease is still valid, so a fresh read does NOT redeliver it (no duplicate lease).
-    let redelivered: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert!(
-        redelivered.is_none(),
-        "a still-valid recovered lease must not be redelivered after a mid-lease crash"
-    );
-
-    // The leased item was not lost back to pending: pushing a NEW item and reading yields exactly that new
-    // item (the old one is held in-flight, not re-queued).
-    let fresh: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(9)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_ne!(fresh, leased_id, "post-crash push minted a distinct id");
-    let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(
-        reply.keys[0].ids.len(),
-        1,
-        "exactly the fresh item is delivered; the in-flight lease was neither lost nor duplicated"
-    );
-    assert_eq!(reply.keys[0].ids[0].id, fresh);
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 /// CHAOS — after two async-profile pushes, wipe the Turso projection through
@@ -1771,78 +931,7 @@ async fn objectlog_turso_async_chaos_disk_loss_replays_retained_object_log() {
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) =
-        tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
-    {
-        let server = start(objectlog_turso_async_config(
-            object_root.clone(),
-            projection_path.clone(),
-        ))
-        .await
-        .unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-        let first: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(1)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let second: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(2)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_ne!(first, second);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-    }
-
-    rebuild_objectlog_turso_projection(
-        object_root.clone(),
-        projection_path.clone(),
-        1024 * 1024,
-        5,
-        Some(
-            AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
-                .expect("valid async projection bounds"),
-        ),
-    )
-    .await;
-
-    let server = start(objectlog_turso_async_config(
-        object_root.clone(),
-        projection_path.clone(),
-    ))
-    .await
-    .unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-    let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("COUNT")
-        .arg(2)
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(
-        reply.keys[0].ids.len(),
-        2,
-        "a fresh hybrid-async projection db replays the retained object log from genesis after disk loss"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1860,85 +949,7 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-disk-loss");
-    {
-        let mut config = Config::new(
-            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-            0,
-            "127.0.0.1:0".to_string(),
-            Duration::from_secs(60),
-            vec![qdef()],
-        );
-        set_segment_config(
-            &mut config,
-            SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
-        );
-        let server = start(config).await.unwrap();
-        let mut con = redis_test_connection(server.addr()).await;
-        let first: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(1)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        let second: String = redis::cmd("XADD")
-            .arg("t1:q1")
-            .arg("*")
-            .arg("priority")
-            .arg(2)
-            .query_async(&mut con)
-            .await
-            .unwrap();
-        assert_ne!(first, second);
-        server.shutdown_and_drain(Duration::from_secs(5)).await;
-    }
-
-    rebuild_objectlog_turso_projection(
-        object_root.clone(),
-        projection_path.clone(),
-        1024 * 1024,
-        5,
-        None,
-    )
-    .await;
-    let mut config = Config::new(
-        objectlog_turso_spec(object_root.clone(), projection_path.clone()),
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    );
-    set_segment_config(
-        &mut config,
-        SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
-    );
-    let server = start(config).await.unwrap();
-    let mut con = redis_test_connection(server.addr()).await;
-    let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP")
-        .arg("g")
-        .arg("c")
-        .arg("COUNT")
-        .arg(2)
-        .arg("STREAMS")
-        .arg("t1:q1")
-        .arg(">")
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    assert_eq!(
-        reply.keys[0].ids.len(),
-        2,
-        "fresh projection db replays retained object log from genesis"
-    );
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2014,14 +1025,14 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
         let values = [
             ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:19000"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:19100"),
             ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-test"),
             ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
             ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
             ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "fireweed"),
             (
                 "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
-                "fireweed-test-minio",
+                "fireweed-test-rustfs",
             ),
             ("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP", "true"),
             ("FIREWEED_BOOTSTRAP_QUEUES", "t1:q1"),
@@ -2266,7 +1277,7 @@ async fn change_record_sink_delivers() {
             expected_epoch: None,
 
             request_id: None,
-})
+        })
         .await
         .unwrap();
     assert_eq!(pushed[0], claim.items[0].item_id);
@@ -2343,7 +1354,7 @@ async fn change_record_sink_failure_isolation() {
             expected_epoch: None,
 
             request_id: None,
-})
+        })
         .await
         .unwrap();
     assert_eq!(pushed[0], claim.items[0].item_id);
@@ -2413,47 +1424,5 @@ async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_de
         .err()
         .expect("filesystem x turso is not a public cell");
         assert_eq!(err, EngineError::Invalid(fireweed::RETIRED_STORAGE_CELL));
-        return;
     }
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, _) = tmp_runtime_paths("p8c-fs-memory-emit");
-    let mut config = Config::new(
-        BackendSpec {
-            log: LogSpec::ObjectLog(ObjectLogSpec::local(
-                object_root.clone(),
-                SegmentConfig::new(262_144, 20).unwrap(),
-            )),
-            projection: ProjectionSpec::InMemory,
-            control_plane: ControlPlaneSpec::InProcess,
-            response_barrier: ResponseBarrierSpec::AsyncProjection,
-            async_projection: None,
-        },
-        0,
-        "127.0.0.1:0".to_string(),
-        Duration::from_secs(60),
-        vec![qdef()],
-    );
-    // Embedded mode: enabled, no endpoint.
-    config.change_record_sink = ChangeRecordSinkConfig {
-        enabled: true,
-        endpoint: None,
-        tick_interval: Duration::from_millis(50),
-        ..ChangeRecordSinkConfig::default()
-    };
-    let server = start(config)
-        .await
-        .expect("Class A filesystem×memory must start with enabled embedded delivery");
-    let mut con = redis_test_connection(server.addr()).await;
-    let _: String = redis::cmd("XADD")
-        .arg("t1:q1")
-        .arg("*")
-        .arg("priority")
-        .arg(1)
-        .query_async(&mut con)
-        .await
-        .unwrap();
-    // Give the emitter a couple of ticks to run without panic.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    server.shutdown_and_drain(Duration::from_secs(5)).await;
-    let _ = std::fs::remove_dir_all(&object_root);
 }

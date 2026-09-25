@@ -12,7 +12,7 @@ Evidence: target/python-resp-insert-matrix/<UTC>/summary.json
 
 Examples:
 
-  # full 1M matrix (needs postgres + minio for those cells)
+  # full 1M matrix (needs postgres + an S3 endpoint such as RustFS for those cells)
   python run_insert_matrix.py --url-base redis://127.0.0.1:18080
 
   # local-only cells (memory/sqlite/filesystem × memory/sqlite)
@@ -234,22 +234,7 @@ def _ensure_pg_database(base_url: str, db_name: str) -> None:
 
 
 def _ensure_s3_bucket(s3: dict[str, str], bucket: str) -> None:
-    """Best-effort bucket create via docker exec mc (MinIO) or skip if already there."""
-    # Prefer docker exec on known container if set.
-    container = s3.get("mc_container")
-    if container:
-        endpoint_in = s3.get("mc_endpoint_in_container", "http://127.0.0.1:9000")
-        cmd = (
-            f"mc alias set local {endpoint_in} {s3['access_key']} {s3['secret_key']} >/dev/null "
-            f"&& mc mb -p local/{bucket} 2>/dev/null || true"
-        )
-        subprocess.run(
-            ["docker", "exec", container, "sh", "-c", cmd],
-            check=False,
-            capture_output=True,
-        )
-        return
-    # Fallback: aws cli if present
+    """Best-effort bucket create via the aws cli, or skip if already there."""
     if shutil.which("aws"):
         env = os.environ.copy()
         env["AWS_ACCESS_KEY_ID"] = s3["access_key"]
@@ -597,25 +582,20 @@ def main(argv: list[str] | None = None) -> int:
         "--s3-endpoint",
         default=os.environ.get(
             "FIREWEED_OBJECT_LOG_S3_ENDPOINT",
-            os.environ.get("INSERT_MATRIX_S3_ENDPOINT", "http://127.0.0.1:19000"),
+            os.environ.get("INSERT_MATRIX_S3_ENDPOINT", "http://127.0.0.1:19100"),
         ),
     )
     p.add_argument(
         "--s3-access-key",
-        default=os.environ.get("INSERT_MATRIX_S3_ACCESS_KEY", "minioadmin"),
+        default=os.environ.get("INSERT_MATRIX_S3_ACCESS_KEY", "fireweed"),
     )
     p.add_argument(
         "--s3-secret-key",
-        default=os.environ.get("INSERT_MATRIX_S3_SECRET_KEY", "minioadmin"),
+        default=os.environ.get("INSERT_MATRIX_S3_SECRET_KEY", "fireweed-test-rustfs"),
     )
     p.add_argument(
         "--s3-region",
         default=os.environ.get("INSERT_MATRIX_S3_REGION", "us-east-1"),
-    )
-    p.add_argument(
-        "--s3-mc-container",
-        default=os.environ.get("INSERT_MATRIX_S3_MC_CONTAINER", "fireweed-e3-minio"),
-        help="Docker container with mc for bucket create (empty to skip)",
     )
     p.add_argument(
         "--evidence-dir",
@@ -647,8 +627,6 @@ def main(argv: list[str] | None = None) -> int:
         "secret_key": args.s3_secret_key,
         "region": args.s3_region,
         "insecure_http": "true",
-        "mc_container": args.s3_mc_container or "",
-        "mc_endpoint_in_container": "http://127.0.0.1:9000",
     }
 
     print(

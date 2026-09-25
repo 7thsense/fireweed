@@ -1,6 +1,7 @@
 use fireweed::*;
 use fireweed_workload::{
-    Config, TestClock, campaign, create_queue, definition, item, open_store, ts,
+    Config, TestClock, campaign, create_queue, definition, item, open_store,
+    open_store_with_projection_root, ts,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -193,18 +194,6 @@ fn campaign_acknowledged_child() {
         std::process::exit(0);
     });
 }
-fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_campaign_reports_rebuild_from_log_only() {
     for (campaign_metadata_only, campaign_timestamp_priority) in
@@ -233,12 +222,16 @@ async fn terminal_campaign_reports_rebuild_from_log_only() {
             "{}",
             String::from_utf8_lossy(&status.stderr)
         );
+        // The authoritative log lives in S3 under the shard root's namespace. Reopen that
+        // log with an empty projection directory so every row is rebuilt from the log alone.
         let rebuilt = tempfile::tempdir().unwrap();
-        copy_tree(
-            &original.path().join("shard-0/log"),
-            &rebuilt.path().join("log"),
-        );
-        let fw = open_store(rebuilt.path(), false, TestClock::at(2000)).unwrap();
+        let fw = open_store_with_projection_root(
+            &original.path().join("shard-0"),
+            false,
+            TestClock::at(2000),
+            rebuilt.path(),
+        )
+        .unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for campaign in 0..2 {
             let mut d = definition(&format!("campaign-{campaign}"));

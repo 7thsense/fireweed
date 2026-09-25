@@ -4,7 +4,8 @@ library:
     repository:
         url: https://github.com/DocumentDrivenDX/ddx-library
         branch: main
-bead: {}
+bead:
+    id_prefix: fireweed
 update_check:
     enabled: true
     frequency: 24h

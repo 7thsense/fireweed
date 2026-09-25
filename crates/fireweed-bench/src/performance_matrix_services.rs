@@ -420,7 +420,7 @@ impl Drop for ServiceLocks {
         release_postgres(&mut self.postgres);
         if let Some((service, payload)) = self.object_lock.take() {
             let store = object_store(&service);
-            let _ = fireweed_objectlog::block_on_objectlog_future(async move {
+            fireweed_objectlog::block_on_objectlog_future(async move {
                 let current = store.get(LOCK_KEY).await.ok().flatten();
                 if current.as_deref() == Some(payload.as_slice()) {
                     let _ = store.delete(LOCK_KEY).await;

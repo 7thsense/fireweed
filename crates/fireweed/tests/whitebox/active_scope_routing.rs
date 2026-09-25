@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::ManualClock;
 use fireweed::{
     ActiveScope, ActiveScopeDiscovery, DiscoveryGranularity, EngineError, GroupKey, LogConfig,
     NewItem, OldestFirstScopePrefix, ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey,
@@ -12,7 +13,6 @@ use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
 };
-use crate::ManualClock;
 
 fn queue(tenant: &str, queue: &str) -> QueueKey {
     QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())

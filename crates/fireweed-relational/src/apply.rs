@@ -4900,6 +4900,13 @@ fn schedule_reorders_rowid(updates: &[UpdateFieldsCommand], shape: Api001UpdateS
     })
 }
 
+/// Payload write for one active key. Without the hint Turso scans the queue prefix.
+pub const ACTIVE_KEY_PAYLOAD_UPSERT_SQL: &str = "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+    SELECT tenant_id,queue_id,item_id,? \
+    FROM fireweed_items INDEXED BY fireweed_items_active_key \
+    WHERE tenant_id=? AND queue_id=? AND client_item_key=? AND superseded=0 \
+    ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload";
+
 fn write_shaped_payloads(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -4910,6 +4917,15 @@ fn write_shaped_payloads(
         return Ok(());
     }
     let (tenant, queue) = parts(shard);
+    let by_key_sql = if tx.prefer_point_updates() {
+        ACTIVE_KEY_PAYLOAD_UPSERT_SQL
+    } else {
+        "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+         SELECT tenant_id,queue_id,item_id,? \
+         FROM fireweed_items \
+         WHERE tenant_id=? AND queue_id=? AND client_item_key=? AND superseded=0 \
+         ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload"
+    };
     let mut by_id = Vec::new();
     for update in updates {
         let PayloadUpdate::Set(payload) = &update.payload else {
@@ -4927,11 +4943,7 @@ fn write_shaped_payloads(
         };
         crate::rel_exec(
             tx,
-            "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
-             SELECT tenant_id,queue_id,item_id,? \
-             FROM fireweed_items \
-             WHERE tenant_id=? AND queue_id=? AND client_item_key=? AND superseded=0 \
-             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET payload=excluded.payload",
+            by_key_sql,
             [
                 RelValue::opt_blob(payload.as_ref().map(|bytes| bytes.to_vec())),
                 RelValue::Text(tenant.clone()),
@@ -4941,6 +4953,22 @@ fn write_shaped_payloads(
         )?;
     }
     upsert_item_payloads(tx, &tenant, &queue, by_id)
+}
+
+/// Resolve active keys to item IDs. Turso binds only the queue prefix for
+/// `client_item_key IN (...)`, even under this hint; the join seeks each key.
+pub fn active_key_item_ids_sql(count: usize) -> String {
+    let values = (0..count)
+        .map(|i| format!("(?{})", i + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH incoming(client_item_key) AS (VALUES {values}) \
+        SELECT i.item_id,i.client_item_key FROM incoming \
+        CROSS JOIN fireweed_items i INDEXED BY fireweed_items_active_key \
+        ON i.tenant_id=?1 AND i.queue_id=?2 AND i.client_item_key=incoming.client_item_key \
+        WHERE i.superseded=0"
+    )
 }
 
 #[allow(
@@ -5044,12 +5072,16 @@ fn apply_update_fields_batch_sql(
         if chunk.is_empty() {
             continue;
         }
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT item_id,client_item_key FROM fireweed_items \
-             WHERE tenant_id=? AND queue_id=? AND client_item_key IN ({placeholders}) \
-             AND superseded=0"
-        );
+        let sql = if tx.prefer_point_updates() {
+            active_key_item_ids_sql(chunk.len())
+        } else {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            format!(
+                "SELECT item_id,client_item_key FROM fireweed_items \
+                 WHERE tenant_id=? AND queue_id=? AND client_item_key IN ({placeholders}) \
+                 AND superseded=0"
+            )
+        };
         let mut params = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
         params.extend(chunk.iter().cloned().map(RelValue::Text));
         for row in crate::rel_query(tx, &sql, params)? {

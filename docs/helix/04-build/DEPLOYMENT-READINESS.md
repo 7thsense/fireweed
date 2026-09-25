@@ -416,16 +416,17 @@ license to open another cell. This section does not claim a 10M or 1000-queue pa
 |------|---------|-------------|
 | `s3` × `turso` | S3-compatible endpoint with native conditional write | `FIREWEED_S3_TEST_ENDPOINT` (+ bucket/keys; see below) |
 
-S3-compatible job contract (endpoint, bucket, keys, create-only, MinIO/Garage
+S3-compatible job contract (endpoint, bucket, keys, create-only, RustFS/Garage
 notes) is normative in
 [`scripts/ci/s3-matrix-job-requirements.md`](../../../scripts/ci/s3-matrix-job-requirements.md).
-Suggested exports for a disposable MinIO:
+Suggested exports for a disposable RustFS (`scripts/ci/s3-qualification-endpoint.sh provision`
+writes the same variables to its secret file):
 
 ```sh
-export FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:9000"
+export FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:19100"
 export FIREWEED_S3_TEST_BUCKET=fireweed-test
-export FIREWEED_S3_TEST_ACCESS_KEY=minioadmin
-export FIREWEED_S3_TEST_SECRET_KEY=minioadmin
+export FIREWEED_S3_TEST_ACCESS_KEY=fireweed
+export FIREWEED_S3_TEST_SECRET_KEY=fireweed-test-rustfs
 export FIREWEED_PG_TEST_URL=postgres://fireweed:fireweed@127.0.0.1:5432/fireweed
 export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
 ```

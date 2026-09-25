@@ -7,7 +7,7 @@ object-log. `claim` polls applied Turso rows and may be empty. There is
 no process-local unpublished overlay. Public reads wait coverage.
 Planning may wait previous apply so leases/unique keys are visible; that
 is not a public Strict snapshot. The public product cell is **s3 × turso**
-(MinIO via `fireweed-objectlog::test_minio` for local tests). Durable
+(RustFS via `fireweed-objectlog::test_s3` for local tests). Durable
 writes stay on the object-log (`S3CreateOnlyPut` / `LogEngine`), not a
 raw S3 SDK put from the facade or workload.
 
@@ -83,7 +83,7 @@ items.
 Native suites today: isolated methods, `instance_fence: None`, no claim of
 the continuation. That does not prove the two-phase protocol.
 
-Required on s3 × Turso (MinIO locally; live S3 when P1s is up):
+Required on s3 × Turso (RustFS locally; live S3 when P1s is up):
 
 - Mutate always returns per-entry outcomes; no successful fire-and-forget.
 - Same-handle: `commit` with fence + continuation, then `claim` receives

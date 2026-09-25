@@ -1,7 +1,7 @@
 // Provenance: crates/fireweed/tests/whitebox/facade.rs::renew_extends_lease_without_charging_a_delivery
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn renew_extends_lease_without_charging_a_delivery() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
@@ -29,7 +29,7 @@ async fn renew_extends_lease_without_charging_a_delivery() {
 // Provenance: crates/fireweed/tests/whitebox/facade.rs::fail_dead_letters_a_claimed_item
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn fail_dead_letters_a_claimed_item() {
-    let backend = Arc::new(composed_memory_backend());
+    let backend = Arc::new(crate::turso_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
@@ -51,7 +51,7 @@ async fn fail_dead_letters_a_claimed_item() {
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn reclaim_expired_convenience_uses_handle_clock() {
     let clock = Arc::new(ManualClock::at(0));
-    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), clock.clone());
     let q = qkey();
     fireweed.create_queue(qdef()).await.unwrap();
     let id = fireweed.push(&q, at(5)).await.unwrap();

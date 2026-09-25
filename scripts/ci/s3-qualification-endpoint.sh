@@ -9,8 +9,9 @@
 # Survey policy:
 #   - Garage v2.2.0 is a known nonconforming candidate (If-None-Match:* not enforced;
 #     fireweed-2aefefbb / docs/operator/object-log-authority-compatibility.md). Not selectable.
-#   - Hermetic MinIO (digest-pinned single-node) is preferred when two-writer CAS preflight
-#     passes on the live endpoint.
+#   - MinIO is retired: it is end-of-life and no longer publishes binaries.
+#   - Hermetic RustFS (checksum-pinned single-node binary) is preferred when two-writer
+#     CAS preflight passes on the live endpoint.
 #   - Selection occurs only after a real two-writer CAS preflight exits 0. No fallback.
 #
 # Credential policy:
@@ -21,16 +22,17 @@
 #
 # Usage:
 #   bash scripts/ci/s3-qualification-endpoint.sh survey
-#   bash scripts/ci/s3-qualification-endpoint.sh provision   # start MinIO, preflight, attest
+#   bash scripts/ci/s3-qualification-endpoint.sh install     # fetch + verify RustFS; print its path
+#   bash scripts/ci/s3-qualification-endpoint.sh provision   # start RustFS, preflight, attest
 #   bash scripts/ci/s3-qualification-endpoint.sh preflight   # CAS only (needs env or secret file)
 #   bash scripts/ci/s3-qualification-endpoint.sh attest      # emit attestation from last preflight
-#   bash scripts/ci/s3-qualification-endpoint.sh teardown    # bounded docker rm
+#   bash scripts/ci/s3-qualification-endpoint.sh teardown    # bounded process stop
 #   bash scripts/ci/s3-qualification-endpoint.sh verify-isolation
 #   bash scripts/ci/s3-qualification-endpoint.sh status
 #
 # Environment overrides:
 #   FIREWEED_S3_SECRET_DIR     default /tmp/fireweed-s3-secrets
-#   FIREWEED_S3_QUAL_CONTAINER default fireweed-s3-qual-<timestamp>-<pid>
+#   FIREWEED_RUSTFS_CACHE      default ${XDG_CACHE_HOME:-~/.cache}/fireweed-rustfs/<version>
 #   FIREWEED_S3_QUAL_HOST_PORT ephemeral loopback port when unset
 set -euo pipefail
 
@@ -38,15 +40,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PREFLIGHT_PY="${SCRIPT_DIR}/s3-native-cas-preflight.py"
 
-# Digest-pinned MinIO from the official registry used in the release README:
-# https://github.com/minio/minio/blob/RELEASE.2024-12-18T13-15-44Z/README.md#container-installation
-# Verified 2026-09-17: Quay serves the same OCI index digest as the former Docker Hub pin;
-# the release-tag and digest-addressed manifest bytes hash to MINIO_IMAGE_DIGEST.
-# Tag is documentation only; selection prefers the digest form.
-readonly MINIO_IMAGE_TAG="quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z"
-readonly MINIO_IMAGE_DIGEST="sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
-readonly MINIO_IMAGE_PINNED="quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
-readonly MINIO_VERSION_LABEL="RELEASE.2024-12-18T13-15-44Z"
+# Checksum-pinned static RustFS release binary. The sha256 matches the release's SHA256SUMS:
+# https://github.com/rustfs/rustfs/releases/tag/1.0.0
+# 1.0.0 is the first stable release and includes the conditional-write atomicity fixes.
+readonly RUSTFS_VERSION="1.0.0"
+readonly RUSTFS_ASSET="rustfs-linux-x86_64-musl-v1.0.0.zip"
+readonly RUSTFS_URL="https://github.com/rustfs/rustfs/releases/download/1.0.0/rustfs-linux-x86_64-musl-v1.0.0.zip"
+readonly RUSTFS_SHA256="c30a95b76546f25122c9ca387090ddb30c391ca5605621b0d7c881703c0f21c8"
+RUSTFS_CACHE="${FIREWEED_RUSTFS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/fireweed-rustfs/${RUSTFS_VERSION}}"
 readonly CAPABILITY_ID="S3-NATIVE-CAS-CAPABILITY-ATTESTATION"
 readonly PLAN_KEY="P1s"
 readonly BEAD_ID="fireweed-f5fa7380"
@@ -56,7 +57,6 @@ SECRET_FILE="${SECRET_DIR}/credentials.env"
 STATE_DIR="${SECRET_DIR}/state"
 ATTESTATION_FILE="${SECRET_DIR}/s3-native-cas-capability-attestation.json"
 PREFLIGHT_JSON="${STATE_DIR}/preflight.json"
-CONTAINER_NAME="${FIREWEED_S3_QUAL_CONTAINER:-}"
 
 err() { echo "s3-qualification-endpoint: $*" >&2; }
 die() { err "$*"; exit 1; }
@@ -100,16 +100,31 @@ prove_garage_e3_absent() {
   echo "  .env.garage-e3 absent from repository (ok)"
 }
 
-select_minio_image() {
-  if docker image inspect "$MINIO_IMAGE_PINNED" >/dev/null 2>&1; then
-    printf '%s\n' "$MINIO_IMAGE_PINNED"
-    return 0
+sha256_of() {
+  sha256sum "$1" | cut -d' ' -f1
+}
+
+# Download (once) and verify the pinned release; print the binary path.
+install_rustfs() {
+  local archive="${RUSTFS_CACHE}/${RUSTFS_ASSET}" bin="${RUSTFS_CACHE}/rustfs"
+  mkdir -p "$RUSTFS_CACHE"
+  if [[ ! -f "$archive" || "$(sha256_of "$archive")" != "$RUSTFS_SHA256" ]]; then
+    err "downloading ${RUSTFS_URL}"
+    curl -fsSL --retry 3 -o "${archive}.part" "$RUSTFS_URL" || die "RustFS download failed"
+    mv "${archive}.part" "$archive"
   fi
-  if docker image inspect "$MINIO_IMAGE_TAG" >/dev/null 2>&1; then
-    printf '%s\n' "$MINIO_IMAGE_TAG"
-    return 0
+  [[ "$(sha256_of "$archive")" == "$RUSTFS_SHA256" ]] \
+    || die "RustFS archive sha256 mismatch (expected ${RUSTFS_SHA256})"
+  if [[ ! -x "$bin" ]]; then
+    python3 - "$archive" "$RUSTFS_CACHE" <<'PY'
+import sys, zipfile
+zipfile.ZipFile(sys.argv[1]).extract("rustfs", sys.argv[2])
+PY
+    chmod 755 "$bin"
   fi
-  die "pinned MinIO image not present locally (${MINIO_IMAGE_PINNED} or ${MINIO_IMAGE_TAG}); docker pull the release tag first"
+  "$bin" --version 2>/dev/null | grep -q "rustfs ${RUSTFS_VERSION}" \
+    || die "RustFS binary at ${bin} is not version ${RUSTFS_VERSION}"
+  printf '%s\n' "$bin"
 }
 
 free_loopback_port() {
@@ -178,11 +193,15 @@ Candidate A — Garage v2.2.0
   docs: docs/operator/object-log-authority-compatibility.md
   selectable: no (reopen P1 if this becomes the only available topology)
 
-Candidate B — Hermetic MinIO (digest-pinned single-node)
-  image_tag:    ${MINIO_IMAGE_TAG}
-  image_digest: ${MINIO_IMAGE_DIGEST}
-  image_pinned: ${MINIO_IMAGE_PINNED}
-  topology:     docker single-node, loopback publish, run-owned bucket
+Candidate B — MinIO
+  status: RETIRED (end-of-life; release binaries withdrawn)
+  selectable: no
+
+Candidate C — Hermetic RustFS (checksum-pinned single-node binary)
+  version:      ${RUSTFS_VERSION}
+  release:      ${RUSTFS_URL}
+  sha256:       ${RUSTFS_SHA256}
+  topology:     single process, loopback listener, run-owned data dir and bucket
   status:       SELECTABLE only after two-writer CAS preflight exits 0
   credentials:  secret-file path outside repository (${SECRET_DIR})
 
@@ -191,11 +210,11 @@ gates but not non-S3 parity. Consumers take manifest + attestation explicitly.
 EOF
 }
 
-wait_minio_ready() {
+wait_rustfs_ready() {
   local endpoint=$1
-  local deadline=$((SECONDS + 45))
+  local deadline=$((SECONDS + 60))
   while (( SECONDS < deadline )); do
-    if curl -fsS "${endpoint}/minio/health/ready" >/dev/null 2>&1; then
+    if curl -fsS "${endpoint}/health/ready" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -206,7 +225,7 @@ wait_minio_ready() {
 prepare_attestation_env() {
   local cleanup_status=${1:-pending}
   export CAPABILITY_ID PLAN_KEY BEAD_ID
-  export MINIO_IMAGE_TAG MINIO_IMAGE_DIGEST MINIO_IMAGE_PINNED MINIO_VERSION_LABEL
+  export RUSTFS_VERSION RUSTFS_ASSET RUSTFS_URL RUSTFS_SHA256
   export SECRET_FILE
   export SOURCE_REVISION
   SOURCE_REVISION=$(git -C "$REPO_ROOT" rev-parse HEAD)
@@ -214,16 +233,16 @@ prepare_attestation_env() {
   export RUNNER_IDENTITY="fireweed-p1s@$(hostname -s 2>/dev/null || echo host)"
   export HOST_OBSERVATION
   HOST_OBSERVATION=$(hostname -s 2>/dev/null || echo unknown)
-  export IMAGE_USED
-  IMAGE_USED=$(cat "${STATE_DIR}/image" 2>/dev/null || echo "$MINIO_IMAGE_PINNED")
+  export BINARY_USED
+  BINARY_USED=$(cat "${STATE_DIR}/binary" 2>/dev/null || echo "unknown")
   if [[ -z "${FIREWEED_S3_TEST_ENDPOINT:-}" && -f "$SECRET_FILE" ]]; then
     load_secret_file
   fi
   export ENDPOINT="${FIREWEED_S3_TEST_ENDPOINT:-}"
   export BUCKET="${FIREWEED_S3_TEST_BUCKET:-}"
   export REGION="${FIREWEED_S3_TEST_REGION:-us-east-1}"
-  export CONTAINER_NAME
-  CONTAINER_NAME=$(cat "${STATE_DIR}/container_name" 2>/dev/null || echo "${CONTAINER_NAME:-unknown}")
+  export SERVER_PID
+  SERVER_PID=$(cat "${STATE_DIR}/pid" 2>/dev/null || echo "unknown")
   export CLEANUP_STATUS="$cleanup_status"
   # Pass secret material only for redaction scanning inside the writer.
   export FIREWEED_S3_TEST_ACCESS_KEY="${FIREWEED_S3_TEST_ACCESS_KEY:-}"
@@ -271,18 +290,18 @@ attestation = {
     },
     "runner": {
         "runner_identity": os.environ["RUNNER_IDENTITY"],
-        "topology": "hermetic-docker-minio-single-node-loopback",
-        "resource_limits": "single-container; ephemeral loopback port; no host volume",
+        "topology": "hermetic-rustfs-binary-single-node-loopback",
+        "resource_limits": "single process; ephemeral loopback port; run-owned data dir",
         "hostname_observation": os.environ["HOST_OBSERVATION"],
         "platform": platform.platform(),
     },
     "s3": {
-        "provider": "minio",
-        "version": os.environ["MINIO_VERSION_LABEL"],
-        "image_tag": os.environ["MINIO_IMAGE_TAG"],
-        "image_digest": os.environ["MINIO_IMAGE_DIGEST"],
-        "image_pinned": os.environ["MINIO_IMAGE_PINNED"],
-        "image_used": os.environ["IMAGE_USED"],
+        "provider": "rustfs",
+        "version": os.environ["RUSTFS_VERSION"],
+        "release_asset": os.environ["RUSTFS_ASSET"],
+        "release_url": os.environ["RUSTFS_URL"],
+        "artifact_sha256": os.environ["RUSTFS_SHA256"],
+        "binary_used": os.environ["BINARY_USED"],
         "region": os.environ["REGION"],
         "endpoint": os.environ["ENDPOINT"],
         "tls_mode": (
@@ -305,15 +324,22 @@ attestation = {
     },
     "preflight": preflight,
     "cleanup": {
-        "container_name": os.environ["CONTAINER_NAME"],
-        "teardown_policy": "bounded-docker-rm-force",
+        "server_pid": os.environ["SERVER_PID"],
+        "teardown_policy": "bounded-process-stop",
         "status": os.environ["CLEANUP_STATUS"],
         "command": "bash scripts/ci/s3-qualification-endpoint.sh teardown",
     },
     "results": {
         "selected": True,
-        "selected_provider": "minio",
+        "selected_provider": "rustfs",
         "rejected_candidates": [
+            {
+                "provider": "minio",
+                "version": "RELEASE.2024-12-18T13-15-44Z",
+                "reason": "end-of-life; release binaries withdrawn",
+                "evidence": "docs/operator/object-log-authority-compatibility.md",
+                "selectable": False,
+            },
             {
                 "provider": "garage",
                 "version": "v2.2.0",
@@ -349,47 +375,41 @@ PY
 }
 
 cmd_provision() {
-  require_cmd docker
   require_cmd curl
   require_cmd python3
   require_cmd git
   assert_secret_dir_outside_repo
   prove_garage_e3_absent
 
-  local image host_port access secret bucket region endpoint container
-  image=$(select_minio_image)
+  local bin host_port access secret bucket region endpoint data pid
+  bin=$(install_rustfs)
   host_port="${FIREWEED_S3_QUAL_HOST_PORT:-$(free_loopback_port)}"
   access="fwqual$(random_token | head -c 12)"
   secret="$(random_token)$(random_token)"
   bucket="fireweed-qual-$(random_token | head -c 10)"
   region="us-east-1"
   endpoint="http://127.0.0.1:${host_port}"
-  container="${CONTAINER_NAME:-fireweed-s3-qual-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-  CONTAINER_NAME=$container
+  data="${STATE_DIR}/data"
 
   mkdir -p "$SECRET_DIR" "$STATE_DIR"
   chmod 700 "$SECRET_DIR"
-  printf '%s\n' "$container" >"${STATE_DIR}/container_name"
-  printf '%s\n' "$image" >"${STATE_DIR}/image"
+  cmd_teardown >/dev/null 2>&1 || true
+  rm -rf "$data"
+  mkdir -p "$data"
+  printf '%s\n' "$bin" >"${STATE_DIR}/binary"
   printf '%s\n' "$endpoint" >"${STATE_DIR}/endpoint"
 
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  err "starting RustFS ${RUSTFS_VERSION} at ${endpoint}"
+  RUSTFS_ACCESS_KEY="$access" RUSTFS_SECRET_KEY="$secret" RUSTFS_CONSOLE_ENABLE=false \
+    nohup "$bin" server "$data" --address "127.0.0.1:${host_port}" \
+    >"${STATE_DIR}/rustfs.log" 2>&1 </dev/null &
+  pid=$!
+  printf '%s\n' "$pid" >"${STATE_DIR}/pid"
 
-  err "starting MinIO container=${container} image=${image} port=127.0.0.1:${host_port}"
-  if ! docker run -d \
-    --name "$container" \
-    -p "127.0.0.1:${host_port}:9000" \
-    -e "MINIO_ROOT_USER=${access}" \
-    -e "MINIO_ROOT_PASSWORD=${secret}" \
-    "$image" \
-    server /data --address ":9000" >/dev/null; then
-    die "docker run failed for ${image}"
-  fi
-
-  if ! wait_minio_ready "$endpoint"; then
-    docker logs "$container" >&2 || true
-    docker rm -f "$container" >/dev/null 2>&1 || true
-    die "MinIO health check timed out at ${endpoint}"
+  if ! wait_rustfs_ready "$endpoint"; then
+    tail -n 50 "${STATE_DIR}/rustfs.log" >&2 || true
+    cmd_teardown || true
+    die "RustFS readiness check timed out at ${endpoint}"
   fi
 
   write_secret_file "$endpoint" "$bucket" "$region" "$access" "$secret"
@@ -410,7 +430,7 @@ cmd_provision() {
   err "  attestation=${ATTESTATION_FILE}"
   err "  endpoint=${FIREWEED_S3_TEST_ENDPOINT}"
   err "  bucket=${FIREWEED_S3_TEST_BUCKET} (ack in attestation; keys redacted)"
-  err "  container left running for consumers; run teardown when finished"
+  err "  RustFS left running for consumers (pid ${pid}); run teardown when finished"
 }
 
 cmd_preflight() {
@@ -433,25 +453,33 @@ cmd_attest() {
   emit_attestation "${1:-pending}"
 }
 
+server_running() {
+  local pid=$1
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+    && grep -q rustfs "/proc/${pid}/cmdline" 2>/dev/null
+}
+
 cmd_teardown() {
-  require_cmd docker
-  local container
-  container="${CONTAINER_NAME:-}"
-  if [[ -z "$container" && -f "${STATE_DIR}/container_name" ]]; then
-    container=$(cat "${STATE_DIR}/container_name")
+  local pid=""
+  if [[ -f "${STATE_DIR}/pid" ]]; then
+    pid=$(cat "${STATE_DIR}/pid")
   fi
-  if [[ -z "$container" ]]; then
-    err "no container name recorded; nothing to tear down"
+  if [[ -z "$pid" ]]; then
+    err "no RustFS process recorded; nothing to tear down"
     return 0
   fi
-  err "teardown: docker rm -f ${container}"
-  docker rm -f "$container" >/dev/null 2>&1 || true
-  if docker inspect -f '{{.State.Running}}' "$container" >/dev/null 2>&1; then
-    local running
-    running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo false)
-    if [[ "$running" == "true" ]]; then
-      die "container ${container} still running after teardown"
+  if server_running "$pid"; then
+    err "teardown: stopping RustFS pid ${pid}"
+    kill "$pid" 2>/dev/null || true
+    local deadline=$((SECONDS + 10))
+    while server_running "$pid" && (( SECONDS < deadline )); do
+      sleep 0.2
+    done
+    if server_running "$pid"; then
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 0.2
     fi
+    server_running "$pid" && die "RustFS pid ${pid} still running after teardown"
   fi
   if [[ -f "$ATTESTATION_FILE" && -f "$PREFLIGHT_JSON" ]]; then
     if [[ -f "$SECRET_FILE" ]]; then
@@ -459,7 +487,9 @@ cmd_teardown() {
     fi
     emit_attestation "completed" || true
   fi
-  err "teardown complete for ${container}"
+  rm -f "${STATE_DIR}/pid"
+  rm -rf "${STATE_DIR}/data"
+  err "teardown complete for RustFS pid ${pid}"
 }
 
 cmd_verify_isolation() {
@@ -513,14 +543,15 @@ cmd_status() {
   echo "SECRET_DIR=${SECRET_DIR}"
   echo "SECRET_FILE=${SECRET_FILE}"
   echo "ATTESTATION_FILE=${ATTESTATION_FILE}"
-  if [[ -f "${STATE_DIR}/container_name" ]]; then
-    local c
-    c=$(cat "${STATE_DIR}/container_name")
-    echo "CONTAINER=${c}"
-    if docker inspect -f '{{.State.Running}}' "$c" >/dev/null 2>&1; then
-      echo "CONTAINER_RUNNING=$(docker inspect -f '{{.State.Running}}' "$c")"
+  echo "RUSTFS_VERSION=${RUSTFS_VERSION}"
+  if [[ -f "${STATE_DIR}/pid" ]]; then
+    local pid
+    pid=$(cat "${STATE_DIR}/pid")
+    echo "RUSTFS_PID=${pid}"
+    if server_running "$pid"; then
+      echo "RUSTFS_RUNNING=true"
     else
-      echo "CONTAINER_RUNNING=absent"
+      echo "RUSTFS_RUNNING=false"
     fi
   fi
   if [[ -f "$ATTESTATION_FILE" ]]; then
@@ -540,6 +571,7 @@ main() {
   shift || true
   case "$cmd" in
     survey) cmd_survey "$@" ;;
+    install) install_rustfs ;;
     provision) cmd_provision "$@" ;;
     preflight) cmd_preflight "$@" ;;
     attest) cmd_attest "${1:-pending}" ;;
@@ -548,7 +580,7 @@ main() {
     status) cmd_status "$@" ;;
     -h|--help|help) usage ;;
     "") usage; exit 64 ;;
-    *) die "unknown command: $cmd (try: survey|provision|preflight|attest|teardown|verify-isolation|status)" ;;
+    *) die "unknown command: $cmd (try: survey|install|provision|preflight|attest|teardown|verify-isolation|status)" ;;
   esac
 }
 

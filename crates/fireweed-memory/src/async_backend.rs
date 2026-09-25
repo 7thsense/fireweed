@@ -93,7 +93,7 @@ mod tests {
                 expected_epoch: None,
 
                 request_id: None,
-})
+            })
             .await
             .unwrap();
         assert_eq!(claimed.items.len(), 1);

@@ -448,7 +448,7 @@ def validate_leaves(leaves: list[dict], authority: dict) -> None:
             },
             f"broad substring filter forbidden: {filt}",
         )
-        for banned in ("garage", "Garage", "minio", "MinIO"):
+        for banned in ("garage", "Garage", "minio", "MinIO", "rustfs", "RustFS"):
             require(banned not in row["leaf_id"], f"provider brand in leaf_id {row['leaf_id']}")
             require(banned not in filt, f"provider brand in filter {filt}")
 
@@ -581,7 +581,8 @@ Contracts:
 - Credentials live in an explicit secret-file path **outside** the repository.
   `.env.garage-e3` remains forbidden in-repo. Attestation records the secret path,
   never credential values.
-- Image is digest-pinned; teardown is `bash scripts/ci/s3-qualification-endpoint.sh teardown`.
+- The RustFS release binary is sha256-pinned; teardown is
+  `bash scripts/ci/s3-qualification-endpoint.sh teardown`.
 - Consumers take `docs/helix/04-build/storage-authority-manifest.json` + the run-owned
   attestation explicitly. Missing attestation blocks S3 children only.
 
@@ -591,13 +592,14 @@ Contract tests: `bash scripts/ci/tests/s3-qualification-endpoint-test.sh`.
 
 A **required** storage-matrix / product CI job that claims the s3 axis **must**:
 
-1. **Provision an S3-compatible service** before tests (MinIO or other attested CAS provider).
+1. **Provision an S3-compatible service** before tests (RustFS or other attested CAS provider).
    - Preferred hermetic path: `scripts/ci/s3-qualification-endpoint.sh provision`
-     (digest-pinned MinIO + two-writer CAS preflight + run-owned attestation).
-   - Disposable MinIO via docker remains acceptable for unit/integration lanes when the
-     same native create-only bar is met (see
-     `crates/fireweed-server/tests/production_s3_object_log_config.rs`).
-   - Kind/deploy lanes may use the in-cluster MinIO fixture under
+     (sha256-pinned RustFS + two-writer CAS preflight + run-owned attestation).
+   - Unit/integration lanes may instead install the same binary
+     (`scripts/ci/s3-qualification-endpoint.sh install`) and export `FIREWEED_RUSTFS_BIN`;
+     `fireweed_objectlog::shared_s3_test_env` starts it on loopback.
+   - MinIO is retired (end-of-life; release binaries withdrawn).
+   - Kind/deploy lanes may use the in-cluster object-log fixture under
      `scripts/ci/kind/object-log.yaml` only when CAS preflight still passes.
    - Do **not** claim product S3 cells against Garage v2.2.0 (create-only not enforced).
 2. **Create a writable bucket** and export:
@@ -607,13 +609,13 @@ A **required** storage-matrix / product CI job that claims the s3 axis **must**:
    | `FIREWEED_S3_TEST_ENDPOINT` | **yes** (job must set) | — (tests skip without it) |
    | `FIREWEED_S3_TEST_BUCKET` | recommended | `fireweed` / `fireweed-test` |
    | `FIREWEED_S3_TEST_REGION` | optional | `us-east-1` |
-   | `FIREWEED_S3_TEST_ACCESS_KEY` | recommended | `minioadmin` |
-   | `FIREWEED_S3_TEST_SECRET_KEY` | recommended | `minioadmin` |
+   | `FIREWEED_S3_TEST_ACCESS_KEY` | recommended | `fireweed` |
+   | `FIREWEED_S3_TEST_SECRET_KEY` | recommended | `fireweed-test-rustfs` |
 
-3. **Not treat skip as pass** for the gate job. Local developer runs without MinIO may
+3. **Not treat skip as pass** for the gate job. Local developer runs without RustFS may
    `eprintln!` skip; the **required** CI job must fail the matrix if s3 cells did not run.
 4. **Native create-only**: the endpoint must support S3 create-only (`If-None-Match: *`
-   or equivalent). Fireweed probes this on product open. MinIO and conforming
+   or equivalent). Fireweed probes this on product open. RustFS and conforming
    topologies satisfy this; do not claim s3 cells against an S3 implementation that lacks it.
 5. For `s3{sep}postgres`, also provision Postgres and set `FIREWEED_PG_TEST_URL`, building
    with `--features postgres`.

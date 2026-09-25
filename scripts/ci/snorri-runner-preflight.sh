@@ -233,7 +233,7 @@ export SNORRI_S3_TEST_BUCKET=$(printf '%q' "${FIREWEED_S3_TEST_BUCKET}")
 export SNORRI_S3_TEST_REGION=$(printf '%q' "${FIREWEED_S3_TEST_REGION}")
 export SNORRI_S3_TEST_ACCESS_KEY=$(printf '%q' "${FIREWEED_S3_TEST_ACCESS_KEY}")
 export SNORRI_S3_TEST_SECRET_KEY=$(printf '%q' "${FIREWEED_S3_TEST_SECRET_KEY}")
-# Legacy Snorri main live harness names (provider must still be P1s MinIO).
+# Legacy Snorri main live harness names (provider must still be the P1s-qualified RustFS).
 export SNORRI_GARAGE_S3_ENDPOINT=$(printf '%q' "${FIREWEED_S3_TEST_ENDPOINT}")
 export SNORRI_GARAGE_S3_BUCKET=$(printf '%q' "${FIREWEED_S3_TEST_BUCKET}")
 export SNORRI_GARAGE_S3_REGION=$(printf '%q' "${FIREWEED_S3_TEST_REGION}")

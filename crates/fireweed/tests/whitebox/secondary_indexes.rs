@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::ManualClock;
 use bytes::Bytes;
 use fireweed::{NewItem, PayloadUpdate, RuntimeCore};
 use fireweed_core::{
@@ -15,7 +16,6 @@ use fireweed_core::{
     PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
     RetryPolicy, TenantId,
 };
-use crate::ManualClock;
 use serde_json::{Value, json};
 
 fn qkey() -> fireweed::QueueKey {

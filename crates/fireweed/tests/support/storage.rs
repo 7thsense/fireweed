@@ -1,4 +1,4 @@
-//! Product storage fixtures: S3 (local MinIO) × Turso.
+//! Product storage fixtures: S3 (local RustFS) × Turso.
 #![allow(dead_code)]
 use fireweed::{Clock, EngineResult, Fireweed, ObjectLogAuthority, ResponseBarrier, StorageConfig};
 use fireweed_objectlog::shared_s3_test_env;

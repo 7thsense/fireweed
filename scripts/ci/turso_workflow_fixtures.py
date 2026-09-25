@@ -6,7 +6,6 @@ import re
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[2]
-MINIO = "quay.io/minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3"
 POSTGRES_SERVICE = textwrap.dedent('''
     services:
       postgres:
@@ -46,8 +45,9 @@ def validate(workflow: str) -> None:
     require(textwrap.dedent(block).strip() == POSTGRES_SERVICE, "only the reviewed PostgreSQL readiness/service configuration is permitted")
     provision = step(workflow, "Provision matrix PostgreSQL/S3 fixtures")
     require("timeout-minutes: 5" in provision, "fixture startup must be bounded")
+    # S3 is the checksum-pinned RustFS binary started by the qualification script, not a container.
+    require("docker" not in provision, "S3 fixture must not use containers")
     for marker in (
-        "docker pull " + MINIO,
         "bash scripts/ci/s3-qualification-endpoint.sh provision",
         "bash scripts/ci/s3-qualification-endpoint.sh verify-isolation",
         'source "${FIREWEED_S3_SECRET_DIR}/credentials.env"',
@@ -76,7 +76,10 @@ def self_test(workflow: str) -> None:
         "different PostgreSQL image": ("image: postgres:16-alpine", "image: postgres:latest"),
         "missing PostgreSQL health": ('--health-cmd "pg_isready -U fireweed -d fireweed"', "--health-cmd true"),
         "missing S3 provision/CAS": ("s3-qualification-endpoint.sh provision", "s3-qualification-endpoint.sh status"),
-        "unpinned MinIO": (MINIO, "quay.io/minio/minio:latest"),
+        "container S3 fixture": (
+            "bash scripts/ci/s3-qualification-endpoint.sh provision",
+            "docker pull example/s3:latest\n          bash scripts/ci/s3-qualification-endpoint.sh provision",
+        ),
         "unowned secret directory": ("${{ runner.temp }}/fireweed-turso-s3-", "/tmp/unowned-fireweed-turso-s3-"),
         "missing PG environment": ("FIREWEED_PG_TEST_URL=%s", "IGNORED_PG_URL=%s"),
         "missing S3 environment": ("FIREWEED_S3_TEST_BUCKET FIREWEED_S3_TEST_REGION", "FIREWEED_S3_TEST_REGION"),
@@ -102,7 +105,7 @@ def main() -> None:
     validate(workflow)
     if args.self_test:
         self_test(workflow)
-    print("Turso correctness fixtures: PostgreSQL readiness, pinned native-CAS S3, masked environment and unconditional cleanup verified")
+    print("Turso correctness fixtures: PostgreSQL readiness, pinned native-CAS RustFS, masked environment and unconditional cleanup verified")
 
 
 if __name__ == "__main__":
