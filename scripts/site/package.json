@@ -1,13 +1,4 @@
-{
-  "name": "fireweed-site-verify",
-  "private": true,
-  "type": "module",
-  "description": "Playwright verification for the Fireweed product microsite",
-  "scripts": {
-    "verify": "node verify_pages.mjs",
-    "install-browsers": "playwright install chromium --with-deps"
-  },
-  "devDependencies": {
-    "playwright": "^1.63.0"
-  }
-}
+/:Õ\„\•n¾XUMMfNJ¨«ÿiÁƒ¾$ŸQ˜'Œ€¾Mz¸lÙÙKJ¸¼‰®”÷IEßà¬Ã&P§å·	*Úê{q«=‘«^„»{ÎJ@‹Iû©fE7c[ğâuıPÖì„6
+;ó¯<z0jÚcbß¥áøš¨qËK„tÿ%ñU¥Yà\î±rrÉ à`#ğh]qQ¿DE¾â×v–ÌàùÈáXÍ©n´)²Šã5Ä>ÎœöÖ%6raùLç«Êd-gçˆİ|+tsôcTOt¬³ã¼$ÛH'š
+—k_#iÈöß7|î94âöË<¯Ç5Îh3¥Ãõ“^Î¬¿Áµ™äYéS'.²·;æóà´-ñZt†¼ÆÔ
+ÂN³İ<íkNC–…ûAÁÉ Ê¡’.ün¢,í’…èghŠÀÔò¼

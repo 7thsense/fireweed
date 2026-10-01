@@ -1,11 +1,2 @@
-#!/usr/bin/env bash
-# Stage the Pages tree and serve it locally for Playwright / manual checks.
-set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT="${1:-${ROOT}/target/site-pages}"
-PORT="${PORT:-4173}"
-
-python3 "${ROOT}/scripts/site/stage_pages.py" "${OUT}"
-cd "${OUT}"
-echo "Serving ${OUT} at http://127.0.0.1:${PORT}/ (site at /site/)"
-exec python3 -m http.server "${PORT}" --bind 127.0.0.1
+­ój•7()
+ˆãÜvÉß\†¤ë.d©‡?¯dâKè|Bù®e¥Ín¤o®;¸òQN¨w¥[¥ÖÂ¶ËT’œ`Áƒ!şee!Ä6(s0ìM—liHR`-q¯õj_Båä¢@Ÿ)…7ÁÍdÌ‹bÎFoÇMÈ}\(G—ygsj‡Ø’†]jƒô<D«ºZêPa‹Îİ9B!PìÈ½’OXéúEG°kàŠ	-5¸Ew­ˆæü¿¶"èÁF`ÿ8C‚hHšoòwÃo°)ôQÅÒ<‹¯ÔïJ8ê·çCQv™sZ8°úÎ¢YÿÕT9ôêÉ¶«ãz.çb“£±aä÷SíÓ”¤·`Ø<"’®§¿‚[U…<øÑÉ2&˜ZÖÖÚ8\ÖBƒ·5®[©ªA¶H:b§jëQv3v!j}1xnßÿ3è*àxE2ıMu9³.®VtµlŠjÁe$, `ïEr<nIæÅ k:«ƒÚÅÂCâ6B„oŸf€Iè!ÖYğ½zõ

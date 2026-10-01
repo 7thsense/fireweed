@@ -1,47 +1,9 @@
-#!/usr/bin/env python3
-"""Fail if committed example excerpts drift from source symbols."""
-
-from __future__ import annotations
-
-import sys
-from pathlib import Path
-
-# Reuse extractor
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from extract_examples import (  # noqa: E402
-    MANIFEST,
-    OUT_DIR,
-    ROOT,
-    load_manifest,
-    render_excerpt,
-)
-
-
-def main() -> int:
-    examples = load_manifest(MANIFEST)
-    failed = 0
-    for example in examples:
-        slug = example["slug"]
-        expected = render_excerpt(example)
-        path = OUT_DIR / f"{slug}.rs"
-        if not path.is_file():
-            print(f"missing excerpt: {path.relative_to(ROOT)}", file=sys.stderr)
-            failed += 1
-            continue
-        actual = path.read_text(encoding="utf-8")
-        if actual != expected:
-            print(
-                f"stale excerpt: {path.relative_to(ROOT)} "
-                f"(regenerate with python3 scripts/site/extract_examples.py)",
-                file=sys.stderr,
-            )
-            failed += 1
-    if failed:
-        print(f"{failed} provenance check(s) failed", file=sys.stderr)
-        return 1
-    print(f"provenance ok for {len(examples)} example(s)")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+z·W9ågY•ÉBÉ"Ğ †¬ª'‡2ÛopJéwa¡ÅäĞà’­¯nÑ¿:Ç4HşÍR¯‹*j˜dvÅ/ïq§pÏ4¬¶×;ÄŒtZí`ÙØZÔG¶¨B=îŞØj<X¬†ıvF7pjAQÈÙ‘ÑôÑØ“diÓ}ƒ²’Os—€Öğà;)ùáØ9<×NúœÀ][Ş*u¦ª¢ÏL‹[Ô*n(ãƒ]b•(
+Ãş/Õ?ótlnêœ/t
+¦Ãw>k¥Ğò¯MÌZÓØdæ+z£Ü •—‘…–çÉÆ8ZˆOÈH}—’†W=ò(-¢EkH4¶Í{¾è4Ø€Æõ?Xû/€ï•5ük*rŸüÜà=Î—ªúº˜OÆŸGŸôsÌ2ª–Í¾âoyTœk¹a6›ã×e3{f•²20UgBšƒìcëxËDF¨2ö¾P@$dud¯®Q	Dc•l°#ámm0¾†ÇÑIı›İaSé3¡ü^Ø…=A’+dàã¼‚¤+‘ôë4Êöh'÷zg\N/fa1¹Z/Lp
+%ÃN_ÈRÿäŸ‡œ¯ĞÇÙOH°®U1±²Z­á‘Ê6Jµıvâ
+lÊñÔì… °;“aJ÷\/½ŞÇ´”u9¨má‘è3·ä‹œÃD„’ÇƒÚ÷İôÉ° Ê®(uéX2“»ä˜œ™ƒ»7T¡‰9G)LâBŞHÙ|R­g†–¯İVê‘Ò…÷"Td>a?¡Ñ³6ªç…eû€•qŸ¬Í_8P E¼H»ñ“õ×&(` ·™1O{^h¸Ğ­Ï¤)šé˜´cwæSxnûL‰oü—€ƒî4$Ë+tÌu²®ÒÆcÔƒ.ïO“›‡Ğs»Æ¨Jùü…SÔƒõKˆ¤jø26t,´K
+¡AOôÕ£‚â¦İêt‡@.Ì°¿x$-³QëÜŒı)ŞE7-8ô´X*Xä°ÃÜ2àx
+	íÀË¿‚Bz
+c»‰:q>§¶ÿø£Ù›_ÑIæ"Qç–ñ—”.e«³ÍXËIJ‚6gñB"‘MÚTîdÔ)W}ªUéBy£Ğê]¹ç<Isî)F]ë§¼dh€jKi¿„S‚}!gôùğZ®˜º’GÅ]KWuèá¡ØĞc‹{e=[­¶^ì‡õ€»Ya×[WÍ:==³2`VßñÓšàl¯­µ¶Ä-æ2ŠP£2‰Ö¸°‡%2ì¯a? Dë^5”µoUŠí¦Æ ñD²—G`¢>f{­öhÁ¥C±×ñ²å»o«ovŸ£êË$µİ2	Ë}Œ¶t	c’©ey«Í¨‚Ç§ã%0è@l}œBğÌœMÜqññõÁÛ‰¤›€±Û3J9 D}I“ŠÇ:È+‹¨æ‘ApÄuPód.’˜R:ŸürA$…OÛlÀ^e{iZ MëŸ2‚ä3ÑX^$%âzGTu¿NúÜßŒZ]ÙZíÅN[IÂ5ÏfXùc?ÆĞ´é±òºN+¤Ş-’ƒeS[tNhÿ‚m½ÈéøWgı„Á
+ŞŸîìæ;oˆ‘C¼e»_1qÄg…K«£ns ê£<SFf_íyî‡8§*Jİ®}«H8¾ç†¬;ª:èËˆ²ˆ8 ‚
