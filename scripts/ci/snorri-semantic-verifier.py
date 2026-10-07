@@ -63,7 +63,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -77,7 +77,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -94,7 +94,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -110,7 +110,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -129,7 +129,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -147,7 +147,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -165,7 +165,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "-p",
@@ -283,7 +283,7 @@ def commands_for(sid: str, cells_name: str) -> list[list[str]]:
             features = "memory,objectlog,turso" + (",postgres" if external else "")
             test = ("postgres_cells::" if external else "") + f"p7n_{log}_{projection}_lifecycle"
             commands.append([
-                "rustup", "run", "1.97.1", "cargo", "test", "-p", "fireweed",
+                "rustup", "run", "1.99.0", "cargo", "test", "-p", "fireweed",
                 "--features", features, "--test", "p7n_non_s3_lifecycle_parity",
                 test, "--", "--exact", "--nocapture",
             ])

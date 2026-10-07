@@ -32,8 +32,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ripgrep
 
-      - name: Install Rust 1.97.1
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+      - name: Install Rust 1.99.0
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
 
       - name: Reuse Cargo build state
         uses: Swatinem/rust-cache@v2

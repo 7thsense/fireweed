@@ -354,7 +354,7 @@ def cargo_routes(
             [
                 "rustup",
                 "run",
-                "1.97.1",
+                "1.99.0",
                 "cargo",
                 "metadata",
                 "--manifest-path",
@@ -374,7 +374,7 @@ def cargo_routes(
             [
                 "rustup",
                 "run",
-                "1.97.1",
+                "1.99.0",
                 "cargo",
                 "test",
                 "--manifest-path",
@@ -417,7 +417,7 @@ def cargo_routes(
             invocation = [
                 "rustup",
                 "run",
-                "1.97.1",
+                "1.99.0",
                 "cargo",
                 "test",
                 "--manifest-path",
@@ -454,7 +454,7 @@ def cargo_routes(
         command = [
             "rustup",
             "run",
-            "1.97.1",
+            "1.99.0",
             "cargo",
             "test",
             "--manifest-path",
@@ -511,7 +511,7 @@ def cargo_routes(
             invocation = [
                 "rustup",
                 "run",
-                "1.97.1",
+                "1.99.0",
                 "cargo",
                 "test",
                 "--manifest-path",
@@ -546,7 +546,7 @@ def cargo_routes(
             suite_invocation = [
                 "rustup",
                 "run",
-                "1.97.1",
+                "1.99.0",
                 "cargo",
                 "test",
                 "--manifest-path",

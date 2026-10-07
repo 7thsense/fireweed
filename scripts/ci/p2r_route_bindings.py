@@ -44,7 +44,7 @@ PLAN_KEY = "P2r"
 PRODUCT_WORKFLOW_NAMESPACE = "product_workflow"
 OPERATOR_NAMESPACE = "operator_validation"
 STORAGE_NAMESPACE = "storage_matrix"
-CARGO = ["rustup", "run", "1.97.1", "cargo"]
+CARGO = ["rustup", "run", "1.99.0", "cargo"]
 
 # Ten names that must appear in the product_workflow namespace (exact set).
 PRODUCT_WORKFLOW_REQUIRED = [
