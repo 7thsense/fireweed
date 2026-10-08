@@ -144,7 +144,12 @@ fn exercise(page_size: usize, cache_kib: usize, bytes: usize) {
         inner: MemoryIO::new(),
         writes: writes.clone(),
     });
-    let db = Database::open_file(io.clone(), path).unwrap();
+    let db = Database::open(
+        io.clone(),
+        path,
+        turso_core::OpenOptions::new(Arc::new(turso_core::dialect::SqliteDialect)),
+    )
+    .unwrap();
     let writer = db.connect().unwrap();
     writer
         .execute(format!("PRAGMA page_size={page_size}"))
@@ -185,7 +190,12 @@ fn exercise(page_size: usize, cache_kib: usize, bytes: usize) {
     drop(reader);
     drop(writer);
     drop(db);
-    let db = Database::open_file(io, path).unwrap();
+    let db = Database::open(
+        io,
+        path,
+        turso_core::OpenOptions::new(Arc::new(turso_core::dialect::SqliteDialect)),
+    )
+    .unwrap();
     let conn = db.connect().unwrap();
     verify(&conn, 1, 0, bytes);
     conn.execute("BEGIN").unwrap();

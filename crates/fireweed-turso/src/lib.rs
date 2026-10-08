@@ -27,3 +27,11 @@ pub const LOCAL_FEATURE_ENABLED: bool = cfg!(feature = "local");
 
 #[cfg(all(test, feature = "local"))]
 mod runtime_isolation_tests;
+
+#[cfg(feature = "local")]
+fn row_values(row: &turso::Row, columns: usize) -> turso::Result<std::vec::IntoIter<turso::Value>> {
+    (0..columns)
+        .map(|column| row.get_value(column))
+        .collect::<turso::Result<Vec<_>>>()
+        .map(Vec::into_iter)
+}

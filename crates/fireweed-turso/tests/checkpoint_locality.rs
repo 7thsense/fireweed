@@ -69,7 +69,13 @@ fn check_checkpoint_locality(cache_kib: usize) {
         inner: DatabaseFile::new(io.open_file(path, OpenFlags::Create, false).unwrap()),
         writes: Mutex::new(Vec::new()),
     });
-    let db = Database::open(io.clone(), path, storage.clone()).unwrap();
+    let db = Database::open(
+        io.clone(),
+        path,
+        turso_core::OpenOptions::new(Arc::new(turso_core::dialect::SqliteDialect))
+            .storage(storage.clone()),
+    )
+    .unwrap();
     let conn = db.connect().unwrap();
     conn.execute("PRAGMA wal_autocheckpoint=0").unwrap();
     conn.execute("PRAGMA cache_size=-32768").unwrap();
@@ -116,7 +122,12 @@ fn check_checkpoint_locality(cache_kib: usize) {
     drop(db);
     // Truncation removed the WAL: this query must obtain the newest values
     // from the checkpointed database, not from the old pager cache or WAL.
-    let reopened = Database::open(io, path, storage).unwrap();
+    let reopened = Database::open(
+        io,
+        path,
+        turso_core::OpenOptions::new(Arc::new(turso_core::dialect::SqliteDialect)).storage(storage),
+    )
+    .unwrap();
     let conn = reopened.connect().unwrap();
     let mut statement = conn.prepare("SELECT count(*),sum(CAST(value AS INTEGER)),sum(CAST(value AS INTEGER)!=id+2048),min(id),max(id) FROM test").unwrap();
     let mut observed_rows = 0;

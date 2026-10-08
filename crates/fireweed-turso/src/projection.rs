@@ -40,9 +40,20 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
 
 // Keep the statement failure visible when Turso has already aborted the transaction.
 async fn rollback_preserving_error(
-    transaction: turso::transaction::Transaction<'_>,
+    mut transaction: turso::transaction::Transaction<'_>,
     error: EngineError,
 ) -> EngineError {
+    // OR ROLLBACK may already have ended the transaction. Clear its deferred
+    // cleanup using the public API so the next operation does not issue a
+    // second ROLLBACK against an idle connection.
+    match transaction.is_autocommit() {
+        Ok(true) => {
+            transaction.set_drop_behavior(turso::transaction::DropBehavior::Ignore);
+            return error;
+        }
+        Ok(false) => {}
+        Err(state) => return storage(format!("{error}; transaction state check failed: {state}")),
+    }
     match transaction.rollback().await {
         Ok(()) => error,
         Err(rollback) => storage(format!("{error}; rollback also failed: {rollback}")),
@@ -335,7 +346,11 @@ async fn one_row(
     let Some(row) = rows.next().await.map_err(storage)? else {
         return Ok(None);
     };
-    Ok(Some(row.into_values().collect()))
+    Ok(Some(
+        crate::row_values(&row, rows.column_count())
+            .map_err(storage)?
+            .collect(),
+    ))
 }
 
 async fn one_outcome_row(
@@ -350,7 +365,11 @@ async fn one_outcome_row(
     let Some(row) = rows.next().await.map_err(outcome_read_error)? else {
         return Ok(None);
     };
-    Ok(Some(row.into_values().collect()))
+    Ok(Some(
+        crate::row_values(&row, rows.column_count())
+            .map_err(outcome_read_error)?
+            .collect(),
+    ))
 }
 
 async fn query_value_rows(
@@ -367,7 +386,11 @@ async fn query_value_rows(
     let mut rows = statement.query(params).await.map_err(outcome_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(outcome_read_error)? {
-        collected.push(row.into_values().collect());
+        collected.push(
+            crate::row_values(&row, rows.column_count())
+                .map_err(outcome_read_error)?
+                .collect(),
+        );
     }
     trace_sql(
         query.as_ref(),
@@ -535,7 +558,13 @@ async fn validation_rows_by_item(
     let mut by_item = HashMap::with_capacity(ids.len());
     while let Some(row) = rows.next().await.map_err(storage)? {
         let item_id = ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?;
-        by_item.insert(item_id, row.into_values().skip(1).collect());
+        by_item.insert(
+            item_id,
+            crate::row_values(&row, rows.column_count())
+                .map_err(storage)?
+                .skip(1)
+                .collect(),
+        );
     }
     trace_sql(&query, bind_count, by_item.len(), started.elapsed());
     Ok(by_item)
@@ -1881,7 +1910,11 @@ async fn query_driver_value_rows(
     let mut rows = statement.query(params).await.map_err(driver_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(driver_read_error)? {
-        collected.push(row.into_values().collect());
+        collected.push(
+            crate::row_values(&row, rows.column_count())
+                .map_err(driver_read_error)?
+                .collect(),
+        );
     }
     trace_sql(
         query.as_ref(),
@@ -2058,8 +2091,11 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let Some((id, item)) =
-                    class_s_item_from_owned_values(row.into_values(), expires, &exclude_set)?
+                let Some((id, item)) = class_s_item_from_owned_values(
+                    crate::row_values(&row, rows.column_count()).map_err(driver_read_error)?,
+                    expires,
+                    &exclude_set,
+                )?
                 else {
                     continue;
                 };
@@ -2115,8 +2151,11 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let Some((id, item)) =
-                    class_s_item_from_owned_values(row.into_values(), expires, &exclude_set)?
+                let Some((id, item)) = class_s_item_from_owned_values(
+                    crate::row_values(&row, rows.column_count()).map_err(driver_read_error)?,
+                    expires,
+                    &exclude_set,
+                )?
                 else {
                     continue;
                 };
@@ -5589,10 +5628,10 @@ mod item_mutation_tests {
             .collect::<Vec<_>>();
         for (table, key) in [("i", "item_id"), ("k", "client_item_key")] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))),
                 "{details:?}"
             );
         }
@@ -6892,10 +6931,10 @@ mod lease_target_query_tests {
             .collect();
         for table in ["i", "p"] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
                 "{details:?}"
             );
         }
@@ -6927,10 +6966,10 @@ mod addressed_query_tests {
             .collect();
         for table in ["i", "p", "b"] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
                 "{details:?}"
             );
         }
@@ -6948,10 +6987,10 @@ mod addressed_query_tests {
             .collect();
         for (table, key) in [("i", "client_item_key"), ("p", "item_id")] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))),
                 "live-item key lookup: {details:?}"
             );
         }
@@ -6986,10 +7025,10 @@ mod ordered_claim_query_tests {
             .collect();
         for (table, key) in [("g", "item_id"), ("b", "gate_key")] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))),
                 "gate eligibility must seek the candidate's full key, never scan queue membership: {details:?}"
             );
         }
@@ -7012,7 +7051,8 @@ mod ordered_claim_query_tests {
         assert!(
             details
                 .iter()
-                .any(|line| line.starts_with("SEARCH g USING INDEX")
+                .any(|line| (line.starts_with("SEARCH g USING INDEX")
+                    || line.starts_with("SEARCH g USING COVERING INDEX"))
                     && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
             "claim metadata must seek selected IDs regardless of completed membership population: {details:?}"
         );
@@ -7087,10 +7127,10 @@ mod ordered_claim_query_tests {
         }
         for table in ["i", "p"] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
                 "materialization must seek selected IDs: {details:?}"
             );
         }
@@ -7330,8 +7370,8 @@ mod apply_error_preservation_tests {
             "primary error lost: {reported}"
         );
         assert!(
-            reported.contains("rollback also failed"),
-            "expected already-aborted transaction: {reported}"
+            !reported.contains("rollback also failed"),
+            "an already-aborted transaction must preserve its primary error: {reported}"
         );
 
         let transaction = connection

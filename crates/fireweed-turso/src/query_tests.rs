@@ -671,7 +671,8 @@ async fn native_query_claims_and_discovery_respect_time_gates_pause_and_cohort_b
         for (table, key) in [("ig", "item_id"), ("gs", "gate_key")] {
             assert!(
                 details.iter().any(|line| {
-                    line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                    (line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
                         && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
                 }),
                 "query eligibility must seek each full gate key: {details:?}"

@@ -1,8 +1,8 @@
 [workspace]
 # `cargo test --workspace` covers exactly the members below: domain, storage
 # adapters (memory/Turso/PostgreSQL/object-log), conformance, facade, server and tools.
-# Independently invoke `crates/fireweed-bench/Cargo.toml`, `vendor/turso_core/Cargo.toml`
-# object-log is the git tag v0.3.2. Its tests live in that repository.
+# Independently invoke the standalone `crates/fireweed-bench/Cargo.toml` workspace.
+# object-log is the git tag v0.3.6. Its tests live in that repository.
 # Live integrations require explicitly configured PostgreSQL, S3 and Kafka fixtures.
 members = [
     "crates/fireweed-core",
@@ -22,7 +22,6 @@ members = [
     "crates/fireweed-sim-support",
     "crates/fireweed-workload",
 ]
-exclude = ["vendor/turso_core", "vendor/turso", "vendor/turso_sdk_kit", "vendor/turso_sync_sdk_kit", "vendor/turso_sync_engine"]
 resolver = "3"
 
 [workspace.package]

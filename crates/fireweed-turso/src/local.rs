@@ -2954,7 +2954,7 @@ mod committed_pool_tests {
         eprintln!(
             "wal_freeze readers={} elapsed_us={} wal_before={} wal_after_writes={} \
              wal_after_reads={} checkpoint_invocations={} \
-             wal_autocheckpoint_readback=verified_in_reader_configuration",
+             checkpoint_policy=upstream_native",
             observed.len(),
             elapsed.as_micros(),
             wal_before,
@@ -3351,8 +3351,8 @@ pub(crate) async fn configure_committed_reader(
     connection
         .pragma_update("cache_size", settings.cache_size_kib.to_string())
         .await?;
-    // The pinned checkpoint-control backport makes this effective and queryable.
-    connection.pragma_update("wal_autocheckpoint", "0").await?;
+    // Stock Turso owns automatic checkpoint policy. Query-only readers do
+    // not publish writes; do not configure an unsupported checkpoint pragma.
     connection.busy_timeout(settings.busy_timeout)?;
     // Read-only connections never checkpoint or own projection durability.
     connection.pragma_update("synchronous", "OFF").await?;
@@ -3370,7 +3370,6 @@ pub(crate) async fn verify_committed_reader_settings(
     let cache_size_kib = scalar_i64(connection, "PRAGMA cache_size").await?;
     let busy_timeout_ms = scalar_i64(connection, "PRAGMA busy_timeout").await?;
     let query_only = scalar_i64(connection, "PRAGMA query_only").await?;
-    let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     let expected_timeout_ms = i64::try_from(expected.busy_timeout.as_millis()).map_err(|_| {
         TursoRelationalError::Configuration(
             "committed-reader busy timeout exceeds i64 milliseconds".to_string(),
@@ -3381,28 +3380,16 @@ pub(crate) async fn verify_committed_reader_settings(
         || cache_size_kib != expected.cache_size_kib
         || busy_timeout_ms != expected_timeout_ms
         || query_only != 1
-        || checkpoint_frames != 0
     {
         return Err(TursoRelationalError::Configuration(format!(
             "committed reader settings read back as journal_mode={journal_mode:?}, \
              synchronous={synchronous}, cache_size={cache_size_kib}, \
-             busy_timeout={busy_timeout_ms}, query_only={query_only}, wal_autocheckpoint={checkpoint_frames}; expected \
-             wal, 0, {}, {}, 1, 0",
+             busy_timeout={busy_timeout_ms}, query_only={query_only}; expected \
+             wal, 0, {}, {}, 1",
             expected.cache_size_kib, expected_timeout_ms
         )));
     }
     Ok(())
-}
-
-async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Result<i64> {
-    let _ = connection;
-    if !config.rebuildable_io {
-        return Ok(1_000);
-    }
-    // Log-backed projections recover from the object-log after a crash. Do not
-    // auto-checkpoint under load (that stampeded 64 stores during campaigns).
-    // Idle/close and a process-wide Passive cap bound the WAL instead.
-    Ok(0)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3415,9 +3402,9 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection
         .pragma_update("journal_mode", config.journal_mode.pragma_value())
         .await?;
-    // NORMAL still lets an explicit Passive checkpoint publish backfill.
-    // Automatic checkpoints are disabled on log-backed writers (`0` below).
-    // The log-backed I/O adapter omits physical sync; the object-log is durable.
+    // NORMAL lets explicit Passive checkpoints publish backfill alongside
+    // stock Turso's automatic policy. The public I/O adapter omits physical
+    // sync only for disposable projections backed by the durable object log.
     connection
         .pragma_update(
             "synchronous",
@@ -3435,12 +3422,8 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
         // Avoid creating a filesystem temp database for every bounded batch.
         connection.pragma_update("temp_store", "MEMORY").await?;
     }
-    // Coalesce repeated page versions before writing the rebuildable main DB.
-    // Preserve the upstream 1,000-frame policy for standalone projections.
-    let checkpoint_frames = checkpoint_frames(connection, config).await?;
-    connection
-        .pragma_update("wal_autocheckpoint", checkpoint_frames)
-        .await?;
+    // Automatic checkpoint scheduling remains upstream-owned. Fireweed's
+    // idle/close checkpoints use the supported wal_checkpoint interface.
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
 }
@@ -3504,17 +3487,10 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.synchronous
         )));
     }
-    let expected_checkpoint_frames = checkpoint_frames(connection, config).await?;
     if config.rebuildable_io && scalar_i64(connection, "PRAGMA temp_store").await? != 2 {
         return Err(TursoRelationalError::Configuration(
             "log-backed SQL scratch must use memory temp storage".into(),
         ));
-    }
-    let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
-    if checkpoint_frames != expected_checkpoint_frames {
-        return Err(TursoRelationalError::Configuration(format!(
-            "wal_autocheckpoint read back as {checkpoint_frames}, expected {expected_checkpoint_frames}"
-        )));
     }
     let expected_timeout = i64::try_from(config.busy_timeout.as_millis()).map_err(|_| {
         TursoRelationalError::Configuration("busy timeout exceeds i64 milliseconds".to_string())
@@ -3792,7 +3768,7 @@ async fn collect_rows(
     while let Some(row) = rows.next().await? {
         collected.push(OwnedRow {
             columns: columns.clone(),
-            values: row.into_values().collect(),
+            values: crate::row_values(&row, rows.column_count())?.collect(),
         });
     }
     crate::projection::trace_sql(sql, bind_count, collected.len(), started.elapsed());

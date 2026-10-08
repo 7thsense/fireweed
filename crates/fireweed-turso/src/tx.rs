@@ -114,17 +114,18 @@ mod apply_statement_reuse_tests {
             Value::Blob([0, 255, 31, 128].repeat(16384)),
         ];
         let mut rows = statement.query(expected.clone()).await.unwrap();
-        let held: Vec<_> = rows.next().await.unwrap().unwrap().into_values().collect();
+        let row = rows.next().await.unwrap().unwrap();
+        let held: Vec<_> = crate::row_values(&row, rows.column_count())
+            .unwrap()
+            .collect();
         assert!(rows.next().await.unwrap().is_none());
         drop(rows);
         let replacement = vec![Value::Integer(7); 5];
         let mut rows = statement.query(replacement.clone()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
         assert_eq!(
-            rows.next()
-                .await
+            crate::row_values(&row, rows.column_count())
                 .unwrap()
-                .unwrap()
-                .into_values()
                 .collect::<Vec<_>>(),
             replacement
         );
@@ -449,7 +450,12 @@ impl RelTx for TursoRel<'_> {
                 let mut rows = stmt.query(params).await.map_err(storage)?;
                 let mut collected = Vec::new();
                 while let Some(row) = rows.next().await.map_err(storage)? {
-                    collected.push(RelRow(row.into_values().map(from_turso).collect()));
+                    collected.push(RelRow(
+                        crate::row_values(&row, rows.column_count())
+                            .map_err(storage)?
+                            .map(from_turso)
+                            .collect(),
+                    ));
                 }
                 Ok(collected)
             })
@@ -461,7 +467,12 @@ impl RelTx for TursoRel<'_> {
                 let mut rows = stmt.query(params).await.map_err(storage)?;
                 let mut collected = Vec::new();
                 while let Some(row) = rows.next().await.map_err(storage)? {
-                    collected.push(RelRow(row.into_values().map(from_turso).collect()));
+                    collected.push(RelRow(
+                        crate::row_values(&row, rows.column_count())
+                            .map_err(storage)?
+                            .map(from_turso)
+                            .collect(),
+                    ));
                 }
                 Ok(collected)
             })
