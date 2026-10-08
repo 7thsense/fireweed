@@ -1828,7 +1828,9 @@ macro_rules! impl_turso_product_ports {
                     non_work_side_records: $full_transition,
                     authoritative_recovery_reads: true,
                     delayed_awaits_timers: $full_transition,
-                    durability_class: $durability,
+                    // Transition commits are atomic and response-after-coverage;
+                    // the backend's ordinary writes may still be EventualApply.
+                    durability_class: if $full_transition { DurabilityClass::Atomic } else { $durability },
                     consistency: $consistency,
                 }
             }
@@ -6119,6 +6121,146 @@ mod s3c_activation {
                 Err(error) => panic!("concurrent push: {error:?}"),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn workflow_transition_response_waits_for_covered_projection() {
+        use fireweed_engine::{
+            ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+            CommitTransitionPort, RecoveryReadPort, SideRecord,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-transition-coverage-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = Arc::new(open(&root).await);
+        let definition = qdef("transition-coverage");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec::default()],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend.peek(&shard, 1).await.unwrap();
+        let token = LeaseToken::new("transition-coverage-token").unwrap();
+        let expiry = UtcTimestamp::new(30, 0).unwrap();
+        let claimed = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w").unwrap(),
+                max_items: 1,
+                lease_token: token.clone(),
+                lease_expires_at: expiry,
+                now: UtcTimestamp::new(2, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+                request_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        let coordinator = backend.async_apply.as_ref().unwrap().clone();
+        let before = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        coordinator
+            .wait_until_covers(&shard, &before, Duration::from_secs(5))
+            .await
+            .unwrap();
+        coordinator.pause();
+        let transition = CommitTransition {
+            request_id: Some(RequestId::new("covered-transition").unwrap()),
+            entries: vec![CommitTransitionEntry {
+                claim_ref: ClaimRef {
+                    item_id: claimed.items[0].item_id,
+                    lease_token: token,
+                    lease_expires_at: expiry,
+                    item_version: claimed.items[0].item_version,
+                },
+                additional_claim_refs: vec![],
+                finalize: FinalizeKind::Complete,
+                side_records: vec![SideRecord {
+                    key: b"workflow-state".to_vec(),
+                    payload: Bytes::from_static(b"committed"),
+                }],
+                lifecycle_items: vec![],
+                instance_fence: None,
+            }],
+        };
+        let mut worker = tokio::spawn({
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            async move {
+                backend
+                    .commit_transition(&shard, transition, UtcTimestamp::new(3, 0).unwrap(), None)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let high = AsyncLogStore::high_water(backend.log.as_ref(), shard.clone())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if high.sequence > before.sequence {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(200), &mut worker).await;
+        assert_eq!(
+            AsyncProjectionStore::side_record(
+                backend.projection.as_ref(),
+                shard.clone(),
+                b"workflow-state".to_vec()
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        coordinator.resume();
+        assert!(
+            early.is_err(),
+            "authoritative transition must not report success before its projection covers the committed state"
+        );
+        let result = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result.as_slice(),
+            [CommitEntryOutcome::Committed { .. }]
+        ));
+        assert_eq!(
+            backend
+                .side_record(&shard, b"workflow-state")
+                .await
+                .unwrap(),
+            Some(Bytes::from_static(b"committed"))
+        );
+        assert_eq!(
+            backend.commit_capabilities().durability_class,
+            DurabilityClass::Atomic
+        );
+        assert_eq!(
+            backend.durability_class(),
+            DurabilityClass::EventualApply,
+            "ordinary mutation acknowledgments remain asynchronous"
+        );
+        drop(backend);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

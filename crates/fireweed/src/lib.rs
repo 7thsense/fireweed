@@ -5557,6 +5557,17 @@ fn open_s3_objectlog_memory_projection(
     )))
 }
 
+/// Construct a process-local reference fixture for tests and development.
+///
+/// This reference has no disk or object-store durability. Production storage
+/// selection remains S3/Turso; the storage matrix still rejects Memory selectors.
+#[cfg(feature = "memory")]
+#[doc(hidden)]
+pub fn open_reference_memory(clock: Arc<dyn Clock>) -> Fireweed {
+    let backend = Arc::new(fireweed_memory::composed_memory_backend());
+    Fireweed::from_runtime(RuntimeCore::new(backend, clock))
+}
+
 /// Open the public product cell: S3-compatible object-log × local Turso.
 ///
 /// Local processes reuse or start RustFS; durability still goes through

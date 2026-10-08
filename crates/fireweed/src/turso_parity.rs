@@ -23,6 +23,8 @@ pub(super) struct Operation {
     pub node_id: u8,
     pub commit_idempotency: CommitIdempotency,
     pub commit: Commit,
+    #[cfg(feature = "objectlog")]
+    pub async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
 }
 
 impl Operation {
@@ -477,13 +479,40 @@ impl Operation {
             now,
         )
         .await?;
+        let commit = Arc::clone(&self.commit);
+        #[cfg(feature = "objectlog")]
+        let coordinator = self.async_apply;
+        #[cfg(feature = "objectlog")]
+        let transition_shard = self.shard.clone();
         finish_prepared_commit_transition(
             &self.shard,
             self.epoch,
             prepared,
             &self.commit_idempotency,
             now,
-            |request| (self.commit)(request),
+            move |request| {
+                let commit = Arc::clone(&commit);
+                #[cfg(feature = "objectlog")]
+                let coordinator = coordinator.clone();
+                #[cfg(feature = "objectlog")]
+                let shard = transition_shard.clone();
+                Box::pin(async move {
+                    let outcome = commit(request).await?;
+                    // Authoritative workflow transitions have a stronger response
+                    // boundary than ordinary asynchronous queue mutations. Wait
+                    // only for this commit's captured position, while retaining
+                    // selection exclusion, before reporting its state readable.
+                    #[cfg(feature = "objectlog")]
+                    if let (Some(coordinator), Some(position)) =
+                        (&coordinator, outcome.positions().last())
+                    {
+                        coordinator
+                            .wait_until_covers(&shard, position, S3S_DERIVED_COVERAGE_OR_WORK_WAIT)
+                            .await?;
+                    }
+                    Ok(outcome)
+                })
+            },
         )
         .await
     }
@@ -531,6 +560,8 @@ impl<L: AsyncLogStore + 'static> AtomicTursoBackend<L> {
                         node_id,
                         commit_idempotency,
                         commit,
+                        #[cfg(feature = "objectlog")]
+                        async_apply: None,
                     })
                     .await
                 })
@@ -608,6 +639,7 @@ impl DerivedObjectLogTursoBackend {
                         node_id,
                         commit_idempotency,
                         commit,
+                        async_apply: coordinator,
                     })
                     .await
                 })
