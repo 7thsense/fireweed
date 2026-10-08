@@ -496,6 +496,28 @@ fn public_objectlog_postgres_delete_and_rebuild() {
         vec![second, lifecycle_id]
     );
 
+    // AsyncProjection acknowledges before durable SQL apply. Wait for the accepted prefix
+    // before corrupting its cursor; otherwise the live apply worker can race the fault
+    // injection and leave existing rows beyond the artificially rewound cursor.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let verification = block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify(),
+        )
+        .unwrap();
+        if verification.compatible {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "accepted writes must reach the durable projection before fault injection: {verification:?}"
+        );
+        std::thread::yield_now();
+    }
+
     // A deliberately behind image replays only the one retained command after its durable cursor.
     let mut postgres = postgres_in_schema(&url, &schema);
     let last_sequence: i64 = postgres
