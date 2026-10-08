@@ -2517,11 +2517,17 @@ macro_rules! impl_turso_product_ports {
                 ids: &[ItemId],
             ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ClaimedItem>>> + Send
             {
-                AsyncProjectionStore::render_claimed(
-                    self.projection.as_ref(),
-                    shard.clone(),
-                    ids.to_vec(),
-                )
+                async move {
+                    // Like other public SQL reads, observe the accepted log prefix before
+                    // rendering leased rows and their durable bearer tokens.
+                    self.wait_request_entry_coverage(shard).await?;
+                    AsyncProjectionStore::render_claimed(
+                        self.projection.as_ref(),
+                        shard.clone(),
+                        ids.to_vec(),
+                    )
+                    .await
+                }
             }
             fn retained_items(
                 &self, shard: &QueueKey, after: Option<ItemId>, limit: usize,
