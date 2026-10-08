@@ -973,7 +973,7 @@ fn parse_xadd(args: &[Vec<u8>]) -> Result<ParsedXadd, Resp> {
     let mut payload: Option<bytes::Bytes> = None;
     let mut metadata = Metadata::default();
     let mut fields: BTreeMap<String, bytes::Bytes> = BTreeMap::new();
-    for pair in args[3..].chunks_exact(2) {
+    for pair in args[3..].as_chunks::<2>().0 {
         if arg_eq(&pair[0], "priority")
             && let Ok(s) = std::str::from_utf8(&pair[1])
             && let Ok(n) = s.parse::<i64>()

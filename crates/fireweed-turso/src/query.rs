@@ -176,7 +176,9 @@ fn component_length_sql(kind: &IndexType) -> String {
             // seven levels to Turso's recursive expression translator instead.
             while terms.len() > 1 {
                 terms = terms
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| format!("({}+{})", pair[0], pair[1]))
                     .collect();
             }

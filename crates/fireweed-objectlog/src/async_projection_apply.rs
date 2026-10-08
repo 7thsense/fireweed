@@ -1117,7 +1117,7 @@ where
         #[cfg(test)]
         let injected_failure = inner
             .injected_apply_failures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok();

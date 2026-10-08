@@ -498,7 +498,7 @@ fn bulk_string_text(value: &Value) -> String {
 }
 
 fn field_value(fields: &[Value], name: &str) -> Option<Vec<u8>> {
-    for pair in fields.chunks_exact(2) {
+    for pair in fields.as_chunks::<2>().0 {
         if bulk_string(&pair[0]) == name.as_bytes() {
             return Some(bulk_string(&pair[1]));
         }
@@ -1058,7 +1058,7 @@ async fn resp_named_consumer_groups_are_wire_fiction_not_persisted() {
         panic!("group entry must be an array");
     };
     let mut group_fields = std::collections::HashMap::new();
-    for pair in group.chunks_exact(2) {
+    for pair in group.as_chunks::<2>().0 {
         group_fields.insert(bulk_string_text(&pair[0]), pair[1].clone());
     }
     assert_eq!(
