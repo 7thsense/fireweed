@@ -88,6 +88,14 @@ pub trait AsyncQueueControlPlane: Send + Sync {
     ) -> EngineResult<()>;
     /// Read the durable lease or genesis lease for an unknown queue.
     async fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease>;
+    /// Remove this worker from the candidate registry after releasing its leases.
+    async fn unregister_owner(&self, _owner: &OwnerId) -> EngineResult<()> {
+        Err(EngineError::Unavailable)
+    }
+    /// Close authority admission and await any owned connection driver.
+    async fn shutdown(&self) -> EngineResult<()> {
+        Ok(())
+    }
     /// Whether authority resets on restart; this is pure capability metadata.
     fn is_ephemeral(&self) -> bool {
         false

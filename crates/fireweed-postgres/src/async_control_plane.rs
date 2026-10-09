@@ -24,8 +24,8 @@ use tokio_postgres::{Client, Transaction};
 /// after the async ownership sequence confirms that fencing and hydration.
 pub struct AsyncPostgresControlPlane {
     config: ControlPlaneConfig,
-    inner: Mutex<Client>,
-    driver: tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+    inner: Mutex<Option<Client>>,
+    driver: Mutex<Option<tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>>>,
     batch_renewal_calls: AtomicU64,
     batch_renewal_transactions: AtomicU64,
     batch_renewal_statements: AtomicU64,
@@ -78,8 +78,8 @@ impl AsyncPostgresControlPlane {
         st(tx.commit().await)?;
         Ok(Self {
             config,
-            inner: Mutex::new(client),
-            driver,
+            inner: Mutex::new(Some(client)),
+            driver: Mutex::new(Some(driver)),
             batch_renewal_calls: AtomicU64::new(0),
             batch_renewal_transactions: AtomicU64::new(0),
             batch_renewal_statements: AtomicU64::new(0),
@@ -88,12 +88,17 @@ impl AsyncPostgresControlPlane {
         })
     }
     /// Close the connection and await its driver without blocking a runtime worker.
-    pub async fn shutdown(self) -> EngineResult<()> {
-        drop(self.inner.into_inner());
-        st(self.driver.await.map_err(|error| {
-            EngineError::Storage(format!("control-plane driver task failed: {error}"))
-        })?)
+    pub async fn shutdown(&self) -> EngineResult<()> {
+        drop(self.inner.lock().await.take());
+        let mut driver_guard = self.driver.lock().await;
+        if let Some(driver) = driver_guard.take() {
+            st(driver.await.map_err(|error| {
+                EngineError::Storage(format!("control-plane driver task failed: {error}"))
+            })?)?;
+        }
+        Ok(())
     }
+
     /// Structural counters; reading them performs no I/O.
     pub fn diagnostics(&self) -> PostgresControlPlaneDiagnostics {
         PostgresControlPlaneDiagnostics {
@@ -190,8 +195,25 @@ async fn upsert_lease(
 
 #[async_trait]
 impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
+    async fn unregister_owner(&self, owner: &OwnerId) -> EngineResult<()> {
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
+        st(client
+            .execute(
+                "DELETE FROM fireweed_workers WHERE owner_id=$1",
+                &[&owner.as_str()],
+            )
+            .await)?;
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> EngineResult<()> {
+        Self::shutdown(self).await
+    }
+
     async fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
-        let client = self.inner.lock().await;
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
         st(client
             .execute(
                 "INSERT INTO fireweed_workers (owner_id, heartbeat_at) VALUES ($1,$2) \
@@ -207,7 +229,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         endpoint: &str,
         now: UtcTimestamp,
     ) -> EngineResult<()> {
-        let client = self.inner.lock().await;
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
         st(client.execute(
             "INSERT INTO fireweed_workers (owner_id, heartbeat_at, endpoint) VALUES ($1,$2,$3) \
              ON CONFLICT (owner_id) DO UPDATE SET heartbeat_at=EXCLUDED.heartbeat_at, endpoint=EXCLUDED.endpoint",
@@ -221,7 +244,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
     ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
         let cutoff =
             ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
-        let client = self.inner.lock().await;
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
         let rows = st(client
             .query(
                 "SELECT owner_id, endpoint, heartbeat_at FROM fireweed_workers \
@@ -253,7 +277,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<OwnerResolution> {
         let (t, q) = parts(queue);
-        let client = self.inner.lock().await;
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
         // FAIL-CLOSED (I2): a query failure is SURFACED, never swallowed into a fabricated `unassigned`
         // record (which would invite a spurious acquire / a bogus epoch-0 fence value).
         let cutoff =
@@ -300,7 +325,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         let cutoff =
             ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
         self.batch_resolution_calls.fetch_add(1, Ordering::Relaxed);
-        let client = self.inner.lock().await;
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
         self.batch_resolution_statements
             .fetch_add(1, Ordering::Relaxed);
         let rows = st(client
@@ -341,10 +367,11 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<AcquireOutcome> {
         let (t, q) = parts(queue);
-        let mut client = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        let client = guard.as_mut().ok_or(EngineError::Unavailable)?;
         // Fail-closed: only a live registered owner may acquire (checked before the txn — a dead owner
         // never reaches the authority row).
-        if !self.owner_is_live(&mut client, owner, now).await? {
+        if !self.owner_is_live(client, owner, now).await? {
             return Err(EngineError::Forbidden(
                 "owner is not live (register + heartbeat first)",
             ));
@@ -366,7 +393,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<QueueLease> {
         let (t, q) = parts(queue);
-        let mut client = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        let client = guard.as_mut().ok_or(EngineError::Unavailable)?;
         let tx = st(client.transaction().await)?;
         let current = Self::lease_for_update(&tx, &t, &q).await?;
         let confirmed = lease_decide_confirm_fence(&current, owner, expected_epoch, now)?;
@@ -382,7 +410,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<QueueLease> {
         let (t, q) = parts(queue);
-        let mut client = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        let client = guard.as_mut().ok_or(EngineError::Unavailable)?;
         let tx = st(client.transaction().await)?;
         let current = Self::lease_for_update(&tx, &t, &q).await?;
         let renewed = lease_decide_renew(
@@ -424,7 +453,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         let expires_nanos = ts_nanos(fireweed_engine::add_millis(now, self.config.lease_ttl_ms));
 
         self.batch_renewal_calls.fetch_add(1, Ordering::Relaxed);
-        let mut client = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        let client = guard.as_mut().ok_or(EngineError::Unavailable)?;
         let tx = st(client.transaction().await)?;
         self.batch_renewal_transactions
             .fetch_add(1, Ordering::Relaxed);
@@ -490,7 +520,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<QueueLease> {
         let (t, q) = parts(queue);
-        let mut client = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        let client = guard.as_mut().ok_or(EngineError::Unavailable)?;
         let tx = st(client.transaction().await)?;
         let current = Self::lease_for_update(&tx, &t, &q).await?;
         let draining = lease_decide_begin_drain(&current, expected_epoch, target_owner, now)?;
@@ -507,7 +538,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
     ) -> EngineResult<()> {
         let (t, q) = parts(queue);
         let _ = now; // release validates by epoch, not time
-        let mut client = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        let client = guard.as_mut().ok_or(EngineError::Unavailable)?;
         let tx = st(client.transaction().await)?;
         let current = Self::lease_for_update(&tx, &t, &q).await?;
         let released = lease_decide_release(&current, owner, expected_epoch)?;
@@ -517,7 +549,8 @@ impl AsyncQueueControlPlane for AsyncPostgresControlPlane {
     }
     async fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
         let (t, q) = parts(queue);
-        let client = self.inner.lock().await;
+        let guard = self.inner.lock().await;
+        let client = guard.as_ref().ok_or(EngineError::Unavailable)?;
         // FAIL-CLOSED (I2): surface the read error rather than fabricate a genesis epoch-0 record.
         match st(client.query_opt(
             &format!(

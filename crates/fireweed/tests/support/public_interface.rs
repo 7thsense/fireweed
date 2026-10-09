@@ -486,7 +486,7 @@ async fn exercise_control(cell: &str, fw: &Fireweed, failures: &mut Vec<String>)
         matches!(ownership, Some(fireweed::Ownership::Mine { .. })),
         "active handle did not report ownership as mine after its first queue operation",
     );
-    if let Err(error) = fw.renew_owned() {
+    if let Err(error) = fw.renew_owned().await {
         failures.push(format!("{cell}.renew_owned: {error}"));
     }
 }

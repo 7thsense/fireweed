@@ -130,7 +130,8 @@ pub async fn open_turso_projection_async(path: &Path) -> EngineResult<TursoRelat
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|e| EngineError::Storage(format!("turso projection parent: {e}")))?;
     }
     TursoRelational::open(TursoConfig::local(path).with_log_backed_projection())
@@ -3238,6 +3239,10 @@ impl DerivedObjectLogTursoBackend {
         self.drivers.register()
     }
 
+    pub(crate) fn close_admission(&self) {
+        self.sequencer.close();
+    }
+
     /// Close admission and wait registered drivers through append/apply publication.
     pub async fn close_and_drain(&self) -> EngineResult<()> {
         self.sequencer.close();
@@ -5518,6 +5523,22 @@ pub fn assemble_postgres_log_turso(
 }
 
 #[cfg(feature = "objectlog")]
+pub async fn assemble_objectlog_turso_async(
+    log: ObjectLogEngineStore,
+    projection_path: PathBuf,
+    async_spec: Option<AsyncProjectionSpec>,
+) -> EngineResult<DerivedObjectLogTursoBackend> {
+    let projection = open_turso_projection_async(&projection_path).await?;
+    DerivedObjectLogTursoBackend::from_log_and_projection(
+        log,
+        projection,
+        projection_path,
+        0,
+        async_spec,
+    )
+    .await
+}
+
 pub fn assemble_objectlog_turso(
     log: ObjectLogEngineStore,
     projection_path: PathBuf,
@@ -5769,32 +5790,7 @@ mod s4b_lifecycle {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dropping_objectlog_turso_drains_registered_driver() {
-        let lib = include_str!("lib.rs");
-        assert!(
-            lib.contains("struct ObjectLogTursoLifecycle"),
-            "S4b installs ObjectLogTursoLifecycle on the object-log × Turso product"
-        );
-        let shutdown = lib
-            .split("impl ProjectionLifecycle for ObjectLogTursoLifecycle")
-            .nth(1)
-            .and_then(|rest| rest.split("fn shutdown(&mut self)").nth(1))
-            .expect("ObjectLogTursoLifecycle::shutdown");
-        let shutdown_body = shutdown.split("fn ").next().expect("shutdown body");
-        assert!(
-            shutdown_body.contains("block_on_objectlog"),
-            "sync shutdown must use the flavor-safe object-log runtime bridge"
-        );
-        assert!(
-            !shutdown_body.contains("futures::executor::block_on")
-                && !shutdown_body.contains("block_in_place"),
-            "shutdown must never nest block_on on the caller's runtime"
-        );
-        assert!(
-            shutdown_body.contains("close_and_drain"),
-            "shutdown must close admission and await the coordinator registry"
-        );
-
+    async fn async_shutdown_drains_registered_driver() {
         let root = std::env::temp_dir().join(format!(
             "fireweed-s4b-turso-{}-{}",
             std::process::id(),
@@ -5816,11 +5812,14 @@ mod s4b_lifecycle {
             backend: Some(Arc::clone(&backend)),
             max_tail_commands: 1_000_000,
         };
+        crate::ProjectionLifecycle::shutdown_async(&lifecycle)
+            .await
+            .unwrap();
         drop(lifecycle);
 
         assert!(
             published.load(Ordering::Acquire),
-            "dropping ObjectLogTursoLifecycle must wait registered drivers through publication"
+            "awaited shutdown must wait registered drivers through publication"
         );
         assert!(
             matches!(backend.register_driver(), Err(DispatchError::Closed)),

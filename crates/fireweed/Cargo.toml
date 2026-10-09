@@ -191,3 +191,8 @@ required-features = ["objectlog", "turso", "postgres"]
 name = "functional_matrix_route_sources"
 path = "tests/functional_matrix_route_sources.rs"
 required-features = ["memory", "objectlog", "postgres", "turso"]
+
+[[test]]
+name = "objectlog_turso_postgres_control"
+path = "tests/objectlog_turso_postgres_control.rs"
+required-features = ["objectlog", "turso", "postgres"]

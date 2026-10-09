@@ -2530,6 +2530,9 @@ trait ProjectionLifecycle: Send + Sync {
     fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState>;
     fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()>;
     fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState>;
+    fn shutdown_async(&self) -> ProjectionLifecycleFuture<'_, ()> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
     fn shutdown(&mut self);
 }
 
@@ -2558,6 +2561,10 @@ impl fmt::Debug for ProjectionLifecycleHandle {
 }
 
 impl ProjectionLifecycleHandle {
+    pub async fn shutdown_async(&self) -> EngineResult<()> {
+        self.inner.lifecycle.shutdown_async().await
+    }
+
     pub fn lifecycle_capabilities(&self) -> ProjectionLifecycleCapabilities {
         self.inner.lifecycle.capabilities()
     }
@@ -2890,13 +2897,25 @@ impl ProjectionLifecycle for ObjectLogTursoLifecycle {
         Box::pin(async move { backend.rebuild_projection(max_tail_commands).await })
     }
 
+    fn shutdown_async(&self) -> ProjectionLifecycleFuture<'_, ()> {
+        let backend = self.backend.as_ref().cloned();
+        Box::pin(async move {
+            match backend {
+                Some(backend) => backend.close_and_drain().await,
+                None => Ok(()),
+            }
+        })
+    }
     fn shutdown(&mut self) {
         if let Some(backend) = self.backend.take() {
-            // Flavor-safe object-log runtime bridge: never nest `block_on` on the caller.
-            let _ =
-                fireweed_objectlog::block_on_objectlog(
-                    async move { backend.close_and_drain().await },
-                );
+            // Drop cannot await. Close admission immediately and arrange cleanup
+            // without blocking; callers requiring a drain must await shutdown().
+            backend.close_admission();
+            let dispatcher = fireweed_objectlog::ObjectLogTaskDispatcher::new();
+            let _ = fireweed_engine::OwnedTaskDispatcher::submit(
+                &dispatcher,
+                Box::new(move || Box::pin(async move { backend.close_and_drain().await })),
+            );
         }
     }
 }
@@ -3358,7 +3377,7 @@ enum Coordination {
     /// path. `acquire_and_fence` advances the storage fence epoch the op stamps.
     Owner {
         owner_id: OwnerId,
-        control_plane: Arc<dyn QueueControlPlane>,
+        control_plane: Option<Arc<dyn QueueControlPlane>>,
         /// Present for synchronous durable control planes. It owns each full
         /// authority sequence, including its async storage-fence phase.
         control_plane_runtime: Option<Arc<dyn OwnedControlPlaneRuntime>>,
@@ -3388,7 +3407,15 @@ trait OwnedControlPlaneRuntime: Send + Sync {
         owner: OwnerId,
         renewals: Vec<fireweed_engine::LeaseRenewal>,
         now: UtcTimestamp,
-    ) -> EngineResult<Vec<fireweed_engine::LeaseRenewalOutcome>>;
+    ) -> OwnedControlPlaneFuture<'_, Vec<fireweed_engine::LeaseRenewalOutcome>>;
+    fn shutdown(
+        &self,
+        _owner: OwnerId,
+        _leases: Vec<fireweed_engine::LeaseRenewal>,
+        _now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[cfg(any(feature = "postgres", test))]
@@ -3492,12 +3519,106 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         owner: OwnerId,
         renewals: Vec<fireweed_engine::LeaseRenewal>,
         now: UtcTimestamp,
-    ) -> EngineResult<Vec<fireweed_engine::LeaseRenewalOutcome>> {
+    ) -> OwnedControlPlaneFuture<'_, Vec<fireweed_engine::LeaseRenewalOutcome>> {
         let control_plane = self.control_plane();
-        futures::executor::block_on(self.executor.execute(move || {
-            control_plane.heartbeat(&owner, now)?;
-            control_plane.renew_queue_leases(&renewals, now)
-        }))
+        let executor = self.executor.clone();
+        Box::pin(async move {
+            executor
+                .execute(move || {
+                    control_plane.heartbeat(&owner, now)?;
+                    control_plane.renew_queue_leases(&renewals, now)
+                })
+                .await
+        })
+    }
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+struct AsyncControlPlaneRuntime<B: LibBackend + 'static> {
+    backend: Arc<B>,
+    control: Arc<dyn fireweed_engine::AsyncQueueControlPlane>,
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for AsyncControlPlaneRuntime<B> {
+    fn establish(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, OwnershipOutcome> {
+        Box::pin(async move {
+            self.control.register_owner(&owner, now).await?;
+            let resolution = self.control.resolve_queue_owner(&queue, now).await?;
+            if resolution
+                .active_owner
+                .as_ref()
+                .is_some_and(|active| active != &owner)
+            {
+                return Err(EngineError::Forbidden("queue owned by another live owner"));
+            }
+            if resolution.target_owner.as_ref() != Some(&owner) {
+                return Err(EngineError::Forbidden("queue targets another owner"));
+            }
+            fireweed_engine::acquire_and_fence_async(
+                self.control.as_ref(),
+                self.backend.as_ref(),
+                &queue,
+                &owner,
+                now,
+            )
+            .await
+        })
+    }
+    fn resolve(
+        &self,
+        queue: QueueKey,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, fireweed_engine::OwnerResolution> {
+        Box::pin(async move { self.control.resolve_queue_owner(&queue, now).await })
+    }
+    fn renew(
+        &self,
+        owner: OwnerId,
+        renewals: Vec<fireweed_engine::LeaseRenewal>,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, Vec<fireweed_engine::LeaseRenewalOutcome>> {
+        Box::pin(async move {
+            self.control.heartbeat(&owner, now).await?;
+            self.control.renew_queue_leases(&renewals, now).await
+        })
+    }
+    fn shutdown(
+        &self,
+        owner: OwnerId,
+        leases: Vec<fireweed_engine::LeaseRenewal>,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, ()> {
+        Box::pin(async move {
+            let mut first_error = None;
+            for lease in leases {
+                match self
+                    .control
+                    .release_queue_lease(&lease.queue, &owner, lease.expected_epoch, now)
+                    .await
+                {
+                    Ok(()) | Err(EngineError::EpochFenced) => (),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            if let Err(error) = self.control.unregister_owner(&owner).await {
+                first_error.get_or_insert(error);
+            }
+            if let Err(error) = self.control.shutdown().await {
+                first_error.get_or_insert(error);
+            }
+            match first_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        })
     }
 }
 
@@ -3611,7 +3732,7 @@ impl<B: LibBackend> RuntimeCore<B> {
             ids: AtomicU64::new(0),
             coordination: Coordination::Owner {
                 owner_id: instance_id,
-                control_plane,
+                control_plane: Some(control_plane),
                 control_plane_runtime: None,
                 sessions: Mutex::new(HashMap::new()),
                 draining: Mutex::new(HashSet::new()),
@@ -3644,8 +3765,37 @@ impl<B: LibBackend> RuntimeCore<B> {
             operator: Mutex::new(operator::OperatorRuntimeState::default()),
             coordination: Coordination::Owner {
                 owner_id: instance_id,
-                control_plane,
+                control_plane: Some(control_plane),
                 control_plane_runtime: Some(control_plane_runtime),
+                sessions: Mutex::new(HashMap::new()),
+                draining: Mutex::new(HashSet::new()),
+            },
+        }
+    }
+
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
+    fn with_async_control_plane(
+        backend: Arc<B>,
+        clock: Arc<dyn Clock>,
+        instance_id: OwnerId,
+        control: Arc<dyn fireweed_engine::AsyncQueueControlPlane>,
+    ) -> Self
+    where
+        B: 'static,
+    {
+        let runtime: Arc<dyn OwnedControlPlaneRuntime> = Arc::new(AsyncControlPlaneRuntime {
+            backend: Arc::clone(&backend),
+            control,
+        });
+        Self {
+            backend,
+            clock,
+            ids: AtomicU64::new(0),
+            operator: Mutex::new(operator::OperatorRuntimeState::default()),
+            coordination: Coordination::Owner {
+                owner_id: instance_id,
+                control_plane: None,
+                control_plane_runtime: Some(runtime),
                 sessions: Mutex::new(HashMap::new()),
                 draining: Mutex::new(HashSet::new()),
             },
@@ -3699,6 +3849,9 @@ impl<B: LibBackend> RuntimeCore<B> {
                 .establish(queue.clone(), owner_id.clone(), now)
                 .await?
         } else {
+            let control_plane = control_plane
+                .as_ref()
+                .ok_or(EngineError::Invalid("missing ownership authority"))?;
             control_plane.register_owner(owner_id, now)?;
             let res = control_plane.resolve_queue_owner(queue, now)?;
             // A DIFFERENT live owner holds the queue → owned elsewhere; never contend a live lease.
@@ -3771,7 +3924,10 @@ impl<B: LibBackend> RuntimeCore<B> {
         let res = if let Some(runtime) = control_plane_runtime {
             runtime.resolve(queue.clone(), now).await?
         } else {
-            control_plane.resolve_queue_owner(queue, now)?
+            control_plane
+                .as_ref()
+                .ok_or(EngineError::Invalid("missing ownership authority"))?
+                .resolve_queue_owner(queue, now)?
         };
         Ok(match res.active_owner {
             Some(o) if &o == owner_id => Ownership::Mine {
@@ -3789,7 +3945,7 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// handles only; sole-owner is a no-op). The host spawns this on a bounded cadence — one call per node,
     /// never one task per queue (ADR-002 density / TD-003 §Queue density). A queue whose renewal is rejected
     /// (the handle was superseded) has its cached session dropped, so its next op re-resolves.
-    pub fn renew_owned(&self) -> EngineResult<()> {
+    pub async fn renew_owned(&self) -> EngineResult<()> {
         let Coordination::Owner {
             owner_id,
             control_plane,
@@ -3816,8 +3972,11 @@ impl<B: LibBackend> RuntimeCore<B> {
             })
             .collect();
         let outcomes = if let Some(runtime) = control_plane_runtime {
-            runtime.renew(owner_id.clone(), renewals, now)?
+            runtime.renew(owner_id.clone(), renewals, now).await?
         } else {
+            let control_plane = control_plane
+                .as_ref()
+                .ok_or(EngineError::Invalid("missing ownership authority"))?;
             control_plane.heartbeat(owner_id, now)?;
             control_plane.renew_queue_leases(&renewals, now)?
         };
@@ -3829,6 +3988,35 @@ impl<B: LibBackend> RuntimeCore<B> {
             )));
         }
         apply_owned_renewal_outcomes(sessions, draining, owned, outcomes)
+    }
+
+    async fn shutdown_owned(&self) -> EngineResult<()> {
+        if let Coordination::Owner {
+            owner_id,
+            control_plane_runtime: Some(runtime),
+            sessions,
+            draining,
+            ..
+        } = &self.coordination
+        {
+            let leases = sessions
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .map(|(queue, session)| fireweed_engine::LeaseRenewal {
+                    queue: queue.clone(),
+                    owner: owner_id.clone(),
+                    expected_epoch: session.lease_epoch,
+                })
+                .collect();
+            let result = runtime
+                .shutdown(owner_id.clone(), leases, self.clock.now())
+                .await;
+            sessions.lock().expect("poisoned").clear();
+            draining.lock().expect("poisoned").clear();
+            result?;
+        }
+        Ok(())
     }
 
     /// Whether this owner has observed `queue` as `Draining` (drain split): new claims are refused while
@@ -5222,34 +5410,138 @@ pub fn open(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Firewe
     open_validated(config, clock)
 }
 
-/// Async-safe variant of [`open`].
-///
-/// When a Tokio runtime is active and the selected cell may touch the synchronous postgres client
-/// (or object-log authority that uses it), construction runs on `spawn_blocking`. Other cells call
-/// [`open`] directly.
-pub async fn open_async(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
-    config.validate()?;
-    #[cfg(feature = "postgres")]
-    {
-        if storage_open_needs_blocking_offload(&config)
-            && tokio::runtime::Handle::try_current().is_ok()
-        {
-            return tokio::task::spawn_blocking(move || open_validated(config, clock))
-                .await
-                .map_err(|error| {
-                    EngineError::Storage(format!("open_async task failed: {error}"))
-                })?;
-        }
-    }
-    open_validated(config, clock)
+/// PostgreSQL ownership inputs for a native S3/Turso data plane.
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone)]
+pub struct ObjectLogPostgresControlPlaneConfig {
+    /// Application-owned connection string; formatting is redacted.
+    pub url: ConfigSecret,
+    /// Isolated schema in the application's dedicated database.
+    pub schema: String,
+    /// Owner identity and lease timing.
+    pub coordination: PostgresCoordinationConfig,
 }
 
-#[cfg(feature = "postgres")]
-fn storage_open_needs_blocking_offload(config: &StorageConfig) -> bool {
-    matches!(
-        &config.log,
-        LogConfig::Postgres { .. } | LogConfig::S3 { .. } | LogConfig::Filesystem { .. }
-    ) || matches!(&config.projection, ProjectionStoreConfig::Postgres { .. })
+/// Open RustFS-compatible storage and stock Turso with native async PostgreSQL leases.
+///
+/// Construction, recovery, ownership and renewal await native async interfaces.
+/// Call [`Fireweed::shutdown`] to drain accepted writes before closing authority.
+///
+/// # Errors
+/// Returns invalid configuration or storage/authority construction failures.
+#[cfg(all(feature = "objectlog", feature = "turso", feature = "postgres"))]
+pub async fn open_objectlog_turso_coordinated_async(
+    storage: StorageConfig,
+    control: ObjectLogPostgresControlPlaneConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    storage.validate()?;
+    let authority = Arc::new(
+        fireweed_postgres::AsyncPostgresControlPlane::connect_in_schema(
+            &control.url.0.0,
+            &control.schema,
+            control.coordination.control_plane,
+        )
+        .await?,
+    );
+    open_native_s3_turso(
+        storage,
+        clock,
+        Some((control.coordination.instance_id, authority)),
+    )
+    .await
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+async fn open_native_s3_turso(
+    storage: StorageConfig,
+    clock: Arc<dyn Clock>,
+    ownership: Option<(OwnerId, Arc<dyn fireweed_engine::AsyncQueueControlPlane>)>,
+) -> EngineResult<Fireweed> {
+    storage.validate()?;
+    let (
+        LogConfig::S3 {
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_insecure_http,
+        },
+        ProjectionStoreConfig::Turso { path },
+    ) = (storage.log, storage.projection)
+    else {
+        return Err(EngineError::Invalid(RETIRED_STORAGE_CELL));
+    };
+    let provider = S3ComposedProvider {
+        endpoint,
+        bucket,
+        region,
+        access_key_id: access_key_id.0,
+        secret_access_key: secret_access_key.0,
+        allow_insecure_http,
+    };
+    let async_projection =
+        require_s3_turso_authority_and_async_spec(storage.authority, storage.async_projection)?;
+    let config = composed_storage_config(
+        s3_object_log_config(provider.clone()),
+        ObjectLogAuthority::NativeConditionalWrite,
+        ComposedProjectionConfig::Turso { path: path.clone() },
+        storage.response_barrier,
+        Some(async_projection),
+        storage.segments,
+        storage.namespace.clone(),
+        storage.recovery,
+    );
+    let log = fireweed_objectlog::open_object_log_engine_s3(
+        &provider.endpoint,
+        &provider.region,
+        &provider.bucket,
+        &provider.access_key_id.0,
+        &provider.secret_access_key.0,
+        &storage.namespace,
+        config.segments.target_bytes,
+        config.segments.max_latency_ms,
+        provider.allow_insecure_http,
+    )
+    .await?;
+    let backend = Arc::new(
+        turso_compose::assemble_objectlog_turso_async(log, path, Some(async_projection)).await?,
+    );
+    let max_tail_commands = config.recovery.max_tail_commands;
+    let lifecycle = ProjectionLifecycleHandle {
+        inner: Arc::new(ProjectionLifecycleHandleInner {
+            _config: config,
+            lifecycle: Box::new(ObjectLogTursoLifecycle {
+                backend: Some(Arc::clone(&backend)),
+                max_tail_commands,
+            }),
+        }),
+    };
+    let runtime = match ownership {
+        Some((owner, authority)) => {
+            RuntimeCore::with_async_control_plane(backend, clock, owner, authority)
+        }
+        None => RuntimeCore::new(backend, clock),
+    };
+    Ok(Fireweed::from_runtime_with_projection(runtime, lifecycle))
+}
+
+/// Native async construction of the supported S3/Turso product cell.
+/// Construction and recovery await the storage drivers directly.
+pub async fn open_async(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    config.validate()?;
+    #[cfg(all(feature = "objectlog", feature = "turso"))]
+    {
+        open_native_s3_turso(config, clock, None).await
+    }
+    #[cfg(not(all(feature = "objectlog", feature = "turso")))]
+    {
+        let _ = (config, clock);
+        Err(EngineError::Invalid(
+            "s3/turso requires objectlog and turso features",
+        ))
+    }
 }
 
 fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {

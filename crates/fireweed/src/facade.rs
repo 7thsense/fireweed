@@ -15,7 +15,8 @@ pub(crate) fn complain_singleton_batch_update() {
 
 trait FireweedDataPlane: Send + Sync {
     fn ownership<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, Ownership>;
-    fn renew_owned(&self) -> EngineResult<()>;
+    fn renew_owned(&self) -> FacadeFuture<'_, ()>;
+    fn shutdown_owned(&self) -> FacadeFuture<'_, ()>;
     fn create_queue(&self, definition: QueueDefinition) -> FacadeFuture<'_, CreateQueueOutcome>;
     fn queue_definition<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, QueueDefinition>;
     fn ensure_queue<'a>(
@@ -561,8 +562,11 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     fn ownership<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, Ownership> {
         Box::pin(RuntimeCore::ownership(self, queue))
     }
-    fn renew_owned(&self) -> EngineResult<()> {
-        RuntimeCore::renew_owned(self)
+    fn renew_owned(&self) -> FacadeFuture<'_, ()> {
+        Box::pin(RuntimeCore::renew_owned(self))
+    }
+    fn shutdown_owned(&self) -> FacadeFuture<'_, ()> {
+        Box::pin(RuntimeCore::shutdown_owned(self))
     }
     fn create_queue(&self, definition: QueueDefinition) -> FacadeFuture<'_, CreateQueueOutcome> {
         Box::pin(RuntimeCore::create_queue(self, definition))
@@ -1097,8 +1101,15 @@ impl Fireweed {
     pub async fn ownership(&self, queue: &QueueKey) -> EngineResult<Ownership> {
         self.inner.ownership(queue).await
     }
-    pub fn renew_owned(&self) -> EngineResult<()> {
-        self.inner.renew_owned()
+    pub async fn renew_owned(&self) -> EngineResult<()> {
+        self.inner.renew_owned().await
+    }
+    /// Close data admission, await accepted writes, then release ownership and close its authority.
+    pub async fn shutdown(&self) -> EngineResult<()> {
+        if let Some(projection) = &self.projection {
+            projection.shutdown_async().await?;
+        }
+        self.inner.shutdown_owned().await
     }
     pub async fn create_queue(
         &self,

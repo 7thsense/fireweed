@@ -211,7 +211,7 @@ async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target()
     let owner_b = OwnerId::new("owner-b").unwrap();
     cp.register_owner(&owner_b, clock.now()).unwrap();
     cp.begin_drain(&b, 1, &owner_b, clock.now()).unwrap();
-    fireweed.renew_owned().unwrap();
+    fireweed.renew_owned().await.unwrap();
     let partial = fireweed
         .claim_across_queues(
             vec![target(b.clone(), 1), target(a.clone(), 1)],

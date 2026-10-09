@@ -308,7 +308,7 @@ async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
     cp.begin_drain(&qkey(), 1, &OwnerId::new("owner-B").unwrap(), clock.now())
         .unwrap();
     // A observes the drain on its renew loop.
-    a.renew_owned().unwrap();
+    a.renew_owned().await.unwrap();
 
     // A now REFUSES a new claim with a retryable Unavailable...
     assert!(
