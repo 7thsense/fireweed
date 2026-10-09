@@ -2100,7 +2100,10 @@ mod committed_reader_tests {
         Ok(())
     }
 
-    async fn optional_scalar_i64(connection: &Connection, sql: &str) -> Result<Option<i64>> {
+    pub(super) async fn optional_scalar_i64(
+        connection: &Connection,
+        sql: &str,
+    ) -> Result<Option<i64>> {
         let rows = collect_rows(connection, sql, vec![]).await?;
         match rows.first().and_then(|row| row.values.first()) {
             None => Ok(None),
@@ -2175,7 +2178,7 @@ mod committed_reader_tests {
     }
 
     #[tokio::test]
-    async fn records_v03121_read_uncommitted_keyword_disposition() {
+    async fn records_stock_turso_pragma_disposition() {
         let root = tempfile::tempdir().expect("diagnostic tempdir");
         let path = root.path().join("reader-pragma-disposition.db");
         let database = Builder::new_local(path.to_str().expect("diagnostic path is UTF-8"))
@@ -2216,13 +2219,14 @@ mod committed_reader_tests {
         );
         assert!(update.expect("set historical keyword form").is_empty());
         assert_eq!(readback, None);
-        assert_eq!(
+        // Stock Turso accepts this compatibility PRAGMA without exposing a
+        // configurable checkpoint policy. It must not be claimed as disabled.
+        assert!(
             wal_autocheckpoint_update
-                .expect("set wal_autocheckpoint")
-                .len(),
-            1
+                .expect("compatibility PRAGMA")
+                .is_empty()
         );
-        assert_eq!(wal_autocheckpoint_readback, Some(0));
+        assert_eq!(wal_autocheckpoint_readback, None);
         assert!(cache_spill_update.expect("set cache_spill").is_empty());
         assert_eq!(cache_spill_readback, Some(1));
         assert_query_only_rejection(query_only_write).expect("query_only rejection");
@@ -3797,6 +3801,7 @@ async fn scalar_i64(connection: &Connection, sql: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod projection_checkpoint_config_tests {
+    use super::committed_reader_tests::optional_scalar_i64;
     use super::*;
 
     #[tokio::test]
@@ -3849,10 +3854,10 @@ mod projection_checkpoint_config_tests {
         assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
         assert_eq!(
-            scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
+            optional_scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            0
+            None
         );
         drop(new);
         let reopened =
@@ -3860,10 +3865,10 @@ mod projection_checkpoint_config_tests {
                 .await
                 .unwrap();
         assert_eq!(
-            scalar_i64(&*reopened.writer.lock().await, "PRAGMA wal_autocheckpoint")
+            optional_scalar_i64(&*reopened.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            0
+            None
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));
@@ -3889,27 +3894,27 @@ mod projection_checkpoint_config_tests {
             assert_eq!(existing.wal_truncate_min_bytes, page_size as u64 * 1024);
             assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
             assert_eq!(
-                scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                optional_scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                     .await
                     .unwrap(),
-                0
+                None
             );
         }
         let standalone = TursoRelational::in_memory().await.unwrap();
         assert_eq!(standalone.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(
-            scalar_i64(
+            optional_scalar_i64(
                 &*standalone.writer.lock().await,
                 "PRAGMA wal_autocheckpoint"
             )
             .await
             .unwrap(),
-            1_000
+            None
         );
     }
 
     #[tokio::test]
-    async fn log_backed_idle_compact_materializes_without_autocheckpoint() {
+    async fn log_backed_idle_compact_materializes_and_preserves_reopen() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("idle-compact.db");
         let store = TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
@@ -3944,14 +3949,46 @@ mod projection_checkpoint_config_tests {
         let main_before = path.metadata().unwrap().len();
         store.compact_idle_wal().await;
         assert_eq!(
-            scalar_i64(&*store.writer.lock().await, "PRAGMA wal_autocheckpoint")
+            optional_scalar_i64(&*store.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            0
+            None
         );
         assert!(
             path.metadata().unwrap().len() >= main_before,
             "idle compact may publish WAL frames into the main file"
+        );
+        assert_eq!(
+            scalar_i64(
+                &*store.writer.lock().await,
+                "SELECT length(body) FROM compact_probe WHERE id=1"
+            )
+            .await
+            .unwrap(),
+            65536
+        );
+        drop(store);
+        let reopened =
+            TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
+                .await
+                .unwrap();
+        assert_eq!(
+            scalar_i64(
+                &*reopened.writer.lock().await,
+                "SELECT count(*) FROM compact_probe"
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            scalar_i64(
+                &*reopened.writer.lock().await,
+                "SELECT length(body) FROM compact_probe WHERE id=1"
+            )
+            .await
+            .unwrap(),
+            65536
         );
     }
 }

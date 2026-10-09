@@ -22,6 +22,22 @@ and use supported native checkpoint behavior. Explicit idle/close checkpoints
 remain Fireweed operations. Unsupported custom `wal_autocheckpoint` controls
 are not production requirements.
 
+## Updated stock-engine qualification — 2026-10-09
+
+Three adapter failures are repaired by testing the published engine's actual
+PRAGMA behavior. `wal_autocheckpoint` has empty update/readback results in stock
+0.8.2; tests no longer claim that Fireweed disables automatic checkpoints through
+that retired fork control. Page-size and synchronous settings remain asserted.
+Idle compaction now additionally verifies the full 65,536-byte body and one-row
+count through a fresh handle after checkpointing.
+
+The full `fireweed-turso --features local --no-fail-fast` run reports **138 passed,
+5 failed, 3 existing ignored**. Strict adapter/all-target clippy passes. Remaining
+failures are the partial-expression index overflow, checkpoint locality batching,
+two custom checkpoint policy tests, and free-page WAL-image expectations. The
+engine and application behavior have not been patched to emulate the fork.
+The pre-existing PostgreSQL relational edits remain untouched.
+
 ## Verified and outstanding evidence
 
 | Scope | Result |
@@ -66,5 +82,7 @@ commit capability is atomic; the ordinary backend durability classification
 remains `EventualApply`. A paused-applier regression failed before this change
 and passed after it. This is Fireweed orchestration, not a Turso modification.
 
-No live SES emails have been sent and no real SES data has yet been verified
-queryable in Niflheim for the ten-recipient demonstration.
+The original no-live-send statement is superseded by Cayce's ten-email
+qualification: `run_5` has ten confirmed real inbox deliveries, exact SQL
+correlation in Niflheim, and independent RustFS readback of its 34 events.
+This does not qualify the five remaining adapter failures above.
