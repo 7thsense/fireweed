@@ -373,3 +373,17 @@ composition qualifications, not proof that the running Cayce/Snorri embedding
 already selects the new coordinated factory. Snorri facade and host configuration
 wiring, remaining legacy interfaces, and downstream blocking internals remain
 in the scrub scope. No additional SES emails were sent.
+
+
+### Independent native ownership clock (2026-10-09)
+
+The native PostgreSQL/S3/Turso constructor accepts a separate ownership clock.
+Workflow logical time remains the data-plane clock; registration, resolution,
+renewal and release use the ownership clock. The current-thread integration
+fixture advances workflow time by one hour while ownership time remains fixed,
+asserts a second owner is still rejected, then advances ownership time, awaits
+renewal and shutdown, and verifies the original item after reopen. This passed
+against the limited snorri_stack role and actual local RustFS/stock Turso.
+Strict all-features/all-targets Fireweed Clippy passed after replacing the
+ownership tuple with a named configuration type. This does not claim that
+Snorri's running host has already been wired to the new constructor.

@@ -43,6 +43,7 @@ async fn postgres_ownership_with_native_s3_turso_persistence() {
     let root = std::env::temp_dir().join(format!("fireweed-pg-control-{nonce}"));
     std::fs::create_dir_all(&root).unwrap();
     let clock = Arc::new(ManualClock::at(1));
+    let ownership_clock = Arc::new(ManualClock::at(100));
     let make_storage = |file: &str| {
         let mut config = StorageConfig::s3_turso(
             std::env::var("FIREWEED_TEST_S3_ENDPOINT").unwrap(),
@@ -59,6 +60,7 @@ async fn postgres_ownership_with_native_s3_turso_persistence() {
     let make_control = |owner: &str| ObjectLogPostgresControlPlaneConfig {
         url: ConfigSecret::new(url.clone()),
         schema: format!("snorri_control_{nonce}"),
+        ownership_clock: Some(ownership_clock.clone()),
         coordination: PostgresCoordinationConfig {
             instance_id: OwnerId::new(format!("{owner}_{nonce}")).unwrap(),
             control_plane: ControlPlaneConfig::default(),
@@ -85,6 +87,8 @@ async fn postgres_ownership_with_native_s3_turso_persistence() {
         )
         .await
         .unwrap();
+    // Workflow time can jump beyond both lease TTLs without expiring ownership.
+    clock.set(3_600);
     let other = open_objectlog_turso_coordinated_async(
         make_storage("other.turso"),
         make_control("other"),
@@ -111,6 +115,7 @@ async fn postgres_ownership_with_native_s3_turso_persistence() {
     );
     other.shutdown().await.unwrap();
     drop(other);
+    ownership_clock.set(102);
     first.renew_owned().await.unwrap();
     first.shutdown().await.unwrap();
     drop(first);

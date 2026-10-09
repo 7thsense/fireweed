@@ -3537,6 +3537,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
 struct AsyncControlPlaneRuntime<B: LibBackend + 'static> {
     backend: Arc<B>,
     control: Arc<dyn fireweed_engine::AsyncQueueControlPlane>,
+    clock: Arc<dyn Clock>,
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
@@ -3545,9 +3546,10 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for AsyncControlPlaneRunt
         &self,
         queue: QueueKey,
         owner: OwnerId,
-        now: UtcTimestamp,
+        _now: UtcTimestamp,
     ) -> OwnedControlPlaneFuture<'_, OwnershipOutcome> {
         Box::pin(async move {
+            let now = self.clock.now();
             self.control.register_owner(&owner, now).await?;
             let resolution = self.control.resolve_queue_owner(&queue, now).await?;
             if resolution
@@ -3573,17 +3575,21 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for AsyncControlPlaneRunt
     fn resolve(
         &self,
         queue: QueueKey,
-        now: UtcTimestamp,
+        _now: UtcTimestamp,
     ) -> OwnedControlPlaneFuture<'_, fireweed_engine::OwnerResolution> {
-        Box::pin(async move { self.control.resolve_queue_owner(&queue, now).await })
+        Box::pin(async move {
+            let now = self.clock.now();
+            self.control.resolve_queue_owner(&queue, now).await
+        })
     }
     fn renew(
         &self,
         owner: OwnerId,
         renewals: Vec<fireweed_engine::LeaseRenewal>,
-        now: UtcTimestamp,
+        _now: UtcTimestamp,
     ) -> OwnedControlPlaneFuture<'_, Vec<fireweed_engine::LeaseRenewalOutcome>> {
         Box::pin(async move {
+            let now = self.clock.now();
             self.control.heartbeat(&owner, now).await?;
             self.control.renew_queue_leases(&renewals, now).await
         })
@@ -3592,9 +3598,10 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for AsyncControlPlaneRunt
         &self,
         owner: OwnerId,
         leases: Vec<fireweed_engine::LeaseRenewal>,
-        now: UtcTimestamp,
+        _now: UtcTimestamp,
     ) -> OwnedControlPlaneFuture<'_, ()> {
         Box::pin(async move {
+            let now = self.clock.now();
             let mut first_error = None;
             for lease in leases {
                 match self
@@ -3779,6 +3786,7 @@ impl<B: LibBackend> RuntimeCore<B> {
         clock: Arc<dyn Clock>,
         instance_id: OwnerId,
         control: Arc<dyn fireweed_engine::AsyncQueueControlPlane>,
+        ownership_clock: Arc<dyn Clock>,
     ) -> Self
     where
         B: 'static,
@@ -3786,6 +3794,7 @@ impl<B: LibBackend> RuntimeCore<B> {
         let runtime: Arc<dyn OwnedControlPlaneRuntime> = Arc::new(AsyncControlPlaneRuntime {
             backend: Arc::clone(&backend),
             control,
+            clock: ownership_clock,
         });
         Self {
             backend,
@@ -5412,7 +5421,7 @@ pub fn open(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Firewe
 
 /// PostgreSQL ownership inputs for a native S3/Turso data plane.
 #[cfg(feature = "postgres")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ObjectLogPostgresControlPlaneConfig {
     /// Application-owned connection string; formatting is redacted.
     pub url: ConfigSecret,
@@ -5420,6 +5429,21 @@ pub struct ObjectLogPostgresControlPlaneConfig {
     pub schema: String,
     /// Owner identity and lease timing.
     pub coordination: PostgresCoordinationConfig,
+    /// Optional wall clock for ownership, independent of workflow logical time.
+    pub ownership_clock: Option<Arc<dyn Clock>>,
+}
+
+#[cfg(feature = "postgres")]
+impl fmt::Debug for ObjectLogPostgresControlPlaneConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObjectLogPostgresControlPlaneConfig")
+            .field("url", &self.url)
+            .field("schema", &self.schema)
+            .field("coordination", &self.coordination)
+            .field("separate_ownership_clock", &self.ownership_clock.is_some())
+            .finish()
+    }
 }
 
 /// Open RustFS-compatible storage and stock Turso with native async PostgreSQL leases.
@@ -5446,17 +5470,30 @@ pub async fn open_objectlog_turso_coordinated_async(
     );
     open_native_s3_turso(
         storage,
-        clock,
-        Some((control.coordination.instance_id, authority)),
+        Arc::clone(&clock),
+        Some(NativeOwnership {
+            owner: control.coordination.instance_id,
+            authority,
+            clock: control
+                .ownership_clock
+                .unwrap_or_else(|| Arc::clone(&clock)),
+        }),
     )
     .await
+}
+
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+struct NativeOwnership {
+    owner: OwnerId,
+    authority: Arc<dyn fireweed_engine::AsyncQueueControlPlane>,
+    clock: Arc<dyn Clock>,
 }
 
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 async fn open_native_s3_turso(
     storage: StorageConfig,
     clock: Arc<dyn Clock>,
-    ownership: Option<(OwnerId, Arc<dyn fireweed_engine::AsyncQueueControlPlane>)>,
+    ownership: Option<NativeOwnership>,
 ) -> EngineResult<Fireweed> {
     storage.validate()?;
     let (
@@ -5519,9 +5556,13 @@ async fn open_native_s3_turso(
         }),
     };
     let runtime = match ownership {
-        Some((owner, authority)) => {
-            RuntimeCore::with_async_control_plane(backend, clock, owner, authority)
-        }
+        Some(ownership) => RuntimeCore::with_async_control_plane(
+            backend,
+            clock,
+            ownership.owner,
+            ownership.authority,
+            ownership.clock,
+        ),
         None => RuntimeCore::new(backend, clock),
     };
     Ok(Fireweed::from_runtime_with_projection(runtime, lifecycle))
