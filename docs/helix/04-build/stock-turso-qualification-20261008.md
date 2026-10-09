@@ -22,6 +22,21 @@ and use supported native checkpoint behavior. Explicit idle/close checkpoints
 remain Fireweed operations. Unsupported custom `wal_autocheckpoint` controls
 are not production requirements.
 
+## Current adapter result — 2026-10-09
+
+The full stock-Turso adapter suite now reports **140 passed, 3 failed, 3 existing
+ignored**. Strict all-target adapter clippy passes. Two retired checkpoint-limit
+tests are replaced with explicit public checkpoint coverage: cached readback
+across independent connections, pinned-reader isolation while PASSIVE checkpoint
+runs, TRUNCATE with no remaining data frames, and fresh-handle reopen of all
+602 rows, their full blob bytes, and the exact sum of their keys.
+
+Remaining failures: partial-expression index overflow, fork-specific destination
+write batching, and fork-specific freed-page WAL-image zeroing. Their subsequent
+or separate semantic checks must remain qualified explicitly. No new ignored
+cases or engine changes were introduced. The older matrix below records earlier
+qualification states.
+
 ## Updated stock-engine qualification — 2026-10-09
 
 Three adapter failures are repaired by testing the published engine's actual
