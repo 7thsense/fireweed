@@ -363,7 +363,9 @@ checks that publication completes and closed admission rejects new work.
 The real limited-role PostgreSQL/RustFS/stock-Turso test passed on a current-thread
 runtime, covering competing owner rejection, async renewal, graceful drain and
 same-data reopen. Actual SQL through snorri_stack verified zero registered workers
-and an unassigned epoch-2 lease after shutdown/reopen/shutdown. All 146 default
+and an unassigned epoch-1 lease after shutdown/reopen/shutdown; same-owner
+reaffirmation preserves its epoch by contract. The initial SQL check assumed
+epoch 2 and failed; the corrected epoch-1 assertion passed. All 146 default
 library tests and strict all-feature/all-target lints passed after normal
 open_async switched to the same native path. The two native PG transaction and
 cancellation tests also passed after awaited shutdown was added. These are backend
