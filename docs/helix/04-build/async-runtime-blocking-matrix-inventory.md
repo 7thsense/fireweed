@@ -320,3 +320,25 @@ Cayce's PostgreSQL snapshot and send-intent adapters already expose async connec
 and async storage operations. Remaining active-stack review must cover Snorri
 embedding composition, Fireweed lease renew/shutdown, Niflheim control-plane
 interfaces, and object-log/projection lifecycle construction and recovery.
+
+
+### Native async PostgreSQL authority qualification
+
+AsyncPostgresControlPlane now implements the async authority port directly with
+tokio-postgres. Schema initialization, lease transactions, resolution, batched
+renewals and connection shutdown await their driver calls. It uses a Tokio mutex
+per connection, never a synchronous mutex across awaits. There is no spawn_blocking
+or block_on in this adapter. Existing pure lease decisions and set-based SQL are
+shared with the legacy adapter; S3 storage fencing remains a separate awaited
+phase before publication of serving ownership.
+
+Two explicitly invoked live PostgreSQL tests passed using the limited
+snorri_stack login and dedicated snorri database on a current-thread runtime.
+They verify competing first acquisitions, pending-fence state, fixed-statement
+batched resolution/renewal outcomes, reconnect persistence and awaited shutdown.
+A second test holds a real row lock, verifies the single-thread reactor remains
+responsive, cancels a pending renewal and verifies the durable lease is unchanged
+after rollback. Strict all-feature library lints, including TLS compilation,
+passed; this is not a live TLS handshake qualification. Runtime/Fireweed factory,
+Snorri facade and Cayce configuration wiring are still pending. The legacy
+synchronous PostgreSQL data adapters are not claimed scrubbed by this change.

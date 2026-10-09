@@ -70,6 +70,7 @@ use fireweed_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 use postgres::Client;
 use sha2::{Digest, Sha256};
 
+mod async_control_plane;
 mod async_log;
 mod async_log_replay;
 mod async_objectlog_postgres;
@@ -77,6 +78,7 @@ mod async_projection;
 mod compose_log;
 mod connect;
 mod control_plane;
+pub use async_control_plane::AsyncPostgresControlPlane;
 mod credential;
 mod relational;
 mod runtime_safe;

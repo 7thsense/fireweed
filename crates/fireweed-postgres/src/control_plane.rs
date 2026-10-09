@@ -32,7 +32,7 @@ use postgres::Client;
 
 use crate::{PostgresConnectConfig, connect};
 
-const CONTROL_PLANE_SCHEMA: &str = r#"
+pub(crate) const CONTROL_PLANE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS fireweed_workers (
     owner_id TEXT NOT NULL PRIMARY KEY,
     heartbeat_at BIGINT NOT NULL,                -- nanoseconds since epoch
@@ -50,24 +50,24 @@ CREATE TABLE IF NOT EXISTS fireweed_queue_owner (
 );
 "#;
 
-fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
+pub(crate) fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
     r.map_err(|e| EngineError::Storage(e.to_string()))
 }
 
-fn parts(queue: &QueueKey) -> (String, String) {
+pub(crate) fn parts(queue: &QueueKey) -> (String, String) {
     (
         queue.tenant_id.as_str().to_string(),
         queue.queue_id.as_str().to_string(),
     )
 }
 
-fn ts_nanos(ts: UtcTimestamp) -> i64 {
+pub(crate) fn ts_nanos(ts: UtcTimestamp) -> i64 {
     ts.seconds
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.nanoseconds as i64)
 }
 
-fn nanos_ts(v: i64) -> UtcTimestamp {
+pub(crate) fn nanos_ts(v: i64) -> UtcTimestamp {
     UtcTimestamp::new(
         v.div_euclid(1_000_000_000),
         v.rem_euclid(1_000_000_000) as u32,
@@ -75,7 +75,7 @@ fn nanos_ts(v: i64) -> UtcTimestamp {
     .expect("nanoseconds bounded by rem_euclid")
 }
 
-fn state_str(state: LeaseState) -> &'static str {
+pub(crate) fn state_str(state: LeaseState) -> &'static str {
     match state {
         LeaseState::Unassigned => "unassigned",
         LeaseState::PendingFence => "pending_fence",
@@ -84,7 +84,7 @@ fn state_str(state: LeaseState) -> &'static str {
     }
 }
 
-fn parse_state(s: &str) -> EngineResult<LeaseState> {
+pub(crate) fn parse_state(s: &str) -> EngineResult<LeaseState> {
     match s {
         "unassigned" => Ok(LeaseState::Unassigned),
         "pending_fence" => Ok(LeaseState::PendingFence),
@@ -95,7 +95,7 @@ fn parse_state(s: &str) -> EngineResult<LeaseState> {
 }
 
 /// Reconstruct a [`QueueLease`] from an authority row (the SELECT returns these 5 columns in order).
-fn row_to_lease(row: &postgres::Row) -> EngineResult<QueueLease> {
+pub(crate) fn row_to_lease(row: &postgres::Row) -> EngineResult<QueueLease> {
     let state: String = row.get(0);
     let active: Option<String> = row.get(1);
     let target: Option<String> = row.get(2);
@@ -114,10 +114,10 @@ fn row_to_lease(row: &postgres::Row) -> EngineResult<QueueLease> {
     })
 }
 
-const SELECT_LEASE_COLS: &str =
+pub(crate) const SELECT_LEASE_COLS: &str =
     "state, active_owner_id, target_owner_id, assignment_epoch, lease_expires_at";
 
-const BATCH_RENEW_SQL: &str = r#"
+pub(crate) const BATCH_RENEW_SQL: &str = r#"
 WITH input AS MATERIALIZED (
     SELECT tenant, queue, owner_id, expected_epoch, ord
     FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
@@ -161,7 +161,7 @@ SELECT i.ord,
  ORDER BY i.ord
 "#;
 
-const BATCH_RESOLVE_SQL: &str = r#"
+pub(crate) const BATCH_RESOLVE_SQL: &str = r#"
 WITH live AS MATERIALIZED (
     SELECT COALESCE(array_agg(owner_id ORDER BY owner_id), ARRAY[]::text[]) AS owners
       FROM fireweed_workers
@@ -179,7 +179,7 @@ SELECT i.ord, q.state, q.active_owner_id, q.target_owner_id,
  ORDER BY i.ord
 "#;
 
-fn optional_lease(
+pub(crate) fn optional_lease(
     state: Option<String>,
     active: Option<String>,
     target: Option<String>,
