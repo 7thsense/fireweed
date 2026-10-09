@@ -22,7 +22,33 @@ and use supported native checkpoint behavior. Explicit idle/close checkpoints
 remain Fireweed operations. Unsupported custom `wal_autocheckpoint` controls
 are not production requirements.
 
-## Current adapter result — 2026-10-09
+## Current adapter result — 2026-10-09, final semantic run
+
+`cargo test -p fireweed-turso --features local --no-fail-fast` reports
+**144 passed, 0 failed, 3 existing ignored**. Strict all-target adapter clippy
+passes. No ignored cases or engine patches were added.
+
+Partial expression keys use public SQL CASE to guard evaluation outside their
+predicate. All original mutation, uniqueness, rejected-row, mixed-VM and
+integrity assertions pass. A separate unguarded-expression test explicitly
+records stock 0.8.2's integer-overflow rejection and proves that rejection leaves
+the original row unchanged; unrestricted expression-index behavior is not
+claimed repaired upstream.
+
+Checkpoint IO observation includes automatic native backfill and the final
+explicit checkpoint across all 2,048 interleaved updates. Fresh-handle row count,
+exact sums, every latest value, and key bounds pass for both cache sizes.
+Freelist tests retain rollback, pinned-reader isolation, deletion, reopen and
+complete reuse assertions across both page sizes, both cache sizes and both
+body sizes. Removed-fork batching ratios, dirty-page byte budgets and zero-filled
+freed WAL images are recorded observations, not stock-engine guarantees or
+physical-erasure qualification. The retired no-op autocheckpoint control is
+removed from these workloads.
+
+The PostgreSQL relational edits present before this work remain untouched and
+unstaged. Older sections below preserve the qualification history.
+
+## Earlier checkpoint stage — 2026-10-09
 
 The full stock-Turso adapter suite now reports **140 passed, 3 failed, 3 existing
 ignored**. Strict all-target adapter clippy passes. Two retired checkpoint-limit

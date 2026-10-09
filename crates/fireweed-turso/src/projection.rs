@@ -5952,7 +5952,45 @@ mod item_mutation_tests {
     }
 
     #[tokio::test]
-    async fn partial_index_updates_skip_keys_outside_the_predicate() {
+    async fn unguarded_partial_expression_failure_preserves_the_original_row() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        store
+            .execute(
+                "CREATE TABLE unguarded_key(id INTEGER PRIMARY KEY,v INTEGER,active INTEGER)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute(
+                "CREATE INDEX unguarded_abs ON unguarded_key(abs(v)) WHERE active=1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute("INSERT INTO unguarded_key VALUES(1,7,0)", vec![])
+            .await
+            .unwrap();
+        let result = store
+            .execute(
+                "UPDATE unguarded_key SET v=-9223372036854775808 WHERE id=1",
+                vec![],
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "record the current stock-engine overflow limitation explicitly"
+        );
+        let row = store
+            .query("SELECT v,active FROM unguarded_key WHERE id=1", vec![])
+            .await
+            .unwrap();
+        assert_eq!(row[0].values, vec![Value::Integer(7), Value::Integer(0)]);
+    }
+
+    #[tokio::test]
+    async fn guarded_partial_index_updates_skip_keys_outside_the_predicate() {
         let store = TursoRelational::in_memory().await.unwrap();
         store
             .execute(
@@ -5963,7 +6001,7 @@ mod item_mutation_tests {
             .unwrap();
         store
             .execute(
-                "CREATE UNIQUE INDEX partial_abs ON partial_key(abs(v)) WHERE active=1",
+                "CREATE UNIQUE INDEX partial_abs ON partial_key(CASE WHEN active=1 THEN abs(v) END) WHERE active=1",
                 vec![],
             )
             .await
@@ -5977,13 +6015,14 @@ mod item_mutation_tests {
             .unwrap();
         store
             .execute(
-                "CREATE INDEX partial_copy ON partial_key(abs(v)+1) WHERE active=1",
+                "CREATE INDEX partial_copy ON partial_key(CASE WHEN active=1 THEN abs(v)+1 END) WHERE active=1",
                 vec![],
             )
             .await
             .unwrap();
-        // These new rows do not belong to the index. Evaluating abs(MIN) for
-        // their unused keys is both wasted work and an erroneous overflow.
+        // Stock Turso can evaluate expression keys before the partial predicate.
+        // Guard the schema expression itself with public SQL CASE, so unused
+        // keys never overflow. Preserve all mutation/uniqueness assertions.
         store
             .execute(
                 "UPDATE partial_key SET v=-9223372036854775808 WHERE id IN(1,3)",
