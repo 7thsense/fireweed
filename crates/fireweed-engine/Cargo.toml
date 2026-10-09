@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # Domain crate: ports + execution. Depends ONLY on fireweed-core (hexagonal: domain
 # depends on nothing outward). No I/O dependencies.
 [dependencies]
+async-trait = "0.1"
 fireweed-core = { path = "../fireweed-core" }
 axon-esf.workspace = true
 bytes = { version = "1", features = ["serde"] }

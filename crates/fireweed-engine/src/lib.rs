@@ -10,6 +10,7 @@ mod async_claim_planner;
 mod async_cohort_lifecycle;
 mod async_commit;
 mod async_composed;
+mod async_control_plane;
 mod async_lifecycle_planner;
 mod async_log_replay_product;
 mod async_projection_spec;
@@ -27,6 +28,7 @@ mod commit;
 pub mod commit_surface;
 mod compose;
 mod control_plane;
+pub use async_control_plane::{AsyncQueueControlPlane, acquire_and_fence_async};
 mod density;
 /// Entity document wire: natural JSON on human-readable; opaque JSON blob on native binary.
 mod entity_wire;

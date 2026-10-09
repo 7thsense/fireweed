@@ -292,3 +292,31 @@ Order is a suggestion for epic decomposition — not a commitment:
 - [ADR-015 full-async storage boundaries](../02-design/adr/ADR-015-full-async-storage-boundaries.md)
 - [Storage matrix composition inventory](./storage-matrix-composition-inventory.md) — wire-up map (distinct concern)
 - [Orthogonal storage matrix brief](../02-design/orthogonal-storage-matrix-brief.md)
+
+
+## Active stack ownership scrub — 2026-10-08 EDT
+
+The operator requires async interfaces throughout the active stack. Current
+public storage selectors remain S3 log × stock Turso projection per ADR-024;
+the old matrix above is historical inventory, not an implementation roadmap.
+
+The new S3/Turso + PostgreSQL ownership prototype exposed a real boundary issue:
+synchronous PostgreSQL lease calls ran on private blocking workers, but native
+RustFS fencing needed an async reactor. A bridge could make its actual limited-
+role PostgreSQL/RustFS/Turso ownership/reopen test pass; that prototype is not the
+accepted implementation and its uncommitted public factory/bridge were removed.
+
+The engine now exposes AsyncQueueControlPlane and acquire_and_fence_async.
+Authority operations, durable fencing and projection hydration are awaited;
+serving ownership is published only after storage succeeds. Capability metadata
+and pure lease decisions remain synchronous. The port is runtime-neutral and
+object-safe. cargo check -p fireweed-engine and strict library lints passed. The focused
+async ownership test passed both successful hydration and failed-hydration
+release branches, asserting no serving publication before hydration. A native async PostgreSQL
+implementation and runtime/embedding wiring remain required; no production
+control-plane migration or completed scrub is claimed by the interface alone.
+
+Cayce's PostgreSQL snapshot and send-intent adapters already expose async connect
+and async storage operations. Remaining active-stack review must cover Snorri
+embedding composition, Fireweed lease renew/shutdown, Niflheim control-plane
+interfaces, and object-log/projection lifecycle construction and recovery.

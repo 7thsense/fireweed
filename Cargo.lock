@@ -1448,6 +1448,7 @@ dependencies = [
 name = "fireweed-engine"
 version = "0.31.32"
 dependencies = [
+ "async-trait",
  "axon-esf",
  "base64 0.23.1",
  "bytes",
