@@ -81,6 +81,9 @@ pub fn group_expansion_budget(
         .iter()
         .map(|u| u.key.as_str())
         .chain(group.work_updates.iter().map(|u| u.key.as_str()))
+        // Insert vectors may replace existing pending rows. Releasing their old
+        // unique tuples is materialization too, even when new fields shrink.
+        .chain(group.work_inserts.iter().map(|u| u.key.as_str()))
         .collect();
     for key in old_work {
         if let Some(old) = snapshot.work.get(key) {
@@ -744,5 +747,65 @@ mod tests {
             group_expansion_budget(&group, &RecordSnapshot::default(), &schema).unwrap()
                 > 4 * 65536
         );
+    }
+    #[test]
+    fn shrinking_insert_vector_charges_old_unique_tuple_release() {
+        let mut schema = QueueSchema {
+            work: CollectionDefinition {
+                fields: BTreeMap::from([("value".into(), FieldType::Bytes)]),
+                indexes: BTreeMap::new(),
+                unique_indexes: BTreeSet::new(),
+            },
+            state: BTreeMap::new(),
+            progress_bound_nanos: 1,
+            max_attempts: 3,
+        };
+        for n in 0..32 {
+            let name = n.to_string();
+            schema
+                .work
+                .indexes
+                .insert(name.clone(), vec!["value".into()]);
+            schema.work.unique_indexes.insert(name);
+        }
+        let work = NewWork {
+            key: "old".into(),
+            priority: 0,
+            available_at: 0,
+            fields: BTreeMap::from([("value".into(), FieldValue::Bytes(vec![]))]),
+            body: Default::default(),
+        };
+        let group = CommitGroup {
+            request_id: "shrink".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_updates: vec![],
+            work_inserts: vec![work.clone()],
+        };
+        let empty = RecordSnapshot::default();
+        let base = group_expansion_budget(&group, &empty, &schema).unwrap();
+        let mut old = work;
+        old.fields
+            .insert("value".into(), FieldValue::Bytes(vec![0; 2048]));
+        let mut snapshot = empty;
+        snapshot.work.insert(
+            "old".into(),
+            crate::queue_planner::StoredWork {
+                record: WorkRecord {
+                    work: old,
+                    version: 1,
+                    lifecycle: Lifecycle::Pending,
+                    attempts: 0,
+                    insertion_sequence: 1,
+                    eligible_since: 0,
+                    lease_expires_at: None,
+                },
+                lease_hash: None,
+                fields_loaded: true,
+                body_loaded: true,
+            },
+        );
+        let budget = group_expansion_budget(&group, &snapshot, &schema).unwrap();
+        assert!(budget >= base + 4 * 32 * 4096);
     }
 }

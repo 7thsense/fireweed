@@ -1384,3 +1384,135 @@ pub async fn verify_process_loss(
         receipts
     );
 }
+
+/// Insert-vector authority must account for accepted earlier rekeys and rejected
+/// siblings without conflating independent per-item outcomes.
+pub async fn ordered_insert_uniqueness(store: &dyn QueueStore, queue: QueueAddress) {
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    let target = |key: &str, value: &str| {
+        let mut work = item(key, "unique-vector", 0, 0);
+        work.fields
+            .insert("target".into(), FieldValue::Text(value.into()));
+        work
+    };
+    let seed = store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "vector-seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![target("a", "x"), target("external", "z")],
+        })
+        .await
+        .unwrap();
+    assert!(
+        seed.iter()
+            .all(|o| matches!(o, InsertOutcome::Inserted { .. }))
+    );
+    let request = InsertRequest {
+        queue: queue.clone(),
+        request_id: "vector-upsert".into(),
+        mode: InsertMode::Upsert,
+        items: vec![
+            target("a", "y"),
+            target("b", "x"),
+            target("c", "y"),
+            target("d", "z"),
+            target("e", "free"),
+        ],
+    };
+    let result = store.insert(request.clone()).await.unwrap();
+    assert!(matches!(result[0], InsertOutcome::Replaced { .. }));
+    assert!(matches!(result[1], InsertOutcome::Inserted { .. }));
+    for outcome in &result[2..4] {
+        assert!(matches!(
+            outcome,
+            InsertOutcome::Rejected {
+                reason: Rejection::UniqueConflict,
+                ..
+            }
+        ));
+    }
+    assert!(matches!(result[4], InsertOutcome::Inserted { .. }));
+    assert_eq!(store.insert(request).await.unwrap(), result);
+    let selected = store
+        .claim(claim(&queue, "vector-claim", "unique-vector"))
+        .await
+        .unwrap();
+    assert_eq!(
+        selected
+            .iter()
+            .map(|w| w.record.work.key.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["a", "b", "e", "external"])
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .find(|w| w.record.work.key == "a")
+            .unwrap()
+            .record
+            .work
+            .fields["target"],
+        FieldValue::Text("y".into())
+    );
+}
+
+pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue: QueueAddress) {
+    let mut definition = schema();
+    for n in 0..32 {
+        let name = format!("unique-target-{n}");
+        definition
+            .work
+            .indexes
+            .insert(name.clone(), vec!["target".into()]);
+        definition.work.unique_indexes.insert(name);
+    }
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: definition,
+        })
+        .await
+        .unwrap();
+    let mut old = item("shrinking", "shrink", 0, 0);
+    old.fields
+        .insert("target".into(), FieldValue::Text("\0".repeat(2048)));
+    let inserted = store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "large-index-seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![old.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(inserted[0], InsertOutcome::Inserted { .. }));
+    let replacement = item("shrinking", "shrink", 0, 0);
+    let replaced = store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "small-index-upsert".into(),
+            mode: InsertMode::Upsert,
+            items: vec![replacement],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(replaced[0], InsertOutcome::Replaced { .. }));
+    old.key = "released-owner".into();
+    let release = store
+        .insert(InsertRequest {
+            queue,
+            request_id: "released-index-insert".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![old],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(release[0], InsertOutcome::Inserted { .. }));
+}

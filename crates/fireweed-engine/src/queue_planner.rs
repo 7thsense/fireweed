@@ -436,6 +436,19 @@ fn record_unique_keys(
     }
     Ok(keys)
 }
+/// Complete prospective tuples for an insert vector, independent of per-item
+/// acceptance. Load authority once, then apply individual items in request order.
+/// Sparse tuples remain NULLS DISTINCT; duplicate tuples are probed once.
+pub fn insert_unique_probes(
+    items: &[NewWork],
+    schema: &QueueSchema,
+) -> QueueResult<BTreeSet<UniqueIdentity>> {
+    let mut keys = BTreeSet::new();
+    for item in items {
+        keys.extend(record_unique_keys(None, &item.fields, &schema.work)?);
+    }
+    Ok(keys)
+}
 /// Probe these complete tuples while retaining the authoritative storage lock.
 /// A hash/prefix lookup is only candidate discovery; compare full_sort_key.
 pub fn required_unique_probes(

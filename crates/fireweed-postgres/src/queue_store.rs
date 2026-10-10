@@ -8,8 +8,8 @@ use fireweed_engine::{
     queue_contract::{QueueFuture, QueueStore},
     queue_index::ordered_key,
     queue_planner::{
-        CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, lease_hash, plan_commit_group,
-        required_unique_probes,
+        CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity,
+        insert_unique_probes, lease_hash, plan_commit_group, required_unique_probes,
     },
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -203,6 +203,24 @@ impl PostgresQueueStore {
                 tx.execute("SELECT pg_advisory_xact_lock(6073190500807001)", &[])
                     .await
                     .map_err(storage)?;
+                // CREATE INDEX IF NOT EXISTS still acquires table locks. Fence
+                // existing queue operations before touching any dependent table:
+                // every operation reads queues first and retains that lock until
+                // commit. Otherwise DDL's queues->records lock order can deadlock
+                // a writer that updates records before its queue sequence row.
+                let exists: bool = tx
+                    .query_one(
+                        "SELECT to_regclass('fireweed_api007.queues') IS NOT NULL",
+                        &[],
+                    )
+                    .await
+                    .map_err(storage)?
+                    .get(0);
+                if exists {
+                    tx.batch_execute("LOCK TABLE fireweed_api007.queues IN ACCESS EXCLUSIVE MODE")
+                        .await
+                        .map_err(storage)?;
+                }
                 tx.batch_execute(DDL).await.map_err(storage)?;
                 tx.commit().await.map_err(storage)?;
             }
@@ -643,6 +661,15 @@ async fn load_unique_probes<'a>(
         .into_iter()
         .filter(|probe| !loaded.snapshot.unique_probes_loaded.contains(probe))
         .collect();
+    load_unique_authority(tx, queue, loaded, probes, reservation).await
+}
+async fn load_unique_authority<'a>(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    loaded: &mut Loaded<'a>,
+    probes: Vec<UniqueIdentity>,
+    reservation: &'a QueueReservation,
+) -> QueueResult<()> {
     if probes.is_empty() {
         return Ok(());
     }
@@ -1303,6 +1330,20 @@ impl QueueStore for PostgresQueueStore {
                     };
                     let mut loaded = load_group(&tx, &queue, &read_set, &reservation).await?;
                     let before = loaded.snapshot.clone();
+                    // Reserve tuple/name amplification before materializing all
+                    // prospective insert keys. SQL authority loads once per vector;
+                    // the shared planner still decides each item in request order.
+                    loaded
+                        ._probe_charges
+                        .push(reservation.buffer(group_expansion_budget(
+                            &read_set,
+                            &loaded.snapshot,
+                            &queue.schema,
+                        )?)?);
+                    let probes = insert_unique_probes(&request.items, &queue.schema)?
+                        .into_iter()
+                        .collect();
+                    load_unique_authority(&tx, &queue, &mut loaded, probes, &reservation).await?;
                     for item in &request.items {
                         let mut group = CommitGroup {
                             request_id: request.request_id.clone(),
@@ -1323,8 +1364,6 @@ impl QueueStore for PostgresQueueStore {
                             });
                         }
                         let now = timestamp_nanos(clock.now())?;
-                        load_unique_probes(&tx, &queue, &mut loaded, &group, now, &reservation)
-                            .await?;
                         let delta =
                             plan_commit_group(&group, &mut loaded.snapshot, now, &queue.schema)?;
                         deltas.push(delta.clone());
@@ -1884,6 +1923,51 @@ mod tests {
             .unwrap();
         assert_eq!(work.records.len(), 1);
         reopened.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn reopening_schema_fences_writers_before_dependent_tables() {
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+        let store = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 1)
+            .await
+            .unwrap();
+        let (mut client, driver) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(driver);
+        let tx = client.transaction().await.unwrap();
+        tx.batch_execute("LOCK TABLE fireweed_api007.queues IN ACCESS SHARE MODE; LOCK TABLE fireweed_api007.records IN ROW EXCLUSIVE MODE").await.unwrap();
+        let opener = tokio::spawn(async move {
+            PostgresQueueStore::connect(&url, clock, QueueLimits::default(), 1).await
+        });
+        // Wait until the opener has reached its schema lock barrier, without
+        // guessing an interleaving from a wall-clock sleep.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='fireweed_api007.queues'::regclass AND NOT granted)", &[]).await.unwrap().get(0);
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tx.batch_execute("LOCK TABLE fireweed_api007.queues IN ROW EXCLUSIVE MODE"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tx.commit().await.unwrap();
+        let reopened = tokio::time::timeout(std::time::Duration::from_secs(5), opener)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        reopened.shutdown().await.unwrap();
+        store.shutdown().await.unwrap();
+        drop(client);
+        driver.await.unwrap().unwrap();
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]

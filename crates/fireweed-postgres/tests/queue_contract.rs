@@ -78,6 +78,8 @@ async fn mandatory_competition_expiry_and_long_ordering() {
     suite::predicate_and_order_oracles(&a, q("predicate-oracles")).await;
     suite::ordered_groups_sparse_stats_and_replay_precedence(&a, &clock, q("groups-stats-replay"))
         .await;
+    suite::ordered_insert_uniqueness(&a, q("insert-uniqueness")).await;
+    suite::shrinking_upsert_index_amplification(&a, q("shrinking-index-upsert")).await;
     suite::unrestricted_names_obey_response_bounds(&a, q("names-bounds")).await;
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();

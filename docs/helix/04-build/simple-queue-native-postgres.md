@@ -28,14 +28,19 @@ can leave no group committed; this packaging adds no public transaction session.
 Owned Tokio jobs retain connections, admission and buffer charges after caller
 cancellation. Shutdown stops admission, drains terminal jobs, closes connections
 and joins drivers. Session synchronous_commit is forced on; fsync/full_page_writes
-must already be on. No cluster settings are changed.
+must already be on. No cluster settings are changed. Schema opening serializes constructors with an
+advisory lock and fences existing queue operations at the queues table before
+checking dependent tables/indexes. This transient global opening barrier avoids
+DDL/write lock inversion; it is not a throughput qualification or an online
+schema migration claim.
 
 ## Storage and bounded materialization
 
 Shared tables keep opaque bodies separate from claim metadata. Fixed-width hash
 probes and bounded prefixes accompany complete-value comparisons; no key/name
-length cap or database collation changes the logical domain. Versions include
-retained deletion tombstones. Declared fields have typed predicate indexes;
+length cap or database collation changes the logical domain. Insert vectors batch-load prospective unique-tuple authority before ordered
+per-item planning, including old tuple-release amplification for pending upserts.
+Versions include retained deletion tombstones. Declared fields have typed predicate indexes;
 composite indexes retain full memcomparable sort keys and sparse unique semantics.
 
 Claims select only matching due work, including expired leases, before leasing.
