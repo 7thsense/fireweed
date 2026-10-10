@@ -1,0 +1,58 @@
+"""Controls for complete deterministic generation and independent predictions."""
+import copy
+import json
+import unittest
+from generate_replay import REQUIRED, generate, graph, validate_corpus
+
+
+class ReplayGenerationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.corpus = generate()
+
+    def test_complete_deterministic_graph_and_required_compositions(self):
+        self.assertEqual(self.corpus, generate())
+        states, _, _, edges = graph()
+        self.assertEqual(self.corpus['graph'], {'complete': True, 'states': len(states), 'edges': len(edges)})
+        sequences = [[step['action'] for step in trace['steps']] for trace in self.corpus['traces']]
+        for sequence in REQUIRED:
+            self.assertIn(sequence, sequences)
+        self.assertTrue(validate_corpus(self.corpus))
+
+    def test_full_edge_selection_and_generation_cap(self):
+        corpus = generate('edges')
+        self.assertEqual(corpus['selection']['intended_edges'], corpus['graph']['edges'])
+        self.assertTrue(validate_corpus(corpus))
+        with self.assertRaises(ValueError):
+            generate(limit=10)
+
+    def test_concurrency_continuation_preserves_both_branches(self):
+        trace = next(t for t in self.corpus['traces'] if [s['action'] for s in t['steps']][:2] == ['ConcurrentClaims', 'LoseResponse:0'])
+        first, second = trace['steps'][:2]
+        self.assertEqual(len(first['transitions']), 2)
+        self.assertEqual({e['after'] for e in first['transitions']}, {e['before'] for e in second['transitions']})
+
+    def test_corrupt_schema_observation_transitions_and_coverage_rejected(self):
+        modifications = [
+            lambda c: c.update(schema='bad'),
+            lambda c: c.update(model_sha256='0'*64),
+            lambda c: c.update(traces=[]),
+            lambda c: c['graph'].update(complete=False),
+            lambda c: c['graph'].update(edges=1),
+            lambda c: c['selection'].update(intended_edges=0),
+            lambda c: c.update(fingerprint_body='wrong'),
+            lambda c: c['traces'][0]['steps'][0].update(action='Unknown'),
+            lambda c: c['traces'][0]['steps'][0].update(transitions=[]),
+            lambda c: c['states']['0']['observation'].update(owner=1),
+            lambda c: c['traces'][0].update(intended_edges=[]),
+        ]
+        for modify in modifications:
+            corpus = copy.deepcopy(self.corpus)
+            modify(corpus)
+            with self.assertRaises((ValueError, AssertionError, KeyError, TypeError)):
+                validate_corpus(corpus)
+
+    def test_checked_in_fixture_is_canonical(self):
+        from pathlib import Path
+        fixture = json.loads(Path(__file__).with_name('fixtures').joinpath('replay-smoke.json').read_text())
+        self.assertEqual(fixture, json.loads(json.dumps(self.corpus)))

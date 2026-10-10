@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
-fn definition() -> QueueDefinition {
+pub(super) fn definition() -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new("formal").unwrap(),
         queue_id: QueueId::new("claims").unwrap(),

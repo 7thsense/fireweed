@@ -1,0 +1,4 @@
+# Preserve exact subprocess output bytes for SHA-256 evidence.
+*.log -whitespace
+conformance-logs/*.log -whitespace
+counterexamples/*.log -whitespace

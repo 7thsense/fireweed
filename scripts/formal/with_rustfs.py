@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--replay-profile', choices=('smoke', 'edges'))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     binary = args.binary.resolve(strict=True)
@@ -54,8 +55,11 @@ def main():
                 preflight = args.output.with_name(args.output.stem + '-s3-cas.json')
                 subprocess.run([sys.executable, str(root / 'scripts/ci/s3-native-cas-preflight.py'),
                                 '--json-out', str(preflight)], cwd=root, env=env, check=True)
-                command = [sys.executable, str(root / 'scripts/formal/conformance.py'),
+                runner = 'run_replay.py' if args.replay_profile else 'conformance.py'
+                command = [sys.executable, str(root / 'scripts/formal' / runner),
                            '--output', str(args.output)]
+                if args.replay_profile:
+                    command += ['--profile', args.replay_profile]
                 if args.offline:
                     command.append('--offline')
                 result = subprocess.run(command, cwd=root, env=env)

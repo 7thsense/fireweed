@@ -42,7 +42,7 @@ def provenance(root):
         for path in sorted((root / parent).rglob('*')):
             if path.is_file() and (path.suffix in ('.py', '.rs', '.md') or path.name == 'Cargo.toml'):
                 sources[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
-    for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'):
+    for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/formal/fixtures/replay-smoke.json'):
         path = root / name
         if path.is_file():
             sources[name] = hashlib.sha256(path.read_bytes()).hexdigest()

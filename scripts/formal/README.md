@@ -42,3 +42,31 @@ Generic memory-projection and filesystem-publication tests remain separately
 attributed. They cannot qualify public S3 × Turso. A local RustFS/Turso test is
 public-cell conformance, not a production-cloud or process-kill qualification.
 The service-envelope fixture does not discharge the numeric PRD progress bound.
+
+## Generated model-to-S3/Turso replay
+
+CONTRACT-007 adds an independent combined model: 6,386 reachable states and
+20,913 edges. The smoke selection contains 91 traces targeting 83 semantic edge
+classes plus required compositions. Every selected trace executes against real
+local S3 and Turso; both concurrent serial outcomes remain permitted. Reports
+record actual matched edges separately from intended coverage.
+
+```sh
+python3 scripts/formal/generate_replay.py --output target/replay-corpus.json
+python3 scripts/formal/generate_replay.py --validate target/replay-corpus.json
+CARGO_INCREMENTAL=0 python3 scripts/formal/with_rustfs.py \
+  --binary /absolute/path/to/rustfs --replay-profile smoke \
+  --output target/model-replay.json
+# Deeper, potentially lengthy: prefixes intended for every modeled edge.
+CARGO_INCREMENTAL=0 python3 scripts/formal/with_rustfs.py \
+  --binary /absolute/path/to/rustfs --replay-profile edges \
+  --output target/model-replay-edges.json
+```
+
+Use `--offline` with cached Cargo dependencies. The runner retains the canonical
+corpus, actual per-step observations, failure prefix, Cargo log and native CAS
+preflight. Canonical validation recomputes graph, state IDs, observations,
+transitions and selection metadata. A search cap, changed source, stale corpus,
+zero/ignored cases or missing evidence fails closed. Execution covers one process
+with an ephemeral CP kernel, graceful reopen and simulated client nonreceipt;
+it does not qualify cloud S3 or process-kill recovery.

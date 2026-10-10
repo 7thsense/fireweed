@@ -281,3 +281,79 @@ async fn cohort_lease_validation_renew_and_retry_preserve_boundaries() {
         );
     }
 }
+
+#[tokio::test]
+async fn serving_claim_coverage_guard_rejects_uncovered_and_wrong_queue_minimum() {
+    let definition = qdef();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let id = ItemId::new("901").unwrap();
+    let position = CommandPosition::new(shard.clone(), 1, 0);
+    AsyncProjectionStore::apply_live(
+        &turso,
+        vec![position.clone()],
+        vec![envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("901", "key", 1)],
+            }),
+            vec![id],
+        )],
+    )
+    .await
+    .unwrap();
+    let members = [(ts(2), 1, LeaseToken::new("guard-token").unwrap(), ts(30))];
+    let future = CommandPosition::new(shard.clone(), 1, 1);
+    assert!(matches!(
+        turso
+            .item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+                &shard,
+                &members,
+                &[],
+                None,
+                Some(&future)
+            )
+            .await,
+        Err(EngineError::Backpressure {
+            resource: "claim serving projection coverage"
+        })
+    ));
+    let mut wrong = position.clone();
+    wrong.queue.queue_id = QueueId::new("wrong-queue").unwrap();
+    assert!(matches!(
+        turso
+            .item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+                &shard,
+                &members,
+                &[],
+                None,
+                Some(&wrong)
+            )
+            .await,
+        Err(EngineError::Invalid(_))
+    ));
+    let selected = turso
+        .item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+            &shard,
+            &members,
+            &[],
+            None,
+            Some(&position),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected[0].0, vec![id]);
+    let rows = turso
+        .query(
+            "SELECT lifecycle_state FROM fireweed_items WHERE item_id=?1",
+            vec![id.to_string().into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0].values[0].as_text().map(String::as_str),
+        Some("Pending")
+    );
+}

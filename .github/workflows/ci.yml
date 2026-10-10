@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts/formal -p 'test_*.py'
           python3 scripts/formal/check.py --output target/formal-analysis.json
+          python3 scripts/formal/generate_replay.py --output target/replay-corpus.json
 
       - name: Retain bounded formal evidence
         if: always()
@@ -60,6 +61,23 @@ jobs:
       - name: Install pinned RustFS for S3 product tests
         timeout-minutes: 3
         run: echo "FIREWEED_RUSTFS_BIN=$(bash scripts/ci/s3-qualification-endpoint.sh install)" >> "$GITHUB_ENV"
+
+      - name: Generated model-to-S3/Turso replay
+        run: |
+          python3 scripts/formal/with_rustfs.py \
+            --binary "$FIREWEED_RUSTFS_BIN" --replay-profile smoke \
+            --output target/model-replay.json
+
+      - name: Retain generated replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-replay
+          path: |
+            target/replay-corpus.json
+            target/model-replay*.json
+            target/model-replay.log
+          if-no-files-found: error
 
       - name: Public release validation gate
         run: |

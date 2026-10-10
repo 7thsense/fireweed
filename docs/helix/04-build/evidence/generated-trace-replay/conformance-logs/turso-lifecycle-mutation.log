@@ -1,0 +1,29 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/async_reclaim_selection.rs (target/debug/deps/async_reclaim_selection-a47d9f432c65f566)
+
+running 3 tests
+test cohort_lease_validation_renew_and_retry_preserve_boundaries ... ok
+test ordinary_expiry_respects_time_fences_and_cohorts ... ok
+test serving_claim_coverage_guard_rejects_uncovered_and_wrong_queue_minimum ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/item_mutation_parity.rs (target/debug/deps/item_mutation_parity-d5dfeefc9a6b33f0)
+
+running 13 tests
+test addressed_unique_validation_sees_unaddressed_rows_and_root_removal_releases_key ... ok
+test batch_apply_changes_gates_only_for_accepted_rows_with_resolved_ids ... ok
+test batch_update_preflight_preserves_entry_outcomes_and_rejects_both_unique_contenders ... ok
+test competing_sibling_unique_edits_fail_without_changing_projection ... ok
+test legacy_and_typed_indexes_follow_scalar_batch_mutation_replacement_and_purge ... ok
+test pending_claim_tail_is_visible_to_selectors_without_double_version_increment ... ok
+test reopened_cohort_mutation_preserves_bearer_and_invalidates_only_addressed_lease ... ok
+test retained_commit_receipts_and_binary_prefix_pages_are_queue_scoped ... ok
+test scalar_reschedule_preserves_batch_replaced_payload_and_reports_next_version ... ok
+test scalar_validator_preserves_leased_semantics_and_cross_row_uniqueness ... ok
+test schema_validation_covers_real_and_dry_run_mutations_without_sql_writes ... ok
+test selector_snapshot_keeps_gate_membership_and_item_metadata_in_one_commit ... ok
+test selectors_preserve_first_match_fifo_snapshots_and_compact_entities ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+

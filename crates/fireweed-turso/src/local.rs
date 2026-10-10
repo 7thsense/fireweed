@@ -749,8 +749,53 @@ impl TursoRelational {
         exclude: &[ItemId],
         gate_policy: Option<fireweed_core::GateKeyPolicy>,
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        self.item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+            shard,
+            members,
+            exclude,
+            gate_policy,
+            None,
+        )
+        .await
+    }
+
+    /// On the deferred-claim exclusion path, ensure this serving connection
+    /// covers the cursor from which the authoritative suffix was validated.
+    pub async fn item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+        &self,
+        shard: &QueueKey,
+        members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+        exclude: &[ItemId],
+        gate_policy: Option<fireweed_core::GateKeyPolicy>,
+        minimum: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
         let fifo = self.claim_scan_is_fifo(shard);
         let mut connection = self.reader.lock().await;
+        if let Some(minimum) = minimum {
+            if &minimum.queue != shard {
+                return Err(EngineError::Invalid("claim coverage queue mismatch"));
+            }
+            let rows = collect_rows(
+                &connection,
+                sql::SELECT_CURSOR,
+                vec![
+                    shard.tenant_id.as_str().to_owned().into(),
+                    shard.queue_id.as_str().to_owned().into(),
+                ],
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let covered = rows.first().is_some_and(|row| {
+                matches!((row.values[0].as_integer(), row.values[1].as_integer()),
+                    (Some(next),Some(epoch)) if *next > 0 && *epoch >= 0
+                    && (*next as u64) > minimum.sequence && (*epoch as u64) >= minimum.backend_epoch)
+            });
+            if !covered {
+                return Err(EngineError::Backpressure {
+                    resource: "claim serving projection coverage",
+                });
+            }
+        }
         let rowid_floor = if fifo {
             Some(self.claim_scan_hint(shard).unwrap_or(1).max(1))
         } else {

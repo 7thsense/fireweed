@@ -24,9 +24,9 @@
 //!
 //!    TWO-COUNTER RECONCILIATION (bead pqueue-b29435b2): for backends whose control-plane acquire does
 //!    NOT bind the storage fence in the same transaction, `acquire_and_fence` may observe
-//!    `current_epoch > lease.assignment_epoch` after the acquire succeeds. This happens when an ephemeral
+//!    `current_epoch >= lease.assignment_epoch` after the acquire succeeds. This happens when an ephemeral
 //!    control plane (e.g., `InMemoryControlPlane`) is reset on process restart while the durable backend
-//!    retains a higher storage epoch. This gap is reconciled here by distinguishing the restart scenario
+//!    retains an equal or higher storage epoch. This gap is reconciled here by distinguishing the restart scenario
 //!    from a genuine inconsistency:
 //!
 //!    - **Ephemeral reset, cold start**: the CP's prior `active_owner_id` is `None` (the queue was
@@ -93,9 +93,9 @@ pub enum OwnershipOutcome {
 ///
 /// RESET-RESTART RECONCILIATION (bead pqueue-b29435b2): for ephemeral control planes (`is_ephemeral()`)
 /// whose state resets on process restart, the acquire succeeds but the durable backend's `current_epoch`
-/// may be greater than `lease.assignment_epoch`. This function reads the CP's prior `active_owner_id`
-/// before the acquire to distinguish a cold restart (advance storage) from a same-owner re-affirm (reuse
-/// current storage epoch), avoiding both permanent `EpochFenced` and self-fencing on re-acquire.
+/// may be equal to or greater than `lease.assignment_epoch`. This function reads the CP's prior lease
+/// before the acquire to distinguish a new assignment (advance storage) from a confirmed same-owner
+/// re-affirm (reuse current storage epoch), avoiding both permanent `EpochFenced` and self-fencing.
 pub async fn acquire_and_fence<CP, S>(
     control_plane: &CP,
     storage: &S,
@@ -107,12 +107,10 @@ where
     CP: QueueControlPlane + ?Sized,
     S: ControlPlaneStore + ?Sized,
 {
-    // Read prior active owner before acquire so we can distinguish cold restart from same-owner re-affirm.
-    let prior_owner = if control_plane.is_ephemeral() {
-        control_plane
-            .lease(queue)
-            .ok()
-            .and_then(|l| l.active_owner_id)
+    // Owner identity alone is insufficient: an expired PendingFence retries
+    // with a new assignment even when the same owner acquires again.
+    let prior_lease = if control_plane.is_ephemeral() {
+        control_plane.lease(queue).ok()
     } else {
         None
     };
@@ -124,22 +122,19 @@ where
             // inside the acquire transaction, so the current storage epoch may already equal the lease
             // epoch. Reference/in-memory control planes still need the explicit storage advance.
             let current_epoch = storage.current_epoch(queue).await?;
-            let fence_result = if current_epoch <= lease.assignment_epoch {
-                storage.fence_epoch(queue, lease.assignment_epoch).await
-            } else {
-                // current_epoch > lease.assignment_epoch
-                if prior_owner.as_ref() == Some(owner) {
-                    // Same-owner re-affirm after a prior restart-reconciliation advanced the storage.
-                    // CP preserved the epoch; re-advancing would self-fence in-flight writes.
-                    Ok(current_epoch)
-                } else if control_plane.is_ephemeral() {
-                    // Ephemeral CP was reset on restart: storage epoch is ahead of the fresh CP.
-                    // Advance storage to fence stale pre-restart writers.
-                    storage.acquire_epoch(queue).await
-                } else {
-                    Err(crate::error::EngineError::EpochFenced)
-                }
-            };
+            let fence_result = establish_ownership_fence(
+                storage,
+                queue,
+                current_epoch,
+                lease.assignment_epoch,
+                control_plane.is_ephemeral(),
+                prior_lease.as_ref().is_some_and(|prior| {
+                    prior.active_owner_id.as_ref() == Some(owner)
+                        && prior.assignment_epoch == lease.assignment_epoch
+                        && prior.state != LeaseState::PendingFence
+                }),
+            )
+            .await;
             let fence_epoch = match fence_result {
                 Ok(epoch) => epoch,
                 Err(error) => {
@@ -171,6 +166,33 @@ where
                 fence_epoch,
             }))
         }
+    }
+}
+
+/// Bind a newly acquired lease to durable append authority. An ephemeral CP
+/// cannot use numeric equality as proof that storage fenced this incarnation:
+/// equality also occurs at CP reset and when its counter catches up after reset.
+/// Durable CPs may already have atomically published the assignment fence.
+pub(crate) async fn establish_ownership_fence<S: ControlPlaneStore + ?Sized>(
+    storage: &S,
+    queue: &QueueKey,
+    current: u64,
+    assignment: u64,
+    ephemeral: bool,
+    same_session: bool,
+) -> EngineResult<u64> {
+    if current < assignment {
+        storage.fence_epoch(queue, assignment).await
+    } else if ephemeral {
+        if same_session {
+            Ok(current)
+        } else {
+            storage.acquire_epoch(queue).await
+        }
+    } else if current == assignment {
+        storage.fence_epoch(queue, assignment).await
+    } else {
+        Err(crate::error::EngineError::EpochFenced)
     }
 }
 
@@ -399,6 +421,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expired_pending_same_owner_gets_a_new_storage_fence() {
+        use futures::executor::block_on;
+
+        let storage = EpochStore::new();
+        let cp = InMemoryControlPlane::new(ControlPlaneConfig::default());
+        let owner = OwnerId::new("node-a").unwrap();
+        let queue = qk();
+        cp.register_owner(&owner, ts(0)).unwrap();
+        let AcquireOutcome::Acquired(pending) =
+            cp.acquire_queue_lease(&queue, &owner, ts(0)).unwrap()
+        else {
+            panic!("initial acquire rejected");
+        };
+        assert_eq!(pending.state, LeaseState::PendingFence);
+        assert_eq!(pending.assignment_epoch, 1);
+        // A previous, interrupted acquire already advanced durable authority,
+        // but never confirmed the ephemeral assignment as serving.
+        storage.set_epoch(&queue, 2);
+        cp.register_owner(&owner, ts(100)).unwrap();
+        assert!(!cp.lease(&queue).unwrap().is_live(ts(100)));
+        let OwnershipOutcome::Owned(recovered) =
+            block_on(acquire_and_fence(&cp, &storage, &queue, &owner, ts(100))).unwrap()
+        else {
+            panic!("expired pending acquire rejected");
+        };
+        assert_eq!((recovered.lease_epoch, recovered.fence_epoch), (2, 3));
+        assert_eq!(cp.lease(&queue).unwrap().state, LeaseState::Assigned);
+
+        // Once confirmed, expiry alone is a same-assignment reaffirmation.
+        cp.register_owner(&owner, ts(200)).unwrap();
+        let OwnershipOutcome::Owned(reaffirmed) =
+            block_on(acquire_and_fence(&cp, &storage, &queue, &owner, ts(200))).unwrap()
+        else {
+            panic!("assigned reaffirmation rejected");
+        };
+        assert_eq!((reaffirmed.lease_epoch, reaffirmed.fence_epoch), (2, 3));
+    }
+
     /// A durable CP (non-ephemeral) with `current_epoch > lease.assignment_epoch` still fails closed.
     #[test]
     fn durable_cp_mismatch_still_fails_closed() {
@@ -490,6 +551,49 @@ mod tests {
         assert!(
             matches!(result, Err(EngineError::EpochFenced)),
             "durable CP with storage > CP epoch must fail closed"
+        );
+    }
+    #[test]
+    fn ephemeral_equal_epoch_restart_and_handoff_issue_distinct_fences() {
+        use futures::executor::block_on;
+        let storage = EpochStore::new();
+        let queue = qk();
+        storage.set_epoch(&queue, 1);
+        let cp = InMemoryControlPlane::new(ControlPlaneConfig::default());
+        let a = OwnerId::new("a").unwrap();
+        let b = OwnerId::new("b").unwrap();
+        cp.register_owner(&a, ts(2)).unwrap();
+        cp.register_owner(&b, ts(2)).unwrap();
+        let OwnershipOutcome::Owned(reopened) =
+            block_on(acquire_and_fence(&cp, &storage, &queue, &a, ts(2))).unwrap()
+        else {
+            panic!("restart acquire rejected");
+        };
+        assert_eq!(
+            (reopened.lease_epoch, reopened.fence_epoch),
+            (1, 2),
+            "cold CP1/storage1 must fence the old incarnation"
+        );
+        let OwnershipOutcome::Owned(reaffirmed) =
+            block_on(acquire_and_fence(&cp, &storage, &queue, &a, ts(2))).unwrap()
+        else {
+            panic!("reaffirm acquire rejected");
+        };
+        assert_eq!(
+            reaffirmed.fence_epoch, 2,
+            "same-session reaffirmation must preserve in-flight credentials"
+        );
+        cp.release_queue_lease(&queue, &a, reopened.lease_epoch, ts(2))
+            .unwrap();
+        let OwnershipOutcome::Owned(successor) =
+            block_on(acquire_and_fence(&cp, &storage, &queue, &b, ts(2))).unwrap()
+        else {
+            panic!("handoff acquire rejected");
+        };
+        assert_eq!(
+            (successor.lease_epoch, successor.fence_epoch),
+            (2, 3),
+            "new CP2 owner must fence prior storage2 session"
         );
     }
 }

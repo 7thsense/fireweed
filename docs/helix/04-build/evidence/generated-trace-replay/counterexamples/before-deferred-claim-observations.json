@@ -1,0 +1,996 @@
+{
+  "all_selected_traces_executed": false,
+  "attempted": 8,
+  "attribution": "real local-S3/Turso; one-process ephemeral CP; graceful reopen; simulated client nonreceipt",
+  "cases": [
+    {
+      "error": null,
+      "intended_edges": [
+        "0|Claim:0|1"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "Claim:0",
+          "compatible_after": [
+            1
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 1,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 1
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Claim:0|1"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 0,
+                "operation": "claim",
+                "request": 0,
+                "token": 0,
+                "worker": "worker-0"
+              }
+            ],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "attempts": 1,
+            "expiry": 30,
+            "item": 0,
+            "request": 0,
+            "status": "claimed",
+            "token": 0,
+            "version": 2
+          },
+          "step": 0
+        }
+      ],
+      "trace": "2f8685deab6362cd"
+    },
+    {
+      "error": null,
+      "intended_edges": [
+        "0|Claim:1|2"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "Claim:1",
+          "compatible_after": [
+            2
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 1,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 1
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Claim:1|2"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 0,
+                "operation": "claim",
+                "request": 1,
+                "token": 1,
+                "worker": "worker-1"
+              }
+            ],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "attempts": 1,
+            "expiry": 30,
+            "item": 0,
+            "request": 1,
+            "status": "claimed",
+            "token": 1,
+            "version": 2
+          },
+          "step": 0
+        }
+      ],
+      "trace": "8a92d8d2da28a378"
+    },
+    {
+      "error": null,
+      "intended_edges": [
+        "0|ConcurrentClaims|3"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "ConcurrentClaims",
+          "compatible_after": [
+            3
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 2,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 1
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 2
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|ConcurrentClaims|3"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 0,
+                "operation": "claim",
+                "request": 0,
+                "token": 0,
+                "worker": "worker-0"
+              },
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 1,
+                "operation": "claim",
+                "request": 1,
+                "token": 1,
+                "worker": "worker-1"
+              }
+            ],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "responses": [
+              {
+                "attempts": 1,
+                "expiry": 30,
+                "item": 0,
+                "request": 0,
+                "status": "claimed",
+                "token": 0,
+                "version": 2
+              },
+              {
+                "attempts": 1,
+                "expiry": 30,
+                "item": 1,
+                "request": 1,
+                "status": "claimed",
+                "token": 1,
+                "version": 2
+              }
+            ],
+            "status": "concurrent_claims"
+          },
+          "step": 0
+        }
+      ],
+      "trace": "54213030d20eaf8b"
+    },
+    {
+      "error": null,
+      "intended_edges": [
+        "0|Handoff|5"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "Handoff",
+          "compatible_after": [
+            5
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 0,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Handoff|5"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 2,
+            "history": [],
+            "owner": 1,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 2
+          },
+          "result": {
+            "status": "handed_off"
+          },
+          "step": 0
+        }
+      ],
+      "trace": "27a5a107cc38a0de"
+    },
+    {
+      "error": null,
+      "intended_edges": [
+        "0|Reopen|6"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "Reopen",
+          "compatible_after": [
+            6
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "operation": "Reopen",
+              "post_close": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "post_open": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "pre_close": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "same_namespace": true,
+              "same_projection_file": true,
+              "tail_repaired": false
+            },
+            {
+              "apply_lag": 0,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Reopen|6"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 2
+          },
+          "result": {
+            "status": "reopened"
+          },
+          "step": 0
+        }
+      ],
+      "trace": "eebcdddd853180fd"
+    },
+    {
+      "error": null,
+      "intended_edges": [
+        "0|Reaffirm|7"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "Reaffirm",
+          "compatible_after": [
+            7
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 0,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Reaffirm|7"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "status": "reaffirmed"
+          },
+          "step": 0
+        }
+      ],
+      "trace": "0277569676382f51"
+    },
+    {
+      "error": null,
+      "intended_edges": [
+        "1|LoseResponse:0|8"
+      ],
+      "status": "PASS",
+      "steps": [
+        {
+          "action": "Claim:0",
+          "compatible_after": [
+            1
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 1,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 1
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Claim:0|1"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 0,
+                "operation": "claim",
+                "request": 0,
+                "token": 0,
+                "worker": "worker-0"
+              }
+            ],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "attempts": 1,
+            "expiry": 30,
+            "item": 0,
+            "request": 0,
+            "status": "claimed",
+            "token": 0,
+            "version": 2
+          },
+          "step": 0
+        },
+        {
+          "action": "LoseResponse:0",
+          "compatible_after": [
+            8
+          ],
+          "compatible_before": [
+            1
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 1,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 1
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "1|LoseResponse:0|8"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 0,
+                "operation": "claim",
+                "request": 0,
+                "token": 0,
+                "worker": "worker-0"
+              }
+            ],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "request": 0,
+            "status": "response_lost"
+          },
+          "step": 1
+        }
+      ],
+      "trace": "9a503714a4acbf4a"
+    },
+    {
+      "error": "backpressure: projection coverage",
+      "intended_edges": [
+        "1|Claim:1|3"
+      ],
+      "status": "FAIL",
+      "steps": [
+        {
+          "action": "Claim:0",
+          "compatible_after": [
+            1
+          ],
+          "compatible_before": [
+            0
+          ],
+          "diagnostics": [
+            {
+              "apply_lag": 1,
+              "durable_positions": [
+                {
+                  "backend_epoch": 0,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 0
+                },
+                {
+                  "backend_epoch": 1,
+                  "queue": {
+                    "queue_id": "claims",
+                    "tenant_id": "formal"
+                  },
+                  "sequence": 1
+                }
+              ],
+              "operation": "Observe",
+              "projection_after": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              },
+              "projection_before": {
+                "backend_epoch": 0,
+                "queue": {
+                  "queue_id": "claims",
+                  "tenant_id": "formal"
+                },
+                "sequence": 0
+              }
+            }
+          ],
+          "matched_edges": [
+            "0|Claim:0|1"
+          ],
+          "observation": {
+            "applied_receipts": [],
+            "assignment_epoch": 1,
+            "history": [
+              {
+                "epoch": 1,
+                "expiry": 30,
+                "fingerprint": 7625438221890202055,
+                "item": 0,
+                "operation": "claim",
+                "request": 0,
+                "token": 0,
+                "worker": "worker-0"
+              }
+            ],
+            "owner": 0,
+            "rows": [
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 0,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              },
+              {
+                "attempts": 0,
+                "expiry": null,
+                "item": 1,
+                "state": "pending",
+                "token": null,
+                "version": 1,
+                "worker": null
+              }
+            ],
+            "storage_epoch": 1
+          },
+          "result": {
+            "attempts": 1,
+            "expiry": 30,
+            "item": 0,
+            "request": 0,
+            "status": "claimed",
+            "token": 0,
+            "version": 2
+          },
+          "step": 0
+        }
+      ],
+      "trace": "a637efa8dfc33b18"
+    }
+  ],
+  "corpus_sha256": "30fe7125bb6c6aaec2df3e99bdc2bd8ec5c869cba1d2add468011e921c48fbee",
+  "matched_edges": [
+    "0|Claim:0|1",
+    "0|Claim:1|2",
+    "0|ConcurrentClaims|3",
+    "0|Handoff|5",
+    "0|Reaffirm|7",
+    "0|Reopen|6",
+    "1|LoseResponse:0|8"
+  ],
+  "model_graph": {
+    "complete": true,
+    "edges": 20889,
+    "states": 6386
+  },
+  "model_sha256": "4abf410dabdc96ae6840948bf330904fae3482a6e38fc2c3f7c009c40dd76370",
+  "passed": 7,
+  "schema": "fireweed-model-replay-evidence-v1",
+  "selection": {
+    "intended_edges": 80,
+    "profile": "smoke",
+    "semantic_classes": 80,
+    "sut_edge_coverage": "must be measured; intended coverage is not witnessed coverage",
+    "traces": 86
+  },
+  "status": "FAIL",
+  "sut_graph_edge_exhaustive": false
+}

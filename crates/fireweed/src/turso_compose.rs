@@ -291,6 +291,59 @@ fn claim_exclude_ids(snapshot: &MutationDriverSnapshot) -> Vec<ItemId> {
     ids
 }
 
+/// Only the native object-log Claim poll path may subtract an unapplied tail
+/// across ownership fences. Offsets are globally contiguous in this log engine;
+/// epochs may advance but never regress. Other tail consumers keep their stricter
+/// single-epoch validator.
+#[cfg(feature = "objectlog")]
+fn claim_poll_tail_exclusions(
+    applied: &CommandPosition,
+    target: &CommandPosition,
+    entries: Vec<(CommandPosition, CommandEnvelope)>,
+    now: UtcTimestamp,
+) -> Option<Vec<ItemId>> {
+    if applied.queue != target.queue
+        || applied.backend_epoch > target.backend_epoch
+        || !matches!(target.sequence.checked_sub(applied.sequence), Some(1..=16))
+    {
+        return None;
+    }
+    let mut sequence = applied.sequence;
+    let mut epoch = applied.backend_epoch;
+    let mut ids = HashSet::new();
+    let mut last = None;
+    for (position, envelope) in entries {
+        sequence = sequence.checked_add(1)?;
+        if position.queue != target.queue
+            || position.sequence != sequence
+            || sequence > target.sequence
+            || position.backend_epoch < epoch
+            || position.backend_epoch > target.backend_epoch
+        {
+            return None;
+        }
+        let QueueCommand::Claim(claim) = envelope.command else {
+            return None;
+        };
+        if !claim.authority_first
+            || claim.lease_expires_at <= now
+            || claim.item_ids.is_empty()
+            || claim.item_ids.iter().any(|id| !ids.insert(*id))
+            || ids.len() > 8192
+        {
+            return None;
+        }
+        epoch = position.backend_epoch;
+        last = Some(position);
+    }
+    if last.as_ref() != Some(target) {
+        return None;
+    }
+    let mut ids: Vec<_> = ids.into_iter().collect();
+    ids.sort_unstable();
+    Some(ids)
+}
+
 #[cfg(feature = "objectlog")]
 fn identity_base(definition: QueueDefinition) -> MutationDriverSnapshot {
     MutationDriverSnapshot {
@@ -4215,18 +4268,25 @@ impl DerivedObjectLogTursoBackend {
                 MutationGenerationWork::Singleton { .. } => {}
             }
         }
-        // Claim SELECT reads Turso. Wait for this process's previous claim and
-        // push to apply so those rows exist. Mutate acks the log without that wait.
-        self.wait_selected_frontiers(&queue, claimed, claimed)
-            .await?;
+        let pure_claims = works
+            .iter()
+            .all(|work| matches!(work, MutationGenerationWork::Claim { .. }));
+        if !pure_claims {
+            self.wait_selected_frontiers(&queue, claimed, claimed)
+                .await?;
+        }
         let definition =
             AsyncControlPlane::queue_definition(self.control.as_ref(), queue.clone()).await?;
         let _waiter = self.fence_admission.admit_waiter().map_err(map_coord)?;
-        let _fence = self
-            .selection_fence
-            .acquire_shared(queue.clone())
-            .await
-            .map_err(map_coord)?;
+        // A claim-containing generation holds exclusive candidate-selection
+        // authority. Bypass renewal/reassignment cannot create Pending work;
+        // shared/exclusive candidate writes cannot change selection under it.
+        let _fence = if has_claim {
+            self.selection_fence.acquire_exclusive(queue.clone()).await
+        } else {
+            self.selection_fence.acquire_shared(queue.clone()).await
+        }
+        .map_err(map_coord)?;
         let now = match &works[0] {
             MutationGenerationWork::Push { request, .. } => request.now,
             MutationGenerationWork::BatchUpdate { now, .. }
@@ -4239,6 +4299,19 @@ impl DerivedObjectLogTursoBackend {
                 .map(|envelope| envelope.created_at)
                 .unwrap_or_else(|| UtcTimestamp::new(1, 0).expect("epoch")),
         };
+        let mut claim_exclusions = Vec::new();
+        let mut claim_minimum = None;
+        if pure_claims {
+            let tail = self.claim_poll_exclusions(&queue, now).await?;
+            if let Some((excluded, minimum)) = tail {
+                claim_exclusions = excluded;
+                claim_minimum = minimum;
+            } else {
+                // Conservative fallback for mixed/expired/unvalidated or large
+                // tails; this is not evidence of general nonclaim-lag polling.
+                self.wait_request_entry_coverage(&queue).await?;
+            }
+        }
         let snapshot_batch_keys = batch_keys;
         let needs_serving_snapshot =
             !keys.is_empty() || !snapshot_batch_keys.is_empty() || !batch_ids.is_empty();
@@ -4329,8 +4402,15 @@ impl DerivedObjectLogTursoBackend {
             None
         };
         let saved_claim_hint = claimed.then(|| self.projection.claim_scan_hint(&queue));
-        self.realize_accepted_claims(&queue, &works, &mut members, &mut folded)
-            .await?;
+        folded.leased_ids.extend(claim_exclusions);
+        self.realize_accepted_claims(
+            &queue,
+            &works,
+            &mut members,
+            &mut folded,
+            claim_minimum.as_ref(),
+        )
+        .await?;
         self.allocate_accepted_pushes(&definition, &works, &mut members, &mut folded)
             .await?;
         drop(_slot);
@@ -4434,16 +4514,54 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
+    async fn claim_poll_exclusions(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<(Vec<ItemId>, Option<CommandPosition>)>> {
+        let Some(coordinator) = &self.async_apply else {
+            return Ok(None);
+        };
+        coordinator.ensure_healthy(queue)?;
+        let Some(target) = AsyncLogStore::high_water(self.log.as_ref(), queue.clone()).await?
+        else {
+            return Ok(Some((Vec::new(), None)));
+        };
+        // Delimit against the serving reader, not a potentially newer writer.
+        // The subsequent SELECT rechecks this minimum on its own connection.
+        let applied =
+            AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), queue.clone())
+                .await?;
+        if position_covers(applied.as_ref(), &target) {
+            return Ok(Some((Vec::new(), None)));
+        }
+        let Some(applied) = applied else {
+            return Ok(None);
+        };
+        if !matches!(target.sequence.checked_sub(applied.sequence), Some(1..=16)) {
+            return Ok(None);
+        }
+        let page =
+            AsyncLogStore::read_from(self.log.as_ref(), queue.clone(), Some(applied.clone()), 16)
+                .await?;
+        Ok(
+            claim_poll_tail_exclusions(&applied, &target, page.entries, now)
+                .map(|ids| (ids, Some(applied))),
+        )
+    }
+
     async fn realize_accepted_claims(
         &self,
         queue: &QueueKey,
         works: &[MutationGenerationWork],
         members: &mut [fireweed_engine::MutationGenerationMember],
         folded: &mut MutationDriverSnapshot,
+        minimum: Option<&CommandPosition>,
     ) -> EngineResult<()> {
         let mut claim_indices = Vec::new();
         let mut claim_members = Vec::new();
-        for (index, (work, member)) in works.iter().zip(members.iter()).enumerate() {
+        let epoch = AsyncLogStore::current_epoch(self.log.as_ref(), queue.clone()).await?;
+        for (index, (work, member)) in works.iter().zip(members.iter_mut()).enumerate() {
             if !matches!(
                 member.outcome,
                 MutationGenerationMemberOutcome::ClaimAccepted { .. }
@@ -4453,6 +4571,14 @@ impl DerivedObjectLogTursoBackend {
             let MutationGenerationWork::Claim { request, .. } = work else {
                 continue;
             };
+            if request
+                .expected_epoch
+                .is_some_and(|credential| credential != epoch)
+            {
+                member.outcome =
+                    MutationGenerationMemberOutcome::Rejected(EngineError::EpochFenced);
+                continue;
+            }
             claim_indices.push(index);
             claim_members.push((
                 request.eligibility_at(),
@@ -4467,22 +4593,14 @@ impl DerivedObjectLogTursoBackend {
         let exclude = claim_exclude_ids(folded);
         let selected = self
             .projection
-            .item_claim_microbatch_on_serving_reader_with_gate_policy(
+            .item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
                 queue,
                 &claim_members,
                 &exclude,
                 Some(folded.definition.eligibility_policy.gate_keys),
+                minimum,
             )
             .await?;
-        let epoch = match claim_indices
-            .first()
-            .and_then(|&index| match &works[index] {
-                MutationGenerationWork::Claim { request, .. } => request.expected_epoch,
-                _ => None,
-            }) {
-            Some(epoch) => epoch,
-            None => AsyncLogStore::current_epoch(self.log.as_ref(), queue.clone()).await?,
-        };
         for (index, (ids, items)) in claim_indices.into_iter().zip(selected) {
             let MutationGenerationWork::Claim { id, request } = &works[index] else {
                 continue;
@@ -8012,3 +8130,7 @@ mod ownership_hydrate_tests {
 #[cfg(all(test, feature = "objectlog"))]
 #[path = "formal_analysis_tests.rs"]
 mod formal_analysis_tests;
+
+#[cfg(all(test, feature = "objectlog"))]
+#[path = "generated_replay_tests.rs"]
+mod generated_replay_tests;

@@ -117,8 +117,8 @@ where
     CP: AsyncQueueControlPlane + ?Sized,
     S: ControlPlaneStore + ?Sized,
 {
-    let prior_owner = if control.is_ephemeral() {
-        control.lease(queue).await?.active_owner_id
+    let prior_lease = if control.is_ephemeral() {
+        Some(control.lease(queue).await?)
     } else {
         None
     };
@@ -128,15 +128,19 @@ where
     };
     let fenced = async {
         let current = storage.current_epoch(queue).await?;
-        let epoch = if current <= lease.assignment_epoch {
-            storage.fence_epoch(queue, lease.assignment_epoch).await?
-        } else if prior_owner.as_ref() == Some(owner) {
-            current
-        } else if control.is_ephemeral() {
-            storage.acquire_epoch(queue).await?
-        } else {
-            return Err(EngineError::EpochFenced);
-        };
+        let epoch = crate::ownership::establish_ownership_fence(
+            storage,
+            queue,
+            current,
+            lease.assignment_epoch,
+            control.is_ephemeral(),
+            prior_lease.as_ref().is_some_and(|prior| {
+                prior.active_owner_id.as_ref() == Some(owner)
+                    && prior.assignment_epoch == lease.assignment_epoch
+                    && prior.state != LeaseState::PendingFence
+            }),
+        )
+        .await?;
         storage.hydrate_projection_for_ownership(queue).await?;
         if lease.state == LeaseState::PendingFence {
             control
@@ -345,5 +349,92 @@ mod tests {
                 }
             });
         }
+    }
+    #[test]
+    fn expired_pending_same_owner_async_gets_a_new_storage_fence() {
+        futures::executor::block_on(async {
+            let plane = Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
+            let control = Plane(Arc::clone(&plane));
+            let queue = QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new("queue").unwrap(),
+            );
+            let owner = OwnerId::new("a").unwrap();
+            let start = UtcTimestamp::new(0, 0).unwrap();
+            control.register_owner(&owner, start).await.unwrap();
+            let AcquireOutcome::Acquired(pending) = control
+                .acquire_queue_lease(&queue, &owner, start)
+                .await
+                .unwrap()
+            else {
+                panic!("initial acquire rejected");
+            };
+            assert_eq!(pending.state, LeaseState::PendingFence);
+            assert_eq!(pending.assignment_epoch, 1);
+            let storage = Storage {
+                plane,
+                epoch: AtomicU64::new(2),
+                phases: Mutex::new(Vec::new()),
+                fail_hydration: false,
+            };
+            let later = UtcTimestamp::new(100, 0).unwrap();
+            control.register_owner(&owner, later).await.unwrap();
+            assert!(!control.lease(&queue).await.unwrap().is_live(later));
+            let OwnershipOutcome::Owned(recovered) =
+                acquire_and_fence_async(&control, &storage, &queue, &owner, later)
+                    .await
+                    .unwrap()
+            else {
+                panic!("expired pending acquire rejected");
+            };
+            assert_eq!((recovered.lease_epoch, recovered.fence_epoch), (2, 3));
+            assert_eq!(
+                control.lease(&queue).await.unwrap().state,
+                LeaseState::Assigned
+            );
+        });
+    }
+
+    #[test]
+    fn ephemeral_equal_epoch_async_restart_and_handoff_issue_distinct_fences() {
+        futures::executor::block_on(async {
+            let plane = Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
+            let control = Plane(Arc::clone(&plane));
+            let queue = QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new("queue").unwrap(),
+            );
+            let a = OwnerId::new("a").unwrap();
+            let b = OwnerId::new("b").unwrap();
+            let now = UtcTimestamp::new(2, 0).unwrap();
+            control.register_owner(&a, now).await.unwrap();
+            control.register_owner(&b, now).await.unwrap();
+            let storage = Storage {
+                plane,
+                epoch: AtomicU64::new(1),
+                phases: Mutex::new(Vec::new()),
+                fail_hydration: false,
+            };
+            let OwnershipOutcome::Owned(reopened) =
+                acquire_and_fence_async(&control, &storage, &queue, &a, now)
+                    .await
+                    .unwrap()
+            else {
+                panic!("restart acquire rejected");
+            };
+            assert_eq!((reopened.lease_epoch, reopened.fence_epoch), (1, 2));
+            control
+                .release_queue_lease(&queue, &a, reopened.lease_epoch, now)
+                .await
+                .unwrap();
+            let OwnershipOutcome::Owned(successor) =
+                acquire_and_fence_async(&control, &storage, &queue, &b, now)
+                    .await
+                    .unwrap()
+            else {
+                panic!("handoff acquire rejected");
+            };
+            assert_eq!((successor.lease_epoch, successor.fence_epoch), (2, 3));
+        });
     }
 }
