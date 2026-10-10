@@ -141,11 +141,38 @@ pub struct ClaimedUpdate {
     pub patch: WorkPatch,
     pub disposition: Disposition,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdministrativeLifecycle {
+    Keep,
+    Pending,
+    Completed,
+    Failed,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdministrativeLeaseGuard {
+    RejectActive,
+    RequireActive,
+    InvalidateActive,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UnclaimedChange {
+    Patch(WorkPatch),
+    /// Explicit version-fenced lifecycle control; never transfers lease authority.
+    Administrative {
+        patch: WorkPatch,
+        lifecycle: AdministrativeLifecycle,
+        lease_guard: AdministrativeLeaseGuard,
+    },
+    /// Replace pending work with fresh pending work, resetting attempts and insertion age.
+    /// The key must match its update; the durable version still increases.
+    Replace(NewWork),
+    Delete,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnclaimedUpdate {
     pub key: String,
     pub expect: StateExpect,
-    pub patch: Option<WorkPatch>, // None deletes; a live lease always rejects.
+    pub change: UnclaimedChange,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitGroup {
@@ -169,6 +196,7 @@ pub enum Rejection {
     Leased,
     Invalid(String),
     UniqueConflict,
+    Terminal,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordVersion {
@@ -437,7 +465,7 @@ impl std::io::Write for CanonicalWriter {
 /// vector order and exact byte values. Streaming avoids a second full body copy.
 pub fn fingerprint<T: Serialize>(domain: &str, value: &T) -> QueueResult<[u8; 32]> {
     let mut hash = Sha256::new();
-    hash.update(b"fireweed-api007-v2\0");
+    hash.update(b"fireweed-api007-v3\0");
     hash.update((domain.len() as u64).to_le_bytes());
     hash.update(domain.as_bytes());
     let writer = CanonicalWriter {
@@ -773,8 +801,18 @@ impl CommitBatch {
                         "unclaimed update requires existing version; creation uses work_inserts",
                     ));
                 }
-                if let Some(value) = &update.patch {
-                    patch(value, schema, limits)?;
+                match &update.change {
+                    UnclaimedChange::Patch(value)
+                    | UnclaimedChange::Administrative { patch: value, .. } => {
+                        patch(value, schema, limits)?
+                    }
+                    UnclaimedChange::Replace(value) => {
+                        if value.key != update.key {
+                            return Err(invalid("replacement key mismatch"));
+                        }
+                        work(value, schema, limits)?;
+                    }
+                    UnclaimedChange::Delete => {}
                 }
             }
             for update in &group.state_updates {
@@ -1311,7 +1349,7 @@ mod tests {
         assert!(request.validate(&QueueLimits::default()).is_err());
     }
     #[test]
-    fn codec_v2_golden_claim() {
+    fn codec_v3_golden_claim() {
         let request = claim();
         let digest = request
             .fingerprint()
@@ -1322,7 +1360,7 @@ mod tests {
         assert_eq!(encoded_len(&request).unwrap(), 28);
         assert_eq!(
             digest,
-            "8f9ac1f4aa911f12e2f7300f0fcc52799069a485cfeea5fdd33dbbff8402977c"
+            "f9ecef4a79efc3846a7a78fa7a1f96d1c872c42db2898cf92d822dbc67456c68"
         );
     }
     #[test]
@@ -1361,7 +1399,7 @@ mod tests {
         g.work_updates.push(UnclaimedUpdate {
             key: "missing".into(),
             expect: StateExpect::Absent,
-            patch: Some(WorkPatch::default()),
+            change: UnclaimedChange::Patch(WorkPatch::default()),
         });
         assert!(
             CommitBatch {

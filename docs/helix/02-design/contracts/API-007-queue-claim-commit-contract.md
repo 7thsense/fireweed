@@ -80,13 +80,24 @@ CommitGroup {
   claimed_updates: [{ key, lease, expected_version, patch, disposition }],
   state_updates: [{ collection, key, expect: Absent | Version(v), value_or_delete }],
   work_inserts: [KeyedWork],
-  work_updates: [{ key, expect: Absent | Version(v), patch_or_delete }]
+  work_updates: [{ key, expect: Version(v), change: Patch | Replace | Delete | Administrative }]
 }
 ```
 
 Disposition is complete, fail, release, retry-at, or retain/renew the lease.
-An update may change permitted fields/body/priority/eligibility. Delete of leased
-work requires its live credential. An unclaimed update cannot steal a live lease.
+An update may change permitted fields/body/priority/eligibility. Delete of active-leased
+work requires its live credential. Patch/Delete reject an active lease; fresh Replace only accepts Pending work.
+Administrative changes carry lifecycle intent Keep/Pending/Completed/Failed and
+an explicit RejectActive/RequireActive/InvalidateActive lease guard. They are
+version-fenced and atomic with state/audit changes, never transfer authority.
+Terminal Complete/Fail intents reject Terminal; Pending explicitly rearms while
+preserving attempts/insertion sequence. Administrative no-change preserves the
+version. A transition to Pending or changed schedule resets its eligibility age
+to max(now,due). This covers actual Snorri cancellation, force-Due, unsuppression,
+resume and operator completion semantics.
+Fresh Replace resets attempts/insertion/eligibility age and increments the
+durable per-key version. It rejects terminal and stored-leased work; an ordinary
+upsert cannot resurrect terminal work.
 State collection schemas determine values and query fields; Fireweed does not
 interpret workflow programs. Snorri validates its transition before calling.
 
@@ -190,7 +201,7 @@ queue-density and bounded-progress obligations are not waived by this contract.
 | Migration/recovery | Claimless CAS group with durable audit and replay identity |
 | Instance/audit/await recovery | Typed keyed state reads and declared indexed queries; verify audit digest |
 | Shard manifest bootstrap | Absent/version CAS on a named configuration state record |
-| Counts/live controls | Filtered stats and versioned/lease-checked work updates; no forced consumer lease theft |
+| Counts/live controls | Filtered stats and versioned/lease-checked work updates; explicit administrative lifecycle control; no transfer of live authority |
 
 This preserves RuntimeStateStorePort's actual rule: committed transitions and
 await consumption advance state_version; ordinary dispatch/timeouts/timer

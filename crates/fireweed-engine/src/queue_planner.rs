@@ -238,7 +238,8 @@ fn apply_group(
             .cloned()
             .ok_or(Rejection::NotFound)?;
         expect_state(Some(stored.record.version), &update.expect)?;
-        if stored.record.lifecycle == Lifecycle::Leased
+        if !matches!(update.change, UnclaimedChange::Administrative { .. })
+            && stored.record.lifecycle == Lifecycle::Leased
             && stored
                 .record
                 .lease_expires_at
@@ -246,9 +247,13 @@ fn apply_group(
         {
             return Err(Rejection::Leased);
         }
-        let version = next_version(snapshot, None, &update.key)?;
-        match &update.patch {
-            Some(patch) => {
+        let mut version = if matches!(update.change, UnclaimedChange::Administrative { .. }) {
+            stored.record.version
+        } else {
+            next_version(snapshot, None, &update.key)?
+        };
+        match &update.change {
+            UnclaimedChange::Patch(patch) => {
                 if stored.record.lifecycle == Lifecycle::Leased {
                     stored.record.lifecycle = Lifecycle::Pending;
                     stored.record.lease_expires_at = None;
@@ -259,7 +264,106 @@ fn apply_group(
                 snapshot.work.insert(update.key.clone(), stored.clone());
                 delta.work.push(stored);
             }
-            None => {
+            UnclaimedChange::Administrative {
+                patch,
+                lifecycle,
+                lease_guard,
+            } => {
+                let before = stored.clone();
+                let active = stored.record.lifecycle == Lifecycle::Leased
+                    && stored
+                        .record
+                        .lease_expires_at
+                        .is_some_and(|expiry| expiry > now);
+                match lease_guard {
+                    AdministrativeLeaseGuard::RejectActive if active => {
+                        return Err(Rejection::Leased);
+                    }
+                    AdministrativeLeaseGuard::RequireActive if !active => {
+                        return Err(Rejection::StaleLease);
+                    }
+                    _ => {}
+                }
+                if matches!(
+                    stored.record.lifecycle,
+                    Lifecycle::Completed | Lifecycle::Failed
+                ) && matches!(
+                    lifecycle,
+                    AdministrativeLifecycle::Completed | AdministrativeLifecycle::Failed
+                ) {
+                    return Err(Rejection::Terminal);
+                }
+                let desired = match lifecycle {
+                    AdministrativeLifecycle::Keep
+                        if stored.record.lifecycle == Lifecycle::Leased
+                            && *lease_guard == AdministrativeLeaseGuard::InvalidateActive =>
+                    {
+                        Lifecycle::Pending
+                    }
+                    AdministrativeLifecycle::Keep => stored.record.lifecycle,
+                    AdministrativeLifecycle::Pending => Lifecycle::Pending,
+                    AdministrativeLifecycle::Completed => Lifecycle::Completed,
+                    AdministrativeLifecycle::Failed => Lifecycle::Failed,
+                };
+                if active
+                    && desired != Lifecycle::Leased
+                    && *lease_guard == AdministrativeLeaseGuard::RejectActive
+                {
+                    return Err(Rejection::Leased);
+                }
+                patch_work(&mut stored, patch);
+                stored.record.lifecycle = desired;
+                if desired != Lifecycle::Leased
+                    || *lease_guard == AdministrativeLeaseGuard::InvalidateActive
+                {
+                    stored.record.lease_expires_at = None;
+                    stored.lease_hash = None;
+                }
+                if desired == Lifecycle::Pending
+                    && (before.record.lifecycle != Lifecycle::Pending
+                        || before.record.work.available_at != stored.record.work.available_at)
+                {
+                    stored.record.eligible_since = now.max(stored.record.work.available_at);
+                }
+                if stored != before {
+                    version = next_version(snapshot, None, &update.key)?;
+                }
+                stored.record.version = version;
+                snapshot.work.insert(update.key.clone(), stored.clone());
+                delta.work.push(stored);
+            }
+            UnclaimedChange::Replace(work) => {
+                match stored.record.lifecycle {
+                    Lifecycle::Completed | Lifecycle::Failed => return Err(Rejection::Terminal),
+                    Lifecycle::Leased => return Err(Rejection::Leased),
+                    Lifecycle::Pending => {}
+                }
+                if work.key != update.key {
+                    return Err(Rejection::Invalid("replacement key mismatch".into()));
+                }
+                let sequence = snapshot
+                    .next_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| Rejection::Invalid("sequence exhausted".into()))?;
+                snapshot.next_sequence = sequence;
+                stored = StoredWork {
+                    record: WorkRecord {
+                        work: work.clone(),
+                        version,
+                        insertion_sequence: sequence,
+                        lifecycle: Lifecycle::Pending,
+                        eligible_since: now.max(work.available_at),
+                        attempts: 0,
+                        lease_expires_at: None,
+                    },
+                    lease_hash: None,
+                    fields_loaded: true,
+                    body_loaded: true,
+                };
+                snapshot.work.insert(update.key.clone(), stored.clone());
+                delta.work.push(stored);
+            }
+            UnclaimedChange::Delete => {
                 snapshot.work.remove(&update.key);
                 delta.deleted_work.push(update.key.clone());
             }
@@ -341,7 +445,7 @@ pub fn required_unique_probes(
     schema: &QueueSchema,
 ) -> QueueResult<BTreeSet<UniqueIdentity>> {
     let mut candidate = addressed_snapshot(group, snapshot);
-    validate_snapshot(&candidate)?;
+    validate_group_snapshot(&candidate, group)?;
     let Ok(delta) = apply_group(group, &mut candidate, now, schema) else {
         return Ok(BTreeSet::new());
     };
@@ -575,6 +679,22 @@ fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
     }
     Ok(())
 }
+fn validate_group_snapshot(candidate: &RecordSnapshot, group: &CommitGroup) -> QueueResult<()> {
+    validate_snapshot(candidate)?;
+    for update in &group.work_updates {
+        if matches!(&update.change,UnclaimedChange::Administrative {patch,..} if patch.body.is_some())
+            && candidate
+                .work
+                .get(&update.key)
+                .is_some_and(|work| !work.body_loaded)
+        {
+            return Err(QueueError::OutcomeUnknown(
+                "administrative body authority not loaded".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 /// The caller first validates the envelope and resolves identity/replay. Loaded
 /// snapshot/version high waters must be protected against concurrent writers.
 /// Rejection leaves the snapshot unchanged but still returns a durable receipt.
@@ -585,7 +705,7 @@ pub fn plan_commit_group(
     schema: &QueueSchema,
 ) -> QueueResult<CommitDelta> {
     let mut candidate = addressed_snapshot(group, snapshot);
-    validate_snapshot(&candidate)?;
+    validate_group_snapshot(&candidate, group)?;
     match apply_group(group, &mut candidate, now, schema) {
         Ok(delta) => {
             let additions = match validate_uniques(&delta, snapshot, schema)? {
@@ -815,7 +935,7 @@ mod tests {
         g.work_updates.push(UnclaimedUpdate {
             key: "input".into(),
             expect: StateExpect::Version(2),
-            patch: None,
+            change: UnclaimedChange::Delete,
         });
         assert_eq!(
             plan_commit_group(&g, &mut snapshot, 10, &schema())
@@ -916,7 +1036,7 @@ mod tests {
         rekey.work_updates.push(UnclaimedUpdate {
             key: "a".into(),
             expect: StateExpect::Version(1),
-            patch: Some(WorkPatch {
+            change: UnclaimedChange::Patch(WorkPatch {
                 fields: BTreeMap::from([("target".into(), Some(FieldValue::Text("new".into())))]),
                 ..WorkPatch::default()
             }),
@@ -970,7 +1090,7 @@ mod tests {
             swap.work_updates.push(UnclaimedUpdate {
                 key: key.into(),
                 expect: StateExpect::Version(1),
-                patch: Some(WorkPatch {
+                change: UnclaimedChange::Patch(WorkPatch {
                     fields: BTreeMap::from([(
                         "target".into(),
                         Some(FieldValue::Text(value.into())),
@@ -1123,7 +1243,7 @@ mod tests {
         delete.work_updates.push(UnclaimedUpdate {
             key: "a".into(),
             expect: StateExpect::Version(1),
-            patch: None,
+            change: UnclaimedChange::Delete,
         });
         probe_and_plan(&delete, &mut snapshot, &s);
         assert!(matches!(
@@ -1141,6 +1261,266 @@ mod tests {
                 key: "a".into()
             }],
             2
+        );
+    }
+    #[test]
+    fn fresh_replacement_resets_pending_work_but_preserves_version_highwater() {
+        let mut snapshot = claimed_snapshot();
+        let old = snapshot.work.get_mut("input").unwrap();
+        old.record.lifecycle = Lifecycle::Pending;
+        old.record.attempts = 3;
+        old.lease_hash = None;
+        old.record.lease_expires_at = None;
+        let mut replacement = work("input");
+        replacement.body = vec![9].into();
+        replacement.available_at = 40;
+        let mut g = group();
+        g.work_updates.push(UnclaimedUpdate {
+            key: "input".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Replace(replacement.clone()),
+        });
+        let delta = plan_commit_group(&g, &mut snapshot, 10, &schema()).unwrap();
+        let fresh = &delta.work[0];
+        assert_eq!(fresh.record.work, replacement);
+        assert_eq!(fresh.record.lifecycle, Lifecycle::Pending);
+        assert_eq!(fresh.record.attempts, 0);
+        assert_eq!(fresh.record.eligible_since, 40);
+        assert_eq!(fresh.record.insertion_sequence, 2);
+        assert_eq!(fresh.record.version, 3);
+        assert!(fresh.body_loaded);
+        assert!(fresh.fields_loaded);
+        assert_eq!(fresh.lease_hash, None);
+        assert_eq!(
+            plan_commit_group(&g, &mut snapshot, 10, &schema())
+                .unwrap()
+                .receipt
+                .outcome,
+            GroupOutcome::Rejected(Rejection::VersionConflict)
+        );
+    }
+    #[test]
+    fn replace_rejects_live_lease_and_cancel_invalidates_it_atomically() {
+        let mut snapshot = claimed_snapshot();
+        let mut g = group();
+        g.work_updates.push(UnclaimedUpdate {
+            key: "input".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Replace(work("input")),
+        });
+        assert_eq!(
+            plan_commit_group(&g, &mut snapshot, 10, &schema())
+                .unwrap()
+                .receipt
+                .outcome,
+            GroupOutcome::Rejected(Rejection::Leased)
+        );
+        g.work_updates[0].change = UnclaimedChange::Administrative {
+            patch: WorkPatch::default(),
+            lifecycle: AdministrativeLifecycle::Failed,
+            lease_guard: AdministrativeLeaseGuard::InvalidateActive,
+        };
+        g.state_updates.push(state("i", StateExpect::Version(1)));
+        assert_eq!(
+            plan_commit_group(&g, &mut snapshot, 10, &schema())
+                .unwrap()
+                .receipt
+                .outcome,
+            GroupOutcome::Rejected(Rejection::NotFound)
+        );
+        assert_eq!(snapshot.work["input"].record.lifecycle, Lifecycle::Leased);
+        assert_eq!(
+            snapshot.work["input"].lease_hash,
+            Some(lease_hash(b"token"))
+        );
+        g.state_updates[0].expect = StateExpect::Absent;
+        let delta = plan_commit_group(&g, &mut snapshot, 10, &schema()).unwrap();
+        assert!(matches!(
+            delta.receipt.outcome,
+            GroupOutcome::Committed { .. }
+        ));
+        assert_eq!(snapshot.work["input"].record.lifecycle, Lifecycle::Failed);
+        assert_eq!(snapshot.work["input"].record.version, 3);
+        assert_eq!(snapshot.work["input"].lease_hash, None);
+        let mut stale = group();
+        stale.claimed_updates.push(update());
+        assert_eq!(
+            plan_commit_group(&stale, &mut snapshot, 10, &schema())
+                .unwrap()
+                .receipt
+                .outcome,
+            GroupOutcome::Rejected(Rejection::StaleLease)
+        );
+    }
+    #[test]
+    fn terminal_work_is_not_resurrected_by_upsert_or_cancel() {
+        for lifecycle in [Lifecycle::Completed, Lifecycle::Failed] {
+            for change in [
+                UnclaimedChange::Replace(work("input")),
+                UnclaimedChange::Administrative {
+                    patch: WorkPatch::default(),
+                    lifecycle: AdministrativeLifecycle::Failed,
+                    lease_guard: AdministrativeLeaseGuard::InvalidateActive,
+                },
+            ] {
+                let mut snapshot = claimed_snapshot();
+                let old = snapshot.work.get_mut("input").unwrap();
+                old.record.lifecycle = lifecycle;
+                old.record.lease_expires_at = None;
+                old.lease_hash = None;
+                let before = snapshot.work.clone();
+                let mut g = group();
+                g.work_updates.push(UnclaimedUpdate {
+                    key: "input".into(),
+                    expect: StateExpect::Version(2),
+                    change,
+                });
+                assert_eq!(
+                    plan_commit_group(&g, &mut snapshot, 10, &schema())
+                        .unwrap()
+                        .receipt
+                        .outcome,
+                    GroupOutcome::Rejected(Rejection::Terminal)
+                );
+                assert_eq!(snapshot.work, before);
+            }
+        }
+    }
+    #[test]
+    fn administrative_rearm_preserves_attempts_sequence_and_resets_eligible_age() {
+        for lifecycle in [
+            AdministrativeLifecycle::Pending,
+            AdministrativeLifecycle::Keep,
+        ] {
+            let mut snapshot = claimed_snapshot();
+            let mut g = group();
+            g.work_updates.push(UnclaimedUpdate {
+                key: "input".into(),
+                expect: StateExpect::Version(2),
+                change: UnclaimedChange::Administrative {
+                    patch: WorkPatch::default(),
+                    lifecycle,
+                    lease_guard: AdministrativeLeaseGuard::InvalidateActive,
+                },
+            });
+            plan_commit_group(&g, &mut snapshot, 10, &schema()).unwrap();
+            let stored = &snapshot.work["input"];
+            assert_eq!(stored.record.lifecycle, Lifecycle::Pending);
+            assert_eq!(stored.record.attempts, 1);
+            assert_eq!(stored.record.insertion_sequence, 1);
+            assert_eq!(stored.record.eligible_since, 10);
+            assert_eq!(stored.lease_hash, None);
+            assert_eq!(stored.record.version, 3);
+        }
+    }
+    #[test]
+    fn administrative_completion_requires_live_lease_and_noop_keeps_version() {
+        for now in [10, 100] {
+            let mut snapshot = claimed_snapshot();
+            let mut g = group();
+            g.work_updates.push(UnclaimedUpdate {
+                key: "input".into(),
+                expect: StateExpect::Version(2),
+                change: UnclaimedChange::Administrative {
+                    patch: WorkPatch::default(),
+                    lifecycle: AdministrativeLifecycle::Completed,
+                    lease_guard: AdministrativeLeaseGuard::RequireActive,
+                },
+            });
+            let outcome = plan_commit_group(&g, &mut snapshot, now, &schema())
+                .unwrap()
+                .receipt
+                .outcome;
+            if now == 10 {
+                assert!(matches!(outcome, GroupOutcome::Committed { .. }));
+                assert_eq!(
+                    snapshot.work["input"].record.lifecycle,
+                    Lifecycle::Completed
+                );
+            } else {
+                assert_eq!(outcome, GroupOutcome::Rejected(Rejection::StaleLease));
+            }
+        }
+        let mut snapshot = claimed_snapshot();
+        let stored = snapshot.work.get_mut("input").unwrap();
+        stored.record.lifecycle = Lifecycle::Pending;
+        stored.record.lease_expires_at = None;
+        stored.lease_hash = None;
+        let before = stored.clone();
+        let mut g = group();
+        g.work_updates.push(UnclaimedUpdate {
+            key: "input".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Administrative {
+                patch: WorkPatch::default(),
+                lifecycle: AdministrativeLifecycle::Pending,
+                lease_guard: AdministrativeLeaseGuard::InvalidateActive,
+            },
+        });
+        let delta = plan_commit_group(&g, &mut snapshot, 10, &schema()).unwrap();
+        assert_eq!(snapshot.work["input"], before);
+        assert_eq!(delta.versions[0].version, 2);
+    }
+    #[test]
+    fn administrative_identical_body_noop_requires_materialized_authority() {
+        for body in [vec![], vec![1, 2, 3]] {
+            for loaded in [true, false] {
+                let mut snapshot = claimed_snapshot();
+                let old = snapshot.work.get_mut("input").unwrap();
+                old.record.lifecycle = Lifecycle::Pending;
+                old.lease_hash = None;
+                old.record.lease_expires_at = None;
+                old.record.work.body = if loaded {
+                    body.clone().into()
+                } else {
+                    Default::default()
+                };
+                old.body_loaded = loaded;
+                let original = snapshot.work.clone();
+                let mut g = group();
+                g.work_updates.push(UnclaimedUpdate {
+                    key: "input".into(),
+                    expect: StateExpect::Version(2),
+                    change: UnclaimedChange::Administrative {
+                        patch: WorkPatch {
+                            body: Some(body.clone().into()),
+                            ..WorkPatch::default()
+                        },
+                        lifecycle: AdministrativeLifecycle::Keep,
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                });
+                let probes = required_unique_probes(&g, &snapshot, 10, &schema());
+                if loaded {
+                    assert!(probes.is_ok());
+                } else {
+                    assert!(matches!(probes, Err(QueueError::OutcomeUnknown(_))));
+                }
+                let result = plan_commit_group(&g, &mut snapshot, 10, &schema());
+                if loaded {
+                    assert_eq!(result.unwrap().versions[0].version, 2);
+                } else {
+                    assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+                }
+                assert_eq!(snapshot.work, original);
+            }
+        }
+    }
+    #[test]
+    fn fresh_replacement_rejects_stored_lease_even_after_expiry() {
+        let mut snapshot = claimed_snapshot();
+        let mut g = group();
+        g.work_updates.push(UnclaimedUpdate {
+            key: "input".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Replace(work("input")),
+        });
+        assert_eq!(
+            plan_commit_group(&g, &mut snapshot, 100, &schema())
+                .unwrap()
+                .receipt
+                .outcome,
+            GroupOutcome::Rejected(Rejection::Leased)
         );
     }
 }
