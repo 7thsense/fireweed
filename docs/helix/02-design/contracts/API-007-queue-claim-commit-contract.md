@@ -26,8 +26,10 @@ One concrete asynchronous Fireweed handle, selected at construction, provides:
 | `read_state` | Queue, typed collection and keys | Input-correlated state values and versions |
 | `query` | Queue, declared work/state index, filter, order, opaque cursor, limits | Bounded page of records and next cursor |
 | `read_commit` | Queue and group request ids | Recorded outcomes or explicit absent/expired outcomes |
+| `preview` | Queue and administrative intent, including evaluated_at | Non-durable planned outcomes from the current covered snapshot; no identity retention |
 
-Queue provisioning declares work fields, state collections, and indexes once.
+Queue provisioning declares work fields, an explicit mandatory-indexed additional
+field/property-bag policy where needed, state collections, and indexes once.
 Definitions retain declared unique indexes (including Snorri run/target identity).
 Commit validates complete resulting unique tuples atomically, including rekeys;
 missing components follow the existing NULLS DISTINCT rule. Definition drift is a deployment error. Construction and maintenance are not
@@ -42,14 +44,19 @@ as opaque. A commit group may consume several claims from the same queue.
 ## 2. Records and selection
 
 Work has a stable caller key, version, priority, eligibility time, lifecycle,
-declared fields, and opaque body. State has a collection, stable key, version,
+declared and admitted additional typed fields, and opaque body. State has a collection, stable key, version,
 declared query fields, and opaque value. Versions never repeat for a key, including across deletion and reinsertion,
 so stale CAS cannot match a replacement record (ABA). State is never claimable. Both are
 first-class records with documented schemas, keyed reads, and indexed queries;
 there is no consumer-facing side-record API or backend position.
 
-Filters are conjunctions of typed equality, membership, and range predicates
-on declared fields, plus explicit key selection. Snorri requires work-kind,
+Hot-path filters provide typed equality, membership, ranges and presence/absence
+on declared or explicitly admitted indexed additional fields, plus key selection.
+Administrative selection also supports All/Any/Not and intrinsic lifecycle,
+attempt, lease-active-at-evaluated_at and due-time predicates. Full namespace/name
+and typed values disambiguate every hash/prefix; no digest-only or schema-ordinal
+identity limits arbitrary Snorri payload keys. Missing differs from present JSON
+null, and no cross-type coercion is permitted. Snorri requires work-kind,
 scheduled time, item/idempotency key, instance, tenant/run, artifact/version,
 and lifecycle selectors. Order is declared priority or scheduled time with a
 stable insertion-order tie break; direction is explicit. Queue provisioning
@@ -80,7 +87,8 @@ CommitGroup {
   claimed_updates: [{ key, lease, expected_version, patch, disposition }],
   state_updates: [{ collection, key, expect: Absent | Version(v), value_or_delete }],
   work_inserts: [KeyedWork],
-  work_updates: [{ key, expect: Version(v), change: Patch | Replace | Delete | Administrative }]
+  work_updates: [{ key, expect: Version(v), change: Patch | Replace | Delete | Administrative }],
+  administration: optional Addressed(targets) | SelectFirst(ordered_clauses)
 }
 ```
 
@@ -93,22 +101,39 @@ version-fenced and atomic with state/audit changes, never transfer authority.
 Terminal Complete/Fail intents reject Terminal; Pending explicitly rearms while
 preserving attempts/insertion sequence. Administrative no-change preserves the
 version. A transition to Pending or changed schedule resets its eligibility age
-to max(now,due). This covers actual Snorri cancellation, force-Due, unsuppression,
-resume and operator completion semantics.
+to max(now,due). These ordinary CAS updates cover version-fenced individual controls. The distinct
+administrative intent below preserves actual whole-request control semantics.
 Fresh Replace resets attempts/insertion/eligibility age and increments the
 durable per-key version. It rejects terminal and stored-leased work; an ordinary
 upsert cannot resurrect terminal work.
 State collection schemas determine values and query fields; Fireweed does not
 interpret workflow programs. Snorri validates its transition before calling.
 
-Every group is all-or-nothing: lease/version checks, state CAS, work updates,
-new work and its replay receipt are one durable commit. A failed precondition
+Every group is all-or-nothing: state CAS, all accepted changes, new work and its
+replay result publish together. For ordinary claimed/addressed CAS work, a failed precondition
 changes no work or state in that group; its rejected outcome is durably retained
 under the group identity for replay. Groups are independent, return positional
 outcomes, and may partially succeed across the batch. There is no cross-queue
 atomicity. An empty claimed_updates list is legal: insert, await consumption,
 migration and recovery can use the same atomic group without manufacturing a
 claim. `insert` is the convenient batch insertion binding to these semantics.
+
+An optional server-resolved administrative intent has Addressed and ordered
+SelectFirst forms. Addressed retains input order, missing targets and optional
+expected versions. SelectFirst freezes first-clause ownership before preconditions;
+a failed first clause never falls through. Per-row business no-op, missing, invalid,
+version conflict, terminal, lease and predicate outcomes do not automatically reject
+successful administrative sibling rows. They belong to one compact committed
+whole-operation result with exact histograms and per-clause matched counts.
+External state CAS and ordinary group failures still reject the whole group.
+Zero targets/matches are valid intents with retained real-execution identities.
+Resolution uses the group initial covered snapshot after prior successful groups;
+own inserts cannot become targets. Overlap with explicit work/claimed changes or
+inserts rejects the group before effects. Disjoint state/audit/new-work changes may
+publish atomically with administration. Addressed controls can return compact
+before lifecycle/lease/schedule/overlay metadata; opaque bodies need not hydrate.
+Preview uses that same planner but bypasses receipt lookup, appends nothing and
+retains no identity; it is explicitly not a durable CommitReceipt.
 
 Envelope validation precedes all effects. Duplicate writes to one key within a
 group, malformed credentials/values and excessive limits reject the envelope.
@@ -162,8 +187,12 @@ per item. Packing/logging groups together never changes their independence.
 ## 5. Bounds and performance
 
 Requests and responses have explicit count and canonical-byte admission limits,
-identical across implementations. Oversized groups reject before effects and
-cannot be split silently: atomicity belongs to the whole group. Large independent
+identical across implementations. Wire/envelope overflow rejects before any group begins. Data-dependent resolved
+administrative publication overflow is a positional durable rejected TooLarge
+outcome for that group, with no work/state effect in it and successful siblings
+retained; never report a known envelope TooLarge after a sibling publishes. Preview
+returns the equivalent non-durable rejection without partial successful counts.
+Oversized groups cannot be split silently: atomicity belongs to the whole group. Large independent
 batches may be chunked with stable per-group ids.
 
 Do not impose API-006's 64 KiB field cap on Snorri's state/audit. The supported
@@ -173,6 +202,12 @@ instance projections may exceed one transition's output; their separate bound
 must be measured and explicitly documented before activation, not inferred as
 1 MiB or silently truncated. Exact request/response/group bounds are a required
 implementation binding decision tested at and beyond each boundary.
+
+Broad administrative selectors have no silent 4096-match cap. Their internal
+planning/publication memory and bytes are bounded explicitly, with above-4096
+coverage and actual consumer-size qualification before cutover. Stats numeric
+bucket dimensions preserve request order, zero bins, missing/null bins and
+out-of-range omission in one covered per-queue snapshot.
 
 Claims use storage-side indexed selection and bounded memory. Reads and queries
 are paged; no whole-queue hydration is required. Validation, DTOs, fingerprinting,
@@ -201,12 +236,18 @@ queue-density and bounded-progress obligations are not waived by this contract.
 | Migration/recovery | Claimless CAS group with durable audit and replay identity |
 | Instance/audit/await recovery | Typed keyed state reads and declared indexed queries; verify audit digest |
 | Shard manifest bootstrap | Absent/version CAS on a named configuration state record |
-| Counts/live controls | Filtered stats and versioned/lease-checked work updates; explicit administrative lifecycle control; no transfer of live authority |
+| Counts/live controls | One-snapshot bucket/filtered stats; whole-operation Addressed/SelectFirst administration with per-row outcomes, exact replay and true preview; ordinary version-fenced CAS updates remain separate |
 
 This preserves RuntimeStateStorePort's actual rule: committed transitions and
 await consumption advance state_version; ordinary dispatch/timeouts/timer
 bookkeeping do not independently do so. State and audit remain non-work data.
 Snorri owns business semantics; Fireweed owns atomic persistence and leasing.
+The [actual consumer integration binding](../../04-build/simple-queue-consumer-integration-binding.md)
+is normative for arbitrary indexed payload equality, membership/eligibility and
+precedence, administration/preview clocks, compact results/overflow, bucket stats
+and versioned collision-free object-log address migration. Its source inventory
+and reviewed sequence distinguish target requirements from currently implemented
+Rust DTOs and adapters.
 
 ## 7. Persisted-data adoption
 

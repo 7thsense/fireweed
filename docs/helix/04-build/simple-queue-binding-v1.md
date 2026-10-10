@@ -8,6 +8,13 @@ ddx:
 
 # API-007 Rust binding, iteration 2
 
+This is the implemented primitive binding, not complete consumer qualification.
+The [actual consumer integration binding](simple-queue-consumer-integration-binding.md)
+extends the target with indexed additional attributes, whole-operation
+Addressed/SelectFirst administration, true preview, bucket stats and safe
+object-log address identity. Those extensions must pass both stores before
+Snorri cutover; the fixed-field DTOs below do not yet cover all live controls.
+
 The pure `fireweed_core::queue_contract` module owns DTOs, declared schema/filter
 validation, canonical byte admission, and operation fingerprints. The mandatory
 object-safe `fireweed_engine::queue_contract::QueueStore` port has no default

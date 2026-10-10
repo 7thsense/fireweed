@@ -82,7 +82,9 @@ useful evidence. Other rescue/tooling branches and main remain untouched.
    known-rejection/unknown distinction and fresh successful observations. Paused-applier,
    ownership handoff, corruption, poison, shutdown and exact rebuild tests; preserve stock
    Turso schema/transaction exclusion and formal/model replay gates. Do not introduce
-   snapshots/truncation/partition redesign to complete this iteration.
+   snapshots/truncation or unrelated partition redesign to complete this iteration.
+   The necessary versioned collision-free address encoding and checked old-address
+   migration are required by the actual consumer integration binding.
 6. Snorri migration: single adapter against both constructors. Remove claim-all/filter,
    side-record consumer API, capability downgrade and client projection polling. Preserve
    atomic per-transition independent replay and state-version behavior including await
@@ -117,6 +119,17 @@ progress obligations independently of quiescent tests: shared skew/near-bound
 scenario verifies progress-guard precedence within filter, eligibility/age anchors
 and stats age, preserving the existing queue-global numeric bound. Benchmark correctness uses the
 same reference oracle; never compare databases by backend-private fast paths.
+
+## Actual consumer integration gate
+
+The [consumer integration binding](simple-queue-consumer-integration-binding.md)
+closes actual-source gaps before cutover: indexed additional attributes, one
+server-resolved Addressed/SelectFirst administrative intent within commit groups,
+compact exact outcomes, read-only preview without identity retention, one-snapshot
+bucket stats and collision-free object-log address migration. Its reviewed sequence
+extends this plan; the current native adapter is not yet full Snorri conformance.
+No fixed-field restriction, client-side selector scan, 4096-match truncation or
+per-item group translation may substitute for the original whole-operation result.
 
 ## Open bindings to settle during reviewed iteration 2
 
