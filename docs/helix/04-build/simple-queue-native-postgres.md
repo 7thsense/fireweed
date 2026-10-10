@@ -79,8 +79,15 @@ value and emitted next work together. The readiness payload is published by atom
 rename only after the writer has received successful commit acknowledgement. This
 proves writer-process loss; abrupt database/server crash remains a separate gate.
 
+A native current-thread fixture now forces all discovery hashes to the same
+32-byte value. Shared contract, ordered uniqueness, typed predicate and long-value
+scenarios still pass across distinct tenant/name queues, and reopening resolves
+their original state by full identity. Semantic fingerprints, lease hashing and
+cursor cryptography retain their normal algorithms. This validates collision
+disambiguation, not adversarial storage corruption or S3/Turso parity.
+
 This iteration is a functional native adapter slice. It does not qualify matched
-throughput, 10M indexed query paths, numeric progress bounds, forced hash collisions,
+throughput, 10M indexed query paths, numeric progress bounds,
 full legacy persisted-data migration, server/PG crash recovery, or S3/Turso parity.
 Full Snorri/Cayce facade migration and run-wide gates/membership/control mapping
 still require verification against actual consumers. Production activation and

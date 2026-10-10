@@ -73,7 +73,18 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> QueueResult<T> {
     }
     Ok(value)
 }
-fn hash(bytes: &[u8]) -> Vec<u8> {
+#[cfg(test)]
+thread_local! {
+    // Only discovery hashes collide. Semantic fingerprints, lease hashes and
+    // cursor HMAC retain their normal algorithms. Current-thread fixture jobs
+    // run on this same test thread; other tests have independent hook state.
+    static COLLIDING_PROBES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn probe_hash(bytes: &[u8]) -> Vec<u8> {
+    #[cfg(test)]
+    if COLLIDING_PROBES.get() {
+        return vec![0; 32];
+    }
     Sha256::digest(bytes).to_vec()
 }
 fn prefix(bytes: &[u8]) -> Vec<u8> {
@@ -302,7 +313,7 @@ async fn queue_row<'a>(
     address: &QueueAddress,
     reservation: &'a QueueReservation,
 ) -> QueueResult<QueueRow<'a>> {
-    let address_hash = hash(&encode(address)?);
+    let address_hash = probe_hash(&encode(address)?);
     let rows=tx.query("SELECT id,octet_length(definition),next_sequence::text,cursor_secret FROM fireweed_api007.queues WHERE address_hash=$1 AND tenant=$2 AND name=$3 FOR UPDATE",&[&address_hash,&address.tenant.as_bytes(),&address.queue.as_bytes()]).await.map_err(storage)?;
     if rows.len() != 1 {
         return Err(if rows.is_empty() {
@@ -349,7 +360,7 @@ async fn receipt<'a, T: DeserializeOwned + PersistedStructure>(
     charges: &mut Vec<QueueBufferCharge<'a>>,
 ) -> QueueResult<Option<T>> {
     let rows=tx.query("SELECT identity,fingerprint,expired,outcome FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=$2 AND identity_hash=$3 AND identity=$4",
-        &[&queue,&domain,&hash(id.as_bytes()),&id.as_bytes()]).await.map_err(storage)?;
+        &[&queue,&domain,&probe_hash(id.as_bytes()),&id.as_bytes()]).await.map_err(storage)?;
     if rows.len() > 1 {
         return Err(storage("duplicate receipt authority"));
     }
@@ -375,7 +386,7 @@ async fn save_receipt<T: Serialize>(
     value: &T,
 ) -> QueueResult<()> {
     tx.execute("INSERT INTO fireweed_api007.requests(queue_id,domain,identity_hash,identity,fingerprint,outcome) VALUES($1,$2,$3,$4,$5,$6)",
-        &[&queue,&domain,&hash(id.as_bytes()),&id.as_bytes(),&fp,&encode(value)?]).await.map_err(storage)?;
+        &[&queue,&domain,&probe_hash(id.as_bytes()),&id.as_bytes(),&fp,&encode(value)?]).await.map_err(storage)?;
     Ok(())
 }
 async fn load_fields<C: GenericClient + Sync>(
@@ -504,7 +515,7 @@ async fn load_group<'a>(
             .filter(|id| id.collection == col_name)
             .map(|id| id.key.as_bytes().to_vec())
             .collect();
-        let hashes: Vec<Vec<u8>> = keys.iter().map(|key| hash(key)).collect();
+        let hashes: Vec<Vec<u8>> = keys.iter().map(|key| probe_hash(key)).collect();
         let sql = format!(
             "SELECT {RECORD_COLUMNS} FROM fireweed_api007.records r WHERE queue_id=$1 AND collection=$2 AND key_hash=ANY($3) AND key=ANY($4)"
         );
@@ -682,7 +693,7 @@ async fn load_unique_authority<'a>(
         let col = collection(&queue.schema, probe.collection.as_deref())?;
         columns.push(col);
         numbers.push(index_no(definition(&queue.schema, col)?, &probe.index)?);
-        hashes.push(hash(&probe.full_sort_key));
+        hashes.push(probe_hash(&probe.full_sort_key));
         full.push(probe.full_sort_key.clone());
     }
     let rows=tx.query("SELECT p.ordinal,r.id,octet_length(r.key) FROM UNNEST($2::int[],$3::int[],$4::bytea[],$5::bytea[]) WITH ORDINALITY AS p(col,no,hash,full_key,ordinal) JOIN fireweed_api007.indexes i ON i.queue_id=$1 AND i.collection=p.col AND i.index_no=p.no AND i.hash=p.hash AND i.full_key=p.full_key AND i.is_unique JOIN fireweed_api007.records r ON r.id=i.record_id AND r.active",&[&queue.id,&columns,&numbers,&hashes,&full]).await.map_err(storage)?;
@@ -819,7 +830,7 @@ async fn persist_delta(
         ids.push(id);
         cols.push(col);
         keys.push(v.key.as_bytes().to_vec());
-        hashes.push(hash(v.key.as_bytes()));
+        hashes.push(probe_hash(v.key.as_bytes()));
         versions.push(v.version.to_string());
         if let Some(work) = if col == 0 {
             work_by_key.get(v.key.as_str()).copied()
@@ -948,7 +959,7 @@ async fn persist_delta(
                 col_ids.push(*col);
                 numbers.push(field_no(def, name)?);
                 prefixes.push(prefix(&sort));
-                value_hashes.push(hash(&sort));
+                value_hashes.push(probe_hash(&sort));
                 full.push(sort);
                 values.push(encode(value)?);
             }
@@ -963,7 +974,7 @@ async fn persist_delta(
                 ix_cols.push(*col);
                 ix_numbers.push(no as i32);
                 ix_prefixes.push(prefix(&sort));
-                ix_hashes.push(hash(&sort));
+                ix_hashes.push(probe_hash(&sort));
                 ix_full.push(sort);
                 uniques.push(def.unique_indexes.contains(name));
             }
@@ -1004,7 +1015,7 @@ fn filter_sql(
     let mut sql = String::new();
     if let Some(keys) = &filter.keys {
         let raw: Vec<Vec<u8>> = keys.iter().map(|key| key.as_bytes().to_vec()).collect();
-        let hashes: Vec<Vec<u8>> = raw.iter().map(|key| hash(key)).collect();
+        let hashes: Vec<Vec<u8>> = raw.iter().map(|key| probe_hash(key)).collect();
         let hp = parameter(params, hashes);
         let kp = parameter(params, raw);
         sql.push_str(&format!(" AND r.key_hash=ANY({hp}) AND r.key=ANY({kp})"));
@@ -1015,7 +1026,7 @@ fn filter_sql(
         match predicate {
             Predicate::Equal(value) => {
                 let bytes = ordered_key(&[Some(value)])?;
-                let hp = parameter(params, hash(&bytes));
+                let hp = parameter(params, probe_hash(&bytes));
                 let vp = parameter(params, bytes);
                 sql.push_str(&format!(" AND f.hash={hp} AND f.full_key={vp}"));
             }
@@ -1024,7 +1035,7 @@ fn filter_sql(
                     .iter()
                     .map(|v| ordered_key(&[Some(v)]))
                     .collect::<QueueResult<_>>()?;
-                let hashes: Vec<_> = bytes.iter().map(|b| hash(b)).collect();
+                let hashes: Vec<_> = bytes.iter().map(|b| probe_hash(b)).collect();
                 let hp = parameter(params, hashes);
                 let vp = parameter(params, bytes);
                 sql.push_str(&format!(" AND f.hash=ANY({hp}) AND f.full_key=ANY({vp})"));
@@ -1117,7 +1128,7 @@ impl QueueStore for PostgresQueueStore {
             self.dispatch(charge,move |client,reservation|Box::pin(async move {
                 let _owned_job=reservation;
                 let tx=client.transaction().await.map_err(storage)?;
-                let address_hash=hash(&encode(&request.queue)?);
+                let address_hash=probe_hash(&encode(&request.queue)?);
                 let lock=i64::from_be_bytes(address_hash[..8].try_into().map_err(storage)?);
                 tx.execute("SELECT pg_advisory_xact_lock($1)",&[&lock]).await.map_err(storage)?;
                 let rows=tx.query("SELECT definition FROM fireweed_api007.queues WHERE address_hash=$1 AND tenant=$2 AND name=$3",
@@ -1128,7 +1139,7 @@ impl QueueStore for PostgresQueueStore {
                     if row.get::<_,Vec<u8>>(0)!=encoded{return Err(QueueError::DefinitionConflict);}
                 }else{
                     let token=fireweed_engine::generate_query_lease_token().map_err(storage)?;
-                    let secret=hash(token.as_str().as_bytes());
+                    let secret=Sha256::digest(token.as_str().as_bytes()).to_vec();
                     tx.execute("INSERT INTO fireweed_api007.queues(address_hash,tenant,name,definition,cursor_secret) VALUES($1,$2,$3,$4,$5)",
                         &[&address_hash,&request.queue.tenant.as_bytes(),&request.queue.queue.as_bytes(),&encoded,&secret]).await.map_err(storage)?;
                 }tx.commit().await.map_err(storage)?;Ok(())
@@ -1381,7 +1392,7 @@ impl QueueStore for PostgresQueueStore {
                 let _owned_job=reservation;
                 let tx=client.transaction().await.map_err(storage)?;let queue=queue_row(&tx,&request.queue,&_owned_job).await?;request.validate(&queue.schema,&limits)?;
                 let col=collection(&queue.schema,Some(&request.collection))?;
-                let keys:Vec<Vec<u8>>=request.keys.iter().map(|key|key.as_bytes().to_vec()).collect();let hashes:Vec<_>=keys.iter().map(|key|hash(key)).collect();
+                let keys:Vec<Vec<u8>>=request.keys.iter().map(|key|key.as_bytes().to_vec()).collect();let hashes:Vec<_>=keys.iter().map(|key|probe_hash(key)).collect();
                 let rows=tx.query("SELECT id,key,version::text FROM fireweed_api007.records WHERE queue_id=$1 AND collection=$2 AND active AND key_hash=ANY($3) AND key=ANY($4)",&[&queue.id,&col,&hashes,&keys]).await.map_err(storage)?;
                 let ids:Vec<i64>=rows.iter().map(|r|r.get(0)).collect();
                 payload_budget(&tx,&ids,None,true,request.max_bytes,definition(&queue.schema,col)?).await?;
@@ -1414,7 +1425,7 @@ impl QueueStore for PostgresQueueStore {
             self.dispatch(charge,move |client,reservation|Box::pin(async move {
                 let _owned_job=reservation;
                 let tx=client.transaction().await.map_err(storage)?;let queue=queue_row(&tx,&request.queue,&_owned_job).await?;
-                let ids:Vec<Vec<u8>>=request.request_ids.iter().map(|s|s.as_bytes().to_vec()).collect();let hashes:Vec<_>=ids.iter().map(|s|hash(s)).collect();
+                let ids:Vec<Vec<u8>>=request.request_ids.iter().map(|s|s.as_bytes().to_vec()).collect();let hashes:Vec<_>=ids.iter().map(|s|probe_hash(s)).collect();
                 let size=tx.query_one("SELECT COALESCE(sum(octet_length(outcome)),0)::bigint FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=2 AND identity_hash=ANY($2) AND identity=ANY($3) AND NOT expired",&[&queue.id,&hashes,&ids]).await.map_err(storage)?.get::<_,i64>(0);
                 if size as u64>request.max_bytes{return Err(QueueError::TooLarge);}
                 let rows=tx.query("SELECT identity,expired,CASE WHEN expired THEN NULL ELSE outcome END FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=2 AND identity_hash=ANY($2) AND identity=ANY($3)",&[&queue.id,&hashes,&ids]).await.map_err(storage)?;
@@ -1809,6 +1820,76 @@ mod tests {
         reopened.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn full_values_disambiguate_all_discovery_hash_collisions() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                COLLIDING_PROBES.set(false);
+            }
+        }
+        COLLIDING_PROBES.set(true);
+        let _restore = Restore;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+        let store = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 2)
+            .await
+            .unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let q = |tenant: &str, name: &str| QueueAddress {
+            tenant: format!("hash-collision-{nonce}-{tenant}"),
+            queue: name.into(),
+        };
+        let left = q("left", "same-name");
+        let right = q("right", "same-name");
+        let another = q("left", "other-name");
+        // Same logical keys/request identities/index values live in distinct
+        // tenant/name authorities despite every physical probe sharing one hash.
+        fireweed_conformance::queue_contract::run(&store, left).await;
+        fireweed_conformance::queue_contract::run(&store, right).await;
+        fireweed_conformance::queue_contract::run(&store, another).await;
+        fireweed_conformance::queue_contract::ordered_insert_uniqueness(
+            &store,
+            q("left", "uniqueness"),
+        )
+        .await;
+        fireweed_conformance::queue_contract::predicate_and_order_oracles(
+            &store,
+            q("left", "predicates"),
+        )
+        .await;
+        fireweed_conformance::queue_contract::ordered_long_values_and_cursor_scope(
+            &store,
+            q("left", "long-values"),
+        )
+        .await;
+        store.shutdown().await.unwrap();
+        // Reopening cannot consult a process identity cache for disambiguation.
+        let reopened = PostgresQueueStore::connect(&url, clock, QueueLimits::default(), 1)
+            .await
+            .unwrap();
+        for address in [
+            q("left", "same-name"),
+            q("right", "same-name"),
+            q("left", "other-name"),
+        ] {
+            let state = reopened
+                .read_state(StateReadRequest {
+                    queue: address,
+                    collection: "instances".into(),
+                    keys: vec!["instance".into()],
+                    max_bytes: 1 << 20,
+                })
+                .await
+                .unwrap();
+            assert_eq!(state[0].as_ref().unwrap().value.as_ref(), &[7, 8]);
+        }
+        reopened.shutdown().await.unwrap();
+    }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn reopening_schema_fences_writers_before_dependent_tables() {
