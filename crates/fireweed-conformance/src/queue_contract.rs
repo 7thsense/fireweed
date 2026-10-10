@@ -1243,3 +1243,144 @@ pub async fn unrestricted_names_obey_response_bounds(store: &dyn QueueStore, que
     .await;
     assert_eq!(keys, vec!["page-0", "page-1", "page-2", "page-3", "state"]);
 }
+
+/// Fixture-independent acknowledged-write payload for adapter process-loss tests.
+/// The fixture must kill the writer without calling shutdown, then open a fresh
+/// process and invoke `verify_process_loss`; neither function weakens semantics.
+pub async fn prepare_process_loss(
+    store: &dyn QueueStore,
+    queue: QueueAddress,
+) -> (CommitBatch, Vec<CommitReceipt>) {
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    let seed = InsertRequest {
+        queue: queue.clone(),
+        request_id: "crash-seed".into(),
+        mode: InsertMode::InsertOnly,
+        items: vec![item("crash-source", "source", 0, 0)],
+    };
+    assert!(matches!(
+        store.insert(seed).await.unwrap()[0],
+        InsertOutcome::Inserted { .. }
+    ));
+    let selected = store
+        .claim(claim(&queue, "crash-claim", "source"))
+        .await
+        .unwrap();
+    assert_eq!(selected.len(), 1);
+    let mut transition = group("crash-transition");
+    transition.claimed_updates.push(update(&selected[0]));
+    transition.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "crash-state".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Put {
+            fields: BTreeMap::from([("run".into(), FieldValue::Text("crash-run".into()))]),
+            value: vec![0, 255, 17].into(),
+        },
+    });
+    transition
+        .work_inserts
+        .push(item("crash-next", "next", 7, 9));
+    let batch = CommitBatch {
+        queue,
+        groups: vec![transition],
+    };
+    let receipts = store.commit(batch.clone()).await.unwrap();
+    committed(&receipts[0]);
+    (batch, receipts)
+}
+
+pub async fn verify_process_loss(
+    store: &dyn QueueStore,
+    acknowledged: (CommitBatch, Vec<CommitReceipt>),
+) {
+    let (batch, acknowledged_receipts) = acknowledged;
+    let queue = batch.queue.clone();
+    let state = store
+        .read_state(StateReadRequest {
+            queue: queue.clone(),
+            collection: "instances".into(),
+            keys: vec!["crash-state".into()],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state[0].as_ref().unwrap().value.as_ref(), &[0, 255, 17]);
+    let receipts = store
+        .read_commit(ReceiptReadRequest {
+            queue: queue.clone(),
+            request_ids: vec!["crash-transition".into()],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        receipts,
+        acknowledged_receipts
+            .iter()
+            .cloned()
+            .map(ReceiptLookup::Found)
+            .collect::<Vec<_>>()
+    );
+    let ReceiptLookup::Found(original) = &receipts[0] else {
+        panic!("acknowledged receipt missing: {receipts:?}")
+    };
+    committed(original);
+    assert_eq!(store.commit(batch).await.unwrap(), vec![original.clone()]);
+    assert_eq!(
+        store.claim(claim(&queue, "crash-claim", "source")).await,
+        Err(QueueError::ClaimExpired)
+    );
+    assert!(
+        store
+            .claim(claim(&queue, "crash-source-new", "source"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let next = store
+        .claim(claim(&queue, "crash-next-new", "next"))
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].record.work.key, "crash-next");
+    assert_eq!(next[0].record.work.body.as_ref(), &[0, 1, 255]);
+    let stats = store
+        .stats(StatsRequest {
+            queue: queue.clone(),
+            filter: Filter::default(),
+            group_by: vec![],
+            eligible_at: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(stats.totals.completed, 1);
+    assert_eq!(stats.totals.leased, 1);
+    let mut changed = group("crash-transition");
+    changed.work_inserts.push(item("wrong-next", "next", 0, 0));
+    let conflict = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![changed],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(conflict[0].outcome, GroupOutcome::RequestConflict));
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue,
+                request_ids: vec!["crash-transition".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        receipts
+    );
+}

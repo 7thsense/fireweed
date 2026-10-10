@@ -67,7 +67,12 @@ exact expiry, administrative controls and competing independent clients.
 
 Adapter fault setup additionally holds a SQL lock, aborts an admitted caller,
 drains storage, and reopens the complete state/work/receipt group. This is a
-cancellation/reopen proof, not a substitute for abrupt server/process crash tests.
+cancellation/reopen proof. A separate subprocess fixture now kills an acknowledged
+writer without shutdown and starts a fresh verifier process. The shared scenario
+checks the original acknowledged receipt and exact replay, completed source, state
+value and emitted next work together. The readiness payload is published by atomic
+rename only after the writer has received successful commit acknowledgement. This
+proves writer-process loss; abrupt database/server crash remains a separate gate.
 
 This iteration is a functional native adapter slice. It does not qualify matched
 throughput, 10M indexed query paths, numeric progress bounds, forced hash collisions,
