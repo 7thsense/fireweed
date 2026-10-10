@@ -8,8 +8,9 @@ use fireweed_engine::{
     queue_contract::{QueueFuture, QueueStore},
     queue_index::ordered_key,
     queue_planner::{
-        CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity,
-        insert_unique_probes, lease_hash, plan_commit_group, required_unique_probes,
+        CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity, combine_deltas,
+        insert_unique_probes, lease_hash, load_envelope, plan_commit_group, plan_insert_vector,
+        required_unique_probes,
     },
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1104,77 +1105,6 @@ async fn hydrate_work(
         })
         .collect()
 }
-fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> CommitDelta {
-    let mut work: BTreeMap<String, Option<StoredWork>> = BTreeMap::new();
-    let mut states: BTreeMap<(String, String), Option<StateRecord>> = BTreeMap::new();
-    let mut versions = BTreeMap::new();
-    let mut next = initial;
-    for delta in deltas {
-        for row in &delta.work {
-            work.insert(row.record.work.key.clone(), Some(row.clone()));
-        }
-        for key in &delta.deleted_work {
-            work.insert(key.clone(), None);
-        }
-        for row in &delta.state {
-            states.insert((row.collection.clone(), row.key.clone()), Some(row.clone()));
-        }
-        for key in &delta.deleted_state {
-            states.insert(key.clone(), None);
-        }
-        for v in &delta.versions {
-            versions.insert(
-                RecordIdentity {
-                    collection: v.collection.clone(),
-                    key: v.key.clone(),
-                },
-                v.clone(),
-            );
-        }
-        next = delta.next_sequence;
-    }
-    let mut out = CommitDelta {
-        work: vec![],
-        deleted_work: vec![],
-        state: vec![],
-        deleted_state: vec![],
-        versions: versions.into_values().collect(),
-        next_sequence: next,
-        receipt: CommitReceipt {
-            request_id: "internal-packed-delta".into(),
-            outcome: GroupOutcome::Committed { versions: vec![] },
-        },
-    };
-    for (key, value) in work {
-        match value {
-            Some(value) => out.work.push(value),
-            None => out.deleted_work.push(key),
-        }
-    }
-    for (key, value) in states {
-        match value {
-            Some(value) => out.state.push(value),
-            None => out.deleted_state.push(key),
-        }
-    }
-    out
-}
-fn load_envelope(groups: &[CommitGroup]) -> CommitGroup {
-    let mut all = CommitGroup {
-        request_id: "internal-read-set".into(),
-        claimed_updates: vec![],
-        state_updates: vec![],
-        work_inserts: vec![],
-        work_updates: vec![],
-    };
-    for group in groups {
-        all.claimed_updates.extend(group.claimed_updates.clone());
-        all.state_updates.extend(group.state_updates.clone());
-        all.work_inserts.extend(group.work_inserts.clone());
-        all.work_updates.extend(group.work_updates.clone());
-    }
-    all
-}
 impl QueueStore for PostgresQueueStore {
     fn provision(&self, request: ProvisionRequest) -> QueueFuture<'_, ()> {
         Box::pin(async move {
@@ -1319,8 +1249,6 @@ impl QueueStore for PostgresQueueStore {
                     {
                         return Ok(found);
                     }
-                    let mut outcomes = vec![];
-                    let mut deltas = vec![];
                     let read_set = CommitGroup {
                         request_id: "insert-read-set".into(),
                         claimed_updates: vec![],
@@ -1344,54 +1272,10 @@ impl QueueStore for PostgresQueueStore {
                         .into_iter()
                         .collect();
                     load_unique_authority(&tx, &queue, &mut loaded, probes, &reservation).await?;
-                    for item in &request.items {
-                        let mut group = CommitGroup {
-                            request_id: request.request_id.clone(),
-                            claimed_updates: vec![],
-                            state_updates: vec![],
-                            work_inserts: vec![item.clone()],
-                            work_updates: vec![],
-                        };
-                        let old = loaded.snapshot.work.get(&item.key).cloned();
-                        if request.mode == InsertMode::Upsert
-                            && let Some(old) = &old
-                        {
-                            group.work_inserts.clear();
-                            group.work_updates.push(UnclaimedUpdate {
-                                key: item.key.clone(),
-                                expect: StateExpect::Version(old.record.version),
-                                change: UnclaimedChange::Replace(item.clone()),
-                            });
-                        }
-                        let now = timestamp_nanos(clock.now())?;
-                        let delta =
-                            plan_commit_group(&group, &mut loaded.snapshot, now, &queue.schema)?;
-                        deltas.push(delta.clone());
-                        outcomes.push(match delta.receipt.outcome {
-                            GroupOutcome::Committed { versions } => {
-                                let version = versions
-                                    .first()
-                                    .ok_or_else(|| storage("missing insert version"))?
-                                    .version;
-                                if old.is_some() {
-                                    InsertOutcome::Replaced {
-                                        key: item.key.clone(),
-                                        version,
-                                    }
-                                } else {
-                                    InsertOutcome::Inserted {
-                                        key: item.key.clone(),
-                                        version,
-                                    }
-                                }
-                            }
-                            GroupOutcome::Rejected(reason) => InsertOutcome::Rejected {
-                                key: item.key.clone(),
-                                reason,
-                            },
-                            _ => return Err(storage("invalid planned insert outcome")),
-                        });
-                    }
+                    let (deltas, outcomes) =
+                        plan_insert_vector(&request, &mut loaded.snapshot, &queue.schema, || {
+                            timestamp_nanos(clock.now())
+                        })?;
                     let combined = combine_deltas(&deltas, queue.next_sequence);
                     let _charge = reservation.buffer(
                         encoded_len(&combined)?

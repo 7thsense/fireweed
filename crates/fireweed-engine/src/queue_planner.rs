@@ -49,6 +49,150 @@ pub struct CommitDelta {
     pub next_sequence: u64,
     pub receipt: CommitReceipt,
 }
+
+/// Backend-neutral ordered insert decisions. The store has already fenced the
+/// queue, validated the request and loaded prospective unique tuple authority.
+/// Infrastructure failure discards this speculative snapshot; only a durable
+/// publication of returned deltas/outcomes may be acknowledged to the caller.
+pub fn plan_insert_vector(
+    request: &InsertRequest,
+    snapshot: &mut RecordSnapshot,
+    schema: &QueueSchema,
+    mut now: impl FnMut() -> QueueResult<i64>,
+) -> QueueResult<(Vec<CommitDelta>, Vec<InsertOutcome>)> {
+    let mut deltas = Vec::new();
+    let mut outcomes = Vec::new();
+    for item in &request.items {
+        let old = snapshot.work.get(&item.key);
+        let replaced = old.is_some();
+        let mut group = CommitGroup {
+            request_id: request.request_id.clone(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![item.clone()],
+            work_updates: vec![],
+        };
+        if request.mode == InsertMode::Upsert
+            && let Some(old) = old
+        {
+            group.work_inserts.clear();
+            group.work_updates.push(UnclaimedUpdate {
+                key: item.key.clone(),
+                expect: StateExpect::Version(old.record.version),
+                change: UnclaimedChange::Replace(item.clone()),
+            });
+        }
+        let delta = plan_commit_group(&group, snapshot, now()?, schema)?;
+        let outcome = match &delta.receipt.outcome {
+            GroupOutcome::Committed { versions } => {
+                let version = versions
+                    .first()
+                    .ok_or_else(|| QueueError::OutcomeUnknown("missing insert version".into()))?
+                    .version;
+                if replaced {
+                    InsertOutcome::Replaced {
+                        key: item.key.clone(),
+                        version,
+                    }
+                } else {
+                    InsertOutcome::Inserted {
+                        key: item.key.clone(),
+                        version,
+                    }
+                }
+            }
+            GroupOutcome::Rejected(reason) => InsertOutcome::Rejected {
+                key: item.key.clone(),
+                reason: reason.clone(),
+            },
+            _ => {
+                return Err(QueueError::OutcomeUnknown(
+                    "invalid planned insert outcome".into(),
+                ));
+            }
+        };
+        outcomes.push(outcome);
+        deltas.push(delta);
+    }
+    Ok((deltas, outcomes))
+}
+
+/// Coalesce ordered speculative changes for physical storage publication. This
+/// does not coalesce request identities: stores retain every original receipt
+/// separately; the internal receipt on this packing result is never public.
+pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> CommitDelta {
+    let mut work: BTreeMap<String, Option<StoredWork>> = BTreeMap::new();
+    let mut states: BTreeMap<(String, String), Option<StateRecord>> = BTreeMap::new();
+    let mut versions = BTreeMap::new();
+    let mut next = initial;
+    for delta in deltas {
+        for row in &delta.work {
+            work.insert(row.record.work.key.clone(), Some(row.clone()));
+        }
+        for key in &delta.deleted_work {
+            work.insert(key.clone(), None);
+        }
+        for row in &delta.state {
+            states.insert((row.collection.clone(), row.key.clone()), Some(row.clone()));
+        }
+        for key in &delta.deleted_state {
+            states.insert(key.clone(), None);
+        }
+        for v in &delta.versions {
+            versions.insert(
+                RecordIdentity {
+                    collection: v.collection.clone(),
+                    key: v.key.clone(),
+                },
+                v.clone(),
+            );
+        }
+        next = delta.next_sequence;
+    }
+    let mut out = CommitDelta {
+        work: vec![],
+        deleted_work: vec![],
+        state: vec![],
+        deleted_state: vec![],
+        versions: versions.into_values().collect(),
+        next_sequence: next,
+        receipt: CommitReceipt {
+            request_id: "internal-packed-delta".into(),
+            outcome: GroupOutcome::Committed { versions: vec![] },
+        },
+    };
+    for (key, value) in work {
+        match value {
+            Some(value) => out.work.push(value),
+            None => out.deleted_work.push(key),
+        }
+    }
+    for (key, value) in states {
+        match value {
+            Some(value) => out.state.push(value),
+            None => out.deleted_state.push(key),
+        }
+    }
+    out
+}
+/// Union only the addressed materialization read-set. Cross-group duplicate keys
+/// are expected; never validate or execute this envelope as one atomic group.
+pub fn load_envelope(groups: &[CommitGroup]) -> CommitGroup {
+    let mut all = CommitGroup {
+        request_id: "internal-read-set".into(),
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![],
+        work_updates: vec![],
+    };
+    for group in groups {
+        all.claimed_updates.extend(group.claimed_updates.clone());
+        all.state_updates.extend(group.state_updates.clone());
+        all.work_inserts.extend(group.work_inserts.clone());
+        all.work_updates.extend(group.work_updates.clone());
+    }
+    all
+}
 /// A durable log can encode the same delta a SQL adapter stores atomically.
 /// Receipt encoding/storage is a storage responsibility, never a caller cache.
 pub fn lease_hash(token: &[u8]) -> [u8; 32] {
