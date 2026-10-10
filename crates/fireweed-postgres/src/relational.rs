@@ -10026,6 +10026,14 @@ pub struct PostgresRelational {
     inner: Arc<Mutex<Inner>>,
 }
 
+// Paired with the session migration lock in PostgresRelational::from_client.
+// Transaction-scoped shared locks release on both commit and rollback.
+fn lock_projection_schema(tx: &mut postgres::Transaction<'_>) -> EngineResult<()> {
+    st(tx.batch_execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('fireweed-projection-schema:' || current_schema(), 0))",
+    ))
+}
+
 impl PostgresRelational {
     /// Connect to `url`, ensure the schema, and load the queue-def cache.
     pub fn connect(url: &str) -> EngineResult<Self> {
@@ -10050,6 +10058,12 @@ impl PostgresRelational {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
+        // A reopen can overlap deferred apply on another connection. Take the
+        // namespace migration lock before DDL takes any table locks, preventing
+        // an inversion of the apply transaction's table-lock order.
+        st(client.batch_execute(
+            "SELECT pg_advisory_lock(hashtextextended('fireweed-projection-schema:' || current_schema(), 0))",
+        ))?;
         let fresh: bool =
             st(client.query_one("SELECT to_regclass('fireweed_items') IS NULL", &[]))?.get(0);
         st(client.batch_execute(RELATIONAL_SCHEMA))?;
@@ -10068,6 +10082,9 @@ impl PostgresRelational {
             live_tokens: HashMap::new(),
         };
         inner.reload()?;
+        st(inner.client.batch_execute(
+            "SELECT pg_advisory_unlock(hashtextextended('fireweed-projection-schema:' || current_schema(), 0))",
+        ))?;
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -10103,6 +10120,7 @@ impl PostgresRelational {
             .isolation_level(postgres::IsolationLevel::RepeatableRead)
             .read_only(true)
             .start())?;
+        lock_projection_schema(&mut tx)?;
         let projection = queue_projection_sql(&mut tx, queues, live_tokens, shard, false, exclude)?;
         st(tx.commit())?;
         Ok(Some(projection))
@@ -10174,6 +10192,7 @@ impl PostgresRelational {
         let definition = queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
         let (t, q) = parts(shard);
         let mut tx = st(client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         let result = (|| {
             let mut keys = HashSet::new();
             let mut item_ids = HashSet::new();
@@ -10352,6 +10371,7 @@ impl PostgresRelational {
         let mut g = self.lock();
         let (tenant, queue) = parts(shard);
         let mut tx = st(g.client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         st(tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))?;
         let row = st(tx.query_opt(
             "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
@@ -10454,6 +10474,7 @@ impl PostgresRelational {
         let (tenant, queue) = parts(shard);
         let now_nanos = ts_nanos(now);
         let mut tx = st(g.client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         st(tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))?;
         let result = (|| {
             let ids = targets
@@ -10530,6 +10551,7 @@ impl PostgresRelational {
     ) -> EngineResult<IdempotencyDecision<Vec<ItemId>>> {
         let mut g = self.lock();
         let mut tx = st(g.client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         let result = match check_request_idempotency(
             &mut tx,
             shard,
@@ -10786,6 +10808,7 @@ impl ProjectionStore for PostgresRelational {
         let (t, q) = parts(&key);
         let def_json = to_json(definition)?;
         let mut tx = st(g.client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         st(tx.execute(
             "INSERT INTO queues(tenant,queue,definition,paused) VALUES($1,$2,$3,false) \
              ON CONFLICT (tenant,queue) DO NOTHING",
@@ -10844,6 +10867,7 @@ impl ProjectionStore for PostgresRelational {
             ..
         } = &mut *g;
         let mut tx = st(client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         let mut token_ops = Vec::new();
         let mut max_position: HashMap<QueueKey, (u64, u64)> = HashMap::new();
         for (pos, env) in positions.iter().zip(commands) {
@@ -11021,6 +11045,7 @@ impl ProjectionStore for PostgresRelational {
     ) -> EngineResult<()> {
         let mut inner = self.lock();
         let mut transaction = st(inner.client.transaction())?;
+        lock_projection_schema(&mut transaction)?;
         for claim_ref in claim_refs {
             commit_validate_sql(&mut transaction, shard, claim_ref, now)?;
         }
@@ -11075,6 +11100,7 @@ impl ProjectionStore for PostgresRelational {
     ) -> EngineResult<RichClaimSelection> {
         let mut inner = self.lock();
         let mut transaction = st(inner.client.transaction())?;
+        lock_projection_schema(&mut transaction)?;
         if queue_paused(&mut transaction, shard)? {
             st(transaction.rollback())?;
             return Ok(RichClaimSelection::default());
@@ -11181,6 +11207,7 @@ impl ProjectionStore for PostgresRelational {
     ) -> EngineResult<Option<ItemMutationResponse>> {
         let mut guard = self.lock();
         let mut tx = st(guard.client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         let response = check_item_mutation_idempotency(
             &mut tx,
             shard,
@@ -11205,6 +11232,7 @@ impl ProjectionStore for PostgresRelational {
             ..
         } = &mut *guard;
         let mut tx = st(client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         let plan = plan_item_mutation_sql(&mut tx, queues, live_tokens, shard, request, true)?;
         st(tx.commit())?;
         Ok(plan)
@@ -11521,6 +11549,7 @@ impl ProjectionStore for PostgresRelational {
     ) -> EngineResult<Vec<ItemId>> {
         let mut g = self.lock();
         let mut tx = st(g.client.transaction())?;
+        lock_projection_schema(&mut tx)?;
         let ids = terminal_items_to_reap_sql(
             &mut tx,
             shard,
