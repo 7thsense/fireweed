@@ -27,3 +27,6 @@ pub use query::{
     QueryRequestError, RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection,
     TimeBucket, TypedValue,
 };
+
+/// Exact JSON equality encoding for client-owned indexed attributes.
+pub mod queue_json;
