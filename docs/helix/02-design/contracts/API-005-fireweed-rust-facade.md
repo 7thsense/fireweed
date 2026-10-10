@@ -10,6 +10,9 @@ ddx:
 
 # API-005: Fireweed Rust facade
 
+> **2026-10-10 precedence:** [ADR-026](../adr/ADR-026-postgres-baseline-queue-contract.md) and [API-007](../contracts/API-007-queue-claim-commit-contract.md) accept the simple claim/commit target with a PostgreSQL baseline and equal S3/Turso conformance. This document describes the existing implementation where not superseded; adoption remains outstanding.
+
+
 **Type**: Rust binding contract
 **Version**: v0.24
 **Status**: accepted
