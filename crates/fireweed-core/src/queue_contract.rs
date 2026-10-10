@@ -50,6 +50,9 @@ pub struct CollectionDefinition {
     pub indexes: BTreeMap<String, Vec<String>>,
     /// Named declared indexes whose complete nonmissing tuple is unique.
     pub unique_indexes: BTreeSet<String>,
+    /// Explicit additional-field namespaces. Every admitted full name/value is
+    /// automatically indexed; names retain literal UTF-8 identity and value type.
+    pub additional_field_prefixes: BTreeSet<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueSchema {
@@ -507,15 +510,28 @@ fn field(value: &FieldValue, expected: FieldType) -> QueueResult<()> {
     }
     Ok(())
 }
+impl CollectionDefinition {
+    pub fn admits_field(&self, key: &str) -> bool {
+        self.fields.contains_key(key)
+            || self
+                .additional_field_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+    }
+    fn validate_value(&self, key: &str, value: &FieldValue) -> QueueResult<()> {
+        name(key)?;
+        if let Some(expected) = self.fields.get(key) {
+            field(value, *expected)
+        } else if self.admits_field(key) {
+            field(value, value.field_type())
+        } else {
+            Err(invalid("undeclared field"))
+        }
+    }
+}
 fn fields(values: &Fields, definition: &CollectionDefinition) -> QueueResult<()> {
     for (key, value) in values {
-        field(
-            value,
-            *definition
-                .fields
-                .get(key)
-                .ok_or_else(|| invalid("undeclared field"))?,
-        )?;
+        definition.validate_value(key, value)?;
     }
     Ok(())
 }
@@ -534,6 +550,12 @@ impl QueueSchema {
                 .any(|key| !definition.indexes.contains_key(key))
             {
                 return Err(invalid("unique index must be declared"));
+            }
+            for prefix in &definition.additional_field_prefixes {
+                name(prefix)?;
+                if !prefix.ends_with('/') {
+                    return Err(invalid("additional field namespace must end in slash"));
+                }
             }
             for key in definition.fields.keys() {
                 name(key)?;
@@ -565,18 +587,18 @@ impl Filter {
             }
         }
         for (key, predicate) in &self.fields {
-            let ty = *definition
-                .fields
-                .get(key)
-                .ok_or_else(|| invalid("undeclared filter field"))?;
+            name(key)?;
+            if !definition.admits_field(key) {
+                return Err(invalid("undeclared filter field"));
+            }
             match predicate {
-                Predicate::Equal(value) => field(value, ty)?,
+                Predicate::Equal(value) => definition.validate_value(key, value)?,
                 Predicate::In(values) => {
                     if values.is_empty() {
                         return Err(invalid("empty membership predicate"));
                     }
                     for value in values {
-                        field(value, ty)?;
+                        definition.validate_value(key, value)?;
                     }
                 }
                 Predicate::Range { lower, upper } => {
@@ -584,11 +606,13 @@ impl Filter {
                         return Err(invalid("empty range"));
                     }
                     for bound in lower.iter().chain(upper.iter()) {
-                        field(bound.value(), ty)?;
+                        definition.validate_value(key, bound.value())?;
                     }
                     if let (Some(lower), Some(upper)) = (lower, upper)
-                        && compare_fields(lower.value(), upper.value())
-                            == Some(std::cmp::Ordering::Greater)
+                        && matches!(
+                            compare_fields(lower.value(), upper.value()),
+                            None | Some(std::cmp::Ordering::Greater)
+                        )
                     {
                         return Err(invalid("inverted range"));
                     }
@@ -717,13 +741,12 @@ fn work(item: &NewWork, schema: &QueueSchema, limits: &QueueLimits) -> QueueResu
 }
 fn patch(value: &WorkPatch, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
     for (key, value) in &value.fields {
-        let ty = *schema
-            .work
-            .fields
-            .get(key)
-            .ok_or_else(|| invalid("undeclared patch field"))?;
+        name(key)?;
+        if !schema.work.admits_field(key) {
+            return Err(invalid("undeclared patch field"));
+        }
         if let Some(value) = value {
-            field(value, ty)?;
+            schema.work.validate_value(key, value)?;
         }
     }
     if value
@@ -918,9 +941,7 @@ impl ClaimRequest {
             return Err(invalid("invalid claim limits"));
         }
         if let Some(selected) = &self.fields
-            && selected
-                .iter()
-                .any(|key| !schema.work.fields.contains_key(key))
+            && selected.iter().any(|key| !schema.work.admits_field(key))
         {
             return Err(invalid("undeclared return field"));
         }
@@ -977,7 +998,7 @@ impl StatsRequest {
         self.filter.validate(&schema.work)?;
         let mut seen = BTreeSet::new();
         for key in &self.group_by {
-            if !schema.work.fields.contains_key(key) || !seen.insert(key) {
+            if !schema.work.admits_field(key) || !seen.insert(key) {
                 return Err(invalid("invalid stats grouping"));
             }
         }
@@ -1157,6 +1178,7 @@ mod tests {
     use super::*;
     fn schema() -> QueueSchema {
         let definition = CollectionDefinition {
+            additional_field_prefixes: BTreeSet::new(),
             fields: BTreeMap::from([
                 ("kind".into(), FieldType::Text),
                 ("score".into(), FieldType::Float),

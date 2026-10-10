@@ -906,6 +906,7 @@ mod tests {
     fn schema() -> QueueSchema {
         QueueSchema {
             work: CollectionDefinition {
+                additional_field_prefixes: BTreeSet::new(),
                 fields: BTreeMap::new(),
                 indexes: BTreeMap::new(),
                 unique_indexes: Default::default(),
@@ -913,6 +914,7 @@ mod tests {
             state: BTreeMap::from([(
                 "instance".into(),
                 CollectionDefinition {
+                    additional_field_prefixes: BTreeSet::new(),
                     fields: BTreeMap::new(),
                     indexes: BTreeMap::new(),
                     unique_indexes: BTreeSet::new(),

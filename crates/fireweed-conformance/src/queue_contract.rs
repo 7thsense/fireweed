@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub fn schema() -> QueueSchema {
     let work = CollectionDefinition {
+        additional_field_prefixes: BTreeSet::new(),
         fields: BTreeMap::from([
             ("kind".into(), FieldType::Text),
             ("score".into(), FieldType::Integer),
@@ -23,6 +24,7 @@ pub fn schema() -> QueueSchema {
         state: BTreeMap::from([(
             "instances".into(),
             CollectionDefinition {
+                additional_field_prefixes: BTreeSet::new(),
                 fields: BTreeMap::from([("run".into(), FieldType::Text)]),
                 indexes: BTreeMap::from([("by_run".into(), vec!["run".into()])]),
                 unique_indexes: BTreeSet::new(),
@@ -1125,6 +1127,7 @@ pub async fn unrestricted_names_obey_response_bounds(store: &dyn QueueStore, que
     def.state.insert(
         collection.clone(),
         CollectionDefinition {
+            additional_field_prefixes: BTreeSet::new(),
             fields: BTreeMap::new(),
             indexes: BTreeMap::new(),
             unique_indexes: BTreeSet::new(),
@@ -1515,4 +1518,367 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
         .await
         .unwrap();
     assert!(matches!(release[0], InsertOutcome::Inserted { .. }));
+}
+
+/// Literal full-name property-bag indexes, with exact type/equality semantics.
+pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueAddress) {
+    use fireweed_core::queue_json::{
+        current_json_equality_encoding, encode_json_equality_for, json_attribute_name,
+    };
+    let mut definition = schema();
+    definition.work.additional_field_prefixes =
+        BTreeSet::from(["/payload/".into(), "/gates/".into()]);
+    definition
+        .state
+        .get_mut("instances")
+        .unwrap()
+        .additional_field_prefixes
+        .insert("/meta/".into());
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: definition,
+        })
+        .await
+        .unwrap();
+    let pin = current_json_equality_encoding();
+    let literal = json_attribute_name("/payload", "route/~tier");
+    let encoded =
+        encode_json_equality_for(&serde_json::json!({"tier":[1,null,"λ"]}), pin, 1 << 20).unwrap();
+    let long = format!("/payload/{}", "n\0λ/".repeat(8192));
+    let mut a = item("a", "attributes", 0, 0);
+    a.fields
+        .insert(literal.clone(), FieldValue::Bytes(encoded.clone()));
+    a.fields
+        .insert("/payload/mixed".into(), FieldValue::Integer(7));
+    a.fields
+        .insert("/gates/rule/~1".into(), FieldValue::Boolean(true));
+    a.fields
+        .insert(long.clone(), FieldValue::Text("long value".into()));
+    let mut b = item("b", "attributes", 1, 1);
+    b.fields.insert(
+        literal.clone(),
+        FieldValue::Bytes(encode_json_equality_for(&serde_json::json!(null), pin, 1024).unwrap()),
+    );
+    b.fields
+        .insert("/payload/mixed".into(), FieldValue::Float(7.0));
+    let mut c = item("c", "attributes", 2, 2);
+    c.fields
+        .insert("/payload/mixed".into(), FieldValue::Boolean(true));
+    let d = item("d", "attributes", 3, 3);
+    let outcomes = store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "attribute-seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![a, b, c, d],
+        })
+        .await
+        .unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, InsertOutcome::Inserted { .. }))
+    );
+    let select = |name: String, predicate: Predicate| QueryRequest {
+        queue: queue.clone(),
+        source: RecordSource::Work,
+        index: "$key".into(),
+        filter: Filter {
+            fields: BTreeMap::from([(name, predicate)]),
+            ..Filter::default()
+        },
+        descending: false,
+        cursor: None,
+        max_records: 10,
+        max_bytes: 1 << 20,
+    };
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                literal.clone(),
+                Predicate::Equal(FieldValue::Bytes(encoded))
+            )
+        )
+        .await,
+        vec!["a"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                literal.clone(),
+                Predicate::Equal(FieldValue::Bytes(
+                    encode_json_equality_for(&serde_json::json!(null), pin, 1024).unwrap()
+                ))
+            )
+        )
+        .await,
+        vec!["b"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/gates/rule/~1".into(),
+                Predicate::Equal(FieldValue::Boolean(true))
+            )
+        )
+        .await,
+        vec!["a"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/payload/mixed".into(),
+                Predicate::Range {
+                    lower: Some(Bound::Included(FieldValue::Integer(0))),
+                    upper: None
+                }
+            )
+        )
+        .await,
+        vec!["a"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/payload/mixed".into(),
+                Predicate::Equal(FieldValue::Float(7.0))
+            )
+        )
+        .await,
+        vec!["b"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                long.clone(),
+                Predicate::Equal(FieldValue::Text("long value".into()))
+            )
+        )
+        .await,
+        vec!["a"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/payload/mixed".into(),
+                Predicate::In(vec![FieldValue::Float(7.0), FieldValue::Boolean(true)])
+            )
+        )
+        .await,
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/payload/mixed".into(),
+                Predicate::Range {
+                    lower: None,
+                    upper: Some(Bound::Excluded(FieldValue::Integer(8)))
+                }
+            )
+        )
+        .await,
+        vec!["a"]
+    );
+    let groups = store
+        .stats(StatsRequest {
+            queue: queue.clone(),
+            filter: Filter::default(),
+            group_by: vec!["/payload/mixed".into()],
+            eligible_at: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(groups.totals.pending, 4);
+    assert_eq!(groups.groups.len(), 4);
+    assert_eq!(
+        groups
+            .groups
+            .iter()
+            .map(|g| g.values.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![None],
+            vec![Some(FieldValue::Integer(7))],
+            vec![Some(FieldValue::Float(7.0))],
+            vec![Some(FieldValue::Boolean(true))]
+        ]
+    );
+    assert!(groups.groups.iter().all(|g| g.counts.pending == 1));
+    let mut tiny = claim(&queue, "attribute-tiny", "attributes");
+    tiny.filter = Filter {
+        keys: Some(BTreeSet::from(["a".into()])),
+        ..Filter::default()
+    };
+    tiny.max_bytes = 4096;
+    assert_eq!(store.claim(tiny.clone()).await, Err(QueueError::TooLarge));
+    tiny.request_id = "attribute-selective".into();
+    tiny.fields = Some(BTreeSet::from(["/gates/rule/~1".into()]));
+    tiny.include_body = false;
+    let leased = store.claim(tiny).await.unwrap();
+    assert_eq!(leased.len(), 1);
+    assert_eq!(
+        leased[0].record.work.fields,
+        BTreeMap::from([("/gates/rule/~1".into(), FieldValue::Boolean(true))])
+    );
+    let mut patch = group("attribute-patch");
+    patch.claimed_updates.push(ClaimedUpdate {
+        key: "a".into(),
+        lease: leased[0].lease.clone(),
+        expected_version: leased[0].record.version,
+        patch: WorkPatch {
+            fields: BTreeMap::from([
+                (literal.clone(), None),
+                (
+                    "/payload/new".into(),
+                    Some(FieldValue::Text("updated".into())),
+                ),
+            ]),
+            ..WorkPatch::default()
+        },
+        disposition: Disposition::Release,
+    });
+    patch.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "attributes".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Put {
+            fields: BTreeMap::from([("/meta/literal".into(), FieldValue::Bytes(vec![0, 255]))]),
+            value: vec![9].into(),
+        },
+    });
+    committed(
+        &store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![patch],
+            })
+            .await
+            .unwrap()[0],
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                literal,
+                Predicate::Equal(FieldValue::Bytes(
+                    encode_json_equality_for(
+                        &serde_json::json!({"tier":[1,null,"λ"]}),
+                        pin,
+                        1 << 20
+                    )
+                    .unwrap()
+                ))
+            )
+        )
+        .await,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/payload/new".into(),
+                Predicate::Equal(FieldValue::Text("updated".into()))
+            )
+        )
+        .await,
+        vec!["a"]
+    );
+    let state = store
+        .read_state(StateReadRequest {
+            queue: queue.clone(),
+            collection: "instances".into(),
+            keys: vec!["attributes".into()],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state[0].as_ref().unwrap().fields["/meta/literal"],
+        FieldValue::Bytes(vec![0, 255])
+    );
+    let mut state_query = select(
+        "/meta/literal".into(),
+        Predicate::Equal(FieldValue::Bytes(vec![0, 255])),
+    );
+    state_query.source = RecordSource::State("instances".into());
+    assert_eq!(query_keys(store, state_query).await, vec!["attributes"]);
+    let mut replacement = item("a", "attributes", 0, 0);
+    replacement
+        .fields
+        .insert("/payload/new".into(), FieldValue::Integer(11));
+    let replacement_outcomes = store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "attribute-replace".into(),
+            mode: InsertMode::Upsert,
+            items: vec![replacement],
+        })
+        .await
+        .unwrap();
+    let InsertOutcome::Replaced { version, .. } = replacement_outcomes[0] else {
+        panic!("expected replacement")
+    };
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                long,
+                Predicate::Equal(FieldValue::Text("long value".into()))
+            )
+        )
+        .await,
+        Vec::<String>::new()
+    );
+    let mut deletion = group("attribute-delete");
+    deletion.work_updates.push(UnclaimedUpdate {
+        key: "a".into(),
+        expect: StateExpect::Version(version),
+        change: UnclaimedChange::Delete,
+    });
+    committed(
+        &store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![deletion],
+            })
+            .await
+            .unwrap()[0],
+    );
+    assert_eq!(
+        query_keys(
+            store,
+            select(
+                "/payload/new".into(),
+                Predicate::Equal(FieldValue::Integer(11))
+            )
+        )
+        .await,
+        Vec::<String>::new()
+    );
+    let mut invalid = item("invalid", "attributes", 0, 0);
+    invalid
+        .fields
+        .insert("/undeclared/value".into(), FieldValue::Text("no".into()));
+    assert!(matches!(
+        store
+            .insert(InsertRequest {
+                queue,
+                request_id: "attribute-invalid".into(),
+                mode: InsertMode::InsertOnly,
+                items: vec![invalid]
+            })
+            .await,
+        Err(QueueError::Invalid(_))
+    ));
 }

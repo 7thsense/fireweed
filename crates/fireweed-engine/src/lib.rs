@@ -341,3 +341,6 @@ mod tests {
 
 /// Shared API-007 operation memory accounting; physical stores charge before allocation.
 pub mod queue_memory;
+
+/// Versioned persisted queue definitions with strict legacy decoding.
+pub mod queue_schema_codec;

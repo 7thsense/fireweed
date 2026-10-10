@@ -200,6 +200,7 @@ struct MeasuredDefinition {
     fields: MeasuredFields,
     indexes: MeasuredIndexes,
     unique_indexes: MeasuredNames,
+    additional_field_prefixes: MeasuredNames,
 }
 impl MeasuredDefinition {
     fn headers(&self) -> QueueResult<u64> {
@@ -207,6 +208,7 @@ impl MeasuredDefinition {
             .0
             .checked_add(self.indexes.0)
             .and_then(|n| n.checked_add(self.unique_indexes.0))
+            .and_then(|n| n.checked_add(self.additional_field_prefixes.0))
             .ok_or(QueueError::TooLarge)
     }
 }
@@ -549,7 +551,7 @@ pub fn schema_headers(schema: &QueueSchema) -> QueueResult<u64> {
         }
         bytes
             .checked_add(
-                (def.unique_indexes.len() as u64)
+                (def.unique_indexes.len() as u64 + def.additional_field_prefixes.len() as u64)
                     .checked_mul(64)
                     .ok_or(QueueError::TooLarge)?,
             )
@@ -632,6 +634,67 @@ impl IncomingHeaders for ReceiptReadRequest {
     }
 }
 
+#[derive(Deserialize)]
+struct LegacyMeasuredSchema {
+    work: LegacyMeasuredDefinition,
+    state: LegacyMeasuredState,
+    progress_bound_nanos: u64,
+    max_attempts: u32,
+}
+#[derive(Deserialize)]
+struct LegacyMeasuredDefinition {
+    fields: MeasuredFields,
+    indexes: MeasuredIndexes,
+    unique_indexes: MeasuredNames,
+}
+impl LegacyMeasuredDefinition {
+    fn headers(&self) -> QueueResult<u64> {
+        self.fields
+            .0
+            .checked_add(self.indexes.0)
+            .and_then(|n| n.checked_add(self.unique_indexes.0))
+            .ok_or(QueueError::TooLarge)
+    }
+}
+struct LegacyMeasuredState(u64);
+impl<'de> Deserialize<'de> for LegacyMeasuredState {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = LegacyMeasuredState;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("legacy state definitions")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut total = 0;
+                while map.next_key::<&'de str>()?.is_some() {
+                    measured_add::<A::Error>(&mut total, 512)?;
+                    let def = map.next_value::<LegacyMeasuredDefinition>()?;
+                    measured_add::<A::Error>(
+                        &mut total,
+                        def.headers().map_err(|_| {
+                            serde::de::Error::custom("legacy schema header count overflow")
+                        })?,
+                    )?;
+                }
+                Ok(LegacyMeasuredState(total))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+pub fn persisted_legacy_schema_headers(raw: &[u8]) -> QueueResult<u64> {
+    let schema = decode::<LegacyMeasuredSchema>(raw)?;
+    let _ = (schema.progress_bound_nanos, schema.max_attempts);
+    schema
+        .work
+        .headers()?
+        .checked_add(schema.state.0)
+        .ok_or(QueueError::TooLarge)
+}
 pub fn persisted_schema_headers(raw: &[u8]) -> QueueResult<u64> {
     decode::<MeasuredSchema>(raw)?.headers()
 }
@@ -644,6 +707,7 @@ mod tests {
     fn borrowed_measurements_cover_schema_and_all_receipt_shapes() {
         let schema = QueueSchema {
             work: CollectionDefinition {
+                additional_field_prefixes: BTreeSet::new(),
                 fields: BTreeMap::from([("k".into(), FieldType::Text)]),
                 indexes: BTreeMap::from([("by_k".into(), vec!["k".into()])]),
                 unique_indexes: BTreeSet::from(["by_k".into()]),
@@ -715,6 +779,7 @@ mod tests {
         let key = "k".repeat(32768);
         let collection = "c".repeat(32768);
         let def = CollectionDefinition {
+            additional_field_prefixes: BTreeSet::new(),
             fields: BTreeMap::from([("field".into(), FieldType::Bytes)]),
             indexes: BTreeMap::from([(index, vec!["field".into()])]),
             unique_indexes: BTreeSet::new(),
@@ -752,6 +817,7 @@ mod tests {
     fn shrinking_insert_vector_charges_old_unique_tuple_release() {
         let mut schema = QueueSchema {
             work: CollectionDefinition {
+                additional_field_prefixes: BTreeSet::new(),
                 fields: BTreeMap::from([("value".into(), FieldType::Bytes)]),
                 indexes: BTreeMap::new(),
                 unique_indexes: BTreeSet::new(),

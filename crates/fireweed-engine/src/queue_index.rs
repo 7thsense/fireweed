@@ -1,7 +1,7 @@
 //! Order-preserving v1 index keys, separate from request fingerprint encoding.
 //! Full values remain authoritative. Storage may use bounded prefixes/hash probes
 //! to find candidates, but must compare complete keys and never truncate semantics.
-use fireweed_core::queue_contract::{FieldValue, QueueError, QueueResult};
+use fireweed_core::queue_contract::{FieldType, FieldValue, QueueError, QueueResult};
 
 fn escaped(out: &mut Vec<u8>, bytes: &[u8]) {
     for byte in bytes {
@@ -12,6 +12,21 @@ fn escaped(out: &mut Vec<u8>, bytes: &[u8]) {
         }
     }
     out.extend_from_slice(&[0, 0]);
+}
+/// Inclusive lower prefix for exactly one present scalar type. The next tag is
+/// its exclusive upper prefix, allowing mixed typed property-bag range probes.
+pub fn scalar_type_prefix(value: FieldType) -> [u8; 3] {
+    [
+        1,
+        1,
+        match value {
+            FieldType::Integer => 0,
+            FieldType::Float => 1,
+            FieldType::Boolean => 2,
+            FieldType::Text => 3,
+            FieldType::Bytes => 4,
+        },
+    ]
 }
 /// Missing values precede present values. A queue declares each column's type.
 /// Length prefixes are intentionally absent, preserving lexical tuple order.

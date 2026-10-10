@@ -2,11 +2,14 @@
 //! retain admission and connection ownership after caller cancellation.
 use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_memory::*;
+use fireweed_engine::queue_schema_codec::{
+    decode_definition, definition_headers, encode_definition,
+};
 use fireweed_engine::{
     Clock,
     queue_admission::{QueueAdmission, QueueBufferCharge, QueueReservation},
     queue_contract::{QueueFuture, QueueStore},
-    queue_index::ordered_key,
+    queue_index::{ordered_key, scalar_type_prefix},
     queue_planner::{
         CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity, combine_deltas,
         insert_unique_probes, lease_hash, load_envelope, plan_commit_group, plan_insert_vector,
@@ -47,6 +50,13 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.fields (
  PRIMARY KEY(record_id,field));
 CREATE INDEX IF NOT EXISTS field_equal_probe ON fireweed_api007.fields(queue_id,collection,field,hash,record_id);
 CREATE INDEX IF NOT EXISTS field_range_probe ON fireweed_api007.fields(queue_id,collection,field,prefix,record_id);
+CREATE TABLE IF NOT EXISTS fireweed_api007.additional_fields (
+ id BIGSERIAL PRIMARY KEY, record_id BIGINT NOT NULL REFERENCES fireweed_api007.records(id),
+ queue_id BIGINT NOT NULL, collection INT NOT NULL, name_hash BYTEA NOT NULL, name BYTEA NOT NULL,
+ prefix BYTEA NOT NULL, hash BYTEA NOT NULL, full_key BYTEA NOT NULL, value BYTEA NOT NULL);
+CREATE INDEX IF NOT EXISTS additional_name_probe ON fireweed_api007.additional_fields(record_id,name_hash);
+CREATE INDEX IF NOT EXISTS additional_equal_probe ON fireweed_api007.additional_fields(queue_id,collection,name_hash,hash,record_id);
+CREATE INDEX IF NOT EXISTS additional_range_probe ON fireweed_api007.additional_fields(queue_id,collection,name_hash,prefix,record_id);
 CREATE TABLE IF NOT EXISTS fireweed_api007.indexes (
  record_id BIGINT NOT NULL REFERENCES fireweed_api007.records(id), queue_id BIGINT NOT NULL, collection INT NOT NULL,
  index_no INT NOT NULL, prefix BYTEA NOT NULL, hash BYTEA NOT NULL, full_key BYTEA NOT NULL, is_unique BOOLEAN NOT NULL,
@@ -140,6 +150,7 @@ fn field_no(def: &CollectionDefinition, name: &str) -> QueueResult<i32> {
         .keys()
         .position(|key| key == name)
         .map(|n| n as i32)
+        .or_else(|| def.admits_field(name).then_some(-1))
         .ok_or_else(|| QueueError::Invalid("undeclared field".into()))
 }
 fn index_no(def: &CollectionDefinition, name: &str) -> QueueResult<i32> {
@@ -339,12 +350,12 @@ async fn queue_row<'a>(
         .await
         .map_err(storage)?
         .get::<_, Vec<u8>>(0);
-    let headers = reservation.buffer(persisted_schema_headers(&definition)?)?;
+    let headers = reservation.buffer(definition_headers(&definition)?)?;
     Ok(QueueRow {
         _schema_charge: charge,
         _schema_headers: headers,
         id,
-        schema: decode(&definition)?,
+        schema: decode_definition(&definition)?,
         next_sequence: version(row.get(2))?,
         secret: row.get(3),
     })
@@ -427,6 +438,40 @@ async fn load_fields<C: GenericClient + Sync>(
             out.entry(id)
                 .or_default()
                 .insert(name.clone(), decode(&row.get::<_, Vec<u8>>(2))?);
+        }
+    }
+    let names = selected.map(|names| {
+        names
+            .iter()
+            .map(|name| name.as_bytes().to_vec())
+            .collect::<Vec<_>>()
+    });
+    let hashes = names.as_ref().map(|names| {
+        names
+            .iter()
+            .map(|name| probe_hash(name))
+            .collect::<Vec<_>>()
+    });
+    let extra_rows=client.query("SELECT record_id,collection,name,value FROM fireweed_api007.additional_fields WHERE record_id=ANY($1) AND ($2::bytea[] IS NULL OR (name_hash=ANY($2) AND name=ANY($3)))",&[&ids,&hashes,&names]).await.map_err(storage)?;
+    for row in extra_rows {
+        let id: i64 = row.get(0);
+        let col = *cols
+            .get(&id)
+            .ok_or_else(|| storage("foreign additional field record"))?;
+        if row.get::<_, i32>(1) != col {
+            return Err(storage("additional field collection mismatch"));
+        }
+        let name = key(row.get(2))?;
+        let def = definition(schema, col)?;
+        if def.fields.contains_key(&name) || !def.admits_field(&name) {
+            return Err(storage("invalid additional field namespace"));
+        }
+        let value: FieldValue = decode(&row.get::<_, Vec<u8>>(3))?;
+        if matches!(&value,FieldValue::Float(n) if !n.is_finite()) {
+            return Err(storage("invalid additional field value"));
+        }
+        if out.entry(id).or_default().insert(name, value).is_some() {
+            return Err(storage("duplicate additional field authority"));
         }
     }
     Ok(out)
@@ -543,7 +588,10 @@ async fn load_group<'a>(
         .collect();
     let body_size=u64::try_from(tx.query_one("SELECT COALESCE(sum(octet_length(value)),0)::bigint FROM fireweed_api007.bodies WHERE record_id=ANY($1)",&[&body_ids]).await.map_err(storage)?.get::<_,i64>(0)).map_err(storage)?;
     let field_sizes=tx.query("SELECT COALESCE(sum(octet_length(value)+octet_length(full_key)),0)::bigint FROM fireweed_api007.fields WHERE record_id=ANY($1)",&[&ids_vec]).await.map_err(storage)?;
-    let mut names_and_headers = record_headers(rows.len(), 0)?;
+    let extra_size=tx.query_one("SELECT COALESCE(sum(octet_length(name)+octet_length(value)+octet_length(full_key)+256),0)::bigint FROM fireweed_api007.additional_fields WHERE record_id=ANY($1)",&[&ids_vec]).await.map_err(storage)?.get::<_,i64>(0);
+    let mut names_and_headers = record_headers(rows.len(), 0)?
+        .checked_add(u64::try_from(extra_size).map_err(storage)?)
+        .ok_or(QueueError::TooLarge)?;
     for col in rows
         .iter()
         .map(|row| row.get::<_, i32>(1))
@@ -934,6 +982,20 @@ async fn persist_delta(
         )
         .await
         .map_err(storage)?;
+        tx.execute(
+            "DELETE FROM fireweed_api007.additional_fields WHERE record_id=ANY($1)",
+            &[&changed],
+        )
+        .await
+        .map_err(storage)?;
+        let mut extra_records = vec![];
+        let mut extra_cols = vec![];
+        let mut extra_names = vec![];
+        let mut extra_name_hashes = vec![];
+        let mut extra_prefixes = vec![];
+        let mut extra_hashes = vec![];
+        let mut extra_full = vec![];
+        let mut extra_values = vec![];
         let mut record_ids = vec![];
         let mut col_ids = vec![];
         let mut numbers = vec![];
@@ -955,13 +1017,25 @@ async fn persist_delta(
             let def = definition(&queue.schema, *col)?;
             for (name, value) in fields {
                 let sort = ordered_key(&[Some(value)])?;
-                record_ids.push(*id);
-                col_ids.push(*col);
-                numbers.push(field_no(def, name)?);
-                prefixes.push(prefix(&sort));
-                value_hashes.push(probe_hash(&sort));
-                full.push(sort);
-                values.push(encode(value)?);
+                let no = field_no(def, name)?;
+                if no >= 0 {
+                    record_ids.push(*id);
+                    col_ids.push(*col);
+                    numbers.push(no);
+                    prefixes.push(prefix(&sort));
+                    value_hashes.push(probe_hash(&sort));
+                    full.push(sort);
+                    values.push(encode(value)?);
+                } else {
+                    extra_records.push(*id);
+                    extra_cols.push(*col);
+                    extra_names.push(name.as_bytes().to_vec());
+                    extra_name_hashes.push(probe_hash(name.as_bytes()));
+                    extra_prefixes.push(prefix(&sort));
+                    extra_hashes.push(probe_hash(&sort));
+                    extra_full.push(sort);
+                    extra_values.push(encode(value)?);
+                }
             }
             for (no, (name, columns)) in def.indexes.iter().enumerate() {
                 let sort = ordered_key(
@@ -982,6 +1056,9 @@ async fn persist_delta(
         if !record_ids.is_empty() {
             tx.execute("INSERT INTO fireweed_api007.fields(record_id,queue_id,collection,field,prefix,hash,full_key,value) SELECT rid,$1,col,no,prefix,hash,full_key,value FROM UNNEST($2::bigint[],$3::int[],$4::int[],$5::bytea[],$6::bytea[],$7::bytea[],$8::bytea[]) AS x(rid,col,no,prefix,hash,full_key,value)",
             &[&queue.id,&record_ids,&col_ids,&numbers,&prefixes,&value_hashes,&full,&values]).await.map_err(storage)?;
+        }
+        if !extra_records.is_empty() {
+            tx.execute("INSERT INTO fireweed_api007.additional_fields(record_id,queue_id,collection,name_hash,name,prefix,hash,full_key,value) SELECT rid,$1,col,name_hash,name,prefix,hash,full_key,value FROM UNNEST($2::bigint[],$3::int[],$4::bytea[],$5::bytea[],$6::bytea[],$7::bytea[],$8::bytea[],$9::bytea[]) AS x(rid,col,name_hash,name,prefix,hash,full_key,value)",&[&queue.id,&extra_records,&extra_cols,&extra_name_hashes,&extra_names,&extra_prefixes,&extra_hashes,&extra_full,&extra_values]).await.map_err(storage)?;
         }
         if !ix_records.is_empty() {
             tx.execute("INSERT INTO fireweed_api007.indexes(record_id,queue_id,collection,index_no,prefix,hash,full_key,is_unique) SELECT rid,$1,col,no,prefix,hash,full_key,is_unique FROM UNNEST($2::bigint[],$3::int[],$4::int[],$5::bytea[],$6::bytea[],$7::bytea[],$8::bool[]) AS x(rid,col,no,prefix,hash,full_key,is_unique)",
@@ -1021,8 +1098,19 @@ fn filter_sql(
         sql.push_str(&format!(" AND r.key_hash=ANY({hp}) AND r.key=ANY({kp})"));
     }
     for (field, predicate) in &filter.fields {
-        let no = parameter(params, field_no(def, field)?);
-        sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM fireweed_api007.fields f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND f.field={no}"));
+        let no = field_no(def, field)?;
+        let (table, identity) = if no >= 0 {
+            let no = parameter(params, no);
+            ("fireweed_api007.fields", format!("f.field={no}"))
+        } else {
+            let hash = parameter(params, probe_hash(field.as_bytes()));
+            let name = parameter(params, field.as_bytes().to_vec());
+            (
+                "fireweed_api007.additional_fields",
+                format!("f.name_hash={hash} AND f.name={name}"),
+            )
+        };
+        sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity}"));
         match predicate {
             Predicate::Equal(value) => {
                 let bytes = ordered_key(&[Some(value)])?;
@@ -1041,6 +1129,19 @@ fn filter_sql(
                 sql.push_str(&format!(" AND f.hash=ANY({hp}) AND f.full_key=ANY({vp})"));
             }
             Predicate::Range { lower, upper } => {
+                let first = lower
+                    .as_ref()
+                    .or(upper.as_ref())
+                    .ok_or_else(|| QueueError::Invalid("empty range".into()))?;
+                let value = match first {
+                    Bound::Included(v) | Bound::Excluded(v) => v,
+                };
+                let floor = scalar_type_prefix(value.field_type());
+                let mut ceiling = floor;
+                ceiling[2] += 1;
+                let fp = parameter(params, floor.to_vec());
+                let cp = parameter(params, ceiling.to_vec());
+                sql.push_str(&format!(" AND f.prefix>={fp} AND f.prefix<{cp}"));
                 for (bound, lower) in [(lower, true), (upper, false)] {
                     if let Some(bound) = bound {
                         let (value, inclusive) = match bound {
@@ -1131,12 +1232,16 @@ impl QueueStore for PostgresQueueStore {
                 let address_hash=probe_hash(&encode(&request.queue)?);
                 let lock=i64::from_be_bytes(address_hash[..8].try_into().map_err(storage)?);
                 tx.execute("SELECT pg_advisory_xact_lock($1)",&[&lock]).await.map_err(storage)?;
-                let rows=tx.query("SELECT definition FROM fireweed_api007.queues WHERE address_hash=$1 AND tenant=$2 AND name=$3",
+                let rows=tx.query("SELECT id,octet_length(definition) FROM fireweed_api007.queues WHERE address_hash=$1 AND tenant=$2 AND name=$3",
                     &[&address_hash,&request.queue.tenant.as_bytes(),&request.queue.queue.as_bytes()]).await.map_err(storage)?;
-                let encoded=encode(&request.schema)?;
+                let encoded=encode_definition(&request.schema)?;
                 if let Some(row)=rows.first() {
                     if rows.len()!=1{return Err(storage("duplicate queue authority"));}
-                    if row.get::<_,Vec<u8>>(0)!=encoded{return Err(QueueError::DefinitionConflict);}
+                    let bytes=u64::try_from(row.get::<_,i32>(1)).map_err(storage)?;
+                    let _schema_bytes=_owned_job.buffer(bytes.checked_mul(4).ok_or(QueueError::TooLarge)?)?;
+                    let raw:Vec<u8>=tx.query_one("SELECT definition FROM fireweed_api007.queues WHERE id=$1",&[&row.get::<_,i64>(0)]).await.map_err(storage)?.get(0);
+                    let _schema_headers=_owned_job.buffer(definition_headers(&raw)?)?;
+                    if decode_definition(&raw)?!=request.schema{return Err(QueueError::DefinitionConflict);}
                 }else{
                     let token=fireweed_engine::generate_query_lease_token().map_err(storage)?;
                     let secret=Sha256::digest(token.as_str().as_bytes()).to_vec();
@@ -1328,8 +1433,8 @@ impl QueueStore for PostgresQueueStore {
                     for (id,token) in &replay.items {let row=metadata.get(id).ok_or(QueueError::ClaimExpired)?;
                         if row.get::<_,i16>(5)!=1 || row.get::<_,Option<i64>>(10).is_none_or(|expiry|expiry<=now) || row.get::<_,Option<Vec<u8>>>(11).as_deref()!=Some(lease_hash(token).as_slice()) {return Err(QueueError::ClaimExpired);}}
                     let selected_fields=selected_field_numbers(&queue.schema.work,request.fields.as_ref())?;
-                    payload_budget(&tx,&ids,selected_fields.as_deref(),request.include_body,request.max_bytes,&queue.schema.work).await?;
-                    let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_deref()).await?)?;
+                    payload_budget(&tx,&ids,selected_fields.as_ref(),request.include_body,request.max_bytes,&queue.schema.work).await?;
+                    let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_ref()).await?)?;
                 let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,now).await?;
                     let map:BTreeMap<_,_>=rows.iter().map(|row|row.get::<_,i64>(0)).zip(stored).collect();let mut out=vec![];
                     for (id,token) in replay.items {
@@ -1348,7 +1453,7 @@ impl QueueStore for PostgresQueueStore {
                 let candidates=tx.query(&sql,&refs(&params)).await.map_err(storage)?;
                 let candidate_ids:Vec<i64>=candidates.iter().map(|row|row.get(0)).collect();
                 let selected_fields=selected_field_numbers(&queue.schema.work,request.fields.as_ref())?;
-                let sizes=payload_sizes(&tx,&candidate_ids,selected_fields.as_deref(),request.include_body,&queue.schema.work).await?;
+                let sizes=payload_sizes(&tx,&candidate_ids,selected_fields.as_ref(),request.include_body,&queue.schema.work).await?;
                 let mut total=0u64;let mut fitting=vec![];
                 for row in &candidates {let id:i64=row.get(0);let bytes=sizes.get(&id).copied().unwrap_or(0).checked_add(u64::try_from(row.get::<_,i32>(1)).map_err(storage)?).ok_or(QueueError::TooLarge)?;
                     if total.checked_add(bytes).is_none_or(|n|n>request.max_bytes){break;}total+=bytes;fitting.push(id);}
@@ -1357,7 +1462,7 @@ impl QueueStore for PostgresQueueStore {
                 let rows=tx.query(&sql,&[&fitting,&queue.id]).await.map_err(storage)?;
                 let mut by_id:BTreeMap<i64,Row>=rows.into_iter().map(|row|(row.get(0),row)).collect();
                 let rows:Vec<Row>=fitting.iter().map(|id|by_id.remove(id).ok_or_else(||storage("missing selected record"))).collect::<QueueResult<_>>()?;
-                let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_deref()).await?)?;
+                let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_ref()).await?)?;
                 let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,now).await?;
                 let expiry=now.checked_add(i64::try_from(request.lease_nanos).map_err(storage)?).ok_or_else(||QueueError::Invalid("lease expiry overflow".into()))?;
                 let mut out=vec![];let mut replay=ClaimReplay {items:vec![]};let mut ids=vec![];let mut token_hashes=vec![];let mut versions=vec![];let mut attempts=vec![];
@@ -1487,8 +1592,18 @@ impl QueueStore for PostgresQueueStore {
                 let totals=counts(&total,0)?;let mut groups=vec![];
                 if !request.group_by.is_empty(){
                     let mut joins=String::new();let mut columns=vec![];
-                    for (n,name) in request.group_by.iter().enumerate(){let p=parameter(&mut params,field_no(&queue.schema.work,name)?);
-                        joins.push_str(&format!(" LEFT JOIN fireweed_api007.fields g{n} ON g{n}.record_id=r.id AND g{n}.field={p}"));columns.push(format!("g{n}.full_key"));}
+                    for (n,name) in request.group_by.iter().enumerate(){
+                        let no=field_no(&queue.schema.work,name)?;
+                        if no>=0 {
+                            let p=parameter(&mut params,no);
+                            joins.push_str(&format!(" LEFT JOIN fireweed_api007.fields g{n} ON g{n}.record_id=r.id AND g{n}.field={p}"));
+                        } else {
+                            let hp=parameter(&mut params,probe_hash(name.as_bytes()));
+                            let np=parameter(&mut params,name.as_bytes().to_vec());
+                            joins.push_str(&format!(" LEFT JOIN fireweed_api007.additional_fields g{n} ON g{n}.record_id=r.id AND g{n}.name_hash={hp} AND g{n}.name={np}"));
+                        }
+                        columns.push(format!("g{n}.full_key"));
+                    }
                     let joined=columns.join(",");let ordering=columns.iter().map(|col|format!("{col} ASC NULLS FIRST")).collect::<Vec<_>>().join(",");let lp=parameter(&mut params,i64::from(limits.max_records)+1);
                     let sql=format!("SELECT min(r.id),{aggregate} FROM fireweed_api007.records r{joins} WHERE {base} GROUP BY {joined} ORDER BY {ordering} LIMIT {lp}");
                     let rows=tx.query(&sql,&refs(&params)).await.map_err(storage)?;
@@ -1496,12 +1611,19 @@ impl QueueStore for PostgresQueueStore {
                     let ids:Vec<i64>=rows.iter().map(|row|row.get(0)).collect();
                     // Load only bounded representative grouping values, never queue bodies.
                     let nos:Vec<i32>=request.group_by.iter().map(|name|field_no(&queue.schema.work,name)).collect::<QueueResult<_>>()?;
-                    let bytes=tx.query_one("SELECT COALESCE(sum(octet_length(value)),0)::bigint FROM fireweed_api007.fields WHERE record_id=ANY($1) AND field=ANY($2)",&[&ids,&nos]).await.map_err(storage)?.get::<_,i64>(0);
+                    let names:Vec<Vec<u8>>=request.group_by.iter().map(|name|name.as_bytes().to_vec()).collect();
+                    let hashes:Vec<Vec<u8>>=names.iter().map(|name|probe_hash(name)).collect();
+                    let values_sql="SELECT f.record_id,p.ordinal,f.value FROM UNNEST($2::int[],$3::bytea[],$4::bytea[]) WITH ORDINALITY AS p(no,hash,name,ordinal) JOIN fireweed_api007.fields f ON p.no>=0 AND f.field=p.no AND f.record_id=ANY($1) UNION ALL SELECT f.record_id,p.ordinal,f.value FROM UNNEST($2::int[],$3::bytea[],$4::bytea[]) WITH ORDINALITY AS p(no,hash,name,ordinal) JOIN fireweed_api007.additional_fields f ON p.no=-1 AND f.name_hash=p.hash AND f.name=p.name AND f.record_id=ANY($1)";
+                    let bytes=tx.query_one(&format!("SELECT COALESCE(sum(octet_length(value)),0)::bigint FROM ({values_sql}) v"),&[&ids,&nos,&hashes,&names]).await.map_err(storage)?.get::<_,i64>(0);
                     if u64::try_from(bytes).map_err(storage)?>limits.max_response_bytes{return Err(QueueError::TooLarge);}
                     let _headers=_owned_job.buffer(record_headers(ids.len(),nos.len())?)?;
-                    let values=tx.query("SELECT record_id,field,value FROM fireweed_api007.fields WHERE record_id=ANY($1) AND field=ANY($2)",&[&ids,&nos]).await.map_err(storage)?;
-                    let mut fields:BTreeMap<(i64,i32),FieldValue>=BTreeMap::new();for row in values {fields.insert((row.get(0),row.get(1)),decode(&row.get::<_,Vec<u8>>(2))?);}
-                    for row in rows {let id:i64=row.get(0);let values=nos.iter().map(|no|fields.get(&(id,*no)).cloned()).collect();groups.push(StatsGroup {values,counts:counts(&row,1)?});}
+                    let values=tx.query(values_sql,&[&ids,&nos,&hashes,&names]).await.map_err(storage)?;
+                    let mut fields:BTreeMap<(i64,i64),FieldValue>=BTreeMap::new();
+                    for row in values {
+                        if fields.insert((row.get(0),row.get(1)),decode(&row.get::<_,Vec<u8>>(2))?).is_some() {return Err(storage("duplicate grouping value authority"));}
+                    }
+                    for row in rows {let id:i64=row.get(0);let values=(1..=nos.len() as i64).map(|no|fields.get(&(id,no)).cloned()).collect();groups.push(StatsGroup {values,counts:counts(&row,1)?});}
+
 
                 }
                 let result=QueueStats {totals,groups};if encoded_len(&result)?>limits.max_response_bytes{return Err(QueueError::TooLarge);}Ok(result)
@@ -1578,18 +1700,34 @@ fn counts(row: &Row, offset: usize) -> QueueResult<Counts> {
 async fn payload_sizes(
     tx: &Transaction<'_>,
     ids: &[i64],
-    fields: Option<&[i32]>,
+    fields: Option<&FieldSelection>,
     body: bool,
     def: &CollectionDefinition,
 ) -> QueueResult<BTreeMap<i64, u64>> {
-    let selected = fields.map(|fields| fields.to_vec());
+    let selected = fields.map(|fields| fields.declared.clone());
     let names: Vec<i64> = def.fields.keys().map(|name| name.len() as i64).collect();
     let rows=tx.query("SELECT r.id,(COALESCE((SELECT sum(octet_length(f.value)+($4::bigint[])[f.field+1]) FROM fireweed_api007.fields f WHERE f.record_id=r.id AND ($2::int[] IS NULL OR f.field=ANY($2))),0)+CASE WHEN $3 THEN COALESCE((SELECT octet_length(b.value) FROM fireweed_api007.bodies b WHERE b.record_id=r.id),0) ELSE 0 END)::bigint FROM fireweed_api007.records r WHERE r.id=ANY($1)",&[&ids,&selected,&body,&names]).await.map_err(storage)?;
-    rows.iter()
+    let hashes = fields.map(|fields| fields.hashes.clone());
+    let additional = fields.map(|fields| fields.additional.clone());
+    let extra=tx.query("SELECT record_id,COALESCE(sum(octet_length(name)+octet_length(value)),0)::bigint FROM fireweed_api007.additional_fields WHERE record_id=ANY($1) AND ($2::bytea[] IS NULL OR (name_hash=ANY($2) AND name=ANY($3))) GROUP BY record_id",&[&ids,&hashes,&additional]).await.map_err(storage)?;
+    let extra: BTreeMap<i64, u64> = extra
+        .iter()
         .map(|row| {
             Ok((
                 row.get(0),
                 u64::try_from(row.get::<_, i64>(1)).map_err(storage)?,
+            ))
+        })
+        .collect::<QueueResult<_>>()?;
+    rows.iter()
+        .map(|row| {
+            let id: i64 = row.get(0);
+            Ok((
+                id,
+                u64::try_from(row.get::<_, i64>(1))
+                    .map_err(storage)?
+                    .checked_add(extra.get(&id).copied().unwrap_or(0))
+                    .ok_or(QueueError::TooLarge)?,
             ))
         })
         .collect()
@@ -1597,7 +1735,7 @@ async fn payload_sizes(
 async fn payload_budget(
     tx: &Transaction<'_>,
     ids: &[i64],
-    fields: Option<&[i32]>,
+    fields: Option<&FieldSelection>,
     body: bool,
     budget: u64,
     def: &CollectionDefinition,
@@ -1654,12 +1792,33 @@ fn read_cursor(raw: &[u8], secret: &[u8], scope: [u8; 32]) -> QueueResult<Cursor
     Ok(cursor)
 }
 
+struct FieldSelection {
+    declared: Vec<i32>,
+    additional: Vec<Vec<u8>>,
+    hashes: Vec<Vec<u8>>,
+}
 fn selected_field_numbers(
     def: &CollectionDefinition,
     selected: Option<&BTreeSet<String>>,
-) -> QueueResult<Option<Vec<i32>>> {
+) -> QueueResult<Option<FieldSelection>> {
     selected
-        .map(|keys| keys.iter().map(|key| field_no(def, key)).collect())
+        .map(|keys| {
+            let mut out = FieldSelection {
+                declared: vec![],
+                additional: vec![],
+                hashes: vec![],
+            };
+            for key in keys {
+                let no = field_no(def, key)?;
+                if no >= 0 {
+                    out.declared.push(no);
+                } else {
+                    out.hashes.push(probe_hash(key.as_bytes()));
+                    out.additional.push(key.as_bytes().to_vec());
+                }
+            }
+            Ok(out)
+        })
         .transpose()
 }
 
@@ -1867,6 +2026,11 @@ mod tests {
             q("left", "long-values"),
         )
         .await;
+        fireweed_conformance::queue_contract::indexed_additional_attributes(
+            &store,
+            q("left", "additional-attributes"),
+        )
+        .await;
         store.shutdown().await.unwrap();
         // Reopening cannot consult a process identity cache for disambiguation.
         let reopened = PostgresQueueStore::connect(&url, clock, QueueLimits::default(), 1)
@@ -1987,11 +2151,16 @@ mod tests {
 async fn materialized_headers(
     tx: &Transaction<'_>,
     ids: &[i64],
-    selected: Option<&[i32]>,
+    selected: Option<&FieldSelection>,
 ) -> QueueResult<u64> {
-    let selected = selected.map(|nos| nos.to_vec());
-    let fields=u64::try_from(tx.query_one("SELECT count(*) FROM fireweed_api007.fields WHERE record_id=ANY($1) AND ($2::int[] IS NULL OR field=ANY($2))",&[&ids,&selected]).await.map_err(storage)?.get::<_,i64>(0)).map_err(storage)?;
+    let declared = selected.map(|nos| nos.declared.clone());
+    let additional = selected.map(|nos| nos.additional.clone());
+    let hashes = selected.map(|nos| nos.hashes.clone());
+    let fields=u64::try_from(tx.query_one("SELECT count(*) FROM fireweed_api007.fields WHERE record_id=ANY($1) AND ($2::int[] IS NULL OR field=ANY($2))",&[&ids,&declared]).await.map_err(storage)?.get::<_,i64>(0)).map_err(storage)?;
+    let extras=u64::try_from(tx.query_one("SELECT count(*) FROM fireweed_api007.additional_fields WHERE record_id=ANY($1) AND ($2::bytea[] IS NULL OR (name_hash=ANY($2) AND name=ANY($3)))",&[&ids,&hashes,&additional]).await.map_err(storage)?.get::<_,i64>(0)).map_err(storage)?;
     fields
+        .checked_add(extras)
+        .ok_or(QueueError::TooLarge)?
         .checked_mul(256)
         .and_then(|n| n.checked_add((ids.len() as u64).checked_mul(1024)?))
         .ok_or(QueueError::TooLarge)
