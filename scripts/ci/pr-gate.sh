@@ -50,6 +50,9 @@ bash "${SCRIPT_DIR}/../release/build-governed-evidence-bundle-test.sh"
 echo "--- governed evidence promoter fixtures (P17e) ---"
 bash "${SCRIPT_DIR}/../release/promote-governed-evidence-test.sh"
 
+python3 -m unittest discover -s "${SCRIPT_DIR}/../formal" -p 'test_*.py'
+python3 "${SCRIPT_DIR}/../formal/check.py" --output target/formal-analysis.json
+
 POLICY_MODE="remediation"
 if [[ "$MODE" == "enforcing" || "$MODE" == "closure" ]]; then
     POLICY_MODE="closure"

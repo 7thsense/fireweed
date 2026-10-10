@@ -20,3 +20,11 @@ Accepted items, priority, metadata, lease state, and lifecycle survive restart f
 Delivery is at-least-once with a single active lease (FR-28).
 
 Covers FR-23 through FR-28.
+
+## Formal analysis obligations
+
+[CONTRACT-006](../../02-design/contracts/CONTRACT-006-formal-queue-semantics.md) defines
+formal safety and progress vocabulary; [TP-006](../../03-test/TP-006-formal-analysis.md)
+defines bounded model and independent implementation evidence requirements.
+The current public-cell and PRD requirements retain authority. Conditional
+eventual progress does not discharge the numeric queue-global progress bound.

@@ -27,6 +27,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Bounded formal analysis and checker controls
+        run: |
+          python3 -m unittest discover -s scripts/formal -p 'test_*.py'
+          python3 scripts/formal/check.py --output target/formal-analysis.json
+
+      - name: Retain bounded formal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-analysis
+          path: target/formal-analysis.json
+          if-no-files-found: error
+
       - name: Install repository check prerequisites
         run: |
           sudo apt-get update

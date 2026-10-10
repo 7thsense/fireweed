@@ -121,7 +121,8 @@ partitions it across multiple queues at the application layer (ADR-008).
   `assignment_epoch` is allocated in the control plane on `acquire_queue_lease`;
   before the acquiring owner may serve claims, the new epoch is durably fenced
   into the queue's durable log (see "Single Authoritative Fencing Rule").
-  Thereafter only the holder of the current `assignment_epoch` can append; the
+  Thereafter only a serving owner carrying the cached current storage fence
+  credential (`OwnedSession.fence_epoch`) can append; the
   backend rejects any epoch that is not current. The lease is a
   *liveness/assignment* mechanism; the epoch is the *safety* mechanism.
 - **The progress bound is a local per-queue property.** The progress bound
@@ -295,22 +296,20 @@ unchanged from the rest of this design.
 |------|----------------|
 | Library is an owner | A `Fireweed` handle MUST carry an `OwnerId` and a `ControlPlaneStore`, resolve ownership, and operate under an acquired, fenced lease for every queue-addressed op — identically to the RESP server. It MUST NOT append to a queue it has not acquired-and-fenced. A single embedded sole-owner deployment is the degenerate case: constant ownership and a constant (always-current) epoch, so single-instance behavior is unchanged. |
 | Cached acquire-time epoch (MUST) | The `expected_epoch` carried on every data-plane append (`PushPort`/`ClaimPort`/`FinalizePort` -> `append_batch`) MUST be the epoch the owner **cached at `acquire_queue_lease`** (`OwnedSession.fence_epoch`), NOT a value re-read from the control plane / current log epoch at append time. Re-reading the current epoch defeats the fence (a superseded owner would read the new epoch and pass) and is therefore forbidden. The fence MUST be evaluated **at commit time inside the append's atomic unit of work**, so an owner superseded after it resolved but before it commits is rejected `queue-epoch-stale` mid-operation (no resolve->commit TOCTOU). |
-| Single durable epoch (MUST) | For the cached-epoch fence to bind, the control-plane `assignment_epoch` and the storage append-fence epoch MUST be **one durable value advanced atomically at acquire** — already specified as the same token (Data Model) and bound in the `postgres_native` acquire transaction (Backend Profile Bindings). An implementation that keeps two separately-advanced counters does NOT satisfy this rule. |
+| Confirmed durable fence (MUST) | Under ADR-024 the public object-log cell carries distinct `OwnedSession.lease_epoch` (control-plane credential) and `OwnedSession.fence_epoch` (durable append credential). Acquire precedes durable fence establishment; `PendingFence` cannot serve before confirmation. Every append atomically checks the cached storage credential. Ephemeral restart may reconcile the storage counter ahead of the fresh assignment counter; same-owner reaffirmation must not self-fence. Historical atomic Postgres counter bindings below are not public-cell requirements. See CONTRACT-006 F-FENCE and `crates/fireweed-engine/src/ownership.rs::acquire_and_fence`. |
 | Data-path fail-closed (MUST) | Lease liveness MUST fail closed on the **data path**, not only the control path. If a library owner stalls (host GC pause) past `lease_expires_at` and a peer reclaims the queue at a greater epoch, the stalled owner's next append MUST be rejected by the cached-epoch fence regardless of whether its renew loop has run. The cached session is advisory for liveness; the append fence is the safety authority. |
 | Target-affinity (MUST) | The library policy layer MUST restrict `acquire_queue_lease` to the queue's deterministic `target_owner` (Queue-to-owner) and MUST NOT acquire a queue a live peer is the target for. A queue held by a different live owner yields an owned-elsewhere resolution (rendered `-MOVED` by RESP, an `OwnedElsewhere` value by the library); the library MUST NOT contend by acquiring a *live* lease (online handoff is `begin_drain`). The reference in-memory control plane's *cooperative* acquire (admits any live owner) is a reference-impl simplification; target-affinity is the normative requirement **both** adapters MUST apply so they cannot thrash a queue against each other. After a renew/acquire timeout the owner MUST **re-resolve**, never blindly retry the non-idempotent acquire. |
 | Bounded per-node coordination (MUST) | A library process owning many queues MUST keep renew/heartbeat and ownership state bounded per node — a single bounded renew/heartbeat driver, never one task/connection per queue (Queue density). |
 
-**Multi-instance shared-store competition (library).** Multiple `Fireweed` instances
-sharing one durable backend, competing for per-queue leases, is the library
-realization of this design. It is correct **only** on a backend that presents the
-single atomic acquire->fence epoch above — `postgres_native` once that binding
-holds. The reference in-memory control plane (per-process, resets on restart) and a
-backend with no shared durable control plane (sqlite-local) are **single-process
-only**. `object_log_sqlite_projection` is **single-owner only** until the
-manifest-CAS acquire→fence (Control-Plane Pluggability) lands and per-entry epochs
-are recorded — committed build direction per ADR-008 §4: the object log is the
-intended per-queue multi-node fencing/coordination substrate. A `Fireweed` constructed for multi-owner operation MUST runtime-refuse
-a backend that does not present the atomic acquire->fence capability.
+**Multi-instance shared-store competition (library).** Under ADR-024 a shared
+public S3 object log requires shared ownership coordination and confirmed durable
+append fencing. The control-plane assignment credential and storage append
+credential have separate roles as defined above; numeric equality is not a
+requirement. An ephemeral per-process control plane is only a single-process
+coordination fixture and does not establish shared multi-owner safety. Historical
+Postgres/SQLite backend-profile bindings elsewhere in this document do not define
+additional public cells. A multi-owner handle must fail closed when shared
+coordination or confirmed durable fencing is unavailable.
 
 ## Graceful Drain
 

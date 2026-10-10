@@ -21,3 +21,11 @@ Eligible items are claimed before the progress bound expires (FR-12).
 Ordering-quality bounds such as maximum rank error may be exposed without replacing the progress bound (FR-13).
 
 Covers FR-7 through FR-13.
+
+## Formal analysis obligations
+
+[CONTRACT-006](../../02-design/contracts/CONTRACT-006-formal-queue-semantics.md) defines
+formal safety and progress vocabulary; [TP-006](../../03-test/TP-006-formal-analysis.md)
+defines bounded model and independent implementation evidence requirements.
+The current public-cell and PRD requirements retain authority. Conditional
+eventual progress does not discharge the numeric queue-global progress bound.

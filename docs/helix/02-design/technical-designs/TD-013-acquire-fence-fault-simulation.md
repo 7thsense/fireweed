@@ -164,7 +164,7 @@ durable event.
 | after CP confirm, before first mutation | crash | new owner may recover and reacquire without epoch regression |
 | after lease selection, before durable append | crash | no active lease becomes visible |
 | after durable lease append, before response | response loss | same request resolves one lease result; no second active lease |
-| after append, before serving projection apply | crash / apply error | no success response; recovery replays once before serving |
+| after append, before serving projection apply | crash / apply error | AsyncProjection success may precede apply; recovery resolves authority and replays once; empty applied-row polls remain legal |
 | after projection apply, before response | response loss | read/replay returns the committed result once |
 | during snapshot write / tail replay | crash / truncation / stale list | no partial projection becomes serving or authoritative |
 | during owner reassignment with active leases | old-owner stall / new-owner acquire | tokens from the old epoch cannot mutate after the fence |
@@ -219,15 +219,15 @@ There is no quiet-host requirement and no absolute host-speed threshold.
 
 | Oracle | Exact pass condition | Authority mapping |
 |---|---|---|
-| `OWN-1 single_serving_owner` | At most one `Assigned` owner for a queue; its epoch equals CP and storage authority. | ADR-008; TP-003 INV-1/AC-OWN-2 |
+| `OWN-1 single_serving_owner` | At most one serving owner for a queue; its assignment credential matches CP and its cached fence credential matches durable storage. These epoch domains need not be numerically equal after ephemeral restart reconciliation. | ADR-008; TP-003 INV-1/AC-OWN-2 |
 | `OWN-2 monotonic_epoch` | Acquisitions by a different owner strictly increase epoch; same-owner reaffirmation never self-fences. | TD-003; AC-OWN-2 |
 | `OWN-3 pending_is_nonserving` | No new mutation or claim is admitted from `PendingFence`. | ADR-013; TP-003 AC-TXN-4 |
 | `OWN-4 stale_epoch_rejected` | Every post-fence operation carrying an older epoch returns the typed fence/redirect result and appends nothing. | AC-OWN-2; AC-ROUTE-1 |
 | `LEASE-1 single_active_lease` | No item has two lease intervals overlapping in logical time. | FR-23..28; INV-1 |
-| `LEASE-2 stale_token_no_effect` | Renew/finalize with expired, replaced, or old-epoch token changes no item or log position. | FR-24..28 |
+| `LEASE-2 stale_token_no_effect` | Renew/finalize rejects unauthorized item credentials without lease/lifecycle effects; a current owner may log rejected dispositions for replay. Independently, a stale owner session cannot append after fencing. Handoff alone does not invalidate an unchanged item token. | FR-24..28 |
 | `DUR-1 accepted_not_lost` | Every acknowledged request is represented exactly once in recovered log/state. | ADR-013; INV-2/INV-10 |
 | `DUR-2 unknown_resolves_once` | Same-body retry returns the committed outcome or creates one fresh transition if none committed; never two. | INV-5/INV-14 |
-| `VIS-1 response_barrier` | A success response occurs only after authoritative log commit and serving projection visibility. | ADR-013; INV-12 |
+| `VIS-1 response_barrier` | A mutation success response occurs only after authoritative log publication; AsyncProjection permits lagging serving projection and empty polls (ADR-024). | ADR-013; INV-12 |
 | `REC-1 exact_rebuild` | Recovered state checksum, lifecycle counts, leases, replay records, and high-water equal model state at durable head. | AC-TXN-4 |
 | `PROG-1 queue_global_bound` | Every eligible item is claimed before model eligible age exceeds `progress_bound_ms`; ineligible intervals do not accrue age. | FR-9..12 |
 | `PROG-2 unrelated_queue_progress` | A queue not targeted by the injected stall completes a non-empty operation within its declared scheduler-round bound. | P0-11..15; TP-002 E2 |
@@ -302,3 +302,11 @@ not weaken TP-003 AC-OWN-2, AC-ROUTE-1, AC-TXN-4, or the process-kill matrix.
 
 No harness code, architecture change, CI wiring, or implementation bead is
 authorized or created by this proposal.
+
+## Formal analysis obligations (public-cell reconciliation)
+
+[CONTRACT-006](../contracts/CONTRACT-006-formal-queue-semantics.md) defines
+formal safety and progress vocabulary; [TP-006](../../03-test/TP-006-formal-analysis.md)
+defines bounded model and independent implementation evidence requirements.
+The current public-cell and PRD requirements retain authority. Conditional
+eventual progress does not discharge the numeric queue-global progress bound.
