@@ -14,7 +14,9 @@ object-safe `fireweed_engine::queue_contract::QueueStore` port has no default
 unsupported operations. Its owned requests allow adapters to own complete jobs
 across cancellation. The existing interface is not yet replaced or qualified.
 
-Times are signed UTC microseconds. Lease renewal duration is 1 ms through 1 h.
+Queue provisioning retains max_attempts: RetryAt at the attempt bound fails
+the item; otherwise its supplied retry time is the eligible-age anchor (main
+Retry semantics, distinct from Rearm). Times are signed UTC microseconds. Lease renewal duration is 1 ms through 1 h.
 Record versions start at one and are per-key durable non-reused versions.
 Fields are typed integer, finite float, boolean, UTF-8 text or bytes. Negative
 floating zero is rejected at validation to ensure one canonical representation;

@@ -53,6 +53,7 @@ pub struct QueueSchema {
     pub work: CollectionDefinition,
     pub state: BTreeMap<String, CollectionDefinition>,
     pub progress_bound_micros: u64,
+    pub max_attempts: u32,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lifecycle {
@@ -472,7 +473,7 @@ fn fields(values: &Fields, definition: &CollectionDefinition) -> QueueResult<()>
 }
 impl QueueSchema {
     pub fn validate(&self) -> QueueResult<()> {
-        if self.progress_bound_micros == 0 {
+        if self.progress_bound_micros == 0 || self.max_attempts == 0 {
             return Err(invalid("progress bound must be positive"));
         }
         for (collection, definition) in std::iter::once(("work", &self.work))
@@ -982,6 +983,7 @@ mod tests {
             work: definition.clone(),
             state: BTreeMap::from([("instance".into(), definition)]),
             progress_bound_micros: 1_000_000,
+            max_attempts: 3,
         }
     }
     fn queue() -> QueueAddress {
