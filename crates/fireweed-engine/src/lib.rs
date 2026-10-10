@@ -43,6 +43,7 @@ mod object_log_segment_safety;
 mod operator;
 mod ownership;
 mod port;
+pub mod queue_contract;
 pub mod schema_validation;
 pub mod sequenced_metadata;
 mod types;

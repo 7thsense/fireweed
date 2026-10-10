@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod queue_contract;
+
 mod domain;
 mod query;
 
