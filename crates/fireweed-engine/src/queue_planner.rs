@@ -15,6 +15,12 @@ pub struct RecordIdentity {
 pub struct StoredWork {
     pub record: WorkRecord,
     pub lease_hash: Option<[u8; 32]>,
+    /// Internal materialization flags: false means preserve stored payload, not empty.
+    /// An unloaded body is not a complete user-facing WorkRecord. Durable log
+    /// envelopes must version this representation and apply Preserve against the
+    /// existing record; explicit Some(empty) patches instead materialize an empty body.
+    pub fields_loaded: bool,
+    pub body_loaded: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UniqueIdentity {
@@ -82,7 +88,8 @@ fn expect_state(present: Option<u64>, expected: &StateExpect) -> Result<(), Reje
         _ => Err(Rejection::VersionConflict),
     }
 }
-fn patch_work(record: &mut WorkRecord, patch: &WorkPatch) {
+fn patch_work(stored: &mut StoredWork, patch: &WorkPatch) {
+    let record = &mut stored.record;
     if let Some(priority) = patch.priority {
         record.work.priority = priority;
     }
@@ -91,6 +98,7 @@ fn patch_work(record: &mut WorkRecord, patch: &WorkPatch) {
     }
     if let Some(body) = &patch.body {
         record.work.body.clone_from(body);
+        stored.body_loaded = true;
     }
     for (key, value) in &patch.fields {
         match value {
@@ -150,7 +158,7 @@ fn apply_group(
         if stored.record.version != update.expected_version {
             return Err(Rejection::VersionConflict);
         }
-        patch_work(&mut stored.record, &update.patch);
+        patch_work(&mut stored, &update.patch);
         let version = next_version(snapshot, None, &update.key)?;
         stored.record.version = version;
         match update.disposition {
@@ -246,7 +254,7 @@ fn apply_group(
                     stored.record.lease_expires_at = None;
                     stored.lease_hash = None;
                 }
-                patch_work(&mut stored.record, patch);
+                patch_work(&mut stored, patch);
                 stored.record.version = version;
                 snapshot.work.insert(update.key.clone(), stored.clone());
                 delta.work.push(stored);
@@ -283,6 +291,8 @@ fn apply_group(
                 lease_expires_at: None,
             },
             lease_hash: None,
+            fields_loaded: true,
+            body_loaded: true,
         };
         snapshot.work.insert(work.key.clone(), record.clone());
         delta.work.push(record);
@@ -330,8 +340,8 @@ pub fn required_unique_probes(
     now: i64,
     schema: &QueueSchema,
 ) -> QueueResult<BTreeSet<UniqueIdentity>> {
-    validate_snapshot(snapshot)?;
-    let mut candidate = snapshot.clone();
+    let mut candidate = addressed_snapshot(group, snapshot);
+    validate_snapshot(&candidate)?;
     let Ok(delta) = apply_group(group, &mut candidate, now, schema) else {
         return Ok(BTreeSet::new());
     };
@@ -358,9 +368,9 @@ pub fn required_unique_probes(
 }
 fn validate_uniques(
     delta: &CommitDelta,
-    candidate: &mut RecordSnapshot,
+    original: &RecordSnapshot,
     schema: &QueueSchema,
-) -> QueueResult<Option<Rejection>> {
+) -> QueueResult<Result<Vec<(UniqueIdentity, RecordIdentity)>, Rejection>> {
     let affected: BTreeSet<_> = delta
         .versions
         .iter()
@@ -369,19 +379,19 @@ fn validate_uniques(
             key: version.key.clone(),
         })
         .collect();
-    candidate
-        .unique_owners
-        .retain(|_, owner| !affected.contains(owner));
-    let mut additions = vec![];
+    let mut additions = BTreeMap::new();
     for work in &delta.work {
         for key in record_unique_keys(None, &work.record.work.fields, &schema.work)? {
-            additions.push((
-                key,
-                RecordIdentity {
-                    collection: None,
-                    key: work.record.work.key.clone(),
-                },
-            ));
+            let owner = RecordIdentity {
+                collection: None,
+                key: work.record.work.key.clone(),
+            };
+            if additions
+                .insert(key, owner.clone())
+                .is_some_and(|existing| existing != owner)
+            {
+                return Ok(Err(Rejection::UniqueConflict));
+            }
         }
     }
     for state in &delta.state {
@@ -390,31 +400,145 @@ fn validate_uniques(
             .get(&state.collection)
             .ok_or_else(|| QueueError::OutcomeUnknown("missing state schema".into()))?;
         for key in record_unique_keys(Some(state.collection.clone()), &state.fields, definition)? {
-            additions.push((
-                key,
-                RecordIdentity {
-                    collection: Some(state.collection.clone()),
-                    key: state.key.clone(),
-                },
-            ));
+            let owner = RecordIdentity {
+                collection: Some(state.collection.clone()),
+                key: state.key.clone(),
+            };
+            if additions
+                .insert(key, owner.clone())
+                .is_some_and(|existing| existing != owner)
+            {
+                return Ok(Err(Rejection::UniqueConflict));
+            }
         }
     }
-    for (key, owner) in additions {
-        if !candidate.unique_probes_loaded.contains(&key) {
+    for (key, owner) in &additions {
+        if !original.unique_probes_loaded.contains(key) {
             return Err(QueueError::OutcomeUnknown(
                 "unique tuple authority not loaded".into(),
             ));
         }
-        if candidate
+        if original
             .unique_owners
-            .get(&key)
-            .is_some_and(|existing| existing != &owner)
+            .get(key)
+            .is_some_and(|existing| existing != owner && !affected.contains(existing))
         {
-            return Ok(Some(Rejection::UniqueConflict));
+            return Ok(Err(Rejection::UniqueConflict));
         }
-        candidate.unique_owners.insert(key, owner);
     }
-    Ok(None)
+    Ok(Ok(additions.into_iter().collect()))
+}
+fn addressed_snapshot(group: &CommitGroup, source: &RecordSnapshot) -> RecordSnapshot {
+    let mut out = RecordSnapshot {
+        next_sequence: source.next_sequence,
+        ..RecordSnapshot::default()
+    };
+    let work: BTreeSet<_> = group
+        .claimed_updates
+        .iter()
+        .map(|u| &u.key)
+        .chain(group.work_updates.iter().map(|u| &u.key))
+        .chain(group.work_inserts.iter().map(|u| &u.key))
+        .collect();
+    for key in work {
+        if let Some(record) = source.work.get(key) {
+            out.work.insert(key.clone(), record.clone());
+        }
+        let id = RecordIdentity {
+            collection: None,
+            key: key.clone(),
+        };
+        if let Some(version) = source.versions.get(&id) {
+            out.versions.insert(id, *version);
+        }
+    }
+    for update in &group.state_updates {
+        let key = (update.collection.clone(), update.key.clone());
+        if let Some(record) = source.state.get(&key) {
+            out.state.insert(key, record.clone());
+        }
+        let id = RecordIdentity {
+            collection: Some(update.collection.clone()),
+            key: update.key.clone(),
+        };
+        if let Some(version) = source.versions.get(&id) {
+            out.versions.insert(id, *version);
+        }
+    }
+    out
+}
+fn merge_delta(
+    snapshot: &mut RecordSnapshot,
+    delta: &CommitDelta,
+    additions: Vec<(UniqueIdentity, RecordIdentity)>,
+    schema: &QueueSchema,
+) -> QueueResult<()> {
+    // Determine old unique keys from addressed records, without scanning/copying
+    // every other queue member or every owner in a large packed batch.
+    let mut removals = vec![];
+    for version in &delta.versions {
+        let owner = RecordIdentity {
+            collection: version.collection.clone(),
+            key: version.key.clone(),
+        };
+        let old = match &version.collection {
+            None => snapshot
+                .work
+                .get(&version.key)
+                .map(|record| (&record.record.work.fields, &schema.work)),
+            Some(collection) => snapshot
+                .state
+                .get(&(collection.clone(), version.key.clone()))
+                .and_then(|record| {
+                    schema
+                        .state
+                        .get(collection)
+                        .map(|definition| (&record.fields, definition))
+                }),
+        };
+        if let Some((fields, definition)) = old {
+            for key in record_unique_keys(version.collection.clone(), fields, definition)? {
+                if snapshot.unique_owners.get(&key) == Some(&owner) {
+                    removals.push(key);
+                }
+            }
+        }
+    }
+    // All fallible checks/encoding above precede mutation of the original image.
+    for key in removals {
+        snapshot.unique_owners.remove(&key);
+    }
+    for (key, owner) in additions {
+        snapshot.unique_owners.insert(key, owner);
+    }
+    for key in &delta.deleted_work {
+        snapshot.work.remove(key);
+    }
+    for key in &delta.deleted_state {
+        snapshot.state.remove(key);
+    }
+    for record in &delta.work {
+        snapshot
+            .work
+            .insert(record.record.work.key.clone(), record.clone());
+    }
+    for record in &delta.state {
+        snapshot.state.insert(
+            (record.collection.clone(), record.key.clone()),
+            record.clone(),
+        );
+    }
+    for version in &delta.versions {
+        snapshot.versions.insert(
+            RecordIdentity {
+                collection: version.collection.clone(),
+                key: version.key.clone(),
+            },
+            version.version,
+        );
+    }
+    snapshot.next_sequence = delta.next_sequence;
+    Ok(())
 }
 fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
     for (key, stored) in &snapshot.work {
@@ -422,7 +546,8 @@ fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
             collection: None,
             key: key.clone(),
         };
-        if stored.record.work.key != *key
+        if !stored.fields_loaded
+            || stored.record.work.key != *key
             || stored.record.version == 0
             || snapshot.versions.get(&id) != Some(&stored.record.version)
             || stored.record.insertion_sequence == 0
@@ -459,25 +584,28 @@ pub fn plan_commit_group(
     now: i64,
     schema: &QueueSchema,
 ) -> QueueResult<CommitDelta> {
-    validate_snapshot(snapshot)?;
-    let mut candidate = snapshot.clone();
+    let mut candidate = addressed_snapshot(group, snapshot);
+    validate_snapshot(&candidate)?;
     match apply_group(group, &mut candidate, now, schema) {
         Ok(delta) => {
-            if let Some(reason) = validate_uniques(&delta, &mut candidate, schema)? {
-                return Ok(CommitDelta {
-                    work: vec![],
-                    deleted_work: vec![],
-                    state: vec![],
-                    deleted_state: vec![],
-                    versions: vec![],
-                    next_sequence: snapshot.next_sequence,
-                    receipt: CommitReceipt {
-                        request_id: group.request_id.clone(),
-                        outcome: GroupOutcome::Rejected(reason),
-                    },
-                });
-            }
-            *snapshot = candidate;
+            let additions = match validate_uniques(&delta, snapshot, schema)? {
+                Ok(additions) => additions,
+                Err(reason) => {
+                    return Ok(CommitDelta {
+                        work: vec![],
+                        deleted_work: vec![],
+                        state: vec![],
+                        deleted_state: vec![],
+                        versions: vec![],
+                        next_sequence: snapshot.next_sequence,
+                        receipt: CommitReceipt {
+                            request_id: group.request_id.clone(),
+                            outcome: GroupOutcome::Rejected(reason),
+                        },
+                    });
+                }
+            };
+            merge_delta(snapshot, &delta, additions, schema)?;
             Ok(delta)
         }
         Err(reason) => Ok(CommitDelta {
@@ -532,7 +660,7 @@ mod tests {
             priority: 0,
             available_at: 0,
             fields: BTreeMap::new(),
-            body: vec![],
+            body: Default::default(),
         }
     }
     fn state(key: &str, expect: StateExpect) -> StateUpdate {
@@ -542,7 +670,7 @@ mod tests {
             expect,
             change: StateChange::Put {
                 fields: BTreeMap::new(),
-                value: vec![1],
+                value: vec![1].into(),
             },
         }
     }
@@ -568,6 +696,8 @@ mod tests {
                     lease_expires_at: Some(100),
                 },
                 lease_hash: Some(lease_hash(b"token")),
+                fields_loaded: true,
+                body_loaded: true,
             },
         );
         snapshot.next_sequence = 1;
@@ -895,7 +1025,7 @@ mod tests {
                 expect: StateExpect::Absent,
                 change: StateChange::Put {
                     fields: BTreeMap::from([("target".into(), FieldValue::Text("same".into()))]),
-                    value: vec![],
+                    value: Default::default(),
                 },
             });
         }
@@ -907,7 +1037,7 @@ mod tests {
         for update in &mut g.state_updates {
             update.change = StateChange::Put {
                 fields: BTreeMap::new(),
-                value: vec![],
+                value: Default::default(),
             };
         }
         assert!(matches!(
@@ -934,5 +1064,83 @@ mod tests {
                 committed
             );
         }
+    }
+    #[test]
+    fn metadata_patch_preserves_unloaded_body_and_explicit_empty_replaces_it() {
+        for body in [None, Some(Default::default())] {
+            let mut snapshot = claimed_snapshot();
+            snapshot.work.get_mut("input").unwrap().body_loaded = false;
+            let mut g = group();
+            let mut u = update();
+            u.patch.body = body.clone();
+            g.claimed_updates.push(u);
+            let delta = plan_commit_group(&g, &mut snapshot, 10, &schema()).unwrap();
+            assert_eq!(delta.work[0].body_loaded, body.is_some());
+            let encoded = postcard::to_allocvec(&delta).unwrap();
+            let decoded: CommitDelta = postcard::from_bytes(&encoded).unwrap();
+            assert_eq!(decoded, delta);
+            assert_eq!(snapshot.work["input"].body_loaded, body.is_some());
+        }
+    }
+    #[test]
+    fn incomplete_fields_fail_before_any_effect() {
+        let mut snapshot = claimed_snapshot();
+        snapshot.work.get_mut("input").unwrap().fields_loaded = false;
+        let original = snapshot.clone();
+        let mut g = group();
+        g.claimed_updates.push(update());
+        g.work_inserts.push(work("next"));
+        assert!(matches!(
+            plan_commit_group(&g, &mut snapshot, 10, &schema()),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(snapshot.work, original.work);
+        assert_eq!(snapshot.versions, original.versions);
+        assert_eq!(snapshot.next_sequence, original.next_sequence);
+    }
+    #[test]
+    fn unrelated_owners_survive_and_delete_releases_tuple_for_next_group() {
+        let s = unique_schema();
+        let mut snapshot = RecordSnapshot::default();
+        let mut initial = group();
+        initial.work_inserts = vec![unique_work("a", "one"), unique_work("other", "two")];
+        probe_and_plan(&initial, &mut snapshot, &s);
+        let untouched = snapshot.work["other"].clone();
+        let other_owner = snapshot
+            .unique_owners
+            .iter()
+            .find(|(_, v)| v.key == "other")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
+        let mut conflict = group();
+        conflict.work_inserts.push(unique_work("b", "one"));
+        assert_eq!(
+            probe_and_plan(&conflict, &mut snapshot, &s).receipt.outcome,
+            GroupOutcome::Rejected(Rejection::UniqueConflict)
+        );
+        assert_eq!(snapshot.work["other"], untouched);
+        let mut delete = group();
+        delete.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            patch: None,
+        });
+        probe_and_plan(&delete, &mut snapshot, &s);
+        assert!(matches!(
+            probe_and_plan(&conflict, &mut snapshot, &s).receipt.outcome,
+            GroupOutcome::Committed { .. }
+        ));
+        assert_eq!(snapshot.work["other"], untouched);
+        assert_eq!(
+            snapshot.unique_owners.get(&other_owner.0),
+            Some(&other_owner.1)
+        );
+        assert_eq!(
+            snapshot.versions[&RecordIdentity {
+                collection: None,
+                key: "a".into()
+            }],
+            2
+        );
     }
 }

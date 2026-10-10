@@ -4,6 +4,7 @@
 //! backend capability is part of this module. Times are exact signed UTC epoch nanoseconds.
 use std::collections::{BTreeMap, BTreeSet};
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -70,7 +71,7 @@ pub struct NewWork {
     pub priority: i64,
     pub available_at: i64,
     pub fields: Fields,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseCredential {
@@ -102,11 +103,11 @@ pub struct StateRecord {
     pub key: String,
     pub version: u64,
     pub fields: Fields,
-    pub value: Vec<u8>,
+    pub value: Bytes,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StateChange {
-    Put { fields: Fields, value: Vec<u8> },
+    Put { fields: Fields, value: Bytes },
     Delete,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,7 +122,7 @@ pub struct WorkPatch {
     pub priority: Option<i64>,
     pub available_at: Option<i64>,
     pub fields: BTreeMap<String, Option<FieldValue>>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Bytes>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Disposition {
@@ -1040,7 +1041,7 @@ mod tests {
             priority: 0,
             available_at: 0,
             fields: BTreeMap::new(),
-            body: vec![],
+            body: Bytes::new(),
         }
     }
     fn group(id: &str) -> CommitGroup {
@@ -1053,7 +1054,7 @@ mod tests {
                 expect: StateExpect::Absent,
                 change: StateChange::Put {
                     fields: Fields::new(),
-                    value: vec![],
+                    value: Bytes::new(),
                 },
             }],
             work_inserts: vec![],
@@ -1092,7 +1093,7 @@ mod tests {
     fn transition_fanout_and_megabyte_state_are_not_reduced() {
         let mut g = group("large");
         if let StateChange::Put { value, .. } = &mut g.state_updates[0].change {
-            *value = vec![1; 1 << 20];
+            *value = Bytes::from(vec![1; 1 << 20]);
         }
         g.work_inserts = (0..1025)
             .map(|n| item(&format!("effect-or-await-{n}")))
@@ -1488,6 +1489,84 @@ mod tests {
                 .validate(&schema(), &QueueLimits::default())
                 .is_ok(),
                 valid
+            );
+        }
+    }
+    #[test]
+    fn bytes_payloads_preserve_vec_wire_and_fingerprint() {
+        for payload in [vec![], vec![0, 1, 127, 128, 255], vec![42; 300]] {
+            let legacy = (
+                "item".to_string(),
+                -4i64,
+                17i64,
+                Fields::new(),
+                payload.clone(),
+            );
+            let record = NewWork {
+                key: "item".into(),
+                priority: -4,
+                available_at: 17,
+                fields: Fields::new(),
+                body: payload.clone().into(),
+            };
+            let old = postcard::to_allocvec(&legacy).unwrap();
+            let new = postcard::to_allocvec(&record).unwrap();
+            assert_eq!(old, new);
+            assert_eq!(
+                fingerprint("compatibility", &legacy).unwrap(),
+                fingerprint("compatibility", &record).unwrap()
+            );
+            assert_eq!(postcard::from_bytes::<NewWork>(&old).unwrap(), record);
+            assert_eq!(
+                postcard::from_bytes::<(String, i64, i64, Fields, Vec<u8>)>(&new).unwrap(),
+                legacy
+            );
+            let state = StateRecord {
+                collection: "instances".into(),
+                key: "i".into(),
+                version: 1,
+                fields: Fields::new(),
+                value: payload.clone().into(),
+            };
+            let legacy_state = (
+                state.collection.clone(),
+                state.key.clone(),
+                1u64,
+                Fields::new(),
+                payload.clone(),
+            );
+            let encoded = postcard::to_allocvec(&state).unwrap();
+            assert_eq!(encoded, postcard::to_allocvec(&legacy_state).unwrap());
+            assert_eq!(
+                postcard::from_bytes::<StateRecord>(&encoded).unwrap(),
+                state
+            );
+            assert_eq!(
+                postcard::from_bytes::<(String, String, u64, Fields, Vec<u8>)>(&encoded).unwrap(),
+                legacy_state
+            );
+            let patch = WorkPatch {
+                body: Some(payload.clone().into()),
+                ..WorkPatch::default()
+            };
+            let legacy_patch = (
+                None::<i64>,
+                None::<i64>,
+                BTreeMap::<String, Option<FieldValue>>::new(),
+                Some(payload),
+            );
+            let encoded = postcard::to_allocvec(&patch).unwrap();
+            assert_eq!(encoded, postcard::to_allocvec(&legacy_patch).unwrap());
+            assert_eq!(postcard::from_bytes::<WorkPatch>(&encoded).unwrap(), patch);
+            assert_eq!(
+                postcard::from_bytes::<(
+                    Option<i64>,
+                    Option<i64>,
+                    BTreeMap<String, Option<FieldValue>>,
+                    Option<Vec<u8>>
+                )>(&encoded)
+                .unwrap(),
+                legacy_patch
             );
         }
     }

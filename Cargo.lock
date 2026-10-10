@@ -1433,6 +1433,7 @@ name = "fireweed-core"
 version = "0.31.32"
 dependencies = [
  "axon-esf",
+ "bytes",
  "postcard",
  "proptest",
  "serde",

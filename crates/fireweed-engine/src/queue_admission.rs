@@ -90,6 +90,39 @@ impl QueueReservation {
         Ok(())
     }
 }
+/// Scoped loaded/planning buffer charge borrows its job reservation, so storage
+/// cannot release the job slot while this buffer is still retained.
+#[derive(Debug)]
+pub struct QueueBufferCharge<'a> {
+    reservation: &'a QueueReservation,
+    bytes: u64,
+}
+impl QueueReservation {
+    pub fn buffer(&self, bytes: u64) -> QueueResult<QueueBufferCharge<'_>> {
+        let mut state = self
+            .admission
+            .state
+            .lock()
+            .map_err(|_| QueueError::OutcomeUnknown("admission state poisoned".into()))?;
+        if bytes > self.admission.max_bytes.saturating_sub(state.bytes) {
+            return Err(QueueError::OutcomeUnknown(
+                "admitted buffer capacity exhausted; resolve owned operation".into(),
+            ));
+        }
+        state.bytes += bytes;
+        Ok(QueueBufferCharge {
+            reservation: self,
+            bytes,
+        })
+    }
+}
+impl Drop for QueueBufferCharge<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.reservation.admission.state.lock() {
+            state.bytes -= self.bytes;
+        }
+    }
+}
 impl Drop for QueueReservation {
     fn drop(&mut self) {
         if let Ok(mut state) = self.admission.state.lock() {
@@ -125,6 +158,35 @@ mod tests {
         reservation.grow(20).unwrap();
         assert_eq!(admission.usage().unwrap(), (1, 100));
         drop(reservation);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+    #[test]
+    fn temporary_group_buffers_release_without_releasing_owned_job() {
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let job = admission.reserve(10).unwrap();
+        {
+            let _buffer = job.buffer(90).unwrap();
+            assert_eq!(admission.usage().unwrap(), (1, 100));
+        }
+        assert_eq!(admission.usage().unwrap(), (1, 10));
+        {
+            let _next_group = job.buffer(90).unwrap();
+            assert_eq!(admission.usage().unwrap(), (1, 100));
+        }
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+    #[test]
+    fn failed_buffer_charge_keeps_owned_reservation_and_existing_buffers() {
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let job = admission.reserve(10).unwrap();
+        let retained = job.buffer(80).unwrap();
+        assert!(matches!(job.buffer(11), Err(QueueError::OutcomeUnknown(_))));
+        assert_eq!(admission.usage().unwrap(), (1, 90));
+        drop(retained);
+        assert_eq!(admission.usage().unwrap(), (1, 10));
+        assert!(matches!(admission.reserve(1), Err(QueueError::Busy)));
+        drop(job);
         assert_eq!(admission.usage().unwrap(), (0, 0));
     }
 }

@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+bytes = { version = "1", features = ["serde"] }
 sha2 = "0.11"
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }
 serde = { version = "1", features = ["derive"] }
