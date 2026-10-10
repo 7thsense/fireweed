@@ -737,7 +737,7 @@ fn patch(value: &WorkPatch, schema: &QueueSchema, limits: &QueueLimits) -> Queue
 }
 impl CommitBatch {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.queue.validate()?;
+        self.preflight(limits)?;
         schema.validate()?;
         limits.validate()?;
         if self.groups.is_empty() || self.groups.len() > limits.max_groups as usize {
@@ -898,7 +898,7 @@ fn lease_duration(value: u64) -> QueueResult<()> {
 }
 impl ClaimRequest {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.queue.validate()?;
+        self.preflight(limits)?;
         name(&self.request_id)?;
         limits.validate()?;
         self.filter.validate(&schema.work)?;
@@ -932,7 +932,7 @@ impl ClaimRequest {
 }
 impl InsertRequest {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.queue.validate()?;
+        self.preflight(limits)?;
         name(&self.request_id)?;
         limits.validate()?;
         if self.items.is_empty() || self.items.len() > limits.max_records as usize {
@@ -972,7 +972,7 @@ impl CommitGroup {
 }
 impl StatsRequest {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.queue.validate()?;
+        self.preflight(limits)?;
         limits.validate()?;
         self.filter.validate(&schema.work)?;
         let mut seen = BTreeSet::new();
@@ -986,7 +986,7 @@ impl StatsRequest {
 }
 impl StateReadRequest {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.queue.validate()?;
+        self.preflight(limits)?;
         limits.validate()?;
         if !schema.state.contains_key(&self.collection) {
             return Err(invalid("undeclared state collection"));
@@ -1005,7 +1005,7 @@ impl StateReadRequest {
 }
 impl QueryRequest {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.queue.validate()?;
+        self.preflight(limits)?;
         limits.validate()?;
         let definition = match &self.source {
             RecordSource::Work => &schema.work,
@@ -1045,6 +1045,110 @@ impl QueryRequest {
                 schema,
             ),
         )
+    }
+}
+
+/// Schema-independent envelope checks run before transferring ownership/admission.
+/// The storage-specific schema/type check follows under its atomic boundary.
+pub trait RequestPreflight {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()>;
+}
+fn envelope<T: Serialize>(
+    queue: &QueueAddress,
+    request: &T,
+    limits: &QueueLimits,
+) -> QueueResult<()> {
+    queue.validate()?;
+    limits.validate()?;
+    byte_limit(request, limits.max_request_bytes)
+}
+fn response_limits(records: Option<u32>, bytes: u64, limits: &QueueLimits) -> QueueResult<()> {
+    if records.is_some_and(|count| count == 0 || count > limits.max_records)
+        || bytes == 0
+        || bytes > limits.max_response_bytes
+    {
+        return Err(invalid("invalid response limits"));
+    }
+    Ok(())
+}
+impl RequestPreflight for ClaimRequest {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        envelope(&self.queue, self, limits)?;
+        name(&self.request_id)?;
+        lease_duration(self.lease_nanos)?;
+        response_limits(Some(self.max_records), self.max_bytes, limits)
+    }
+}
+impl RequestPreflight for QueryRequest {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        envelope(&self.queue, self, limits)?;
+        response_limits(Some(self.max_records), self.max_bytes, limits)
+    }
+}
+impl RequestPreflight for StateReadRequest {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        envelope(&self.queue, self, limits)?;
+        name(&self.collection)?;
+        response_limits(None, self.max_bytes, limits)?;
+        if self.keys.len() > limits.max_records as usize {
+            return Err(invalid("invalid state read limits"));
+        }
+        for key in &self.keys {
+            name(key)?;
+        }
+        Ok(())
+    }
+}
+impl RequestPreflight for StatsRequest {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        envelope(&self.queue, self, limits)
+    }
+}
+impl RequestPreflight for InsertRequest {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        envelope(&self.queue, self, limits)?;
+        name(&self.request_id)?;
+        if self.items.is_empty() || self.items.len() > limits.max_records as usize {
+            return Err(invalid("invalid insert count"));
+        }
+        let mut keys = BTreeSet::new();
+        for item in &self.items {
+            name(&item.key)?;
+            if !keys.insert(&item.key) {
+                return Err(invalid("duplicate insert key"));
+            }
+            if item.body.len() as u64 > limits.max_body_bytes {
+                return Err(QueueError::TooLarge);
+            }
+        }
+        Ok(())
+    }
+}
+impl RequestPreflight for CommitBatch {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        envelope(&self.queue, self, limits)?;
+        if self.groups.is_empty() || self.groups.len() > limits.max_groups as usize {
+            return Err(invalid("invalid commit group count"));
+        }
+        let mut ids = BTreeSet::new();
+        for group in &self.groups {
+            name(&group.request_id)?;
+            if !ids.insert(&group.request_id) {
+                return Err(invalid("duplicate group identity"));
+            }
+            let count = group
+                .claimed_updates
+                .len()
+                .checked_add(group.work_updates.len())
+                .and_then(|n| n.checked_add(group.work_inserts.len()))
+                .and_then(|n| n.checked_add(group.state_updates.len()))
+                .ok_or(QueueError::TooLarge)?;
+            if count == 0 || count > limits.max_records as usize {
+                return Err(invalid("invalid group record count"));
+            }
+            byte_limit(group, limits.max_group_bytes)?;
+        }
+        Ok(())
     }
 }
 
@@ -1607,5 +1711,29 @@ mod tests {
                 legacy_patch
             );
         }
+    }
+    #[test]
+    fn preflight_rejects_wire_size_and_declared_limits_without_schema() {
+        let limits = QueueLimits {
+            max_records: 4,
+            max_groups: 2,
+            max_group_bytes: 512,
+            max_request_bytes: 1024,
+            max_response_bytes: 512,
+            max_body_bytes: 256,
+            max_state_bytes: 512,
+        };
+        let mut request = claim();
+        request.max_records = 4;
+        request.max_bytes = 512;
+        assert!(request.preflight(&limits).is_ok());
+        request.max_bytes = 513;
+        assert!(matches!(
+            request.preflight(&limits),
+            Err(QueueError::Invalid(_))
+        ));
+        request.max_bytes = 512;
+        request.filter.keys = Some(BTreeSet::from(["k".repeat(1025)]));
+        assert_eq!(request.preflight(&limits), Err(QueueError::TooLarge));
     }
 }

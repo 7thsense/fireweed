@@ -1515,6 +1515,7 @@ dependencies = [
  "fireweed-projection",
  "futures",
  "native-tls",
+ "postcard",
  "postgres",
  "postgres-native-tls",
  "serde",

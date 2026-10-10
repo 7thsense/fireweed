@@ -1980,3 +1980,7 @@ mod batching_structure_tests {
         assert!(!write.contains("COUNT(*)"));
     }
 }
+
+/// Native asynchronous API-007 adapter; qualification precedes activation.
+pub mod queue_store;
+pub use queue_store::PostgresQueueStore;

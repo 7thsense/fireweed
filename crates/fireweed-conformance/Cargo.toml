@@ -17,6 +17,7 @@ path = "src/lib.rs"
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 bytes = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
 serde_json = "1"
 
 [dev-dependencies]

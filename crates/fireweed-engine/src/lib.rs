@@ -338,3 +338,6 @@ mod tests {
         assert!(!p2.precedes(&p1));
     }
 }
+
+/// Shared API-007 operation memory accounting; physical stores charge before allocation.
+pub mod queue_memory;

@@ -725,3 +725,6 @@ mod capability_gate_tests {
         );
     }
 }
+
+/// Mandatory new queue binding scenarios; no capability-dependent exemptions.
+pub mod queue_contract;
