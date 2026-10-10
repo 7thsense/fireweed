@@ -45,6 +45,7 @@ mod ownership;
 mod port;
 pub mod queue_admission;
 pub mod queue_contract;
+pub mod queue_index;
 pub mod queue_planner;
 pub mod schema_validation;
 pub mod sequenced_metadata;

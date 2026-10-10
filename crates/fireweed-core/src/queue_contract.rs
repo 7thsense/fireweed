@@ -1,7 +1,7 @@
 //! API-007's shared, storage-independent batch queue vocabulary.
 //!
 //! A commit group owns the atomic boundary. No database transaction handle or
-//! backend capability is part of this module. Times are UTC epoch microseconds.
+//! backend capability is part of this module. Times are exact signed UTC epoch nanoseconds.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -47,12 +47,14 @@ pub struct CollectionDefinition {
     /// Declared composite query indexes. Every declared field additionally has
     /// an automatic typed index; adapters cannot accept then scan/filter broadly.
     pub indexes: BTreeMap<String, Vec<String>>,
+    /// Named declared indexes whose complete nonmissing tuple is unique.
+    pub unique_indexes: BTreeSet<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueSchema {
     pub work: CollectionDefinition,
     pub state: BTreeMap<String, CollectionDefinition>,
-    pub progress_bound_micros: u64,
+    pub progress_bound_nanos: u64,
     pub max_attempts: u32,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +129,7 @@ pub enum Disposition {
     Fail,
     Release,
     RetryAt(i64),
-    Retain { renew_micros: Option<u64> },
+    Retain { renew_nanos: Option<u64> },
     Delete,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +167,7 @@ pub enum Rejection {
     NotFound,
     Leased,
     Invalid(String),
+    UniqueConflict,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordVersion {
@@ -250,7 +253,7 @@ pub struct ClaimRequest {
     pub filter: Filter,
     pub order: ClaimOrder,
     pub eligible_at: i64,
-    pub lease_micros: u64,
+    pub lease_nanos: u64,
     pub max_records: u32,
     pub max_bytes: u64,
     /// None returns all fields, Some(empty) returns no fields. Body separately selected.
@@ -360,11 +363,27 @@ impl Default for QueueLimits {
         }
     }
 }
+/// Exact conversion; i128 intermediate preserves the negative i64 boundary.
+pub fn timestamp_nanos(value: crate::UtcTimestamp) -> QueueResult<i64> {
+    if value.nanoseconds >= 1_000_000_000 {
+        return Err(QueueError::Invalid("invalid nanosecond component".into()));
+    }
+    let exact = i128::from(value.seconds) * 1_000_000_000 + i128::from(value.nanoseconds);
+    i64::try_from(exact).map_err(|_| {
+        QueueError::Invalid("timestamp outside signed nanosecond storage interval".into())
+    })
+}
+pub fn timestamp_from_nanos(value: i64) -> crate::UtcTimestamp {
+    crate::UtcTimestamp {
+        seconds: value.div_euclid(1_000_000_000),
+        nanoseconds: value.rem_euclid(1_000_000_000) as u32,
+    }
+}
 fn invalid(message: &str) -> QueueError {
     QueueError::Invalid(message.into())
 }
 fn name(value: &str) -> QueueResult<()> {
-    if value.trim().is_empty() || value.len() > 256 {
+    if value.trim().is_empty() {
         return Err(invalid("invalid identifier"));
     }
     Ok(())
@@ -417,7 +436,7 @@ impl std::io::Write for CanonicalWriter {
 /// vector order and exact byte values. Streaming avoids a second full body copy.
 pub fn fingerprint<T: Serialize>(domain: &str, value: &T) -> QueueResult<[u8; 32]> {
     let mut hash = Sha256::new();
-    hash.update(b"fireweed-api007-v1\0");
+    hash.update(b"fireweed-api007-v2\0");
     hash.update((domain.len() as u64).to_le_bytes());
     hash.update(domain.as_bytes());
     let writer = CanonicalWriter {
@@ -453,9 +472,9 @@ fn field(value: &FieldValue, expected: FieldType) -> QueueResult<()> {
         return Err(invalid("field type mismatch"));
     }
     if let FieldValue::Float(n) = value
-        && (!n.is_finite() || (n.is_sign_negative() && *n == 0.0))
+        && !n.is_finite()
     {
-        return Err(invalid("float must be finite and zero canonical positive"));
+        return Err(invalid("float must be finite"));
     }
     Ok(())
 }
@@ -473,13 +492,20 @@ fn fields(values: &Fields, definition: &CollectionDefinition) -> QueueResult<()>
 }
 impl QueueSchema {
     pub fn validate(&self) -> QueueResult<()> {
-        if self.progress_bound_micros == 0 || self.max_attempts == 0 {
+        if self.progress_bound_nanos == 0 || self.max_attempts == 0 {
             return Err(invalid("progress bound must be positive"));
         }
         for (collection, definition) in std::iter::once(("work", &self.work))
             .chain(self.state.iter().map(|(key, value)| (key.as_str(), value)))
         {
             name(collection)?;
+            if definition
+                .unique_indexes
+                .iter()
+                .any(|key| !definition.indexes.contains_key(key))
+            {
+                return Err(invalid("unique index must be declared"));
+            }
             for key in definition.fields.keys() {
                 name(key)?;
             }
@@ -637,6 +663,21 @@ impl ReceiptReadRequest {
         byte_limit(self, limits.max_request_bytes)
     }
 }
+/// Reference oracle for selected candidates, never a broad-scan implementation.
+pub fn matches_claim(record: &WorkRecord, request: &ClaimRequest) -> bool {
+    record.lifecycle == Lifecycle::Pending
+        && record.work.available_at <= request.eligible_at
+        && request
+            .filter
+            .keys
+            .as_ref()
+            .is_none_or(|keys| keys.contains(&record.work.key))
+        && request
+            .filter
+            .fields
+            .iter()
+            .all(|(key, predicate)| predicate.matches(record.work.fields.get(key)))
+}
 fn work(item: &NewWork, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
     name(&item.key)?;
     fields(&item.fields, &schema.work)?;
@@ -699,7 +740,7 @@ impl CommitBatch {
                     return Err(invalid("invalid claim credential"));
                 }
                 if let Disposition::Retain {
-                    renew_micros: Some(n),
+                    renew_nanos: Some(n),
                 } = update.disposition
                 {
                     lease_duration(n)?;
@@ -811,7 +852,7 @@ fn expect(value: &StateExpect) -> QueueResult<()> {
     Ok(())
 }
 fn lease_duration(value: u64) -> QueueResult<()> {
-    if !(1000..=3_600_000_000).contains(&value) {
+    if !(1_000_000..=3_600_000_000_000).contains(&value) {
         return Err(invalid("lease outside 1ms to 1h"));
     }
     Ok(())
@@ -822,7 +863,7 @@ impl ClaimRequest {
         name(&self.request_id)?;
         limits.validate()?;
         self.filter.validate(&schema.work)?;
-        lease_duration(self.lease_micros)?;
+        lease_duration(self.lease_nanos)?;
         if self
             .filter
             .lifecycle
@@ -978,11 +1019,12 @@ mod tests {
                 ("score".into(), FieldType::Float),
             ]),
             indexes: BTreeMap::from([("by_kind".into(), vec!["kind".into()])]),
+            unique_indexes: BTreeSet::new(),
         };
         QueueSchema {
             work: definition.clone(),
             state: BTreeMap::from([("instance".into(), definition)]),
-            progress_bound_micros: 1_000_000,
+            progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
         }
     }
@@ -1025,7 +1067,7 @@ mod tests {
             filter: Filter::default(),
             order: ClaimOrder::PriorityAscending,
             eligible_at: 0,
-            lease_micros: 1_000_000,
+            lease_nanos: 1_000_000_000,
             max_records: 100,
             max_bytes: 1 << 20,
             fields: None,
@@ -1100,7 +1142,7 @@ mod tests {
         changed.eligible_at += 1;
         variants.push(changed);
         let mut changed = base.clone();
-        changed.lease_micros += 1;
+        changed.lease_nanos += 1;
         variants.push(changed);
         let mut changed = base.clone();
         changed.order = ClaimOrder::PriorityDescending;
@@ -1189,7 +1231,7 @@ mod tests {
                 .is_err()
         );
         request.fields = None;
-        request.lease_micros = 0;
+        request.lease_nanos = 0;
         assert!(
             request
                 .validate(&schema(), &QueueLimits::default())
@@ -1268,7 +1310,7 @@ mod tests {
         assert!(request.validate(&QueueLimits::default()).is_err());
     }
     #[test]
-    fn codec_v1_golden_claim() {
+    fn codec_v2_golden_claim() {
         let request = claim();
         let digest = request
             .fingerprint()
@@ -1276,10 +1318,10 @@ mod tests {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-        assert_eq!(encoded_len(&request).unwrap(), 26);
+        assert_eq!(encoded_len(&request).unwrap(), 28);
         assert_eq!(
             digest,
-            "2e4a15b23b9146147e72d3e62a62a3a0264343a58d2528482c988e1db44ac27f"
+            "8f9ac1f4aa911f12e2f7300f0fcc52799069a485cfeea5fdd33dbbff8402977c"
         );
     }
     #[test]
@@ -1362,5 +1404,91 @@ mod tests {
             request.validate(&schema(), &limits),
             Err(QueueError::TooLarge)
         );
+    }
+    #[test]
+    fn nanosecond_interval_conversions_never_round_or_saturate() {
+        for n in [i64::MIN, -1, 0, 100, 299, 300, i64::MAX] {
+            assert_eq!(timestamp_nanos(timestamp_from_nanos(n)).unwrap(), n);
+        }
+        let mut beyond = timestamp_from_nanos(i64::MAX);
+        beyond.nanoseconds += 1;
+        assert!(timestamp_nanos(beyond).is_err());
+        let mut before = timestamp_from_nanos(i64::MIN);
+        before.nanoseconds -= 1;
+        assert!(timestamp_nanos(before).is_err());
+        let p = Predicate::Range {
+            lower: Some(Bound::Included(FieldValue::Integer(100))),
+            upper: Some(Bound::Excluded(FieldValue::Integer(300))),
+        };
+        assert!(p.matches(Some(&FieldValue::Integer(299))));
+        assert!(!p.matches(Some(&FieldValue::Integer(300))));
+    }
+    #[test]
+    fn legacy_long_identifiers_remain_valid() {
+        let mut request = InsertRequest {
+            queue: queue(),
+            request_id: "rid".repeat(100),
+            mode: InsertMode::InsertOnly,
+            items: vec![item(&"await-key".repeat(100))],
+        };
+        request.items[0]
+            .fields
+            .insert("kind".into(), FieldValue::Text("target".repeat(200)));
+        assert!(request.validate(&schema(), &QueueLimits::default()).is_ok());
+    }
+    #[test]
+    fn future_three_hundred_nanoseconds_is_not_claimable_early() {
+        let mut record = WorkRecord {
+            work: item("future"),
+            version: 1,
+            insertion_sequence: 1,
+            lifecycle: Lifecycle::Pending,
+            eligible_since: 300,
+            attempts: 0,
+            lease_expires_at: None,
+        };
+        record.work.available_at = 300;
+        let mut request = claim();
+        request.eligible_at = 0;
+        assert!(!matches_claim(&record, &request));
+        request.eligible_at = 299;
+        assert!(!matches_claim(&record, &request));
+        request.eligible_at = 300;
+        assert!(matches_claim(&record, &request));
+    }
+    #[test]
+    fn claim_and_renewal_enforce_nanosecond_wall_limits() {
+        for (duration, valid) in [
+            (999_999, false),
+            (1_000_000, true),
+            (3_600_000_000_000, true),
+            (3_600_000_000_001, false),
+        ] {
+            let mut c = claim();
+            c.lease_nanos = duration;
+            assert_eq!(
+                c.validate(&schema(), &QueueLimits::default()).is_ok(),
+                valid
+            );
+            let mut g = group("renew");
+            g.claimed_updates.push(ClaimedUpdate {
+                key: "work".into(),
+                lease: LeaseCredential { token: vec![1] },
+                expected_version: 1,
+                patch: WorkPatch::default(),
+                disposition: Disposition::Retain {
+                    renew_nanos: Some(duration),
+                },
+            });
+            assert_eq!(
+                CommitBatch {
+                    queue: queue(),
+                    groups: vec![g]
+                }
+                .validate(&schema(), &QueueLimits::default())
+                .is_ok(),
+                valid
+            );
+        }
     }
 }

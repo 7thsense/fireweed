@@ -28,7 +28,9 @@ One concrete asynchronous Fireweed handle, selected at construction, provides:
 | `read_commit` | Queue and group request ids | Recorded outcomes or explicit absent/expired outcomes |
 
 Queue provisioning declares work fields, state collections, and indexes once.
-Definition drift is a deployment error. Construction and maintenance are not
+Definitions retain declared unique indexes (including Snorri run/target identity).
+Commit validates complete resulting unique tuples atomically, including rekeys;
+missing components follow the existing NULLS DISTINCT rule. Definition drift is a deployment error. Construction and maintenance are not
 queue hot-path operations. PostgreSQL and S3/Turso implement this same contract;
 Snorri uses one adapter and never names a storage backend in its operation code.
 No capability flag makes an operation in this table optional.
