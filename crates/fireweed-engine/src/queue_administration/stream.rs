@@ -681,11 +681,22 @@ fn resolve_candidate<'r>(
         )?;
     }
     let probe_charge = reservation.buffer(probe_bytes)?;
-    for tuple in required_tuples(&effects) {
-        copy_probe(&mut before, image, tuple)?;
+    // External owner identifiers can dwarf this row. Own every charge before
+    // fallible probe copies so failure drops payloads before their guards.
+    let mut candidate = AcceptedCandidate {
+        accepted: true,
+        before,
+        delta,
+        effects,
+        _charge: row_charge
+            .merge(names_charge)?
+            .merge(tuple_charge)?
+            .merge(probe_charge)?,
+    };
+    for tuple in required_tuples(&candidate.effects) {
+        copy_probe(&mut candidate.before, image, tuple)?;
     }
-
-    let accepted = match effects.validate(&before)? {
+    candidate.accepted = match candidate.effects.validate(&candidate.before)? {
         Err(Rejection::UniqueConflict) => {
             proposal.outcome = AdministrativeOutcome::UniqueConflict;
             false
@@ -694,16 +705,7 @@ fn resolve_candidate<'r>(
         Ok(()) => true,
     };
     // Keep consulted initial authority even for a per-row business rejection.
-    Ok(Some(AcceptedCandidate {
-        accepted,
-        before,
-        delta,
-        effects,
-        _charge: row_charge
-            .merge(names_charge)?
-            .merge(tuple_charge)?
-            .merge(probe_charge)?,
-    }))
+    Ok(Some(candidate))
 }
 
 fn append_delta(target: &mut CommitDelta, mut delta: CommitDelta) {

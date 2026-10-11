@@ -1353,7 +1353,7 @@ async fn persist_delta(
                     ix_prefixes.push(prefix(sort));
                     ix_hashes.push(probe_hash(sort));
                     ix_full.push(sort.clone());
-                    uniques.push(effect.unique);
+                    uniques.push(effect.after_unique);
                 }
             } else {
                 for (no, (name, columns)) in def.indexes.iter().enumerate() {
@@ -1369,7 +1369,10 @@ async fn persist_delta(
                     ix_prefixes.push(prefix(&sort));
                     ix_hashes.push(probe_hash(&sort));
                     ix_full.push(sort);
-                    uniques.push(def.unique_indexes.contains(name));
+                    uniques.push(
+                        def.unique_indexes.contains(name)
+                            && columns.iter().all(|name| fields.contains_key(name)),
+                    );
                 }
             }
         }

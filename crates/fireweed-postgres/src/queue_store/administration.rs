@@ -646,6 +646,187 @@ async fn finalize_native_semantics(
     }))
 }
 
+/// Apply a sealed resolved stream under the original queue fence. This private
+/// prerequisite does not create a receipt or establish publication-size approval.
+/// Every command targets an existing record; no physical ID may be allocated.
+/// On OutcomeUnknown the enclosing owner must immediately abandon this Rust
+/// Transaction handle: server-side ROLLBACK has ended its transaction. Never
+/// continue siblings or write a rejection receipt through that borrowed handle.
+/// Cancelling the owner/application future requires dropping or rolling back
+/// the containing Transaction; cancellation bypasses the result-error block.
+/// Public caller cancellation must leave the admitted backend job running.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "resolved application qualification precedes public activation"
+    )
+)]
+async fn apply_resolved_administrative_commands(
+    tx: &Transaction<'_>,
+    address: &QueueAddress,
+    queue: &QueueRow<'_>,
+    mut scratch: fireweed_queue_spool::SealedAdministrativeScratch,
+    reservation: &Arc<QueueReservation>,
+    workers: &fireweed_queue_spool::ScratchWorkers,
+) -> QueueResult<fireweed_queue_spool::SealedAdministrativeScratch> {
+    use fireweed_engine::queue_publication::{
+        EffectRef, FieldsCommandRef, materialize_administrative_work,
+    };
+    let result = async {
+        scratch.verify_context(address, queue.definition_pin, queue.next_sequence)?;
+        scratch = workers
+            .run(move || {
+                scratch.rewind_commands()?;
+                Ok(scratch)
+            })
+            .await?;
+        loop {
+            let (next, packet) = workers
+                .run(move || {
+                    let packet = scratch.next_command()?;
+                    Ok((scratch, packet))
+                })
+                .await?;
+            scratch = next;
+            let Some(packet) = packet else { break };
+            let command = packet.command()?;
+            let mut bound = (command.identity.key.len() as u64)
+                .checked_mul(16)
+                .and_then(|n| n.checked_add(8192))
+                .ok_or_else(|| storage("resolved application identity bound"))?;
+            for name in queue.schema.work.indexes.values().flatten() {
+                bound = bound
+                    .checked_add(
+                        (name.len() as u64)
+                            .checked_mul(8)
+                            .ok_or_else(|| storage("resolved application field bound"))?,
+                    )
+                    .and_then(|n| n.checked_add(1024))
+                    .ok_or_else(|| storage("resolved application field bound"))?;
+            }
+            if let EffectRef::WorkPut {
+                fields: FieldsCommandRef::Edit(fields),
+                ..
+            } = command.effect
+            {
+                for entry in fields.iter() {
+                    let (name, _) = entry.map_err(|error| storage(format!("{error:?}")))?;
+                    bound = bound
+                        .checked_add(
+                            (name.len() as u64)
+                                .checked_mul(8)
+                                .ok_or_else(|| storage("resolved application edit bound"))?,
+                        )
+                        .and_then(|n| n.checked_add(1024))
+                        .ok_or_else(|| storage("resolved application edit bound"))?;
+                }
+            }
+            let _input = reservation.buffer(bound)?;
+            let mut names = BTreeSet::new();
+            if let EffectRef::WorkPut {
+                fields: FieldsCommandRef::Edit(fields),
+                ..
+            } = command.effect
+            {
+                for entry in fields.iter() {
+                    names.insert(
+                        entry
+                            .map_err(|error| storage(format!("{error:?}")))?
+                            .0
+                            .to_owned(),
+                    );
+                }
+                let edited = names.clone();
+                for columns in queue.schema.work.indexes.values() {
+                    if columns.iter().any(|name| edited.contains(name)) {
+                        names.extend(columns.iter().cloned());
+                    }
+                }
+            }
+            // Empty patch is only an addressed hydration carrier. No planner or
+            // user expectation evaluates it; resolved predecessor checks follow.
+            let carrier = CommitGroup {
+                request_id: String::new(),
+                claimed_updates: vec![],
+                state_updates: vec![],
+                work_inserts: vec![],
+                work_updates: vec![UnclaimedUpdate {
+                    key: command.identity.key.into(),
+                    expect: StateExpect::Version(command.prior_highwater),
+                    change: UnclaimedChange::Patch(WorkPatch::default()),
+                }],
+            };
+            let mut loaded =
+                load_group_with_fields(tx, queue, &carrier, reservation, Some(&names)).await?;
+            if loaded.ids.len() != 1 || loaded.snapshot.work.len() != 1 {
+                return Err(storage("resolved administrative record must exist"));
+            }
+            let before = std::mem::take(&mut loaded.snapshot);
+            let materialized =
+                materialize_administrative_work(command, &before, &queue.schema.work, reservation)
+                    .map_err(|error| storage(format!("{error:?}")))?;
+            if !loaded.ids.contains_key(&RecordIdentity {
+                collection: None,
+                key: command.identity.key.into(),
+            }) {
+                return Err(storage("resolved administrative physical ID missing"));
+            }
+            persist_delta(tx, queue, materialized.delta(), &before, &mut loaded).await?;
+            #[cfg(test)]
+            APPLICATION_BOUNDARY.with(|hook| {
+                if let Some((id, callback)) = &*hook.borrow()
+                    && *id == queue.id
+                {
+                    callback();
+                }
+            });
+            #[cfg(test)]
+            check_resolved_application_boundary(tx, queue.id).await?;
+        }
+        workers
+            .run(move || {
+                scratch.rewind_commands()?;
+                Ok(scratch)
+            })
+            .await
+    }
+    .await;
+    if result.is_err() {
+        // Infrastructure/predecessor failure discards earlier sibling SQL too.
+        let _ = tx.batch_execute("ROLLBACK").await;
+    }
+    result
+}
+#[cfg(test)]
+type ApplicationBoundary = Option<(i64, Box<dyn Fn()>)>;
+#[cfg(test)]
+thread_local! {
+    static APPLICATION_FAILURE_AFTER: std::cell::Cell<Option<(i64,u64)>> = const { std::cell::Cell::new(None) };
+    static APPLICATION_BOUNDARY: std::cell::RefCell<ApplicationBoundary> = const {std::cell::RefCell::new(None)};
+}
+#[cfg(test)]
+async fn check_resolved_application_boundary(
+    tx: &Transaction<'_>,
+    queue_id: i64,
+) -> QueueResult<()> {
+    let fail = APPLICATION_FAILURE_AFTER.with(|fault| match fault.get() {
+        Some((id, 1)) if id == queue_id => {
+            fault.set(None);
+            true
+        }
+        Some((id, n)) if id == queue_id => {
+            fault.set(Some((id, n - 1)));
+            false
+        }
+        _ => false,
+    });
+    if fail {
+        tx.query_one("SELECT 1/0", &[]).await.map_err(storage)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,21 +1073,60 @@ mod tests {
             assert_eq!(finalized.initial.snapshot.next_sequence, 5001);
             assert!(finalized.initial.ids.is_empty());
             let NativeProvisionalGroup {
-                mut scratch,
+                scratch,
                 summary,
                 ordinary,
                 initial,
             } = finalized;
-            workers
-                .run(move || {
-                    let mut count = 0;
-                    while let Some(command) = scratch.next_command()? {
-                        drop(command);
-                        count += 1;
-                    }
-                    assert_eq!(count, 5001);
-                    Ok(())
-                })
+            let application_bytes = std::rc::Rc::new(std::cell::Cell::new(None));
+            let observed_bytes = application_bytes.clone();
+            let application_admission = admission.clone();
+            APPLICATION_BOUNDARY.with(|hook| {
+                *hook.borrow_mut() = Some((
+                    queue_id,
+                    Box::new(move || {
+                        let bytes = application_admission.usage().unwrap().1;
+                        assert!(bytes < 1 << 20);
+                        if let Some(previous) = observed_bytes.get() {
+                            assert_eq!(previous, bytes);
+                        } else {
+                            observed_bytes.set(Some(bytes));
+                        }
+                    }),
+                ))
+            });
+            struct ResetApplication;
+            impl Drop for ResetApplication {
+                fn drop(&mut self) {
+                    APPLICATION_BOUNDARY.with(|hook| *hook.borrow_mut() = None);
+                }
+            }
+            let reset_application = ResetApplication;
+            tx.batch_execute("SAVEPOINT resolved_application")
+                .await
+                .unwrap();
+            let scratch = apply_resolved_administrative_commands(
+                &tx, &address, &fenced, scratch, &job, &workers,
+            )
+            .await
+            .unwrap();
+            drop(reset_application);
+            assert!(application_bytes.get().is_some());
+            let changed:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=2 AND priority=17",&[&queue_id]).await.unwrap().get(0);
+            assert_eq!(changed, 5001);
+            let logical: String = tx
+                .query_one(
+                    "SELECT next_sequence::text FROM fireweed_api007.queues WHERE id=$1",
+                    &[&queue_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(logical, "5001");
+            // Administrative replay does not allocate physical IDs or publish
+            // the later ordinary sequence. Retain rewindable command authority.
+            drop(scratch);
+            tx.batch_execute("ROLLBACK TO SAVEPOINT resolved_application")
                 .await
                 .unwrap();
             drop(summary);
@@ -977,6 +1197,256 @@ mod tests {
             .get(0);
         assert_eq!(priority, 0);
         drop(fenced);
+        drop(job);
+        workers.close_and_drain().await.unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        store.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn resolved_application_preserves_opaque_data_and_rolls_back_late_failure() {
+        use fireweed_queue_spool::{ScratchDiskQuota, ScratchWorkers};
+        let _fixture = physical_fixture().await;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COLLIDING_PROBES.set(false);
+                APPLICATION_FAILURE_AFTER.set(None);
+            }
+        }
+        let _reset = Reset;
+        COLLIDING_PROBES.set(true);
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let mut schema = fireweed_conformance::queue_contract::schema();
+        schema.work.fields = BTreeMap::from([
+            ("target".into(), FieldType::Text),
+            ("gate".into(), FieldType::Boolean),
+            ("opaque".into(), FieldType::Bytes),
+        ]);
+        schema.work.indexes = BTreeMap::from([
+            ("compound".into(), vec!["target".into(), "gate".into()]),
+            ("opaque".into(), vec!["opaque".into()]),
+        ]);
+        schema.work.unique_indexes = BTreeSet::from(["compound".into()]);
+        schema.work.additional_field_prefixes = BTreeSet::from(["/payload/".into()]);
+        let address = QueueAddress {
+            tenant: "resolved-application".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        store
+            .provision(ProvisionRequest {
+                queue: address.clone(),
+                schema: schema.clone(),
+            })
+            .await
+            .unwrap();
+        store
+            .insert(InsertRequest {
+                queue: address.clone(),
+                request_id: "seed".into(),
+                mode: InsertMode::InsertOnly,
+                items: (0..3)
+                    .map(|n| NewWork {
+                        key: format!("key-{n}"),
+                        priority: 0,
+                        available_at: 0,
+                        fields: BTreeMap::from([
+                            ("target".into(), FieldValue::Text(format!("u-{n}"))),
+                            ("gate".into(), FieldValue::Boolean(true)),
+                            ("opaque".into(), FieldValue::Bytes(vec![n; 32768])),
+                            ("/payload/keep".into(), FieldValue::Text("retained".into())),
+                        ]),
+                        body: vec![n; 262144].into(),
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap();
+        let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            connection.await.unwrap();
+        });
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(2, 4).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let quota = ScratchDiskQuota::new(8 << 20).unwrap();
+        let group = CommitGroup {
+            request_id: "resolved".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_updates: vec![],
+            work_inserts: vec![],
+        };
+        let update = AdministrativeAction::Update {
+            patch: WorkPatch {
+                priority: Some(19),
+                fields: BTreeMap::from([("target".into(), None)]),
+                body: Some(Vec::new().into()),
+                ..Default::default()
+            },
+            lifecycle: AdministrativeLifecycle::Keep,
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+            remove_field_prefixes: BTreeSet::new(),
+        };
+        let mut queue_id = 0;
+        for scenario in 0..6 {
+            let tx = client.transaction().await.unwrap();
+            let queue = queue_row(&tx, &address, &job).await.unwrap();
+            queue_id = queue.id;
+            let intent = AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                    id: "all".into(),
+                    selector: WorkSelector::all(vec![]),
+                    precondition: WorkSelector::all(vec![]),
+                    action: if scenario == 1 {
+                        AdministrativeAction::Delete {
+                            lease_guard: AdministrativeLeaseGuard::InvalidateActive,
+                        }
+                    } else if scenario == 5 {
+                        AdministrativeAction::Update {
+                            patch: WorkPatch {
+                                priority: Some(19),
+                                ..Default::default()
+                            },
+                            lifecycle: AdministrativeLifecycle::Keep,
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                            remove_field_prefixes: BTreeSet::new(),
+                        }
+                    } else {
+                        update.clone()
+                    },
+                }]),
+            };
+            let unchanged=tx.query("SELECT r.key,f.ctid::text,i.ctid::text,a.ctid::text FROM fireweed_api007.records r JOIN fireweed_api007.fields f ON f.record_id=r.id AND f.field=1 JOIN fireweed_api007.indexes i ON i.record_id=r.id AND i.index_no=1 JOIN fireweed_api007.additional_fields a ON a.record_id=r.id WHERE r.queue_id=$1 ORDER BY r.key",&[&queue.id]).await.unwrap();
+            let prepared = prepare_native_scratch(
+                &tx,
+                &address,
+                &queue,
+                &group,
+                &intent,
+                &QueueLimits::default(),
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            let finalized = finalize_native_semantics(
+                prepared,
+                &address,
+                &group,
+                &queue,
+                || Ok(0),
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap()
+            .unwrap_or_else(|reason| panic!("unexpected rejection {reason:?}"));
+            let NativeProvisionalGroup {
+                scratch,
+                summary,
+                ordinary,
+                initial,
+            } = finalized;
+            if (2..5).contains(&scenario) {
+                tx.execute(
+                    "UPDATE fireweed_api007.records SET priority=99 WHERE queue_id=$1 AND key=$2",
+                    &[&queue.id, &b"key-0".as_slice()],
+                )
+                .await
+                .unwrap();
+                if scenario == 2 {
+                    APPLICATION_FAILURE_AFTER.set(Some((queue.id, 2)));
+                }
+                if scenario == 3 {
+                    tx.execute(
+                        "UPDATE fireweed_api007.records SET version=2 WHERE queue_id=$1 AND key=$2",
+                        &[&queue.id, &b"key-1".as_slice()],
+                    )
+                    .await
+                    .unwrap();
+                }
+                if scenario == 4 {
+                    tx.execute("UPDATE fireweed_api007.records SET active=FALSE WHERE queue_id=$1 AND key=$2",&[&queue.id,&b"key-1".as_slice()]).await.unwrap();
+                }
+            }
+            let result = apply_resolved_administrative_commands(
+                &tx, &address, &queue, scratch, &job, &workers,
+            )
+            .await;
+            if (2..5).contains(&scenario) {
+                assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+            } else {
+                let scratch = result.unwrap();
+                drop(scratch);
+                if scenario == 0 {
+                    let changed:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=2 AND priority=19",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(changed, 3);
+                    let empty:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.bodies b JOIN fireweed_api007.records r ON r.id=b.record_id WHERE r.queue_id=$1 AND octet_length(b.value)=0",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(empty, 3);
+                    let removed:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.fields f JOIN fireweed_api007.records r ON r.id=f.record_id WHERE r.queue_id=$1 AND f.field=2",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(removed, 0);
+                    let unique:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.indexes WHERE queue_id=$1 AND index_no=0 AND is_unique",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(unique, 0);
+                    let retained=tx.query("SELECT r.key,f.ctid::text,i.ctid::text,a.ctid::text FROM fireweed_api007.records r JOIN fireweed_api007.fields f ON f.record_id=r.id AND f.field=1 JOIN fireweed_api007.indexes i ON i.record_id=r.id AND i.index_no=1 JOIN fireweed_api007.additional_fields a ON a.record_id=r.id WHERE r.queue_id=$1 ORDER BY r.key",&[&queue.id]).await.unwrap();
+                    assert_eq!(retained.len(), 3);
+                    for (old, new) in unchanged.iter().zip(&retained) {
+                        for col in 1..4 {
+                            assert_eq!(old.get::<_, String>(col), new.get::<_, String>(col));
+                        }
+                    }
+                } else if scenario == 5 {
+                    let bodies:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.bodies b JOIN fireweed_api007.records r ON r.id=b.record_id WHERE r.queue_id=$1 AND octet_length(b.value)=262144",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(bodies, 3);
+                    let complete:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.indexes WHERE queue_id=$1 AND index_no=0 AND is_unique",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(complete, 3);
+                    let retained=tx.query("SELECT r.key,f.ctid::text,i.ctid::text,a.ctid::text FROM fireweed_api007.records r JOIN fireweed_api007.fields f ON f.record_id=r.id AND f.field=1 JOIN fireweed_api007.indexes i ON i.record_id=r.id AND i.index_no=1 JOIN fireweed_api007.additional_fields a ON a.record_id=r.id WHERE r.queue_id=$1 ORDER BY r.key",&[&queue.id]).await.unwrap();
+                    for (old, new) in unchanged.iter().zip(&retained) {
+                        for col in 1..4 {
+                            assert_eq!(old.get::<_, String>(col), new.get::<_, String>(col));
+                        }
+                    }
+                } else {
+                    for table in ["bodies", "fields", "additional_fields", "indexes"] {
+                        let count:i64=tx.query_one(&format!("SELECT count(*) FROM fireweed_api007.{table} p JOIN fireweed_api007.records r ON p.record_id=r.id WHERE r.queue_id=$1"),&[&queue.id]).await.unwrap().get(0);
+                        assert_eq!(count, 0);
+                    }
+                    let tombstones:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND NOT active AND version=2",&[&queue.id]).await.unwrap().get(0);
+                    assert_eq!(tombstones, 3);
+                }
+            }
+            drop(summary);
+            drop(ordinary);
+            drop(initial);
+            drop(queue);
+            tx.rollback().await.unwrap();
+            let original:i64=client.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=1 AND priority=0",&[&queue_id]).await.unwrap().get(0);
+            assert_eq!(original, 3);
+            assert_eq!(quota.usage().unwrap(), 0);
+        }
+        assert_ne!(queue_id, 0);
         drop(job);
         workers.close_and_drain().await.unwrap();
         assert_eq!(admission.usage().unwrap(), (0, 0));
