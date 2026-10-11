@@ -24,6 +24,47 @@ impl ClaimTransition {
         }
     }
 }
+/// Exact postcard response-prefix accounting. Count framing is measured once per
+/// candidate; already fitted records are never reserialized. Failed inclusion
+/// preserves the prior prefix, independently of admission or payload validity.
+pub struct ClaimResponseBudget {
+    max_bytes: u64,
+    element_bytes: u64,
+    records: u64,
+}
+impl ClaimResponseBudget {
+    pub fn new(max_bytes: u64) -> QueueResult<Self> {
+        if encoded_len(&0u64)? > max_bytes {
+            return Err(QueueError::TooLarge);
+        }
+        Ok(Self {
+            max_bytes,
+            element_bytes: 0,
+            records: 0,
+        })
+    }
+    pub fn try_include(&mut self, record: &ClaimedWork) -> QueueResult<bool> {
+        let records = self.records.checked_add(1).ok_or(QueueError::TooLarge)?;
+        let elements = self
+            .element_bytes
+            .checked_add(encoded_len(record)?)
+            .ok_or(QueueError::TooLarge)?;
+        let total = elements
+            .checked_add(encoded_len(&records)?)
+            .ok_or(QueueError::TooLarge)?;
+        if total > self.max_bytes {
+            return Ok(false);
+        }
+        self.records = records;
+        self.element_bytes = elements;
+        Ok(true)
+    }
+    pub fn encoded_bytes(&self) -> QueueResult<u64> {
+        self.element_bytes
+            .checked_add(encoded_len(&self.records)?)
+            .ok_or(QueueError::TooLarge)
+    }
+}
 /// Current lease authority for replay; creation versions intentionally do not
 /// enter this check because renewal returns the current record and expiry.
 #[derive(Clone, Copy)]
@@ -153,6 +194,37 @@ mod tests {
             expires_at: 20,
             insertion_head: 1,
         }
+    }
+    #[test]
+    fn response_prefix_budget_matches_real_vector_bytes_across_count_and_scalar_boundaries() {
+        let mut budget = ClaimResponseBudget::new(1 << 20).unwrap();
+        let mut records: Vec<ClaimedWork> = Vec::new();
+        assert_eq!(
+            budget.encoded_bytes().unwrap(),
+            postcard::to_allocvec(&records).unwrap().len() as u64
+        );
+        for ordinal in 0..=256 {
+            let mut record = plan_claim(work(), vec![3; 32], context())
+                .unwrap()
+                .into_claimed();
+            record.record.version = [1, 127, 128, u64::MAX][ordinal % 4];
+            record.record.work.available_at = [i64::MIN, -1, 0, i64::MAX][ordinal % 4];
+            record.lease.token = vec![7; [1, 127, 128, 256][ordinal % 4]];
+            assert!(budget.try_include(&record).unwrap());
+            records.push(record);
+            if [1, 2, 127, 128, 129, 255, 256, 257].contains(&records.len()) {
+                assert_eq!(
+                    budget.encoded_bytes().unwrap(),
+                    postcard::to_allocvec(&records).unwrap().len() as u64
+                );
+            }
+        }
+        let exact = postcard::to_allocvec(&records[..1]).unwrap().len() as u64;
+        let mut one = ClaimResponseBudget::new(exact).unwrap();
+        assert!(one.try_include(&records[0]).unwrap());
+        assert!(!one.try_include(&records[1]).unwrap());
+        assert_eq!(one.encoded_bytes().unwrap(), exact);
+        assert!(ClaimResponseBudget::new(0).is_err());
     }
     #[test]
     fn pending_and_expired_claims_share_exact_transition_without_payload_copy() {

@@ -18,6 +18,15 @@ pub struct AdmittedClaimReplay {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedClaimReplay {
+    pub(super) fn from_records(
+        records: Vec<ClaimedWork>,
+        charges: Vec<OwnedQueueBufferCharge>,
+    ) -> Self {
+        Self {
+            records,
+            _charges: charges,
+        }
+    }
     pub fn records(&self) -> &[ClaimedWork] {
         &self.records
     }
@@ -85,6 +94,9 @@ impl NativeTransactionWork for ReplayWorker {
         let request = &self.input.request;
         let queue_id = snapshot.queue_id;
         let sequence = snapshot.insertion_sequence;
+        let Some(size) = claim_receipt_size(connection, queue_id, request).await? else {
+            return Ok(None);
+        };
         let identity_hash = discovery_digest(request.request_id.as_bytes());
         let params = || {
             vec![
@@ -93,23 +105,6 @@ impl NativeTransactionWork for ReplayWorker {
                 blob(request.request_id.as_bytes()),
             ]
         };
-        let metadata = one(connection,"SELECT CASE WHEN typeof(fingerprint_format)='integer' THEN fingerprint_format ELSE NULL END,CASE WHEN typeof(fingerprint)='blob' AND length(fingerprint)=32 THEN fingerprint ELSE NULL END,CASE WHEN typeof(expired)='integer' THEN expired ELSE NULL END,CASE WHEN typeof(outcome)='blob' THEN length(outcome) ELSE -1 END FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",params(),4).await?;
-        let Some(metadata) = metadata else {
-            return Ok(None);
-        };
-        if integer(&metadata[0])? != 3 {
-            return Err(unknown("unsupported claim fingerprint format"));
-        }
-        let fingerprint: [u8; 32] = bytes(&metadata[1])?.try_into().map_err(unknown)?;
-        if fingerprint != request.fingerprint()? {
-            return Err(QueueError::RequestConflict);
-        }
-        match integer(&metadata[2])? {
-            0 => {}
-            1 => return Err(QueueError::RequestExpired),
-            _ => return Err(unknown("invalid receipt expiry")),
-        }
-        let size = u64::try_from(integer(&metadata[3])?).map_err(unknown)?;
         self.charges.push(
             self.job.owned_buffer(
                 size.checked_mul(4)
@@ -145,60 +140,23 @@ impl NativeTransactionWork for ReplayWorker {
             if !keys.insert(entry.key) {
                 return Err(unknown("duplicate claim membership"));
             }
-            let key_hash = discovery_digest(entry.key.as_bytes());
-            let row = one(connection,"SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(version)='blob' AND length(version)=8 THEN version ELSE NULL END,CASE WHEN typeof(active)='integer' THEN active ELSE NULL END,CASE WHEN typeof(lifecycle)='integer' THEN lifecycle ELSE NULL END,CASE WHEN typeof(priority)='integer' THEN priority ELSE NULL END,CASE WHEN typeof(available_at)='integer' THEN available_at ELSE NULL END,CASE WHEN typeof(eligible_since)='integer' THEN eligible_since ELSE NULL END,CASE WHEN typeof(attempts)='integer' THEN attempts ELSE NULL END,CASE WHEN lease_until IS NULL OR typeof(lease_until)='integer' THEN lease_until ELSE '' END,CASE WHEN lease_hash IS NULL OR (typeof(lease_hash)='blob' AND length(lease_hash)=32) THEN lease_hash ELSE x'' END,CASE WHEN typeof(insertion_sequence)='blob' AND length(insertion_sequence)=8 THEN insertion_sequence ELSE NULL END FROM q7_records WHERE queue_id=?1 AND collection=0 AND key_hash=?2 AND key=?3",vec![Value::Integer(queue_id),blob(&key_hash),blob(entry.key.as_bytes())],11).await?;
-            let Some(row) = row else {
-                return Err(QueueError::ClaimExpired);
-            };
-            match integer(&row[2])? {
-                0 => return Err(QueueError::ClaimExpired),
-                1 => {}
-                _ => return Err(unknown("invalid active state")),
-            }
-            let lifecycle = match integer(&row[3])? {
-                0 => Lifecycle::Pending,
-                1 => Lifecycle::Leased,
-                2 => Lifecycle::Completed,
-                3 => Lifecycle::Failed,
-                _ => return Err(unknown("invalid lifecycle")),
-            };
-            let expiry = match row[8] {
-                Value::Null => None,
-                _ => Some(integer(&row[8])?),
-            };
-            let hash = match &row[9] {
-                Value::Null => None,
-                _ => Some(bytes(&row[9])?.try_into().map_err(unknown)?),
-            };
+            let (id, stored) =
+                super::work::load_current_work(connection, queue_id, entry.key, sequence)
+                    .await?
+                    .ok_or(QueueError::ClaimExpired)?;
             ClaimOwnership {
-                lifecycle,
-                expires_at: expiry,
-                token_hash: hash,
+                lifecycle: stored.record.lifecycle,
+                expires_at: stored.record.lease_expires_at,
+                token_hash: stored.lease_hash,
             }
             .validate(entry.token, self.input.now)?;
-            let version = unsigned(&row[1])?;
-            let insertion_sequence = unsigned(&row[10])?;
-            if version < entry.version || insertion_sequence == 0 || insertion_sequence > sequence {
-                return Err(unknown("invalid current replay version/sequence"));
+            if stored.record.version < entry.version {
+                return Err(unknown("invalid current replay version"));
             }
             records.push((
-                integer(&row[0])?,
+                id,
                 ClaimedWork {
-                    record: WorkRecord {
-                        work: NewWork {
-                            key: entry.key.into(),
-                            priority: integer(&row[4])?,
-                            available_at: integer(&row[5])?,
-                            fields: Fields::new(),
-                            body: bytes::Bytes::new(),
-                        },
-                        version,
-                        insertion_sequence,
-                        lifecycle,
-                        eligible_since: integer(&row[6])?,
-                        attempts: u32::try_from(integer(&row[7])?).map_err(unknown)?,
-                        lease_expires_at: expiry,
-                    },
+                    record: stored.record,
                     lease: LeaseCredential {
                         token: entry.token.to_vec(),
                     },
@@ -221,6 +179,7 @@ impl NativeTransactionWork for ReplayWorker {
                     job: &self.job,
                     charges: &mut self.charges,
                     total: &mut payload_bytes,
+                    response_limit: &mut false,
                 },
                 &mut work.record.work,
             )
@@ -233,20 +192,59 @@ impl NativeTransactionWork for ReplayWorker {
         Ok(Some(records))
     }
 }
-fn add_payload(total: &mut u64, length: i64, max: u64) -> QueueResult<u64> {
+pub(super) async fn claim_receipt_size(
+    connection: &Connection,
+    queue_id: i64,
+    request: &ClaimRequest,
+) -> QueueResult<Option<u64>> {
+    let identity_hash = discovery_digest(request.request_id.as_bytes());
+    let params = || {
+        vec![
+            Value::Integer(queue_id),
+            blob(&identity_hash),
+            blob(request.request_id.as_bytes()),
+        ]
+    };
+    let metadata = one(connection,"SELECT CASE WHEN typeof(fingerprint_format)='integer' THEN fingerprint_format ELSE NULL END,CASE WHEN typeof(fingerprint)='blob' AND length(fingerprint)=32 THEN fingerprint ELSE NULL END,CASE WHEN typeof(expired)='integer' THEN expired ELSE NULL END,CASE WHEN typeof(outcome)='blob' THEN length(outcome) ELSE -1 END FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",params(),4).await?;
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    if integer(&metadata[0])? != 3 {
+        return Err(unknown("unsupported claim fingerprint format"));
+    }
+    let fingerprint: [u8; 32] = bytes(&metadata[1])?.try_into().map_err(unknown)?;
+    if fingerprint != request.fingerprint()? {
+        return Err(QueueError::RequestConflict);
+    }
+    match integer(&metadata[2])? {
+        0 => {}
+        1 => return Err(QueueError::RequestExpired),
+        _ => return Err(unknown("invalid receipt expiry")),
+    }
+    let size = u64::try_from(integer(&metadata[3])?).map_err(unknown)?;
+    Ok(Some(size))
+}
+fn add_payload(
+    total: &mut u64,
+    length: i64,
+    max: u64,
+    response_limit: &mut bool,
+) -> QueueResult<u64> {
     let length = u64::try_from(length).map_err(unknown)?;
     *total = total.checked_add(length).ok_or(QueueError::TooLarge)?;
     if *total > max {
+        *response_limit = true;
         return Err(QueueError::TooLarge);
     }
     Ok(length)
 }
-struct ReplayPayloadBudget<'a> {
-    job: &'a Arc<QueueReservation>,
-    charges: &'a mut Vec<OwnedQueueBufferCharge>,
-    total: &'a mut u64,
+pub(super) struct ReplayPayloadBudget<'a> {
+    pub(super) job: &'a Arc<QueueReservation>,
+    pub(super) charges: &'a mut Vec<OwnedQueueBufferCharge>,
+    pub(super) total: &'a mut u64,
+    pub(super) response_limit: &'a mut bool,
 }
-async fn load_replay_payload(
+pub(super) async fn load_replay_payload(
     connection: &Connection,
     id: i64,
     definition: &CollectionDefinition,
@@ -297,6 +295,7 @@ async fn load_replay_payload(
                 budget.total,
                 integer(&row.get_value(1).map_err(unknown)?)?,
                 request.max_bytes,
+                budget.response_limit,
             )?;
             budget.charges.push(
                 budget.job.owned_buffer(
@@ -345,12 +344,18 @@ async fn load_replay_payload(
             )
         };
         if let Some(metadata) = one(connection, metadata_sql, params.clone(), 1).await? {
-            add_payload(budget.total, integer(&metadata[0])?, request.max_bytes)?;
+            add_payload(
+                budget.total,
+                integer(&metadata[0])?,
+                request.max_bytes,
+                budget.response_limit,
+            )?;
             if !counted_name {
                 add_payload(
                     budget.total,
                     i64::try_from(name.len()).map_err(unknown)?,
                     request.max_bytes,
+                    budget.response_limit,
                 )?;
             }
             budget.charges.push(
@@ -377,7 +382,12 @@ async fn load_replay_payload(
     }
     if request.include_body {
         let metadata = one(connection,"SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_bodies WHERE record_id=?1",vec![Value::Integer(id)],1).await?.ok_or_else(||unknown("replay body missing"))?;
-        let length = add_payload(budget.total, integer(&metadata[0])?, request.max_bytes)?;
+        let length = add_payload(
+            budget.total,
+            integer(&metadata[0])?,
+            request.max_bytes,
+            budget.response_limit,
+        )?;
         let body = one(
             connection,
             "SELECT value FROM q7_bodies WHERE record_id=?1",
@@ -427,18 +437,18 @@ mod tests {
             let mut records=Vec::new();
             for id in 1..=128 {
                 let mut work=NewWork {key:id.to_string(),priority:0,available_at:0,fields:Fields::new(),body:bytes::Bytes::new()};
-                load_replay_payload(connection,id,&definition,&request,&mut ReplayPayloadBudget {job:&task_job,charges:&mut charges,total:&mut total},&mut work).await?;
+                load_replay_payload(connection,id,&definition,&request,&mut ReplayPayloadBudget {job:&task_job,charges:&mut charges,total:&mut total,response_limit:&mut false},&mut work).await?;
                 records.push(work);
             }
             assert!(records.iter().all(|work|work.fields.is_empty()));assert_eq!(total,0);
             request.fields=Some(definition.fields.keys().cloned().collect());
             let selected_charge=task_job.owned_buffer(100000)?;
             let mut work=records.pop().unwrap();
-            load_replay_payload(connection,128,&definition,&request,&mut ReplayPayloadBudget {job:&task_job,charges:&mut charges,total:&mut total},&mut work).await?;
+            load_replay_payload(connection,128,&definition,&request,&mut ReplayPayloadBudget {job:&task_job,charges:&mut charges,total:&mut total,response_limit:&mut false},&mut work).await?;
             connection.execute("INSERT INTO q7_fields(record_id,queue_id,collection,field,prefix,hash,full_key,value) VALUES(128,1,0,0,x'',x'',x'',?1)",vec![blob(&encode(&FieldValue::Integer(7))?)]).await.map_err(unknown)?;
             for selected in [None,request.fields.clone()] {
                 request.fields=selected;let mut total=0;
-                assert_eq!(load_replay_payload(connection,128,&definition,&request,&mut ReplayPayloadBudget {job:&task_job,charges:&mut charges,total:&mut total},&mut work).await,Err(QueueError::TooLarge));
+                assert_eq!(load_replay_payload(connection,128,&definition,&request,&mut ReplayPayloadBudget {job:&task_job,charges:&mut charges,total:&mut total,response_limit:&mut false},&mut work).await,Err(QueueError::TooLarge));
                 assert!(work.fields.is_empty());
             }
             drop(work);drop(records);drop(request);drop(selected_charge);drop(charges);drop(definition);drop(_definition_charge);Ok::<(),QueueError>(())

@@ -24238,7 +24238,7 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "7b1a0de8f3e5c573218a34514950938d3d865708a8cd85e120ddb50146e3d17b",
+  "source_inventory_sha256": "c0db08db682be12b86a83ae1432f9509cf5882c5b5019f99576c2ff6f02f718f",
   "workspaces": [
     {
       "listing_error_sha256": "be8329699100d1e802435dc11836d5a2f3d9c00f1bc636bb0e98b3b5cfb99843",

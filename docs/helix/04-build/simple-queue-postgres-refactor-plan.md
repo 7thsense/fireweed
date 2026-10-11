@@ -75,10 +75,11 @@ contracts, designs and this execution plan concise and maintained in place.
 
 The concrete PostgreSQL interface and public mandatory suite exist. Native S3
 transport/fence/recovery and stock-Turso atomic projection, current claim replay
-and filtered candidate selection are internal primitives. Their local checks
-are not a public S3/Turso qualification. The full constructor/QueueStore, candidate
-hydration/resolved claim producer, remaining reads/mutations and public parity
-must still land. Full-manifest memory/rewrite growth remains unqualified.
+and filtered candidate selection plus provisional resolved claim preparation are
+internal primitives. Their local checks are not a public S3/Turso qualification.
+The full constructor/QueueStore, conditional publication and original-identity
+resolution with fresh ownership before ACK, remaining reads/mutations and public
+parity must still land. Full-manifest memory/rewrite growth remains unqualified.
 
 The single Snorri adapter and matched settled release workloads remain required.
 Stats as_of and negative-epoch hourly grouping must satisfy the consumer binding.
@@ -100,8 +101,9 @@ capacity evidence. Include paused apply, lost replies, writer/server process
 loss, fencing races, corrupt authority, native rollback/poison and exact rebuild.
 
 Snorri retains vectorized_resplit_replay_check and
-same_instance_siblings_use_independent_candidate_projections. Verify full JSON
-state and body model pins on read/write. State_version advances on transitions
+same_instance_siblings_use_independent_candidate_projections. Verify arbitrary JSON
+state and the complete JsonEqualityEncoding namespace/schema pin before indexed
+reads and writes in both numeric modes. State_version advances on transitions
 and await consumption, not dispatch/timeout/timer bookkeeping. Host maintenance
 must preserve ownership and resource drain semantics.
 

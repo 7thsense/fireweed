@@ -18,6 +18,31 @@ struct SelectionWorker {
     job: Arc<QueueReservation>,
     charges: Vec<OwnedQueueBufferCharge>,
 }
+pub(super) fn selection_charge(input: &ClaimReplayInput) -> QueueResult<u64> {
+    let entries = input.request.filter.fields.values().try_fold(
+        input
+            .request
+            .filter
+            .keys
+            .as_ref()
+            .map_or(0, |keys| keys.len()) as u64,
+        |n, predicate| {
+            n.checked_add(match predicate {
+                Predicate::In(values) => values.len() as u64,
+                _ => 2,
+            })
+            .ok_or(QueueError::TooLarge)
+        },
+    )?;
+    let charge = encoded_len(&input.request)?
+        .checked_mul(16)
+        .and_then(|n| n.checked_add(entries.checked_mul(2048)?))
+        .and_then(|n| n.checked_add(u64::from(input.request.max_records).checked_mul(256)?))
+        .and_then(|n| n.checked_add(input.request.max_bytes.checked_mul(4)?))
+        .and_then(|n| n.checked_add(65536))
+        .ok_or(QueueError::TooLarge)?;
+    Ok(charge)
+}
 impl QueueProjection {
     /// Internal candidate snapshot. The caller must retain/recheck recovered
     /// authority and conditionally publish the final resolved lease transitions.
@@ -31,28 +56,7 @@ impl QueueProjection {
             return Err(unknown("selection belongs to another operation"));
         }
         input.request.preflight(&input.limits)?;
-        let entries = input.request.filter.fields.values().try_fold(
-            input
-                .request
-                .filter
-                .keys
-                .as_ref()
-                .map_or(0, |keys| keys.len()) as u64,
-            |n, predicate| {
-                n.checked_add(match predicate {
-                    Predicate::In(values) => values.len() as u64,
-                    _ => 2,
-                })
-                .ok_or(QueueError::TooLarge)
-            },
-        )?;
-        let charge = encoded_len(&input.request)?
-            .checked_mul(16)
-            .and_then(|n| n.checked_add(entries.checked_mul(2048)?))
-            .and_then(|n| n.checked_add(u64::from(input.request.max_records).checked_mul(256)?))
-            .and_then(|n| n.checked_add(input.request.max_bytes.checked_mul(4)?))
-            .and_then(|n| n.checked_add(65536))
-            .ok_or(QueueError::TooLarge)?;
+        let charge = selection_charge(&input)?;
         let mut worker = SelectionWorker {
             projection: Arc::clone(self),
             input,

@@ -1,8 +1,10 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
+mod prepare;
 mod replay;
 mod selection;
 mod snapshot;
+mod work;
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -22,6 +24,7 @@ use fireweed_engine::{
     },
 };
 use fireweed_queue_spool::ScratchWorkers;
+pub use prepare::PreparedClaim;
 pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 pub use selection::AdmittedClaimSelection;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -1303,13 +1306,13 @@ mod tests {
         queue_publication::{PublicationReceipt, encode_publication_pinned},
         queue_schema_codec::encode_definition,
     };
-    fn address() -> QueueAddress {
+    pub(super) fn address() -> QueueAddress {
         QueueAddress {
             tenant: "tenant\0β".into(),
             queue: "work/λ".into(),
         }
     }
-    fn schema() -> QueueSchema {
+    pub(super) fn schema() -> QueueSchema {
         let work = CollectionDefinition {
             fields: [
                 ("u".into(), FieldType::Integer),
@@ -1371,7 +1374,7 @@ mod tests {
             }
         }
     }
-    async fn inspect(
+    pub(super) async fn inspect(
         projection: &Arc<QueueProjection>,
         sql: &str,
         params: Vec<Value>,
@@ -1391,7 +1394,11 @@ mod tests {
         .await
         .unwrap()
     }
-    async fn execute_for_test(projection: &Arc<QueueProjection>, sql: &str, params: Vec<Value>) {
+    pub(super) async fn execute_for_test(
+        projection: &Arc<QueueProjection>,
+        sql: &str,
+        params: Vec<Value>,
+    ) {
         let projection = projection.clone();
         let sql = sql.to_string();
         tokio::task::spawn_blocking(move || {
@@ -1408,7 +1415,7 @@ mod tests {
         .await
         .unwrap();
     }
-    async fn bootstrap(
+    pub(super) async fn bootstrap(
         path: &Path,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
@@ -1430,7 +1437,7 @@ mod tests {
         );
         (projection, definition)
     }
-    fn publication(
+    pub(super) fn publication(
         before: &RecordSnapshot,
         delta: &fireweed_engine::queue_planner::CommitDelta,
         receipts: &[PublicationReceipt<'_>],
@@ -1450,7 +1457,7 @@ mod tests {
         .unwrap();
         encode_checked_publication_record(1, frame.as_bytes(), 16 << 20, job).unwrap()
     }
-    async fn seed(
+    pub(super) async fn seed(
         projection: &Arc<QueueProjection>,
         definition: &AdmittedQueueDefinition,
         job: &Arc<QueueReservation>,

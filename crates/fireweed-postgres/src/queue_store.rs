@@ -3,7 +3,7 @@
 use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_body::ResolvedBody;
 use fireweed_engine::queue_claim::{
-    ClaimContext, ClaimOwnership, checked_lease_hash, claim_expiry, plan_claim,
+    ClaimContext, ClaimOwnership, ClaimResponseBudget, checked_lease_hash, claim_expiry, plan_claim,
 };
 use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
@@ -1989,16 +1989,16 @@ impl QueueStore for PostgresQueueStore {
                 let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_ref()).await?)?;
                 let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,None).await?;
                 let expiry=claim_expiry(now,request.lease_nanos)?;
-                let mut out=vec![];let mut replay=ClaimReplay {items:vec![]};let mut ids=vec![];let mut token_hashes=vec![];let mut versions=vec![];let mut attempts=vec![];
+                let mut out=vec![];let mut response_budget=ClaimResponseBudget::new(request.max_bytes)?;let mut replay=ClaimReplay {items:vec![]};let mut ids=vec![];let mut token_hashes=vec![];let mut versions=vec![];let mut attempts=vec![];
                 for (row,work) in rows.iter().zip(stored) {
                     let token=fireweed_engine::generate_query_lease_token().map_err(storage)?.as_str().as_bytes().to_vec();
                     let planned=plan_claim(work,token,ClaimContext {now,eligible_at:request.eligible_at,expires_at:expiry,insertion_head:queue.next_sequence})?;
                     let token=planned.lease.token.clone();
                     let claimed=planned.into_claimed();
-                    out.push(claimed);
-                    if encoded_len(&out)?>request.max_bytes {
-                        out.pop();if out.is_empty(){return Err(QueueError::TooLarge);}break;
+                    if !response_budget.try_include(&claimed)? {
+                        if out.is_empty(){return Err(QueueError::TooLarge);}break;
                     }
+                    out.push(claimed);
                     let id:i64=row.get(0);ids.push(id);token_hashes.push(lease_hash(&token).to_vec());versions.push(out.last().ok_or_else(||storage("missing claim"))?.record.version.to_string());attempts.push(i64::from(out.last().ok_or_else(||storage("missing claim"))?.record.attempts));replay.items.push((id,token));
                 }
                 if !ids.is_empty(){tx.execute("UPDATE fireweed_api007.records r SET lifecycle=1,lease_until=$1,lease_hash=x.hash,version=x.version::numeric,attempts=x.attempts FROM UNNEST($2::bigint[],$3::bytea[],$4::text[],$5::bigint[]) AS x(id,hash,version,attempts) WHERE r.id=x.id AND r.queue_id=$6",&[&expiry,&ids,&token_hashes,&versions,&attempts,&queue.id]).await.map_err(storage)?;}
