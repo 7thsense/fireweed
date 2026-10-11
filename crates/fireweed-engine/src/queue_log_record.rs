@@ -4,6 +4,9 @@
 //! Epoch fences a writer. It is neither insertion order nor an apply cursor.
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
+    queue_claim_publication::{
+        ClaimPublicationView, OwnedClaimPublication, view_claim_publication,
+    },
     queue_namespace::{AddressRef, encode_address, framed_address_len, view_address},
     queue_publication::{PublicationView, view_resolved_publication},
     queue_schema_codec::{AdmittedQueueDefinition, DefinitionPin},
@@ -37,6 +40,7 @@ impl QueueLogFormat {
 }
 const GENESIS: u8 = 0;
 const PUBLICATION: u8 = 1;
+const CLAIM: u8 = 2;
 fn invalid(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(message.into())
 }
@@ -71,6 +75,7 @@ impl<'a> GenesisView<'a> {
 pub enum QueueLogPayload<'a> {
     Genesis(GenesisView<'a>),
     Publication(PublicationView<'a>),
+    Claim(ClaimPublicationView<'a>),
 }
 pub struct QueueLogRecordView<'a> {
     format: QueueLogFormat,
@@ -90,6 +95,10 @@ impl<'a> QueueLogRecordView<'a> {
     pub fn address(&self) -> AddressRef<'a> {
         match &self.payload {
             QueueLogPayload::Genesis(genesis) => genesis.address(),
+            QueueLogPayload::Claim(claim) => AddressRef {
+                tenant: claim.commands().summary().queue.0,
+                queue: claim.commands().summary().queue.1,
+            },
             QueueLogPayload::Publication(publication) => AddressRef {
                 tenant: publication.summary().queue.0,
                 queue: publication.summary().queue.1,
@@ -99,6 +108,12 @@ impl<'a> QueueLogRecordView<'a> {
     pub fn definition_pin_bytes(&self) -> [u8; 32] {
         match &self.payload {
             QueueLogPayload::Genesis(genesis) => *genesis.definition_pin().as_bytes(),
+            QueueLogPayload::Claim(claim) => claim
+                .commands()
+                .summary()
+                .definition_pin
+                .try_into()
+                .expect("validated claim pin"),
             QueueLogPayload::Publication(publication) => publication
                 .summary()
                 .definition_pin
@@ -202,6 +217,15 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
             }
             .validate()?;
             QueueLogPayload::Publication(publication)
+        }
+        CLAIM if format == QueueLogFormat::ChecksummedV2 => {
+            let claim = view_claim_publication(payload)?;
+            AddressRef {
+                tenant: claim.commands().summary().queue.0,
+                queue: claim.commands().summary().queue.1,
+            }
+            .validate()?;
+            QueueLogPayload::Claim(claim)
         }
         _ => return Err(invalid("unknown queue-log record kind")),
     };
@@ -464,6 +488,29 @@ fn encode_publication_with_format(
     )?;
     out.bytes.extend_from_slice(publication);
     Ok(seal_record(out, format))
+}
+pub fn encode_checked_claim_record(
+    epoch: u64,
+    claim: &OwnedClaimPublication,
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueLogRecord> {
+    view_claim_publication(claim.bytes())?.validate_binding(job)?;
+    let size = claim
+        .bytes()
+        .len()
+        .checked_add(54)
+        .ok_or(QueueError::TooLarge)?;
+    let mut out = admitted_output(size, max_bytes, job)?;
+    header(
+        &mut out.bytes,
+        epoch,
+        CLAIM,
+        claim.bytes().len(),
+        QueueLogFormat::ChecksummedV2,
+    )?;
+    out.bytes.extend_from_slice(claim.bytes());
+    Ok(seal_record(out, QueueLogFormat::ChecksummedV2))
 }
 fn seal_record(mut out: AdmittedOutput, format: QueueLogFormat) -> OwnedQueueLogRecord {
     if format == QueueLogFormat::ChecksummedV2 {

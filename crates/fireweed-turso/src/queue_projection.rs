@@ -3,11 +3,14 @@
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
+    queue_claim::{ClaimContext, plan_claim},
+    queue_claim_publication::{AdmittedClaimBinding, ClaimPublicationView},
     queue_fields::{
         CheckedFields, FieldCoverage, ResolvedFields, affected_index_fields, resolve_index_effects,
     },
     queue_index::ordered_key,
     queue_log_record::{OwnedQueueLogRecord, QueueLogFormat, QueueLogPayload},
+    queue_planner::StoredWork,
     queue_publication::{BodyCommandRef, CommandRef, EffectRef, FieldsCommandRef, ValueRef},
     queue_schema_codec::AdmittedQueueDefinition,
     queue_storage_layout::{
@@ -440,7 +443,13 @@ async fn apply_transaction(
             let _definition = genesis.validate_definition(job)?;
             connection.execute("INSERT INTO q7_queues(address_hash,tenant,name,definition,cursor_secret,next_sequence,applied_next_offset,last_record_epoch) VALUES(?1,?2,?3,?4,?5,?6,1,?7)", vec![blob(&address_hash),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret()),number(0),number(view.epoch())]).await.map_err(unknown)?;
         }
-        QueueLogPayload::Publication(frame) => {
+        QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
+            let (frame, claim) = match view.payload() {
+                QueueLogPayload::Publication(frame) => (frame, None),
+                QueueLogPayload::Claim(claim) => (claim.commands(), Some(claim)),
+                _ => unreachable!(),
+            };
+            let binding = claim.map(|claim| claim.bind(job)).transpose()?;
             let metadata =
                 metadata.ok_or_else(|| unknown("publication has no projected genesis"))?;
             let queue_id = integer(&metadata[0])?;
@@ -474,15 +483,19 @@ async fn apply_transaction(
             if summary.definition_pin != definition.pin().as_bytes() {
                 return Err(unknown("publication definition pin mismatch"));
             }
+            let context = FrameContext {
+                offset,
+                initial_sequence: summary.initial_sequence,
+                job,
+                claim: claim.zip(binding.as_ref()),
+            };
             for command in frame.commands() {
                 apply_command(
                     connection,
                     queue_id,
                     definition.schema(),
                     command.map_err(publication_error)?,
-                    offset,
-                    summary.initial_sequence,
-                    job,
+                    &context,
                 )
                 .await?;
                 #[cfg(test)]
@@ -511,6 +524,11 @@ async fn apply_transaction(
                 .await?;
                 // These are fixed FWQP outcome bytes, explicitly not Postcard.
                 connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,?2,?3,?4,?5,?6,?7)", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes()),Value::Integer(i64::from(receipt.fingerprint_format)),blob(receipt.fingerprint),blob(receipt.encoded_outcome())]).await.map_err(unknown)?;
+            }
+            if let Some(claim) = claim {
+                let identity = discovery_digest(claim.request_id().as_bytes());
+                if one(connection,"SELECT id FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes())],1).await?.is_some() {return Err(unknown("claim receipt is not fresh immutable authority"));}
+                connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,1,?2,?3,?4,?5,?6)",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes()),Value::Integer(i64::from(claim.fingerprint_format())),blob(claim.fingerprint()),blob(claim.receipt_bytes())]).await.map_err(unknown)?;
             }
             let next = offset.checked_add(1).ok_or(QueueError::TooLarge)?;
             if connection.execute("UPDATE q7_queues SET next_sequence=?2,applied_next_offset=?3,last_record_epoch=?4 WHERE id=?1 AND applied_next_offset=?5", vec![Value::Integer(queue_id),number(summary.final_sequence),Value::Integer(next),number(view.epoch()),Value::Integer(offset)]).await.map_err(unknown)?!=1 { return Err(unknown("external cursor publication lost authority")); }
@@ -799,20 +817,30 @@ async fn write_body(
     connection.execute("INSERT INTO q7_bodies(record_id,value) VALUES(?1,?2) ON CONFLICT(record_id) DO UPDATE SET value=excluded.value",vec![Value::Integer(record_id),blob(body)]).await.map_err(unknown)?;
     Ok(())
 }
+struct FrameContext<'a> {
+    offset: i64,
+    initial_sequence: u64,
+    job: &'a Arc<QueueReservation>,
+    claim: Option<(&'a ClaimPublicationView<'a>, &'a AdmittedClaimBinding<'a>)>,
+}
 async fn apply_command(
     connection: &Connection,
     queue_id: i64,
     schema: &QueueSchema,
     command: CommandRef<'_>,
-    offset: i64,
-    initial_sequence: u64,
-    job: &Arc<QueueReservation>,
+    context: &FrameContext<'_>,
 ) -> QueueResult<()> {
+    let FrameContext {
+        offset,
+        initial_sequence,
+        job,
+        ..
+    } = *context;
     let collection = collection_number(schema, command.identity.collection)?;
     let definition = collection_definition(schema, collection)?;
     let key = command.identity.key.as_bytes();
     let key_hash = discovery_digest(key);
-    let current=one(connection,"SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(version)='blob' AND length(version)=8 THEN version ELSE NULL END,CASE WHEN typeof(active)='integer' THEN active ELSE NULL END,CASE WHEN typeof(insertion_sequence)='blob' AND length(insertion_sequence)=8 THEN insertion_sequence ELSE NULL END,CASE WHEN typeof(lifecycle)='integer' THEN lifecycle ELSE NULL END,CASE WHEN typeof(lease_until) IN ('null','integer') THEN lease_until ELSE 'invalid-type' END,CASE WHEN typeof(lease_hash)='null' THEN NULL WHEN typeof(lease_hash)='blob' AND length(lease_hash)=32 THEN lease_hash ELSE 'invalid-hash' END FROM q7_records WHERE queue_id=?1 AND collection=?2 AND key_hash=?3 AND key=?4",vec![Value::Integer(queue_id),Value::Integer(i64::from(collection)),blob(&key_hash),blob(key)],7).await?;
+    let current=one(connection,"SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(version)='blob' AND length(version)=8 THEN version ELSE NULL END,CASE WHEN typeof(active)='integer' THEN active ELSE NULL END,CASE WHEN typeof(insertion_sequence)='blob' AND length(insertion_sequence)=8 THEN insertion_sequence ELSE NULL END,CASE WHEN typeof(lifecycle)='integer' THEN lifecycle ELSE NULL END,CASE WHEN typeof(lease_until) IN ('null','integer') THEN lease_until ELSE 'invalid-type' END,CASE WHEN typeof(lease_hash)='null' THEN NULL WHEN typeof(lease_hash)='blob' AND length(lease_hash)=32 THEN lease_hash ELSE 'invalid-hash' END,CASE WHEN typeof(priority)='integer' THEN priority ELSE NULL END,CASE WHEN typeof(available_at)='integer' THEN available_at ELSE NULL END,CASE WHEN typeof(eligible_since)='integer' THEN eligible_since ELSE NULL END,CASE WHEN typeof(attempts)='integer' THEN attempts ELSE NULL END FROM q7_records WHERE queue_id=?1 AND collection=?2 AND key_hash=?3 AND key=?4",vec![Value::Integer(queue_id),Value::Integer(i64::from(collection)),blob(&key_hash),blob(key)],11).await?;
     let (current_version, highwater, old_sequence) = if let Some(row) = &current {
         let highwater = unsigned(&row[1])?;
         if highwater == 0 {
@@ -849,6 +877,75 @@ async fn apply_command(
     };
     if current_version != command.expected_version || highwater != command.prior_highwater {
         return Err(unknown("record predecessor authority mismatch"));
+    }
+    if let Some((claim, binding)) = context.claim {
+        let row = current
+            .as_ref()
+            .ok_or_else(|| unknown("claim predecessor disappeared"))?;
+        let entry = binding
+            .lease(command.identity.key)
+            .ok_or_else(|| unknown("claim lease binding missing"))?;
+        let work = StoredWork {
+            record: WorkRecord {
+                work: NewWork {
+                    key: command.identity.key.into(),
+                    priority: integer(&row[7])?,
+                    available_at: integer(&row[8])?,
+                    fields: Default::default(),
+                    body: bytes::Bytes::new(),
+                },
+                version: highwater,
+                insertion_sequence: old_sequence,
+                lifecycle: fireweed_engine::queue_storage_layout::decode_lifecycle(
+                    i16::try_from(integer(&row[4])?).map_err(unknown)?,
+                )?,
+                eligible_since: integer(&row[9])?,
+                attempts: u32::try_from(integer(&row[10])?).map_err(unknown)?,
+                lease_expires_at: if matches!(row[5], Value::Null) {
+                    None
+                } else {
+                    Some(integer(&row[5])?)
+                },
+            },
+            lease_hash: if matches!(row[6], Value::Null) {
+                None
+            } else {
+                Some(bytes(&row[6])?.try_into().map_err(unknown)?)
+            },
+            field_coverage: FieldCoverage::Selected {
+                names: Default::default(),
+                prefixes: Default::default(),
+            },
+            body_loaded: false,
+        };
+        let planned = plan_claim(
+            work,
+            entry.token.to_vec(),
+            ClaimContext {
+                now: claim.claimed_at(),
+                eligible_at: claim.eligible_at(),
+                expires_at: claim.expires_at(),
+                insertion_head: initial_sequence,
+            },
+        )?;
+        let EffectRef::WorkPut { metadata, .. } = command.effect else {
+            return Err(unknown("claim has non-work effect"));
+        };
+        let expected = &planned.work.record;
+        if command.output_highwater != expected.version
+            || metadata.priority != expected.work.priority
+            || metadata.available_at != expected.work.available_at
+            || metadata.eligible_since != expected.eligible_since
+            || metadata.insertion_sequence != expected.insertion_sequence
+            || metadata.attempts != expected.attempts
+            || metadata.lifecycle != expected.lifecycle
+            || metadata.lease_expires_at != expected.lease_expires_at
+            || metadata.lease_hash.copied() != planned.work.lease_hash
+        {
+            return Err(unknown(
+                "claim resolved metadata differs from physical predecessor",
+            ));
+        }
     }
     let record_id = if let Some(row) = &current {
         integer(&row[0])?
@@ -2296,5 +2393,331 @@ mod tests {
             2
         );
         workers.close_and_drain().await.unwrap();
+    }
+    struct ClaimFixture<'a> {
+        before: &'a RecordSnapshot,
+        definition: &'a AdmittedQueueDefinition,
+        job: &'a Arc<QueueReservation>,
+        identity: &'a str,
+        now: i64,
+        token_seed: u8,
+        selected: &'a [&'a str],
+    }
+    fn claim_fixture(
+        input: ClaimFixture<'_>,
+        bad_priority: bool,
+    ) -> (OwnedQueueLogRecord, RecordSnapshot, Vec<u8>, [u8; 32]) {
+        use fireweed_engine::{
+            queue_claim_publication::{ClaimPublicationInput, encode_claim_publication},
+            queue_claim_receipt::{ClaimLease, encode_claim_receipt},
+            queue_log_record::encode_checked_claim_record,
+            queue_planner::CommitDelta,
+        };
+        let before = input.before;
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: input.identity.into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 1 << 20,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        let mut after = before.clone();
+        let mut work = vec![];
+        let mut versions = vec![];
+        let mut work_fields = BTreeMap::new();
+        let mut work_bodies = BTreeMap::new();
+        let mut leases = vec![];
+        for (ordinal, key) in input.selected.iter().enumerate() {
+            let token = vec![input.token_seed + ordinal as u8; 32];
+            let planned = plan_claim(
+                before.work[*key].clone(),
+                token.clone(),
+                ClaimContext {
+                    now: input.now,
+                    eligible_at: 0,
+                    expires_at: input.now + 1_000_000,
+                    insertion_head: before.next_sequence,
+                },
+            )
+            .unwrap();
+            let mut stored = planned.work;
+            if bad_priority && *key == "b" {
+                stored.record.work.priority -= 1;
+            }
+            leases.push(ClaimLease {
+                key: (*key).into(),
+                token,
+                version: stored.record.version,
+            });
+            versions.push(RecordVersion {
+                collection: None,
+                key: (*key).into(),
+                version: stored.record.version,
+            });
+            after.work.insert((*key).into(), stored.clone());
+            after.versions.insert(
+                RecordIdentity {
+                    collection: None,
+                    key: (*key).into(),
+                },
+                stored.record.version,
+            );
+            work.push(stored);
+            work_fields.insert((*key).into(), ResolvedFields::Preserve);
+            work_bodies.insert(
+                (*key).into(),
+                fireweed_engine::queue_body::ResolvedBody::Preserve,
+            );
+        }
+        let delta = CommitDelta {
+            work,
+            work_fields,
+            work_bodies,
+            deleted_work: vec![],
+            state: vec![],
+            deleted_state: vec![],
+            versions: versions.clone(),
+            next_sequence: before.next_sequence,
+            receipt: CommitReceipt {
+                request_id: "unused".into(),
+                outcome: GroupOutcome::Committed { versions },
+            },
+        };
+        let delta = combine_deltas(&[delta], before.next_sequence).unwrap();
+        let commands = encode_publication_pinned(
+            &request.queue,
+            input.definition.pin(),
+            before,
+            &delta,
+            &[],
+            1 << 20,
+            input.job,
+        )
+        .unwrap();
+        let receipt = encode_claim_receipt(&leases, 1 << 20, input.job).unwrap();
+        let expected = receipt.bytes().to_vec();
+        let fingerprint = request.fingerprint().unwrap();
+        let limits = QueueLimits::default();
+        let publication = encode_claim_publication(
+            ClaimPublicationInput {
+                request: &request,
+                definition: input.definition,
+                commands: commands.as_bytes(),
+                receipt: &receipt,
+                claimed_at: input.now,
+                limits: &limits,
+            },
+            1 << 20,
+            input.job,
+        )
+        .unwrap();
+        (
+            encode_checked_claim_record(1, &publication, 1 << 20, input.job).unwrap(),
+            after,
+            expected,
+            fingerprint,
+        )
+    }
+    #[tokio::test]
+    async fn claims_empty_reclaim_and_late_failures_publish_one_atomic_receipt_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) = bootstrap(&path, &job, &workers).await;
+        let mut snapshot = seed(&projection, &definition, &job, &workers, true).await;
+        let mut priority = group("prioritize");
+        priority.work_updates.push(patch("b", 1, Some(-1), None));
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut snapshot,
+            &priority,
+            2,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        // Claim only metadata; the authoritative opaque field/body remain stored.
+        for work in snapshot.work.values_mut() {
+            work.record.work.fields.clear();
+            work.record.work.body = bytes::Bytes::new();
+            work.field_coverage = FieldCoverage::Selected {
+                names: Default::default(),
+                prefixes: Default::default(),
+            };
+            work.body_loaded = false;
+        }
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let definition =
+            AdmittedQueueDefinition::from_raw(&encode_definition(&schema()).unwrap(), &job)
+                .unwrap();
+        let (record, claimed, expected, fp) = claim_fixture(
+            ClaimFixture {
+                before: &snapshot,
+                definition: &definition,
+                job: &job,
+                identity: "claim",
+                now: 30,
+                token_seed: 11,
+                selected: &["b", "a"],
+            },
+            false,
+        );
+        assert_eq!(
+            projection
+                .apply(record, 3, &job, &workers)
+                .await
+                .unwrap()
+                .next_offset,
+            4
+        );
+        let (empty, _, empty_expected, empty_fp) = claim_fixture(
+            ClaimFixture {
+                before: &claimed,
+                definition: &definition,
+                job: &job,
+                identity: "empty",
+                now: 31,
+                token_seed: 31,
+                selected: &[],
+            },
+            false,
+        );
+        assert_eq!(
+            projection
+                .apply(empty, 4, &job, &workers)
+                .await
+                .unwrap()
+                .next_offset,
+            5
+        );
+        let (bad, _, _, _) = claim_fixture(
+            ClaimFixture {
+                before: &claimed,
+                definition: &definition,
+                job: &job,
+                identity: "bad",
+                now: 1_000_030,
+                token_seed: 41,
+                selected: &["b", "a"],
+            },
+            true,
+        );
+        assert!(matches!(
+            projection.apply(bad, 5, &job, &workers).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let mut stale = claimed.clone();
+        stale.work.get_mut("b").unwrap().record.version += 1;
+        stale.versions.insert(
+            RecordIdentity {
+                collection: None,
+                key: "b".into(),
+            },
+            stale.work["b"].record.version,
+        );
+        let (bad, _, _, _) = claim_fixture(
+            ClaimFixture {
+                before: &stale,
+                definition: &definition,
+                job: &job,
+                identity: "stale",
+                now: 1_000_030,
+                token_seed: 41,
+                selected: &["b", "a"],
+            },
+            false,
+        );
+        assert!(matches!(
+            projection.apply(bad, 5, &job, &workers).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let unchanged=inspect(&projection,"SELECT version,attempts,(SELECT applied_next_offset FROM q7_queues) FROM q7_records WHERE key=?1",vec![blob(b"a")],3).await;
+        assert_eq!(unsigned(&unchanged[0]).unwrap(), 2);
+        assert_eq!(integer(&unchanged[1]).unwrap(), 1);
+        assert_eq!(integer(&unchanged[2]).unwrap(), 5);
+        let (record, reclaimed, _, _) = claim_fixture(
+            ClaimFixture {
+                before: &claimed,
+                definition: &definition,
+                job: &job,
+                identity: "reclaim",
+                now: 1_000_030,
+                token_seed: 41,
+                selected: &["b", "a"],
+            },
+            false,
+        );
+        assert_eq!(
+            projection
+                .apply(record, 5, &job, &workers)
+                .await
+                .unwrap()
+                .next_offset,
+            6
+        );
+        let (duplicate, _, _, _) = claim_fixture(
+            ClaimFixture {
+                before: &reclaimed,
+                definition: &definition,
+                job: &job,
+                identity: "reclaim",
+                now: 2_000_030,
+                token_seed: 61,
+                selected: &["b", "a"],
+            },
+            false,
+        );
+        assert!(matches!(
+            projection.apply(duplicate, 6, &job, &workers).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        drop(projection);
+        let reopened = QueueProjection::open(&path, &job, &workers).await.unwrap();
+        let receipt=inspect(&reopened,"SELECT fingerprint_format,fingerprint,outcome FROM q7_requests WHERE domain=1 AND identity=?1",vec![blob(b"claim")],3).await;
+        assert_eq!(integer(&receipt[0]).unwrap(), 3);
+        assert_eq!(bytes(&receipt[1]).unwrap(), fp);
+        assert_eq!(bytes(&receipt[2]).unwrap(), expected);
+        assert_eq!(
+            fireweed_engine::queue_claim_receipt::view_claim_receipt(bytes(&receipt[2]).unwrap())
+                .unwrap()
+                .entries()
+                .map(|entry| entry.unwrap().key)
+                .collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        let empty_receipt=inspect(&reopened,"SELECT fingerprint_format,fingerprint,outcome FROM q7_requests WHERE domain=1 AND identity=?1",vec![blob(b"empty")],3).await;
+        assert_eq!(integer(&empty_receipt[0]).unwrap(), 3);
+        assert_eq!(bytes(&empty_receipt[1]).unwrap(), empty_fp);
+        assert_eq!(bytes(&empty_receipt[2]).unwrap(), empty_expected);
+        assert_eq!(
+            empty_expected,
+            [b"FWCR1".as_slice(), &0u64.to_le_bytes()].concat()
+        );
+        let state=inspect(&reopened,"SELECT version,attempts,lease_until,(SELECT applied_next_offset FROM q7_queues),(SELECT next_sequence FROM q7_queues) FROM q7_records WHERE key=?1",vec![blob(b"a")],5).await;
+        assert_eq!(unsigned(&state[0]).unwrap(), 3);
+        assert_eq!(integer(&state[1]).unwrap(), 2);
+        assert_eq!(integer(&state[2]).unwrap(), 2_000_030);
+        assert_eq!(integer(&state[3]).unwrap(), 6);
+        assert_eq!(unsigned(&state[4]).unwrap(), 2);
+        let opaque=inspect(&reopened,"SELECT length(b.value),(SELECT length(value) FROM q7_fields WHERE record_id=r.id AND field=0) FROM q7_bodies b JOIN q7_records r ON r.id=b.record_id WHERE r.key=?1",vec![blob(b"a")],2).await;
+        assert_eq!(integer(&opaque[0]).unwrap(), 1 << 20);
+        assert_eq!(integer(&opaque[1]).unwrap(), (1 << 20) + 4);
+        drop(definition);
+        drop(job);
+        workers.close_and_drain().await.unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
     }
 }

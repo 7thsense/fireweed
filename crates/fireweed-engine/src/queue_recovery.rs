@@ -109,6 +109,15 @@ impl ColdQueueHistory {
                 self.definition = Some(definition);
                 self.cursor_secret = Some(*genesis.cursor_secret());
             }
+            QueueLogPayload::Claim(claim) => {
+                claim.validate_binding(&self.job)?;
+                let summary = claim.commands().summary();
+                if summary.definition_pin != self.definition()?.pin().as_bytes()
+                    || summary.initial_sequence != self.insertion_sequence
+                {
+                    return Err(invalid("claim definition or insertion sequence mismatch"));
+                }
+            }
             QueueLogPayload::Publication(frame) => {
                 let definition = self.definition()?;
                 let summary = frame.summary();

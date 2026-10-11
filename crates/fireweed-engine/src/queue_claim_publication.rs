@@ -4,7 +4,7 @@
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_claim::claim_expiry,
-    queue_claim_receipt::{ClaimReceiptView, OwnedClaimReceipt, view_claim_receipt},
+    queue_claim_receipt::{ClaimLeaseRef, ClaimReceiptView, OwnedClaimReceipt, view_claim_receipt},
     queue_planner::lease_hash,
     queue_publication::{
         BodyCommandRef, EffectRef, FieldsCommandRef, PublicationFormat, PublicationView,
@@ -41,6 +41,15 @@ impl<'a> Reader<'a> {
     fn blob(&mut self) -> QueueResult<&'a [u8]> {
         let len = usize::try_from(self.number()?).map_err(|_| invalid("length overflow"))?;
         self.take(len)
+    }
+}
+pub struct AdmittedClaimBinding<'a> {
+    entries: BTreeMap<&'a str, ClaimLeaseRef<'a>>,
+    _charge: OwnedQueueBufferCharge,
+}
+impl<'a> AdmittedClaimBinding<'a> {
+    pub fn lease(&self, key: &str) -> Option<ClaimLeaseRef<'a>> {
+        self.entries.get(key).copied()
     }
 }
 pub struct ClaimPublicationView<'a> {
@@ -90,7 +99,10 @@ impl<'a> ClaimPublicationView<'a> {
     /// Full-key, non-quadratic binding. Native storage must additionally check
     /// preserved metadata and the prior attempts against physical authority.
     pub fn validate_binding(&self, job: &Arc<QueueReservation>) -> QueueResult<()> {
-        let _headers = job.owned_buffer(
+        self.bind(job).map(|_| ())
+    }
+    pub fn bind(&self, job: &Arc<QueueReservation>) -> QueueResult<AdmittedClaimBinding<'a>> {
+        let headers = job.owned_buffer(
             self.receipt
                 .len()
                 .checked_mul(256)
@@ -114,7 +126,7 @@ impl<'a> ClaimPublicationView<'a> {
                 return Err(invalid("claim is not one live work increment"));
             }
             let entry = entries
-                .remove(command.identity.key)
+                .get(command.identity.key)
                 .ok_or_else(|| invalid("command has no selected lease"))?;
             let EffectRef::WorkPut {
                 metadata,
@@ -136,10 +148,15 @@ impl<'a> ClaimPublicationView<'a> {
                 return Err(invalid("lease entry and resolved metadata differ"));
             }
         }
-        if !entries.is_empty() {
+        // Frozen FWQP1 commands are strictly ordered and unique. Equal counts
+        // plus one matching unique map entry per command prove a bijection.
+        if entries.len() as u64 != self.commands.summary().commands {
             return Err(invalid("selected lease has no command"));
         }
-        Ok(())
+        Ok(AdmittedClaimBinding {
+            entries,
+            _charge: headers,
+        })
     }
 }
 /// Structure/EOF only; cross-binding requires validate_binding under admission.
@@ -493,6 +510,102 @@ mod tests {
                 encode_claim_publication(input(), n - 1, &job),
                 Err(QueueError::TooLarge)
             ));
+            let record =
+                crate::queue_log_record::encode_checked_claim_record(4, &out, 1 << 20, &job)
+                    .unwrap();
+            let checked = crate::queue_log_record::view_queue_log_record(record.bytes()).unwrap();
+            assert!(matches!(
+                checked.payload(),
+                crate::queue_log_record::QueueLogPayload::Claim(_)
+            ));
+            let mut legacy = record.bytes()[..record.bytes().len() - 32].to_vec();
+            legacy[..5].copy_from_slice(b"FWQL1");
+            assert!(crate::queue_log_record::view_queue_log_record(&legacy).is_err());
+            for position in 0..record.bytes().len() {
+                let mut corrupt = record.bytes().to_vec();
+                corrupt[position] ^= 1;
+                assert!(crate::queue_log_record::view_queue_log_record(&corrupt).is_err());
+            }
+            use crate::{
+                queue_log_record::{encode_checked_genesis, encode_checked_publication_record},
+                queue_planner::plan_insert_vector,
+                queue_recovery::ColdQueueHistory,
+            };
+            let genesis =
+                encode_checked_genesis(1, &request.queue, &definition, &[17; 32], 1 << 20, &job)
+                    .unwrap();
+            let seed_request = InsertRequest {
+                queue: request.queue.clone(),
+                request_id: "seed".into(),
+                items: ["z", "a"]
+                    .into_iter()
+                    .map(|key| before.work[key].record.work.clone())
+                    .collect(),
+                mode: InsertMode::InsertOnly,
+            };
+            let empty = RecordSnapshot::default();
+            let mut seeded = empty.clone();
+            let (deltas, _) =
+                plan_insert_vector(&seed_request, &mut seeded, &schema(), || Ok(-10)).unwrap();
+            let seed_delta = combine_deltas(&deltas, 0).unwrap();
+            let seed_commands = encode_publication_pinned(
+                &request.queue,
+                definition.pin(),
+                &empty,
+                &seed_delta,
+                &[],
+                1 << 20,
+                &job,
+            )
+            .unwrap();
+            let seed_record =
+                encode_checked_publication_record(1, seed_commands.as_bytes(), 1 << 20, &job)
+                    .unwrap();
+            let warm = || {
+                let mut history = ColdQueueHistory::new(&request.queue, &job).unwrap();
+                history.observe(0, genesis.bytes()).unwrap();
+                history.observe(1, seed_record.bytes()).unwrap();
+                history
+            };
+            let mut history = warm();
+            history.observe(2, record.bytes()).unwrap();
+            assert_eq!(
+                (
+                    history.next_offset(),
+                    history.insertion_sequence(),
+                    history.historical_epoch()
+                ),
+                (3, 2, 4)
+            );
+            let parsed = view_claim_publication(out.bytes()).unwrap();
+            let pin_position = parsed.commands().summary().definition_pin.as_ptr() as usize
+                - out.bytes().as_ptr() as usize;
+            for variant in 0..if selected { 3 } else { 2 } {
+                let mut bad = record.bytes().to_vec();
+                match variant {
+                    0 => bad[22 + pin_position] ^= 1,
+                    1 => {
+                        bad[22 + pin_position + 32..22 + pin_position + 40]
+                            .copy_from_slice(&3u64.to_le_bytes());
+                        bad[22 + pin_position + 40..22 + pin_position + 48]
+                            .copy_from_slice(&3u64.to_le_bytes());
+                    }
+                    _ => {
+                        let token = parsed.receipt().entries().next().unwrap().unwrap().token;
+                        let position = token.as_ptr() as usize - out.bytes().as_ptr() as usize;
+                        bad[22 + position] ^= 1;
+                    }
+                }
+                let checksum_start = bad.len() - 32;
+                let checksum = Sha256::digest(&bad[..checksum_start]);
+                bad[checksum_start..].copy_from_slice(&checksum);
+                assert!(crate::queue_log_record::view_queue_log_record(&bad).is_ok());
+                let mut history = warm();
+                assert!(history.observe(2, &bad).is_err());
+                assert_eq!(history.next_offset(), 2);
+                assert!(history.observe(2, record.bytes()).is_err());
+                assert!(history.definition().is_err());
+            }
             let view = view_claim_publication(out.bytes()).unwrap();
             view.validate_binding(&job).unwrap();
             assert_eq!(view.expires_at, 1_000_010);

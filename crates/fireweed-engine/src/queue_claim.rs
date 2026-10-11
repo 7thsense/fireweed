@@ -68,6 +68,9 @@ pub fn plan_claim(
     if token.is_empty() || context.expires_at <= context.now {
         return Err(QueueError::Invalid("invalid claim lease".into()));
     }
+    if work.lease_hash == Some(lease_hash(&token)) {
+        return Err(authority("reused predecessor lease token"));
+    }
     let version = record
         .version
         .checked_add(1)
@@ -172,6 +175,11 @@ mod tests {
             plan_claim(active, vec![3; 32], context()),
             Err(QueueError::OutcomeUnknown(_))
         ));
+        let mut repeated = work();
+        repeated.record.lifecycle = Lifecycle::Leased;
+        repeated.record.lease_expires_at = Some(10);
+        repeated.lease_hash = Some(lease_hash(&[8; 32]));
+        assert!(plan_claim(repeated, vec![8; 32], context()).is_err());
         assert!(matches!(
             claim_expiry(i64::MAX, 1),
             Err(QueueError::Invalid(_))
