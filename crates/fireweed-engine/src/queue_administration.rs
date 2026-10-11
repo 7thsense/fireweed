@@ -88,6 +88,86 @@ pub fn propose_target(
         limits,
     )
 }
+/// Validated borrowed before projection. Counting does not clone field payloads.
+struct BorrowedAdministrativeBefore<'a> {
+    target: &'a StoredWork,
+    names: &'a BTreeSet<String>,
+}
+impl<'a> BorrowedAdministrativeBefore<'a> {
+    fn checked(
+        target: &'a StoredWork,
+        names: Option<&'a BTreeSet<String>>,
+        schema: &QueueSchema,
+    ) -> QueueResult<Option<Self>> {
+        let Some(names) = names else { return Ok(None) };
+        let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
+        for name in names {
+            if !schema.work.admits_field(name) {
+                return Err(QueueError::Invalid(
+                    "undeclared administrative before field".into(),
+                ));
+            }
+            certify_field(&view, name, &schema.work)?;
+        }
+        Ok(Some(Self { target, names }))
+    }
+    fn to_owned(&self) -> AdministrativeBefore {
+        let record = &self.target.record;
+        AdministrativeBefore {
+            version: record.version,
+            lifecycle: record.lifecycle,
+            available_at: record.work.available_at,
+            eligible_since: record.eligible_since,
+            attempts: record.attempts,
+            lease_expires_at: record.lease_expires_at,
+            fields: self
+                .names
+                .iter()
+                .filter_map(|name| {
+                    record
+                        .work
+                        .fields
+                        .get(name)
+                        .map(|value| (name.clone(), value.clone()))
+                })
+                .collect(),
+        }
+    }
+}
+impl serde::Serialize for BorrowedAdministrativeBefore<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeStruct};
+        struct Projection<'a>(&'a BorrowedAdministrativeBefore<'a>);
+        impl serde::Serialize for Projection<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let fields = &self.0.target.record.work.fields;
+                let count = self
+                    .0
+                    .names
+                    .iter()
+                    .filter(|name| fields.contains_key(*name))
+                    .count();
+                let mut map = serializer.serialize_map(Some(count))?;
+                for name in self.0.names {
+                    if let Some(value) = fields.get(name) {
+                        map.serialize_entry(name, value)?;
+                    }
+                }
+                map.end()
+            }
+        }
+        let record = &self.target.record;
+        let mut value = serializer.serialize_struct("AdministrativeBefore", 7)?;
+        value.serialize_field("version", &record.version)?;
+        value.serialize_field("lifecycle", &record.lifecycle)?;
+        value.serialize_field("available_at", &record.work.available_at)?;
+        value.serialize_field("eligible_since", &record.eligible_since)?;
+        value.serialize_field("attempts", &record.attempts)?;
+        value.serialize_field("lease_expires_at", &record.lease_expires_at)?;
+        value.serialize_field("fields", &Projection(self))?;
+        value.end()
+    }
+}
 fn propose_target_view(
     entry: TargetRequest<'_>,
     target: Option<&StoredWork>,
@@ -125,30 +205,9 @@ fn propose_target_view(
         return Err(unknown("incomplete administrative target authority"));
     }
     let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
-    if let Some(names) = before_fields {
-        for name in names {
-            certify_field(&view, name, &schema.work)?;
-        }
-    }
-    let before = before_fields.map(|names| AdministrativeBefore {
-        version: target.record.version,
-        lifecycle: target.record.lifecycle,
-        available_at: target.record.work.available_at,
-        eligible_since: target.record.eligible_since,
-        attempts: target.record.attempts,
-        lease_expires_at: target.record.lease_expires_at,
-        fields: names
-            .iter()
-            .filter_map(|name| {
-                target
-                    .record
-                    .work
-                    .fields
-                    .get(name)
-                    .map(|value| (name.clone(), value.clone()))
-            })
-            .collect(),
-    });
+    let before = BorrowedAdministrativeBefore::checked(target, before_fields, schema)?
+        .map(|projection| projection.to_owned());
+
     macro_rules! rejected {
         ($outcome:expr) => {
             AdministrativeProposal {

@@ -2024,9 +2024,9 @@ mod tests {
             ))
             .unwrap();
             assert_eq!(delivered.get(), 5001);
-            assert_eq!(scan.result().histogram.matched, 5001);
-            assert_eq!(scan.result().clauses[0].histogram.matched, 5001);
-            assert!(scan.result().items.is_empty());
+            assert_eq!(scan.result().unwrap().histogram.matched, 5001);
+            assert_eq!(scan.result().unwrap().clauses[0].histogram.matched, 5001);
+            assert!(scan.result().unwrap().items.is_empty());
             assert!(!scan.overlaps_explicit_work());
             assert!(admission.usage().unwrap().1 < (1 << 16));
             drop(scan);
@@ -2291,11 +2291,16 @@ impl ResolvedAdministrativeRow {
 /// Successful selected-source and awaited-sink EOF. This does not certify
 /// complete uniqueness reduction, ordinary CAS/lease checks or publication.
 /// The backend keeps its fence until all those checks and atomic storage finish.
+pub enum AdministrativeScanResult {
+    Complete(AdministrativeResult),
+    Overflow { histogram: AdministrativeHistogram },
+}
+
 pub struct AdmittedAdministrativeScan {
     pub(super) scan: AdministrativeScanIdentity,
     pub(super) initial_sequence: u64,
     pub(super) packet_count: u64,
-    pub(super) result: AdministrativeResult,
+    pub(super) result: AdministrativeScanResult,
     pub(super) overlap: bool,
     pub(super) _charge: crate::queue_admission::OwnedQueueBufferCharge,
 }
@@ -2312,8 +2317,20 @@ impl AdmittedAdministrativeScan {
     pub fn reservation(&self) -> &QueueReservation {
         self._charge.reservation()
     }
-    pub fn result(&self) -> &AdministrativeResult {
-        &self.result
+    pub fn result(&self) -> Option<&AdministrativeResult> {
+        match &self.result {
+            AdministrativeScanResult::Complete(result) => Some(result),
+            AdministrativeScanResult::Overflow { .. } => None,
+        }
+    }
+    pub fn histogram(&self) -> &AdministrativeHistogram {
+        match &self.result {
+            AdministrativeScanResult::Complete(result) => &result.histogram,
+            AdministrativeScanResult::Overflow { histogram } => histogram,
+        }
+    }
+    pub fn result_overflowed(&self) -> bool {
+        matches!(self.result, AdministrativeScanResult::Overflow { .. })
     }
     pub fn overlaps_explicit_work(&self) -> bool {
         self.overlap
@@ -2455,7 +2472,7 @@ where
         scan,
         initial_sequence: ordinary_image.next_sequence,
         packet_count,
-        result,
+        result: AdministrativeScanResult::Complete(result),
         overlap,
         _charge: root.into_owned(std::sync::Arc::clone(&reservation))?,
     })

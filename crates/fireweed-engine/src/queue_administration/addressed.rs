@@ -59,6 +59,39 @@ pub async fn scan_addressed_group_to_sink<'s, 'r, F, Fut>(
     schema: &QueueSchema,
     limits: &QueueLimits,
     reservation: Arc<QueueReservation>,
+    sink: F,
+) -> QueueResult<AdmittedAdministrativeScan>
+where
+    F: FnMut(ResolvedAdministrativeRow) -> Fut,
+    Fut: std::future::Future<Output = QueueResult<()>>,
+{
+    scan_addressed_group_to_sink_bounded(
+        ordinary,
+        intent,
+        inputs,
+        ordinary_image,
+        schema,
+        limits,
+        reservation,
+        u64::MAX,
+        sink,
+    )
+    .await
+}
+
+/// Count the complete receipt's monotone lower bound before retaining results.
+/// Request identity/variant/ordinary-version framing is derived without copies;
+/// the enclosing job performs the final exact count after business validation.
+#[allow(clippy::too_many_arguments)]
+pub async fn scan_addressed_group_to_sink_bounded<'s, 'r, F, Fut>(
+    ordinary: &CommitGroup,
+    intent: &AdministrativeIntent,
+    inputs: impl futures::Stream<Item = QueueResult<AddressedAdministrativeInput<'s, 'r>>>,
+    ordinary_image: &RecordSnapshot,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+    reservation: Arc<QueueReservation>,
+    max_result_bytes: u64,
     mut sink: F,
 ) -> QueueResult<AdmittedAdministrativeScan>
 where
@@ -72,6 +105,9 @@ where
         ));
     };
     intent.validate(schema, limits)?;
+    let receipt_base_lower_bound =
+        crate::queue_publication::measure_administrative_receipt_base_lower_bound(ordinary)
+            .map_err(|_| unknown("administrative receipt framing measurement failed"))?;
     validate_snapshot(ordinary_image)?;
     let bytes = add(
         intent_headers(intent)?,
@@ -88,6 +124,8 @@ where
     )?;
     let mut root = reservation.buffer(bytes)?;
     let scan = AdministrativeScanIdentity(Arc::new(()));
+    // Declared before payloads: error cleanup drops result copies first.
+    let mut retention = Some(reservation.buffer(0)?);
     let mut result = AdministrativeResult {
         histogram: Default::default(),
         items: Vec::new(),
@@ -97,6 +135,8 @@ where
         .items
         .try_reserve_exact(entries.len())
         .map_err(|_| unknown("addressed result allocation failed"))?;
+    let mut overflow = false;
+    let mut item_bytes = 0u64;
     let mut seen = BTreeSet::new();
     let explicit: BTreeSet<_> = work_keys(ordinary).collect();
     let mut positions = 0usize;
@@ -158,11 +198,6 @@ where
             .map(|_| selected_row(key, image, ordinary_image.next_sequence))
             .transpose()?;
         let _planning = reservation.buffer(target.map(row_bound).transpose()?.unwrap_or(4096))?;
-        // Reserve and transfer retained result bytes BEFORE per-target proposal
-        // copies before fields. On error result payloads drop before root guard.
-        let retained_bytes = retained_result_bound(key, target, intent.before_fields.as_ref())?;
-        let retained_charge = reservation.buffer(retained_bytes)?;
-        root = root.merge(retained_charge)?;
         overlap |= explicit.contains(key);
         let duplicate = !seen.insert(entry.key.as_str());
         let request = TargetRequest {
@@ -182,7 +217,7 @@ where
             target,
             image.versions.get(&id).copied(),
             intent.evaluated_at,
-            intent.before_fields.as_ref(),
+            None,
             schema,
             limits,
         )?;
@@ -211,12 +246,55 @@ where
                 .checked_add(1)
                 .ok_or_else(|| unknown("addressed packet ordinal exhausted"))?;
         }
+        // Certification remains mandatory even once result retention overflows.
+        let before = target
+            .map(|row| {
+                BorrowedAdministrativeBefore::checked(row, intent.before_fields.as_ref(), schema)
+            })
+            .transpose()?
+            .flatten();
         result.histogram.record(&proposal.outcome)?;
-        result.items.push(AdministrativeItemResult {
-            key: key.into(),
-            outcome: proposal.outcome,
-            before: proposal.before,
-        });
+        if !overflow {
+            #[derive(serde::Serialize)]
+            struct BorrowedItem<'a> {
+                key: &'a str,
+                outcome: &'a AdministrativeOutcome,
+                before: Option<&'a BorrowedAdministrativeBefore<'a>>,
+            }
+            let item = BorrowedItem {
+                key,
+                outcome: &proposal.outcome,
+                before: before.as_ref(),
+            };
+            item_bytes = add(item_bytes, wire(&item)?)?;
+            let lower = add(
+                receipt_base_lower_bound,
+                add(
+                    item_bytes,
+                    add(wire(&result.histogram)?, add(wire(&entries.len())?, 1)?)?,
+                )?,
+            )?;
+            if lower > max_result_bytes {
+                overflow = true;
+                result.items.clear();
+                drop(retention.take());
+            } else {
+                let retained_bytes =
+                    retained_result_bound(key, target, intent.before_fields.as_ref())?;
+                let retained_charge = reservation.buffer(retained_bytes)?;
+                retention = Some(
+                    retention
+                        .take()
+                        .expect("complete result retains its charge")
+                        .merge(retained_charge)?,
+                );
+                result.items.push(AdministrativeItemResult {
+                    key: key.into(),
+                    outcome: proposal.outcome,
+                    before: before.map(|projection| projection.to_owned()),
+                });
+            }
+        }
         positions = positions
             .checked_add(1)
             .ok_or_else(|| unknown("addressed source count overflow"))?;
@@ -226,11 +304,20 @@ where
             "addressed source ended before complete positional authority",
         ));
     }
+    if let Some(retention) = retention {
+        root = root.merge(retention)?;
+    }
     Ok(AdmittedAdministrativeScan {
         scan,
         initial_sequence: ordinary_image.next_sequence,
         packet_count: packets,
-        result,
+        result: if overflow {
+            super::stream::AdministrativeScanResult::Overflow {
+                histogram: result.histogram,
+            }
+        } else {
+            super::stream::AdministrativeScanResult::Complete(result)
+        },
         overlap,
         _charge: root.into_owned(Arc::clone(&reservation))?,
     })
@@ -302,6 +389,252 @@ mod tests {
         }))
     }
     #[test]
+    fn overflow_retains_no_partial_result_and_still_requires_full_eof() {
+        futures::executor::block_on(async {
+            let image = image();
+            let keys = ["a", "missing", "a", "dead"];
+            let intent = intent(&keys);
+            let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let summary = scan_addressed_group_to_sink_bounded(
+                &ordinary(),
+                &intent,
+                borrowed(&keys, &image),
+                &image,
+                &schema(),
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                1,
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap();
+            assert!(summary.result_overflowed());
+            assert!(summary.result().is_none());
+            assert_eq!(summary.histogram().matched, 4);
+            assert_eq!(summary.packet_count(), 1);
+            drop(summary);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+            let truncated = ["a"];
+            assert!(
+                scan_addressed_group_to_sink_bounded(
+                    &ordinary(),
+                    &intent,
+                    borrowed(&truncated, &image),
+                    &image,
+                    &schema(),
+                    &QueueLimits::default(),
+                    Arc::clone(&job),
+                    1,
+                    |_| std::future::ready(Ok(()))
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        });
+    }
+    #[test]
+    fn exact_complete_receipt_boundary_preserves_positions_and_before_values() {
+        futures::executor::block_on(async {
+            use crate::queue_publication::{
+                AdministrativeReceiptOutcome, measure_complete_administrative_receipt,
+            };
+            let image = image();
+            let keys = ["a", "missing", "a", "dead"];
+            let intent = intent(&keys);
+            let group = ordinary();
+            let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let complete = scan_addressed_group_to_sink(
+                &group,
+                &intent,
+                borrowed(&keys, &image),
+                &image,
+                &schema(),
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap();
+            let size = measure_complete_administrative_receipt(
+                &group.request_id,
+                &AdministrativeReceiptOutcome::Committed {
+                    versions: &[],
+                    administration: complete.result().unwrap(),
+                },
+            )
+            .unwrap();
+            let expected = complete.result().unwrap().clone();
+            drop(complete);
+            for budget in [size, size - 1] {
+                let summary = scan_addressed_group_to_sink_bounded(
+                    &group,
+                    &intent,
+                    borrowed(&keys, &image),
+                    &image,
+                    &schema(),
+                    &QueueLimits::default(),
+                    Arc::clone(&job),
+                    budget,
+                    |_| std::future::ready(Ok(())),
+                )
+                .await
+                .unwrap();
+                if budget == size {
+                    assert_eq!(summary.result(), Some(&expected));
+                } else {
+                    assert!(summary.result_overflowed());
+                    assert!(summary.result().is_none());
+                }
+                assert_eq!(summary.histogram().matched, 4);
+                drop(summary);
+                assert_eq!(admission.usage().unwrap(), (1, 0));
+            }
+        });
+    }
+    #[test]
+    fn overflow_releases_previous_before_charges_before_later_hydration() {
+        futures::executor::block_on(async {
+            use futures::StreamExt;
+            let mut image = image();
+            image
+                .work
+                .get_mut("a")
+                .unwrap()
+                .record
+                .work
+                .fields
+                .insert("/payload/large".into(), FieldValue::Bytes(vec![3; 262144]));
+            let keys = ["a", "a", "missing"];
+            let mut intent = intent(&keys);
+            intent.before_fields = Some(BTreeSet::from(["/payload/large".into()]));
+            let admission = QueueAdmission::new(1, 24 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let retained = std::cell::Cell::new(0u64);
+            let released = std::cell::Cell::new(0u64);
+            let source = borrowed(&keys, &image).inspect(|input| {
+                let Ok(AddressedAdministrativeInput::BorrowedFullImage { position, .. }) = input
+                else {
+                    unreachable!()
+                };
+                if *position == 1 {
+                    retained.set(admission.usage().unwrap().1);
+                }
+                if *position == 2 {
+                    let current = admission.usage().unwrap().1;
+                    released.set(current);
+                    assert!(retained.get() > current + (2 << 20));
+                    // This working allocation could not fit with discarded
+                    // result charges still retained, but now can proceed.
+                    let working = job.buffer((24 << 20) - current - 1).unwrap();
+                    drop(working);
+                }
+            });
+            let summary = scan_addressed_group_to_sink_bounded(
+                &ordinary(),
+                &intent,
+                source,
+                &image,
+                &schema(),
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                300000,
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap();
+            assert!(summary.result_overflowed());
+            assert_eq!(summary.histogram().matched, 3);
+            assert!(admission.usage().unwrap().1 <= released.get());
+            drop(summary);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        });
+    }
+    #[test]
+    fn late_before_corruption_is_not_hidden_by_overflow() {
+        futures::executor::block_on(async {
+            let good = image();
+            let mut corrupt = image();
+            corrupt
+                .work
+                .get_mut("a")
+                .unwrap()
+                .record
+                .work
+                .fields
+                .insert("/payload/bad".into(), FieldValue::Float(f64::NAN));
+            let keys = ["a", "a"];
+            let mut intent = intent(&keys);
+            intent.before_fields = Some(BTreeSet::from(["/payload/bad".into()]));
+            let inputs = futures::stream::iter([
+                Ok(AddressedAdministrativeInput::BorrowedFullImage {
+                    position: 0,
+                    key: "a",
+                    image: &good,
+                }),
+                Ok(AddressedAdministrativeInput::BorrowedFullImage {
+                    position: 1,
+                    key: "a",
+                    image: &corrupt,
+                }),
+            ]);
+            let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            assert!(
+                scan_addressed_group_to_sink_bounded(
+                    &ordinary(),
+                    &intent,
+                    inputs,
+                    &good,
+                    &schema(),
+                    &QueueLimits::default(),
+                    Arc::clone(&job),
+                    1,
+                    |_| std::future::ready(Ok(()))
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        });
+    }
+    #[test]
+    fn borrowed_before_serialization_matches_owned_projection() {
+        let mut image = image();
+        image
+            .work
+            .get_mut("a")
+            .unwrap()
+            .record
+            .work
+            .fields
+            .insert("/payload/large".into(), FieldValue::Bytes(vec![9; 65536]));
+        image
+            .work
+            .get_mut("a")
+            .unwrap()
+            .record
+            .work
+            .fields
+            .insert("/payload/zero".into(), FieldValue::Float(-0.0));
+        let row = &image.work["a"];
+        let names = BTreeSet::from([
+            "/payload/large".into(),
+            "/payload/zero".into(),
+            "/payload/absent".into(),
+        ]);
+        let schema = schema();
+        let borrowed = BorrowedAdministrativeBefore::checked(row, Some(&names), &schema)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            postcard::to_allocvec(&borrowed).unwrap(),
+            postcard::to_allocvec(&borrowed.to_owned()).unwrap()
+        );
+    }
+    #[test]
     fn positions_keep_initial_before_and_duplicate_missing_tombstone_outcomes() {
         futures::executor::block_on(async {
             let image = image();
@@ -330,7 +663,7 @@ mod tests {
             .unwrap();
             assert_eq!(count.get(), 1);
             assert_eq!(summary.packet_count(), 1);
-            let items = &summary.result().items;
+            let items = &summary.result().unwrap().items;
             assert_eq!(
                 items
                     .iter()
@@ -348,7 +681,7 @@ mod tests {
             assert_eq!(items[0].before.as_ref().unwrap().version, 1);
             assert_eq!(items[1].before.as_ref().unwrap().version, 1);
             assert!(items[2..].iter().all(|item| item.before.is_none()));
-            assert_eq!(summary.result().histogram.matched, 6);
+            assert_eq!(summary.result().unwrap().histogram.matched, 6);
             assert_eq!(image.work["a"].record.version, 1);
             assert_eq!(image.work["a"].record.work.priority, 0);
             drop(summary);
@@ -460,8 +793,11 @@ mod tests {
             assert_eq!(limited.usage().unwrap(), (1, 0));
             assert_eq!(produced.get(), 2); // failure follows a retained first result
             drop(image);
-            let FieldValue::Bytes(value) =
-                &summary.result().items[1].before.as_ref().unwrap().fields["/payload/large"]
+            let FieldValue::Bytes(value) = &summary.result().unwrap().items[1]
+                .before
+                .as_ref()
+                .unwrap()
+                .fields["/payload/large"]
             else {
                 panic!("bytes")
             };

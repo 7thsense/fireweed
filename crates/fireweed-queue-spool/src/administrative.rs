@@ -937,7 +937,8 @@ pub(super) mod tests {
         let summary =
             run_scan_options(3, 0, true, &job, true, |packet| scratch.append(packet)).unwrap();
         assert_eq!(
-            summary.result().histogram.outcomes[&AdministrativeOutcomeKind::UniqueConflict],
+            summary.result().unwrap().histogram.outcomes
+                [&AdministrativeOutcomeKind::UniqueConflict],
             1
         );
         assert_eq!(scratch.commands.count, 2);
@@ -1123,7 +1124,7 @@ pub(super) mod tests {
             })
             .unwrap();
             assert_eq!(summary.packet_count(), 0);
-            assert_eq!(summary.result().histogram.matched, count);
+            assert_eq!(summary.result().unwrap().histogram.matched, count);
             let mut sealed = scratch.seal(&summary).unwrap();
             assert!(sealed.next_command().unwrap().is_none());
             assert_eq!(

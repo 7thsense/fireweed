@@ -1128,7 +1128,7 @@ mod tests {
                 ordinary,
             } = prepared;
             assert_eq!(summary.packet_count(), 5001);
-            assert_eq!(summary.result().histogram.matched, 5001);
+            assert_eq!(summary.result().unwrap().histogram.matched, 5001);
             assert_eq!(ordinary.snapshot.next_sequence, 5001);
             assert!(ordinary.snapshot.work.is_empty() && ordinary.snapshot.state.is_empty());
             let expected_address = address.clone();
@@ -1658,7 +1658,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let items = &prepared.summary.result().items;
+            let items = &prepared.summary.result().unwrap().items;
             assert_eq!(
                 items
                     .iter()

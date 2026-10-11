@@ -67,6 +67,52 @@ fn checked(request_id: &str, outcome: &AdministrativeReceiptOutcome<'_>) -> Publ
     }
     Ok(())
 }
+/// Monotone lower bound for complete successful receipt framing, excluding the
+/// administrative result itself. Every ordinary output keeps its full identity;
+/// its positive version costs at least the one byte used by version 1.
+pub fn measure_administrative_receipt_base_lower_bound(
+    group: &CommitGroup,
+) -> PublicationResult<u64> {
+    let count = group
+        .claimed_updates
+        .len()
+        .checked_add(group.state_updates.len())
+        .and_then(|n| n.checked_add(group.work_updates.len()))
+        .and_then(|n| n.checked_add(group.work_inserts.len()))
+        .ok_or(PublicationError::Overflow)?;
+    let mut bytes = encoded_len(&(&group.request_id, 4u32, count as u64))
+        .map_err(PublicationError::Admission)?;
+    for (collection, key) in group
+        .claimed_updates
+        .iter()
+        .map(|item| (None, item.key.as_str()))
+        .chain(
+            group
+                .state_updates
+                .iter()
+                .map(|item| (Some(item.collection.as_str()), item.key.as_str())),
+        )
+        .chain(
+            group
+                .work_updates
+                .iter()
+                .map(|item| (None, item.key.as_str())),
+        )
+        .chain(
+            group
+                .work_inserts
+                .iter()
+                .map(|item| (None, item.key.as_str())),
+        )
+    {
+        bytes = bytes
+            .checked_add(
+                encoded_len(&(collection, key, 1u64)).map_err(PublicationError::Admission)?,
+            )
+            .ok_or(PublicationError::Overflow)?;
+    }
+    Ok(bytes)
+}
 /// Exact full Postcard CommitReceipt size: request ID, outcome, all ordinary
 /// producer-order versions and complete administrative result. This differs from
 /// FWAR1's fixed-width canonical binary component and includes no envelope list.
@@ -155,6 +201,83 @@ mod tests {
     use crate::queue_admission::QueueAdmission;
     use serde::Deserialize;
     use sha2::Digest;
+    #[test]
+    fn receipt_base_preserves_full_identities_and_is_monotone_across_versions() {
+        let group = CommitGroup {
+            request_id: "α\0".repeat(10000),
+            claimed_updates: vec![ClaimedUpdate {
+                key: "claimedα".into(),
+                lease: LeaseCredential { token: vec![1] },
+                expected_version: 1,
+                patch: WorkPatch::default(),
+                disposition: Disposition::Complete,
+            }],
+            state_updates: vec![StateUpdate {
+                collection: "stateα".repeat(1000),
+                key: "state\0".into(),
+                expect: StateExpect::Version(1),
+                change: StateChange::Delete,
+            }],
+            work_updates: vec![UnclaimedUpdate {
+                key: "updated".into(),
+                expect: StateExpect::Version(1),
+                change: UnclaimedChange::Delete,
+            }],
+            work_inserts: vec![NewWork {
+                key: "inserted".into(),
+                priority: 0,
+                available_at: 0,
+                fields: Default::default(),
+                body: Default::default(),
+            }],
+        };
+        let result = AdministrativeResult {
+            histogram: Default::default(),
+            items: vec![],
+            clauses: vec![],
+        };
+        let result_size = encoded_len(&result).unwrap();
+        let floor = measure_administrative_receipt_base_lower_bound(&group).unwrap();
+        for version in [1, 127, 128, u64::MAX] {
+            let versions = vec![
+                RecordVersion {
+                    collection: None,
+                    key: group.claimed_updates[0].key.clone(),
+                    version,
+                },
+                RecordVersion {
+                    collection: Some(group.state_updates[0].collection.clone()),
+                    key: group.state_updates[0].key.clone(),
+                    version,
+                },
+                RecordVersion {
+                    collection: None,
+                    key: group.work_updates[0].key.clone(),
+                    version,
+                },
+                RecordVersion {
+                    collection: None,
+                    key: group.work_inserts[0].key.clone(),
+                    version,
+                },
+            ];
+            let actual = measure_complete_administrative_receipt(
+                &group.request_id,
+                &AdministrativeReceiptOutcome::Committed {
+                    versions: &versions,
+                    administration: &result,
+                },
+            )
+            .unwrap()
+                - result_size;
+            assert!(floor <= actual);
+            if version <= 127 {
+                assert_eq!(floor, actual);
+            } else {
+                assert!(floor < actual);
+            }
+        }
+    }
     // Independent future public layout; never derived from the live projection.
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     enum FutureReason {
