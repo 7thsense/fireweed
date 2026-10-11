@@ -166,3 +166,44 @@ The existing caller-drop durable commit/reopen regression remains mandatory.
 This closes a live baseline shutdown wake-up gap and provides the terminal signal
 needed by upcoming scratch scheduling. It does not activate administrative input,
 create a blocking worker pool or prove complete selected-source publication.
+
+## Bounded owned blocking execution — iteration 48
+
+ScratchWorkers limits executing blocking closures and all registered executing/
+waiting jobs separately. Registration happens on the first polling of run, before
+its first await, and is linearized with close under one metadata mutex. Waiting
+is caller-owned rather than an unbounded background task/channel queue. Captured
+operation resources must own their admission; queued cancellation drops those
+resources before releasing registration. A dispatched worker owns its operation,
+execution permit, completion token and result delivery. Physical failures/panics
+are OutcomeUnknown, including post-admission scheduler capacity failure.
+
+Tokio can enqueue a blocking closure before thread-creation dispatch panics.
+A private atomic ownership handoff cancels and drops still-unstarted work on that
+failure, leaving any retained task stub empty. If a worker already took ownership,
+run awaits its terminal result and drops returned resources before reporting the
+error. Dispatch failure poisons new registration and already-registered future
+dispatch, bounding empty stubs. Runtime cancellation drops the handoff and closes
+the response channel; the caller must not retain another sender owner while
+awaiting it. Worker panics are caught separately from dispatch failure.
+
+Normal completion releases execution capacity before delivering results, avoiding
+spurious next-row registration failure. Returned T resources retain their queue
+reservation independently. close_and_drain rejects new registration but preserves
+accepted waiters and enables notification before checking counters. It drains
+terminal closure execution, not returned resources; final reservation notification
+supplies that separate ownership boundary. Cancelled/repeated close remains safe.
+
+Tests cover queued/running cancellation, actual file sorting/read/cleanup after
+caller drop, two independent execution slots, accepted waiters during close,
+capacity normalization, immediate next jobs, worker panic and close/register/
+completion races. Injected dispatchers cover retaining a closure then panicking,
+starting it then panicking, and dropping an unstarted runtime task. The first
+case permits no later I/O; the second waits for completion and closes its result.
+
+This scheduler is not wired into either backend's control path. Integration must
+retain the queue fence and complete owned operation while awaiting run. Backend
+shutdown must reject new queue admission, finish existing operations and drain
+final reservations before closing the scheduler, so accepted queue work not yet
+registered for scratch can still finish. Selected-source EOF, command streaming,
+logical-size receipts, publication and backend parity remain pending.

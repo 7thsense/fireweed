@@ -824,3 +824,6 @@ mod tests {
 }
 
 mod evidence;
+
+mod worker;
+pub use worker::ScratchWorkers;
