@@ -1,7 +1,9 @@
-//! Current-record replay in one admitted native snapshot. No clock or selector
-//! is rerun: the immutable receipt determines the complete ordered membership.
+//! Current-record replay in one admitted native snapshot. The immutable receipt
+//! determines membership; production callers sample their clock inside the snapshot.
 use super::*;
-use fireweed_engine::{queue_claim::ClaimOwnership, queue_claim_receipt::view_claim_receipt};
+use fireweed_engine::{
+    Clock, queue_claim::ClaimOwnership, queue_claim_receipt::view_claim_receipt,
+};
 
 pub struct ClaimReplayInput {
     pub genesis: OwnedQueueLogRecord,
@@ -34,6 +36,7 @@ impl AdmittedClaimReplay {
 struct ReplayWorker {
     projection: Arc<QueueProjection>,
     input: ClaimReplayInput,
+    clock: Option<Arc<dyn Clock>>,
     job: Arc<QueueReservation>,
     charges: Vec<OwnedQueueBufferCharge>,
 }
@@ -43,6 +46,27 @@ impl QueueProjection {
     pub async fn replay_claim(
         self: &Arc<Self>,
         input: ClaimReplayInput,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<AdmittedClaimReplay>> {
+        self.dispatch_claim_replay(input, None, job, workers).await
+    }
+    /// Samples the operational clock after acquiring and validating the native
+    /// snapshot. Queueing delay cannot extend ownership through a stale time.
+    pub async fn replay_claim_with_clock(
+        self: &Arc<Self>,
+        input: ClaimReplayInput,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<AdmittedClaimReplay>> {
+        self.dispatch_claim_replay(input, Some(clock), job, workers)
+            .await
+    }
+    async fn dispatch_claim_replay(
+        self: &Arc<Self>,
+        input: ClaimReplayInput,
+        clock: Option<Arc<dyn Clock>>,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<Option<AdmittedClaimReplay>> {
@@ -57,6 +81,7 @@ impl QueueProjection {
         let mut worker = ReplayWorker {
             projection: Arc::clone(self),
             input,
+            clock,
             job: Arc::clone(job),
             charges: vec![job.owned_buffer(size)?],
         };
@@ -90,6 +115,10 @@ impl NativeTransactionWork for ReplayWorker {
             .await?
             .ok_or_else(|| unknown("replay projection missing"))?;
         snapshot.validate_claim_input(&self.input)?;
+        let now = match &self.clock {
+            Some(clock) => timestamp_nanos(clock.now())?,
+            None => self.input.now,
+        };
         let definition = snapshot.definition;
         let request = &self.input.request;
         let queue_id = snapshot.queue_id;
@@ -149,7 +178,7 @@ impl NativeTransactionWork for ReplayWorker {
                 expires_at: stored.record.lease_expires_at,
                 token_hash: stored.lease_hash,
             }
-            .validate(entry.token, self.input.now)?;
+            .validate(entry.token, now)?;
             if stored.record.version < entry.version {
                 return Err(unknown("invalid current replay version"));
             }

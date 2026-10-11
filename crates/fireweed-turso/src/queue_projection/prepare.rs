@@ -707,6 +707,60 @@ mod tests {
         f.finish().await;
     }
     #[tokio::test]
+    async fn queued_current_replay_samples_clock_after_snapshot_and_rejects_expiry() {
+        let f = Fixture::new(false).await;
+        let request = f.request("fresh-replay");
+        let prepared = f
+            .projection
+            .prepare_claim(
+                f.input(request.clone(), 2, 1),
+                7,
+                16 << 20,
+                f.clock.clone(),
+                &f.job,
+                &f.workers,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (record, provisional, head) = prepared.into_parts();
+        f.projection
+            .apply(record, head, &f.job, &f.workers)
+            .await
+            .unwrap();
+        drop(provisional);
+        let guard = f.projection.writer.lock().await;
+        let call = tokio::spawn({
+            let projection = f.projection.clone();
+            let job = f.job.clone();
+            let workers = f.workers.clone();
+            let clock = f.clock.clone();
+            let input = f.input(request.clone(), 3, 7);
+            async move {
+                projection
+                    .replay_claim_with_clock(input, clock, &job, &workers)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        f.clock.set(1_000_100);
+        drop(guard);
+        assert!(matches!(call.await.unwrap(), Err(QueueError::ClaimExpired)));
+        let mut changed = request;
+        changed.include_body = false;
+        assert!(matches!(
+            f.projection
+                .replay_claim_with_clock(
+                    f.input(changed, 3, 7),
+                    f.clock.clone(),
+                    &f.job,
+                    &f.workers,
+                )
+                .await,
+            Err(QueueError::RequestConflict)
+        ));
+    }
+    #[tokio::test]
     async fn queued_preparation_samples_clock_after_native_snapshot_and_rejects_bad_metadata() {
         let f = Fixture::new(false).await;
         execute_for_test(

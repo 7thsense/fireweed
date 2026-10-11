@@ -10689,9 +10689,9 @@
           "P3-P9/P15",
           "P2f"
         ],
-        "detail": "Compiling thiserror v1.0.69; Compiling thiserror-impl v1.0.69; error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "08db05932647506d71dd",
-        "identity": "be8329699100d1e802435dc11836d5a2f3d9c00f1bc636bb0e98b3b5cfb99843",
+        "detail": "Compiling thiserror v1.0.69; Compiling thiserror-impl v1.0.69; Compiling quick-error v1.2.3; error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
+        "id": "6cb453f0bc11d19e03d7",
+        "identity": "407133d0bece6c1ad582f23e5d58037a1670ff5dc552a5f935bd160b4c665645",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -16687,6 +16687,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::legacy_record_below_cached_cursor_never_establishes_coverage",
           "--",
           "--exact"
@@ -16694,6 +16714,46 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::legacy_record_below_cached_cursor_never_establishes_coverage",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::legacy_record_below_cached_cursor_never_establishes_coverage"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal"
       },
       {
         "exact_invocation": [
@@ -24238,10 +24298,10 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "c0db08db682be12b86a83ae1432f9509cf5882c5b5019f99576c2ff6f02f718f",
+  "source_inventory_sha256": "2ff81b28cf8b938753b62bcc18d4c1f9b5a4afcc29ff3c7c8e067c139a270314",
   "workspaces": [
     {
-      "listing_error_sha256": "be8329699100d1e802435dc11836d5a2f3d9c00f1bc636bb0e98b3b5cfb99843",
+      "listing_error_sha256": "407133d0bece6c1ad582f23e5d58037a1670ff5dc552a5f935bd160b4c665645",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"

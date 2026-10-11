@@ -1,6 +1,7 @@
 //! Internal composition of owned native log stages and the stock-Turso projector.
 //! Coverage is operation-scoped; this is not a consumer transaction or readiness cache.
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
+mod claim;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::{QueueLogFormat, encode_checked_genesis},
@@ -14,21 +15,30 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 fn unknown(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(format!("API-007 recovery: {message}"))
 }
+#[cfg(test)]
+type StagePause = std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
 /// An owned orchestrator has no blocking worker while awaiting individual stages.
 pub struct QueueRecoveryPipeline {
     store: Arc<ObjectLogEngineStore>,
     projection: Arc<QueueProjection>,
     workers: ScratchWorkers,
     slots: Arc<Semaphore>,
+    claim_slots: Arc<Semaphore>,
     metadata_bytes: usize,
     hard_record_bytes: u64,
     #[cfg(test)]
     before_acquire: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    #[cfg(test)]
+    before_claim_append: StagePause,
+    #[cfg(test)]
+    before_claim_replay: StagePause,
 }
 /// Point-in-time coverage only; later consumer reads/writes must establish
 /// current projection and fence authority again.
 pub struct RecoveredQueue {
     pub history: ColdQueueHistory,
+    /// Original genesis header epoch, distinct from the acquired fence and last record.
+    pub original_genesis_epoch: u64,
     pub acquired_epoch: u64,
     pub target_next_offset: u64,
 }
@@ -58,10 +68,15 @@ impl QueueRecoveryPipeline {
             projection,
             workers,
             slots: Arc::new(Semaphore::new(64)),
+            claim_slots: Arc::new(Semaphore::new(64)),
             metadata_bytes,
             hard_record_bytes,
             #[cfg(test)]
             before_acquire: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_claim_append: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_claim_replay: std::sync::Mutex::new(None),
         }))
     }
     /// Once spawned, caller cancellation cannot abandon fencing or suffix apply.
@@ -217,6 +232,7 @@ impl RecoveryTask {
         verify_prefix(&history, &final_checkpoint)?;
         Ok(RecoveredQueue {
             history,
+            original_genesis_epoch: genesis_epoch,
             acquired_epoch: target.epoch,
             target_next_offset,
         })
@@ -387,6 +403,502 @@ mod tests {
                 .outcome()
                 .is_ok()
         );
+    }
+    #[tokio::test]
+    async fn competing_same_identity_claims_never_acknowledge_losing_tokens() {
+        use fireweed_conformance::queue_contract::TestClock;
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-api007-claim-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(
+            ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+                .await
+                .unwrap(),
+        );
+        let admission = QueueAdmission::new(4, 128 << 20).unwrap();
+        let workers = ScratchWorkers::new(2, 4).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        provision(&store, &job, &workers).await;
+        append_insert(&store, &job, &workers).await;
+        let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+            .await
+            .unwrap();
+        let pipeline =
+            QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+                .unwrap();
+        let clock = Arc::new(TestClock::default());
+        clock.set(100);
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "renew-race".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 1,
+            max_bytes: 65536,
+            fields: None,
+            include_body: true,
+        };
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *pipeline.before_claim_append.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let spawn = || {
+            let pipeline = pipeline.clone();
+            let request = request.clone();
+            let clock = clock.clone();
+            let job = job.clone();
+            tokio::spawn(async move {
+                pipeline
+                    .claim(request, QueueLimits::default(), clock, job)
+                    .await
+            })
+        };
+        let first = spawn();
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+            .await
+            .unwrap();
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_release = Arc::new(tokio::sync::Notify::new());
+        *pipeline.before_claim_append.lock().unwrap() =
+            Some((second_entered.clone(), second_release.clone()));
+        let second = spawn();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            second_entered.notified(),
+        )
+        .await
+        .unwrap();
+        // The newer fence publishes first. The losing original preparation then
+        // attempts its stale conditional append and resolves the winner's identity.
+        second_release.notify_one();
+        let b = second.await.unwrap();
+        assert!(
+            b.is_ok(),
+            "the controlled newer-fence publication must resolve"
+        );
+        release.notify_one();
+        let a = first.await.unwrap();
+        *pipeline.before_claim_append.lock().unwrap() = None;
+        let ns = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let current = store.read_api007_state(ns, &job, &workers).await.unwrap();
+        assert_eq!(
+            current.state().next_offset,
+            3,
+            "race winner exists before final resolving claim"
+        );
+        drop(current);
+        let resolved = pipeline
+            .claim(request, QueueLimits::default(), clock, job.clone())
+            .await
+            .unwrap();
+        assert_eq!(resolved.records().len(), 1);
+        for result in [a, b] {
+            match result {
+                Ok(response) => assert_eq!(response.records(), resolved.records()),
+                Err(QueueError::OutcomeUnknown(_)) => {}
+                Err(other) => panic!("unexpected claim classification: {other:?}"),
+            }
+        }
+        drop(resolved);
+        let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+        assert_eq!(
+            recovered.target_next_offset, 3,
+            "exactly one original identity publication"
+        );
+        drop(recovered);
+        drop(pipeline);
+        workers.close_and_drain().await.unwrap();
+        drop(job);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn replay_discards_stale_expiry_after_concurrent_durable_renewal() {
+        use fireweed_conformance::queue_contract::TestClock;
+        use fireweed_engine::{
+            queue_fields::FieldCoverage,
+            queue_planner::{RecordIdentity, StoredWork, lease_hash, plan_commit_group},
+        };
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-api007-renew-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(
+            ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+                .await
+                .unwrap(),
+        );
+        let admission = QueueAdmission::new(4, 128 << 20).unwrap();
+        let workers = ScratchWorkers::new(2, 4).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        provision(&store, &job, &workers).await;
+        append_insert(&store, &job, &workers).await;
+        let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+            .await
+            .unwrap();
+        let pipeline =
+            QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+                .unwrap();
+        let clock = Arc::new(TestClock::default());
+        clock.set(100);
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "renew-race".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 1,
+            max_bytes: 65536,
+            fields: None,
+            include_body: true,
+        };
+        let original = pipeline
+            .claim(
+                request.clone(),
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap();
+        let work = original.records()[0].clone();
+        drop(original);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *pipeline.before_claim_replay.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let caller = tokio::spawn({
+            let pipeline = pipeline.clone();
+            let request = request.clone();
+            let job = job.clone();
+            let clock = clock.clone();
+            async move {
+                pipeline
+                    .claim(request, QueueLimits::default(), clock, job)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+            .await
+            .unwrap();
+        let ns = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let acquired = store
+            .acquire_api007_state(ns, &job, &workers)
+            .await
+            .unwrap();
+        let head = acquired.state().next_offset as u64;
+        let mut before = RecordSnapshot {
+            next_sequence: 1,
+            ..Default::default()
+        };
+        before.work.insert(
+            "a".into(),
+            StoredWork {
+                record: work.record.clone(),
+                lease_hash: Some(lease_hash(&work.lease.token)),
+                field_coverage: FieldCoverage::Complete,
+                body_loaded: true,
+            },
+        );
+        before.versions.insert(
+            RecordIdentity {
+                collection: None,
+                key: "a".into(),
+            },
+            work.record.version,
+        );
+        let group = CommitGroup {
+            request_id: "renew-between-coverage-and-replay".into(),
+            claimed_updates: vec![ClaimedUpdate {
+                key: "a".into(),
+                lease: work.lease.clone(),
+                expected_version: work.record.version,
+                patch: WorkPatch::default(),
+                disposition: Disposition::Retain {
+                    renew_nanos: Some(2_000_000),
+                },
+            }],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+            administration: None,
+        };
+        let mut after = before.clone();
+        let delta = plan_commit_group(&group, &mut after, 900_000, &schema()).unwrap();
+        let queue = address();
+        let receipt = PublicationReceipt::commit(&queue, &group, &delta.receipt).unwrap();
+        let definition =
+            AdmittedQueueDefinition::from_raw(&encode_definition(&schema()).unwrap(), &job)
+                .unwrap();
+        let frame = encode_publication_pinned(
+            &address(),
+            definition.pin(),
+            &before,
+            &delta,
+            &[receipt],
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        let record = encode_checked_publication_record(
+            acquired.state().epoch,
+            frame.as_bytes(),
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        drop(frame);
+        assert!(
+            store
+                .append_api007_record(acquired.into_namespace(), record, head, &job, &workers)
+                .await
+                .unwrap()
+                .outcome()
+                .is_ok()
+        );
+        // Renewal is authoritative but deliberately absent from the projection.
+        clock.set(1_100_000);
+        release.notify_one();
+        let renewed = caller.await.unwrap().unwrap();
+        assert_eq!(renewed.records()[0].lease, work.lease);
+        assert_eq!(renewed.records()[0].record.version, work.record.version + 1);
+        assert_eq!(
+            renewed.records()[0].record.lease_expires_at,
+            Some(2_900_000)
+        );
+        drop(renewed);
+        drop(pipeline);
+        workers.close_and_drain().await.unwrap();
+        drop(job);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn owned_claim_publishes_then_replays_original_identity_and_expiry() {
+        use fireweed_conformance::queue_contract::TestClock;
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-api007-claim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(
+            ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+                .await
+                .unwrap(),
+        );
+        let admission = QueueAdmission::new(4, 128 << 20).unwrap();
+        let workers = ScratchWorkers::new(2, 4).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        provision(&store, &job, &workers).await;
+        append_insert(&store, &job, &workers).await;
+        let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+            .await
+            .unwrap();
+        let pipeline =
+            QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+                .unwrap();
+        let clock = Arc::new(TestClock::default());
+        clock.set(100);
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "owned-claim".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 65536,
+            fields: None,
+            include_body: true,
+        };
+        // Many tiny encoded values have substantial resident vector headers.
+        // Reject before even acquiring a durable fence or cloning the request.
+        let mut tiny_values = request.clone();
+        tiny_values.request_id = "admission-only".into();
+        tiny_values.filter.fields.insert(
+            "many".into(),
+            Predicate::In(vec![FieldValue::Boolean(true); 20_000]),
+        );
+        let tight = QueueAdmission::new(1, 1 << 20).unwrap();
+        let tight_job = Arc::new(tight.reserve(0).unwrap());
+        let ns = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let before = store
+            .read_api007_state(ns, &job, &workers)
+            .await
+            .unwrap()
+            .state();
+        assert!(matches!(
+            pipeline
+                .claim(
+                    tiny_values,
+                    QueueLimits::default(),
+                    clock.clone(),
+                    tight_job
+                )
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let ns = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let after = store
+            .read_api007_state(ns, &job, &workers)
+            .await
+            .unwrap()
+            .state();
+        assert_eq!(
+            (before.epoch, before.next_offset),
+            (after.epoch, after.next_offset)
+        );
+        let response = pipeline
+            .claim(
+                request.clone(),
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.records().len(), 1);
+        assert_eq!(response.records()[0].record.work.key, "a");
+        let expected = response.records().to_vec();
+        drop(response);
+        let replay = pipeline
+            .claim(
+                request.clone(),
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.records(), expected);
+        drop(replay);
+        let mut changed = request.clone();
+        changed.include_body = false;
+        assert!(matches!(
+            pipeline
+                .claim(changed, QueueLimits::default(), clock.clone(), job.clone())
+                .await,
+            Err(QueueError::RequestConflict)
+        ));
+        let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+        assert_eq!(recovered.target_next_offset, 3);
+        assert!(recovered.original_genesis_epoch < recovered.acquired_epoch);
+        drop(recovered);
+        drop(pipeline);
+        let projection = QueueProjection::open(&root.join("rebuild.db"), &job, &workers)
+            .await
+            .unwrap();
+        let pipeline =
+            QueueRecoveryPipeline::new(store, projection, workers.clone(), 65536, 1 << 20).unwrap();
+        let replay = pipeline
+            .claim(
+                request.clone(),
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.records(), expected);
+        drop(replay);
+        clock.set(1_000_100);
+        assert!(matches!(
+            pipeline
+                .claim(request, QueueLimits::default(), clock, job.clone())
+                .await,
+            Err(QueueError::ClaimExpired)
+        ));
+        let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+        assert_eq!(
+            recovered.target_next_offset, 3,
+            "expired identity must not append another token set"
+        );
+        drop(recovered);
+        // Cancellation after preparation cannot abandon the original durable
+        // publication. Its delayed completion must not acknowledge expired tokens.
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *pipeline.before_claim_append.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+        let cancelled_job = Arc::new(
+            admission
+                .reserve(0)
+                .unwrap()
+                .with_terminal_callback(move || {
+                    let _ = terminal_tx.send(());
+                })
+                .unwrap(),
+        );
+        let cancelled_request = ClaimRequest {
+            queue: address(),
+            request_id: "cancelled-original".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 65536,
+            fields: None,
+            include_body: true,
+        };
+        let delayed_clock = Arc::new(TestClock::default());
+        delayed_clock.set(1_000_100);
+        let caller = tokio::spawn({
+            let pipeline = pipeline.clone();
+            let request = cancelled_request.clone();
+            let clock = delayed_clock.clone();
+            async move {
+                pipeline
+                    .claim(request, QueueLimits::default(), clock, cancelled_job)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+            .await
+            .unwrap();
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        delayed_clock.set(2_000_100);
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(30), terminal_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        *pipeline.before_claim_append.lock().unwrap() = None;
+        assert!(matches!(
+            pipeline
+                .claim(
+                    cancelled_request,
+                    QueueLimits::default(),
+                    delayed_clock,
+                    job.clone()
+                )
+                .await,
+            Err(QueueError::ClaimExpired)
+        ));
+        let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+        assert_eq!(recovered.target_next_offset, 4);
+        drop(recovered);
+        drop(pipeline);
+        workers.close_and_drain().await.unwrap();
+        drop(job);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target() {

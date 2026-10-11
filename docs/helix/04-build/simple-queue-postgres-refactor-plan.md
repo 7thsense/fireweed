@@ -75,11 +75,13 @@ contracts, designs and this execution plan concise and maintained in place.
 
 The concrete PostgreSQL interface and public mandatory suite exist. Native S3
 transport/fence/recovery and stock-Turso atomic projection, current claim replay
-and filtered candidate selection plus provisional resolved claim preparation are
-internal primitives. Their local checks are not a public S3/Turso qualification.
-The full constructor/QueueStore, conditional publication and original-identity
-resolution with fresh ownership before ACK, remaining reads/mutations and public
-parity must still land. Full-manifest memory/rewrite growth remains unqualified.
+and filtered candidate selection, resolved claim preparation and owned conditional
+claim publication with original-identity resolution are internal primitives.
+Claim completion validates fresh current ownership and a subsequent authoritative
+head cut; provisional tokens cannot become a response. These local checks are
+not a public S3/Turso qualification. The full constructor/QueueStore, remaining
+reads/mutations and public parity must still land. Full-manifest memory/rewrite
+growth remains unqualified.
 
 The single Snorri adapter and matched settled release workloads remain required.
 Stats as_of and negative-epoch hourly grouping must satisfy the consumer binding.
