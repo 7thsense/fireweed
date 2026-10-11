@@ -97,6 +97,58 @@ pub struct AppliedQueueRecord {
     pub next_offset: u64,
     _charge: OwnedQueueBufferCharge,
 }
+/// One admitted native snapshot, bound to the original genesis payload authority.
+/// This is projection progress, never durable log coverage or a live fence.
+pub struct QueueProjectionCheckpoint {
+    pub next_offset: u64,
+    pub insertion_sequence: u64,
+    pub last_record_epoch: u64,
+    _charge: OwnedQueueBufferCharge,
+}
+struct CheckpointWorker {
+    job: Arc<QueueReservation>,
+    projection: Arc<QueueProjection>,
+    genesis: OwnedQueueLogRecord,
+    output_charge: Option<OwnedQueueBufferCharge>,
+}
+impl CheckpointWorker {
+    fn execute(mut self) -> QueueResult<Option<QueueProjectionCheckpoint>> {
+        crate::tx::block_on_owned_apply(async {
+            let view = self.genesis.view()?;
+            if view.format() != QueueLogFormat::ChecksummedV2 {
+                return Err(unknown("checkpoint requires checked genesis"));
+            }
+            let QueueLogPayload::Genesis(genesis) = view.payload() else {
+                return Err(unknown("checkpoint authority is not genesis"));
+            };
+            let _definition = genesis.validate_definition(&self.job)?;
+            let address = genesis.address();
+            let digest = discovery_digest(&encode(&(address.tenant, address.queue))?);
+            let writer = self.projection.writer.lock().await;
+            let connection = writer
+                .as_ref()
+                .ok_or_else(|| unknown("projection connection is poisoned"))?;
+            let row = one(connection,"SELECT CASE WHEN typeof(applied_next_offset)='integer' THEN applied_next_offset ELSE NULL END,CASE WHEN typeof(next_sequence)='blob' AND length(next_sequence)=8 THEN next_sequence ELSE NULL END,CASE WHEN typeof(last_record_epoch)='blob' AND length(last_record_epoch)=8 THEN last_record_epoch ELSE NULL END,CASE WHEN typeof(definition)='blob' AND length(definition)=length(?4) THEN definition=?4 ELSE 0 END,CASE WHEN typeof(cursor_secret)='blob' AND length(cursor_secret)=32 THEN cursor_secret=?5 ELSE 0 END FROM q7_queues WHERE address_hash=?1 AND tenant=?2 AND name=?3",vec![blob(&digest),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret())],5).await?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            if integer(&row[3])? != 1 || integer(&row[4])? != 1 {
+                return Err(unknown("projection genesis authority mismatch"));
+            }
+            let next_offset = u64::try_from(integer(&row[0])?).map_err(unknown)?;
+            let last_record_epoch = unsigned(&row[2])?;
+            if next_offset == 0 || last_record_epoch == 0 || last_record_epoch < view.epoch() {
+                return Err(unknown("invalid projection checkpoint"));
+            }
+            Ok(Some(QueueProjectionCheckpoint {
+                next_offset,
+                insertion_sequence: unsigned(&row[1])?,
+                last_record_epoch,
+                _charge: self.output_charge.take().expect("one checkpoint output"),
+            }))
+        })
+    }
+}
 struct ApplyWorker {
     projection: Arc<QueueProjection>,
     record: OwnedQueueLogRecord,
@@ -219,6 +271,25 @@ impl QueueProjection {
         let worker = OpenWorker {
             path: text.into(),
             _charge: charge,
+        };
+        workers.run(move || worker.execute()).await
+    }
+    /// Read a single native snapshot with exact full address, raw definition and
+    /// cursor-secret binding. The caller must independently validate log coverage.
+    pub async fn checkpoint(
+        self: &Arc<Self>,
+        genesis: OwnedQueueLogRecord,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<QueueProjectionCheckpoint>> {
+        if !genesis.belongs_to(job) {
+            return Err(unknown("checkpoint genesis belongs to another operation"));
+        }
+        let worker = CheckpointWorker {
+            job: Arc::clone(job),
+            projection: Arc::clone(self),
+            genesis,
+            output_charge: Some(job.owned_buffer(65536)?),
         };
         workers.run(move || worker.execute()).await
     }
@@ -2132,6 +2203,98 @@ mod tests {
         ] {
             assert_eq!(inspect(&reopened,"SELECT fingerprint_format,fingerprint,outcome FROM q7_requests WHERE identity=?1",vec![blob(identity.as_bytes())],3).await,expected);
         }
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn checkpoints_bind_exact_genesis_and_reject_corrupt_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let path = directory.path().join("checkpoint.db");
+        let (projection, definition) = bootstrap(&path, &job, &workers).await;
+        let make_genesis = |secret: &[u8; 32]| {
+            encode_checked_genesis(1, &address(), &definition, secret, 16 << 20, &job).unwrap()
+        };
+        let checkpoint = projection
+            .checkpoint(make_genesis(&[31; 32]), &job, &workers)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                checkpoint.next_offset,
+                checkpoint.insertion_sequence,
+                checkpoint.last_record_epoch
+            ),
+            (1, 0, 1)
+        );
+        drop(checkpoint);
+        seed(&projection, &definition, &job, &workers, false).await;
+        let checkpoint = projection
+            .checkpoint(make_genesis(&[31; 32]), &job, &workers)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (checkpoint.next_offset, checkpoint.insertion_sequence),
+            (2, 2)
+        );
+        drop(checkpoint);
+        assert!(matches!(
+            projection
+                .checkpoint(make_genesis(&[32; 32]), &job, &workers)
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        for sql in [
+            "UPDATE q7_queues SET definition=zeroblob(4194304)",
+            "UPDATE q7_queues SET cursor_secret=zeroblob(4194304)",
+        ] {
+            execute_for_test(&projection, sql, vec![]).await;
+            assert!(matches!(
+                projection
+                    .checkpoint(make_genesis(&[31; 32]), &job, &workers)
+                    .await,
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            execute_for_test(
+                &projection,
+                "UPDATE q7_queues SET definition=?1,cursor_secret=?2",
+                vec![blob(definition.raw()), blob(&[31; 32])],
+            )
+            .await;
+        }
+        for sql in [
+            "UPDATE q7_queues SET next_sequence=zeroblob(4194304)",
+            "UPDATE q7_queues SET applied_next_offset=0",
+            "UPDATE q7_queues SET last_record_epoch=zeroblob(8)",
+        ] {
+            execute_for_test(&projection, sql, vec![]).await;
+            assert!(matches!(
+                projection
+                    .checkpoint(make_genesis(&[31; 32]), &job, &workers)
+                    .await,
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            execute_for_test(
+                &projection,
+                "UPDATE q7_queues SET next_sequence=?1,applied_next_offset=2,last_record_epoch=?2",
+                vec![number(2), number(1)],
+            )
+            .await;
+        }
+        drop(projection);
+        let reopened = QueueProjection::open(&path, &job, &workers).await.unwrap();
+        assert_eq!(
+            reopened
+                .checkpoint(make_genesis(&[31; 32]), &job, &workers)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_offset,
+            2
+        );
         workers.close_and_drain().await.unwrap();
     }
 }
