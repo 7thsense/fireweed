@@ -32,8 +32,10 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::s3_create_only::S3CreateOnlyPut;
 mod namespace;
+mod queue_append;
 mod queue_replay;
 pub use namespace::VerifiedApi007Namespace;
+pub use queue_append::AdmittedApi007Append;
 pub use queue_replay::{AdmittedApi007Read, Api007ReadPlan};
 
 fn fresh_writer_id() -> String {
@@ -414,6 +416,7 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     engine: Arc<LogEngine<S>>,
     blob: Arc<dyn BlobStore>,
     namespace_origin: Arc<()>,
+    raw_io_qualified: bool,
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
@@ -510,6 +513,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             engine,
             blob,
             namespace_origin: Arc::new(()),
+            raw_io_qualified: true,
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
@@ -595,6 +599,10 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             |blob| blob,
         )
         .await
+        .map(|mut store| {
+            store.raw_io_qualified = true;
+            store
+        })
     }
 
     /// [`open_s3_with_prefixes`](Self::open_s3_with_prefixes) with the log's blob store wrapped
@@ -717,6 +725,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             engine,
             blob,
             namespace_origin: Arc::new(()),
+            raw_io_qualified: false,
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
@@ -1381,6 +1390,19 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         expected_epoch: u64,
         encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
     ) -> Result<Vec<CommandPosition>, PackedAppendError> {
+        self.produce_payload_with_owner(shard, expected_epoch, encode, None, None)
+            .await
+    }
+
+    async fn produce_payload_with_owner(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
+        owner: Option<object_log::AppendOwner>,
+        job: Option<&Arc<fireweed_engine::queue_admission::QueueReservation>>,
+    ) -> Result<Vec<CommandPosition>, PackedAppendError> {
+        let retain_completion = owner.is_some();
         let trace_started = Instant::now();
         let pre_budget =
             Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
@@ -1399,10 +1421,11 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             let wait_started = Instant::now();
             let metadata = permit.lock().await;
             self.lock_wait.record_append(wait_started.elapsed());
-            let epoch = self
-                .load_epoch(shard)
-                .await
-                .map_err(PackedAppendError::BeforePosition)?;
+            let epoch = match job {
+                Some(job) => self.load_epoch_admitted(shard, job).await,
+                None => self.load_epoch(shard).await,
+            }
+            .map_err(PackedAppendError::BeforePosition)?;
             if epoch != expected_epoch {
                 return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
             }
@@ -1415,7 +1438,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             Ok((metadata, payload, record_count))
         };
         let remaining = pre_deadline.saturating_duration_since(Instant::now());
-        let (payload, record_count) = match tokio::time::timeout(remaining, pre).await {
+        let mut pre = Box::pin(pre);
+        let (payload, record_count) = match tokio::time::timeout(remaining, &mut pre).await {
             Ok(Ok((metadata, payload, record_count))) => {
                 // Drop the queue permit before the object PUT so another produce
                 // on this queue can join the engine's open seal.
@@ -1423,8 +1447,16 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 (payload, record_count)
             }
             Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(PackedAppendError::before_timeout()),
+            Err(_) => {
+                if retain_completion {
+                    // Finish any already-started preparation I/O, but never
+                    // submit a produce after the pre-position deadline.
+                    let _ = pre.await;
+                }
+                return Err(PackedAppendError::before_timeout());
+            }
         };
+        drop(pre);
         let _s3_produce_permit = if self.store_tag == "s3" {
             Some(
                 s3_concurrent_produce_limit()
@@ -1438,27 +1470,43 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         let pre_us = trace_started.elapsed().as_micros();
         let bytes = payload.len();
         let started_unix_us = diagnostic_unix_us();
-        let mut post_phase = "produce";
+        let post_metadata_started = std::sync::atomic::AtomicBool::new(false);
         let produced = async {
             let produce_started = Instant::now();
-            let outcome = self
-                .engine
-                .produce_at_epoch(
-                    partition_key(shard),
-                    payload,
-                    record_count,
-                    (),
-                    Durability::Sequenced,
-                    expected_epoch,
-                )
-                .await
-                .map_err(|error| match error {
-                    // The partition's fence moved past this epoch; nothing was committed.
-                    object_log::ObjectLogError::Fenced { .. } => EngineError::EpochFenced,
-                    other => store_err(other),
-                })?;
+            let outcome = match owner {
+                Some(owner) => {
+                    self.engine
+                        .produce_owned_at_epoch(
+                            partition_key(shard),
+                            payload,
+                            record_count,
+                            (),
+                            Durability::Sequenced,
+                            expected_epoch,
+                            owner,
+                        )
+                        .await
+                }
+                None => {
+                    self.engine
+                        .produce_at_epoch(
+                            partition_key(shard),
+                            payload,
+                            record_count,
+                            (),
+                            Durability::Sequenced,
+                            expected_epoch,
+                        )
+                        .await
+                }
+            }
+            .map_err(|error| match error {
+                // The partition's fence moved past this epoch; nothing was committed.
+                object_log::ObjectLogError::Fenced { .. } => EngineError::EpochFenced,
+                other => store_err(other),
+            })?;
             let produce_us = produce_started.elapsed().as_micros();
-            post_phase = "high-water metadata";
+            post_metadata_started.store(true, Ordering::Relaxed);
             let metadata_started = Instant::now();
             let base = outcome.base_offset.ok_or_else(|| {
                 EngineError::Storage("sequenced produce missing base_offset".into())
@@ -1478,7 +1526,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             }
             EngineResult::Ok(positions)
         };
-        match tokio::time::timeout(post_timeout, produced).await {
+        let mut produced = Box::pin(produced);
+        match tokio::time::timeout(post_timeout, &mut produced).await {
             Ok(Ok(positions)) => Ok(positions),
             // A fenced commit assigned no offset, so the outcome is definite and the shard is
             // not poisoned.
@@ -1490,6 +1539,20 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 reason: format!("{error}; store={}", self.store_tag),
             }),
             Err(_) => {
+                let post_phase = if post_metadata_started.load(Ordering::Relaxed) {
+                    "high-water metadata"
+                } else {
+                    "produce"
+                };
+
+                if retain_completion {
+                    // Classification remains ambiguous even if completion later
+                    // succeeds. The owned worker must retain preparation state
+                    // through this terminal result; engine owners outlive ACK.
+                    let _ = produced.as_mut().await;
+                }
+                drop(produced);
+
                 if log_trace_enabled() {
                     let post_us = trace_started.elapsed().as_micros().saturating_sub(pre_us);
                     eprintln!(

@@ -16,6 +16,9 @@ pub struct VerifiedApi007Namespace {
     _charge: OwnedQueueBufferCharge,
 }
 impl VerifiedApi007Namespace {
+    pub(super) fn belongs_to(&self, job: &QueueReservation) -> bool {
+        std::ptr::eq(self._charge.reservation(), job)
+    }
     pub fn address(&self) -> QueueResult<fireweed_engine::queue_namespace::AddressRef<'_>> {
         if self.origin.upgrade().is_none() {
             return Err(unknown("namespace authority is gone"));
@@ -140,6 +143,31 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         }
         Ok(&namespace.shard)
     }
+    pub(super) async fn load_epoch_admitted(
+        &self,
+        shard: &QueueKey,
+        job: &Arc<QueueReservation>,
+    ) -> EngineResult<u64> {
+        let pk = partition_key(shard).0;
+        if let Some(epoch) = self.epochs.lock().expect("epochs").get(&pk).copied() {
+            return Ok(epoch);
+        }
+        let key = self.epoch_key(shard);
+        let epoch = match self
+            .read_immutable_admitted(&key, job)
+            .await
+            .map_err(|error| store_err(format!("{error:?}")))?
+        {
+            Some(bytes) => {
+                serde_json::from_slice::<EpochDoc>(&bytes.bytes)
+                    .map_err(store_err)?
+                    .epoch
+            }
+            None => 0,
+        };
+        self.epochs.lock().expect("epochs").insert(pk, epoch);
+        Ok(epoch)
+    }
     async fn read_immutable_admitted(
         &self,
         key: &str,
@@ -170,6 +198,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                         }
                         Err(error) => return Err(storage_queue(error)),
                     };
+                    #[cfg(test)]
+                    metadata_read_hook(&worker.path);
                     let size = file.metadata().map_err(storage_queue)?.len();
                     let charge = worker.job.owned_buffer(
                         size.checked_mul(4)
@@ -235,6 +265,18 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 Err(unknown("native immutable namespace authority unavailable"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) type MetadataReadHook = Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+pub(super) static METADATA_READ_HOOK: Mutex<Option<MetadataReadHook>> = Mutex::new(None);
+#[cfg(test)]
+fn metadata_read_hook(path: &Path) {
+    let hook = METADATA_READ_HOOK.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(path);
     }
 }
 
