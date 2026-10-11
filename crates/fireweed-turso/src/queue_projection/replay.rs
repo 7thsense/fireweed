@@ -77,35 +77,25 @@ impl NativeTransactionWork for ReplayWorker {
         self.projection.pause_apply(false).await;
     }
     async fn run(&mut self, connection: &Connection) -> QueueResult<Self::Output> {
-        let view = self.input.genesis.view()?;
-        if view.format() != QueueLogFormat::ChecksummedV2 {
-            return Err(unknown("replay requires checked genesis"));
-        }
-        let QueueLogPayload::Genesis(genesis) = view.payload() else {
-            return Err(unknown("replay authority is not genesis"));
-        };
-        let definition = genesis.validate_definition(&self.job)?;
+        let snapshot = super::snapshot::read_snapshot(connection, &self.input.genesis, &self.job)
+            .await?
+            .ok_or_else(|| unknown("replay projection missing"))?;
+        let definition = snapshot.definition;
         let request = &self.input.request;
         request.validate(definition.schema(), &self.input.limits)?;
-        let address = genesis.address();
+        let view = self.input.genesis.view()?;
+        let address = view.address();
         if request.queue.tenant != address.tenant || request.queue.queue != address.queue {
             return Err(unknown("replay address mismatch"));
         }
-        let digest = discovery_digest(&encode(&(address.tenant, address.queue))?);
-        let row = one(connection, "SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(applied_next_offset)='integer' THEN applied_next_offset ELSE NULL END,CASE WHEN typeof(next_sequence)='blob' AND length(next_sequence)=8 THEN next_sequence ELSE NULL END,CASE WHEN typeof(definition)='blob' AND length(definition)=length(?4) THEN definition=?4 ELSE 0 END,CASE WHEN typeof(cursor_secret)='blob' AND length(cursor_secret)=32 THEN cursor_secret=?5 ELSE 0 END,CASE WHEN typeof(last_record_epoch)='blob' AND length(last_record_epoch)=8 THEN last_record_epoch ELSE NULL END FROM q7_queues WHERE address_hash=?1 AND tenant=?2 AND name=?3", vec![blob(&digest),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret())],6).await?.ok_or_else(|| unknown("replay projection missing"))?;
-        let queue_id = integer(&row[0])?;
-        let offset = u64::try_from(integer(&row[1])?).map_err(unknown)?;
-        if offset == 0
-            || offset != self.input.required_next_offset
-            || integer(&row[3])? != 1
-            || integer(&row[4])? != 1
-            || unsigned(&row[5])? < view.epoch()
-            || unsigned(&row[5])? != self.input.required_last_record_epoch
-            || unsigned(&row[2])? != self.input.required_insertion_sequence
+        if snapshot.next_offset != self.input.required_next_offset
+            || snapshot.last_record_epoch != self.input.required_last_record_epoch
+            || snapshot.insertion_sequence != self.input.required_insertion_sequence
         {
             return Err(unknown("replay projection authority mismatch"));
         }
-        let sequence = unsigned(&row[2])?;
+        let queue_id = snapshot.queue_id;
+        let sequence = snapshot.insertion_sequence;
         let identity_hash = discovery_digest(request.request_id.as_bytes());
         let params = || {
             vec![

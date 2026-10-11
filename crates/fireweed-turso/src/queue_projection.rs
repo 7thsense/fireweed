@@ -1,6 +1,7 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
 mod replay;
+mod snapshot;
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -119,36 +120,19 @@ struct CheckpointWorker {
 impl CheckpointWorker {
     fn execute(mut self) -> QueueResult<Option<QueueProjectionCheckpoint>> {
         crate::tx::block_on_owned_apply(async {
-            let view = self.genesis.view()?;
-            if view.format() != QueueLogFormat::ChecksummedV2 {
-                return Err(unknown("checkpoint requires checked genesis"));
-            }
-            let QueueLogPayload::Genesis(genesis) = view.payload() else {
-                return Err(unknown("checkpoint authority is not genesis"));
-            };
-            let _definition = genesis.validate_definition(&self.job)?;
-            let address = genesis.address();
-            let digest = discovery_digest(&encode(&(address.tenant, address.queue))?);
             let writer = self.projection.writer.lock().await;
             let connection = writer
                 .as_ref()
                 .ok_or_else(|| unknown("projection connection is poisoned"))?;
-            let row = one(connection,"SELECT CASE WHEN typeof(applied_next_offset)='integer' THEN applied_next_offset ELSE NULL END,CASE WHEN typeof(next_sequence)='blob' AND length(next_sequence)=8 THEN next_sequence ELSE NULL END,CASE WHEN typeof(last_record_epoch)='blob' AND length(last_record_epoch)=8 THEN last_record_epoch ELSE NULL END,CASE WHEN typeof(definition)='blob' AND length(definition)=length(?4) THEN definition=?4 ELSE 0 END,CASE WHEN typeof(cursor_secret)='blob' AND length(cursor_secret)=32 THEN cursor_secret=?5 ELSE 0 END FROM q7_queues WHERE address_hash=?1 AND tenant=?2 AND name=?3",vec![blob(&digest),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret())],5).await?;
-            let Some(row) = row else {
+            let Some(snapshot) =
+                snapshot::read_snapshot(connection, &self.genesis, &self.job).await?
+            else {
                 return Ok(None);
             };
-            if integer(&row[3])? != 1 || integer(&row[4])? != 1 {
-                return Err(unknown("projection genesis authority mismatch"));
-            }
-            let next_offset = u64::try_from(integer(&row[0])?).map_err(unknown)?;
-            let last_record_epoch = unsigned(&row[2])?;
-            if next_offset == 0 || last_record_epoch == 0 || last_record_epoch < view.epoch() {
-                return Err(unknown("invalid projection checkpoint"));
-            }
             Ok(Some(QueueProjectionCheckpoint {
-                next_offset,
-                insertion_sequence: unsigned(&row[1])?,
-                last_record_epoch,
+                next_offset: snapshot.next_offset,
+                insertion_sequence: snapshot.insertion_sequence,
+                last_record_epoch: snapshot.last_record_epoch,
                 _charge: self.output_charge.take().expect("one checkpoint output"),
             }))
         })
