@@ -30,7 +30,8 @@ fn checksum(key: &UniqueIdentity, ordinal: u64, body: &[u8]) -> [u8; 32] {
     hash.finalize().into()
 }
 impl QueueSpool {
-    /// Producer must supply already accepted per-row frozen initial evidence.
+    /// Producer supplies frozen initial authority. Releases/claims require
+    /// accepted effects; Observe may preserve authority from a rejected row.
     /// Encoding buffers are admitted before allocation, then immediately dropped.
     pub fn append_unique_evidence(
         &mut self,
@@ -618,5 +619,71 @@ mod tests {
         }
         assert_eq!(quota.usage().unwrap(), 0);
         assert_eq!(admission.usage().unwrap().1, 0);
+    }
+    #[test]
+    fn authority_only_observations_do_not_release_claim_and_late_conflicts_poison() {
+        let directory = tempfile::tempdir().unwrap();
+        let tuple = key(9);
+        let a = owner("a");
+        let b = owner("b");
+        for mode in 0..3 {
+            let admission = QueueAdmission::new(1, 65536).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let quota = ScratchDiskQuota::new(65536).unwrap();
+            let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
+            if mode == 2 {
+                for claimant in [&a, &b] {
+                    spool
+                        .append_unique_evidence(
+                            &tuple,
+                            &claim(None, claimant, UniqueClaimOrigin::Administrative),
+                        )
+                        .unwrap();
+                }
+            }
+            spool
+                .append_unique_evidence(
+                    &tuple,
+                    &ScratchUniqueEvidence {
+                        initial_loaded: true,
+                        initial_owner: Some(a.clone()),
+                        effect: ScratchUniqueEffect::Observe,
+                    },
+                )
+                .unwrap();
+            if mode == 1 {
+                spool
+                    .append_unique_evidence(
+                        &tuple,
+                        &claim(Some(&a), &b, UniqueClaimOrigin::Ordinary),
+                    )
+                    .unwrap();
+            }
+            let mut sorted = spool.seal().unwrap();
+            let result = sorted.reduce_unique_evidence();
+            match mode {
+                0 => assert_eq!(
+                    result.unwrap(),
+                    UniqueTupleDecision {
+                        administrative_collision: false,
+                        final_collision: false
+                    }
+                ),
+                1 => assert_eq!(
+                    result.unwrap(),
+                    UniqueTupleDecision {
+                        administrative_collision: false,
+                        final_collision: true
+                    }
+                ),
+                _ => {
+                    assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+                    assert!(sorted.reduce_unique_evidence().is_err());
+                }
+            }
+            drop(sorted);
+            assert_eq!(quota.usage().unwrap(), 0);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
     }
 }

@@ -13,6 +13,7 @@ pub enum UniqueClaimOrigin {
     Ordinary,
 }
 pub enum UniqueEvidenceEffect<'a> {
+    Observe,
     Release(&'a RecordIdentity),
     Claim {
         owner: &'a RecordIdentity,
@@ -28,6 +29,8 @@ pub enum ScratchUniqueEffect {
         owner: RecordIdentity,
         origin: UniqueClaimOrigin,
     },
+    /// Authority-only observation from a resolved but rejected row.
+    Observe,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScratchUniqueEvidence {
@@ -42,6 +45,7 @@ impl ScratchUniqueEvidence {
             initial_loaded: self.initial_loaded,
             initial_owner: self.initial_owner.as_ref(),
             effect: match &self.effect {
+                ScratchUniqueEffect::Observe => UniqueEvidenceEffect::Observe,
                 ScratchUniqueEffect::Release(owner) => UniqueEvidenceEffect::Release(owner),
                 ScratchUniqueEffect::Claim { owner, origin } => UniqueEvidenceEffect::Claim {
                     owner,
@@ -51,7 +55,8 @@ impl ScratchUniqueEvidence {
         }
     }
 }
-/// Evidence must come from initial fenced authority and already accepted rows.
+/// Evidence comes from initial fenced authority. Releases/claims require accepted
+/// effects; Observe preserves authority consulted by rejected candidates too.
 /// Missing probe authority is distinct from a loaded nonownership result.
 pub struct UniqueEvidence<'a> {
     pub tuple: &'a UniqueIdentity,
@@ -147,6 +152,7 @@ impl<'a, 'r> UniqueTupleReducer<'a, 'r> {
             return Err(unknown("contradictory unique tuple initial authority"));
         }
         match evidence.effect {
+            UniqueEvidenceEffect::Observe => {}
             UniqueEvidenceEffect::Release(owner) => {
                 if self.initial_owner != Some(owner) || owner.collection != self.tuple.collection {
                     return Err(unknown("released tuple lacks exact initial owner"));

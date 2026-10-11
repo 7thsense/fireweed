@@ -528,6 +528,181 @@ fn copy_probe(
     }
     Ok(())
 }
+fn selected_clause<'a>(
+    row: &StoredWork,
+    clause: usize,
+    intent: &'a AdministrativeIntent,
+    schema: &QueueSchema,
+) -> QueueResult<&'a AdministrativeClause> {
+    let AdministrativeOperation::SelectFirst(clauses) = &intent.operation else {
+        return Err(unknown("selection driver lacks selector intent"));
+    };
+    if clause >= clauses.len() {
+        return Err(unknown("administrative clause outside initial ownership"));
+    }
+    let mut first = None;
+    for (index, definition) in clauses.iter().enumerate().take(clause + 1) {
+        if checked_selector_matches(&definition.selector, row, intent.evaluated_at, &schema.work)? {
+            first = Some(index);
+            break;
+        }
+    }
+    if first != Some(clause) {
+        return Err(unknown("administrative first-clause ownership mismatch"));
+    }
+    Ok(&clauses[clause])
+}
+
+fn selected_row<'s>(
+    key: &str,
+    image: &'s RecordSnapshot,
+    next_sequence: u64,
+) -> QueueResult<&'s StoredWork> {
+    let row = image
+        .work
+        .get(key)
+        .ok_or_else(|| unknown("selected administrative row missing"))?;
+    let id = RecordIdentity {
+        collection: None,
+        key: key.into(),
+    };
+    if image.next_sequence != next_sequence
+        || row.record.work.key != key
+        || row.record.version == 0
+        || image.versions.get(&id) != Some(&row.record.version)
+        || row.record.insertion_sequence == 0
+        || row.record.insertion_sequence > image.next_sequence
+    {
+        return Err(unknown("inconsistent streamed administrative authority"));
+    }
+    CheckedFields::new(&row.record.work.fields, &row.field_coverage)?;
+    Ok(row)
+}
+
+/// One row's already resolved mutation and exact initial unique authority.
+/// Payloads are dropped before their admission guard. This ephemeral candidate
+/// grants neither selected-source completeness nor publication authority.
+struct AcceptedCandidate<'r> {
+    accepted: bool,
+    before: RecordSnapshot,
+    delta: CommitDelta,
+    effects: crate::queue_fields::UniqueFieldEffects,
+    _charge: QueueBufferCharge<'r>,
+}
+fn resolve_candidate<'r>(
+    key: &str,
+    row: &StoredWork,
+    image: &RecordSnapshot,
+    proposal: &mut AdministrativeProposal,
+    schema: &QueueSchema,
+    reservation: &'r QueueReservation,
+) -> QueueResult<Option<AcceptedCandidate<'r>>> {
+    if !matches!(
+        proposal.outcome,
+        AdministrativeOutcome::Changed { .. } | AdministrativeOutcome::Deleted { .. }
+    ) {
+        return Ok(None);
+    }
+    // Reserve copies of old/new dependency values and metadata before pruning.
+    let row_charge = reservation.buffer(row_bound(row)?)?;
+    let names_charge = reservation.buffer(dependency_bound(proposal, schema)?)?;
+    let names = dependencies(proposal, schema);
+    let old = prune(row, &names, None);
+    let new = proposal
+        .replacement
+        .as_ref()
+        .map(|row| prune(row, &names, proposal.resolved_body.as_ref()));
+    let version = match proposal.outcome {
+        AdministrativeOutcome::Changed { version } | AdministrativeOutcome::Deleted { version } => {
+            version
+        }
+        _ => unreachable!(),
+    };
+    let id = RecordIdentity {
+        collection: None,
+        key: key.into(),
+    };
+    let mut before = RecordSnapshot {
+        next_sequence: image.next_sequence,
+        ..Default::default()
+    };
+    before.versions.insert(id.clone(), row.record.version);
+    before.work.insert(key.into(), old);
+    let mut delta = empty_delta("", image.next_sequence);
+    if let Some(new) = new {
+        delta.work.push(new);
+        delta.work_fields.insert(
+            key.into(),
+            proposal
+                .resolved_fields
+                .take()
+                .ok_or_else(|| unknown("changed proposal lacks fields"))?,
+        );
+        delta.work_bodies.insert(
+            key.into(),
+            proposal
+                .resolved_body
+                .take()
+                .ok_or_else(|| unknown("changed proposal lacks body intent"))?,
+        );
+    } else {
+        delta.deleted_work.push(key.into());
+    }
+    delta.versions.push(RecordVersion {
+        collection: None,
+        key: key.into(),
+        version,
+    });
+    let mut scratch_bytes = add(delta_bound(&delta)?, tuple_identity_bound(&delta, schema)?)?;
+    for row in before.work.values().chain(delta.work.iter()) {
+        scratch_bytes = add(
+            scratch_bytes,
+            crate::queue_memory::fields_expansion(
+                row.record
+                    .work
+                    .fields
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), Some(value))),
+                &schema.work,
+            )
+            .map_err(|_| unknown("administrative tuple bound exhausted"))?,
+        )?;
+    }
+    let tuple_charge = reservation.buffer(scale(scratch_bytes, 4)?)?;
+    let effects = unique_effects(&delta, &before, schema)?;
+    let mut probe_bytes = 2048;
+    for tuple in required_tuples(&effects) {
+        probe_bytes = add(
+            probe_bytes,
+            tuple_bound(tuple, image.unique_owners.get(tuple))?,
+        )?;
+    }
+    let probe_charge = reservation.buffer(probe_bytes)?;
+    for tuple in required_tuples(&effects) {
+        copy_probe(&mut before, image, tuple)?;
+    }
+
+    let accepted = match effects.validate(&before)? {
+        Err(Rejection::UniqueConflict) => {
+            proposal.outcome = AdministrativeOutcome::UniqueConflict;
+            false
+        }
+        Err(_) => return Err(unknown("unexpected administrative unique rejection")),
+        Ok(()) => true,
+    };
+    // Keep consulted initial authority even for a per-row business rejection.
+    Ok(Some(AcceptedCandidate {
+        accepted,
+        before,
+        delta,
+        effects,
+        _charge: row_charge
+            .merge(names_charge)?
+            .merge(tuple_charge)?
+            .merge(probe_charge)?,
+    }))
+}
+
 fn append_delta(target: &mut CommitDelta, mut delta: CommitDelta) {
     target.work.append(&mut delta.work);
     target.work_fields.append(&mut delta.work_fields);
@@ -568,25 +743,7 @@ impl Accumulator<'_, '_> {
         result
     }
     fn row<'s>(&self, key: &str, image: &'s RecordSnapshot) -> QueueResult<&'s StoredWork> {
-        let row = image
-            .work
-            .get(key)
-            .ok_or_else(|| unknown("selected administrative row missing"))?;
-        let id = RecordIdentity {
-            collection: None,
-            key: key.into(),
-        };
-        if image.next_sequence != self.initial.next_sequence
-            || row.record.work.key != key
-            || row.record.version == 0
-            || image.versions.get(&id) != Some(&row.record.version)
-            || row.record.insertion_sequence == 0
-            || row.record.insertion_sequence > image.next_sequence
-        {
-            return Err(unknown("inconsistent streamed administrative authority"));
-        }
-        CheckedFields::new(&row.record.work.fields, &row.field_coverage)?;
-        Ok(row)
+        selected_row(key, image, self.initial.next_sequence)
     }
     fn visit_broad(&mut self, key: &str, clause: usize, image: &RecordSnapshot) -> QueueResult<()> {
         let _key_scratch = self
@@ -604,34 +761,13 @@ impl Accumulator<'_, '_> {
         let last_charge = self.reservation.buffer(add(key.len() as u64, 256)?)?;
         self.last = Some((key.into(), last_charge));
         let row = self.row(key, image)?;
-        let AdministrativeOperation::SelectFirst(clauses) = &self.intent.operation else {
-            unreachable!()
-        };
-        if clause >= clauses.len() {
-            return Err(unknown("administrative clause outside initial ownership"));
-        }
-        let mut first = None;
-        for (index, definition) in clauses.iter().enumerate().take(clause + 1) {
-            if checked_selector_matches(
-                &definition.selector,
-                row,
-                self.intent.evaluated_at,
-                &self.schema.work,
-            )? {
-                first = Some(index);
-                break;
-            }
-        }
-        if first != Some(clause) {
-            return Err(unknown("administrative first-clause ownership mismatch"));
-        }
+        let definition = selected_clause(row, clause, self.intent, self.schema)?;
         if self.explicit.contains(key) {
             self.doom(true);
         }
         if self.overlap || self.collision {
             return Ok(());
         }
-        let definition = &clauses[clause];
         let _planning = self.reservation.buffer(row_bound(row)?)?;
         let proposal = propose_target_view(
             TargetRequest {
@@ -657,123 +793,49 @@ impl Accumulator<'_, '_> {
         mut proposal: AdministrativeProposal,
         clause: Option<usize>,
     ) -> QueueResult<()> {
-        if matches!(
-            proposal.outcome,
-            AdministrativeOutcome::Changed { .. } | AdministrativeOutcome::Deleted { .. }
-        ) {
-            let _names = self
-                .reservation
-                .buffer(dependency_bound(&proposal, self.schema)?)?;
-            let names = dependencies(&proposal, self.schema);
-            let old = prune(row, &names, None);
-            let new = proposal
-                .replacement
-                .as_ref()
-                .map(|row| prune(row, &names, proposal.resolved_body.as_ref()));
-            let version = match proposal.outcome {
-                AdministrativeOutcome::Changed { version }
-                | AdministrativeOutcome::Deleted { version } => version,
-                _ => unreachable!(),
-            };
-            let id = RecordIdentity {
-                collection: None,
-                key: key.into(),
-            };
-            let mut before = RecordSnapshot {
-                next_sequence: image.next_sequence,
-                ..Default::default()
-            };
-            before.versions.insert(id.clone(), row.record.version);
-            before.work.insert(key.into(), old);
-            let mut delta = empty_delta("", image.next_sequence);
-            if let Some(new) = new {
-                delta.work.push(new);
-                delta.work_fields.insert(
-                    key.into(),
-                    proposal
-                        .resolved_fields
-                        .take()
-                        .ok_or_else(|| unknown("changed proposal lacks fields"))?,
-                );
-                delta.work_bodies.insert(
-                    key.into(),
-                    proposal
-                        .resolved_body
-                        .take()
-                        .ok_or_else(|| unknown("changed proposal lacks body intent"))?,
-                );
-            } else {
-                delta.deleted_work.push(key.into());
-            }
-            delta.versions.push(RecordVersion {
-                collection: None,
-                key: key.into(),
-                version,
-            });
-            let mut scratch_bytes = add(
-                delta_bound(&delta)?,
-                tuple_identity_bound(&delta, self.schema)?,
-            )?;
-            for row in before.work.values().chain(delta.work.iter()) {
-                scratch_bytes = add(
-                    scratch_bytes,
-                    crate::queue_memory::fields_expansion(
-                        row.record
-                            .work
-                            .fields
-                            .iter()
-                            .map(|(name, value)| (name.as_str(), Some(value))),
-                        &self.schema.work,
-                    )
-                    .map_err(|_| unknown("administrative tuple bound exhausted"))?,
+        if let Some(AcceptedCandidate {
+            mut before,
+            delta,
+            effects,
+            accepted,
+            _charge,
+        }) = resolve_candidate(
+            key,
+            row,
+            image,
+            &mut proposal,
+            self.schema,
+            self.reservation,
+        )? && accepted
+        {
+            let mut retained_bytes = add(snapshot_bound(&before)?, delta_bound(&delta)?)?;
+            for tuple in required_tuples(&effects) {
+                retained_bytes = add(
+                    retained_bytes,
+                    tuple_bound(tuple, before.unique_owners.get(tuple))?,
                 )?;
             }
-            let _tuple_scratch = self.reservation.buffer(scale(scratch_bytes, 4)?)?;
-            let effects = unique_effects(&delta, &before, self.schema)?;
-            let mut probe_bytes = 2048;
-            for tuple in required_tuples(&effects) {
-                probe_bytes = add(
-                    probe_bytes,
-                    tuple_bound(tuple, image.unique_owners.get(tuple))?,
-                )?;
-            }
-            let _probes = self.reservation.buffer(probe_bytes)?;
-            for tuple in required_tuples(&effects) {
-                copy_probe(&mut before, image, tuple)?;
-            }
-            match effects.validate(&before)? {
-                Err(Rejection::UniqueConflict) => {
-                    proposal.outcome = AdministrativeOutcome::UniqueConflict;
-                }
-                Err(_) => return Err(unknown("unexpected administrative unique rejection")),
-                Ok(()) => {
-                    let retained_bytes = add(
-                        add(snapshot_bound(&before)?, delta_bound(&delta)?)?,
-                        probe_bytes,
-                    )?;
-                    let charge = self.reservation.buffer(retained_bytes)?;
-                    for (tuple, owner) in &effects.claims {
-                        if self
-                            .claims
-                            .get(tuple)
-                            .is_some_and(|previous| previous != owner)
-                        {
-                            self.doom(false);
-                            return Ok(());
-                        }
-                    }
-                    for tuple in &before.unique_probes_loaded {
-                        copy_probe(&mut self.initial, &before, tuple)?;
-                    }
-                    self.initial.work.append(&mut before.work);
-                    self.initial.versions.append(&mut before.versions);
-                    for (tuple, owner) in effects.claims {
-                        self.claims.insert(tuple, owner);
-                    }
-                    append_delta(&mut self.delta, delta);
-                    self.retained.push(charge);
+            let charge = self.reservation.buffer(retained_bytes)?;
+            for (tuple, owner) in &effects.claims {
+                if self
+                    .claims
+                    .get(tuple)
+                    .is_some_and(|previous| previous != owner)
+                {
+                    self.doom(false);
+                    return Ok(());
                 }
             }
+            for tuple in &before.unique_probes_loaded {
+                copy_probe(&mut self.initial, &before, tuple)?;
+            }
+            self.initial.work.append(&mut before.work);
+            self.initial.versions.append(&mut before.versions);
+            for (tuple, owner) in effects.claims {
+                self.claims.insert(tuple, owner);
+            }
+            append_delta(&mut self.delta, delta);
+            self.retained.push(charge);
         }
         self.result.histogram.record(&proposal.outcome)?;
         if let Some(clause) = clause {
@@ -1884,4 +1946,464 @@ mod tests {
         drop(hydration);
         assert_eq!(admission.usage().unwrap().1, 0);
     }
+    #[test]
+    fn sink_drains_5001_accepted_rows_with_constant_retained_driver_memory() {
+        use std::sync::Arc;
+        for deleting in [false, true] {
+            let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let definition = schema();
+            let request = ordinary();
+            let action = if deleting {
+                AdministrativeAction::Delete {
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                }
+            } else {
+                AdministrativeAction::Update {
+                    patch: WorkPatch {
+                        priority: Some(17),
+                        ..Default::default()
+                    },
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    remove_field_prefixes: BTreeSet::new(),
+                }
+            };
+            let operation = intent(action);
+            let before = RecordSnapshot {
+                next_sequence: 5001,
+                ..Default::default()
+            };
+            let template = row();
+            let observed = Cell::new(None);
+            let delivered = Cell::new(0);
+            let source = futures::stream::iter((0..5001).map(|index| {
+                let hydration = job.buffer(row_bound(&template).unwrap()).unwrap();
+                let image = one_row(template.clone(), &format!("row-{index:05}"), 5001);
+                if index > 1 {
+                    assert_eq!(observed.get().unwrap(), admission.usage().unwrap().1);
+                } else if index == 1 {
+                    observed.set(Some(admission.usage().unwrap().1));
+                }
+                Ok(SelectedAdministrativeInput::OwnedOneRow {
+                    clause: 0,
+                    image,
+                    hydration,
+                })
+            }));
+            let scan = futures::executor::block_on(scan_broad_group_to_sink(
+                &request,
+                &operation,
+                source,
+                &before,
+                &definition,
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                |packet| {
+                    let delta = packet.command().unwrap();
+                    assert_eq!(packet.clause(), 0);
+                    assert_eq!(delta.versions.len(), 1);
+                    assert_eq!(delta.versions[0].version, 2);
+                    if deleting {
+                        assert_eq!(delta.deleted_work.len(), 1);
+                        assert!(delta.work.is_empty());
+                    } else {
+                        assert_eq!(delta.work.len(), 1);
+                        assert_eq!(delta.work[0].record.work.priority, 17);
+                        assert!(delta.work[0].record.work.fields.is_empty());
+                    }
+                    assert_eq!(packet.initial_authority().work.len(), 1);
+                    delivered.set(delivered.get() + 1);
+                    futures::future::ready(Ok(()))
+                },
+            ))
+            .unwrap();
+            assert_eq!(delivered.get(), 5001);
+            assert_eq!(scan.result().histogram.matched, 5001);
+            assert_eq!(scan.result().clauses[0].histogram.matched, 5001);
+            assert!(scan.result().items.is_empty());
+            assert!(!scan.overlaps_explicit_work());
+            assert!(admission.usage().unwrap().1 < (1 << 16));
+            drop(scan);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+            drop(job);
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn sink_receives_rejected_authority_after_overlap_and_detects_late_contradiction() {
+        use crate::queue_unique_stream::{
+            UniqueEvidence, UniqueEvidenceEffect, UniqueTupleReducer,
+        };
+        use std::sync::Arc;
+        let admission = QueueAdmission::new(1, 2 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let definition = unique_schema();
+        let operation = intent(rekey("z"));
+        let mut request = ordinary();
+        request.work_inserts.push(row().record.work); // explicit a overlaps first row
+        let before = RecordSnapshot {
+            next_sequence: 3,
+            ..Default::default()
+        };
+        let target_tuple = tuple("z");
+        let foreign = RecordIdentity {
+            collection: None,
+            key: "foreign".into(),
+        };
+        let delivered = Cell::new(0);
+        let mut reducer = UniqueTupleReducer::new(&target_tuple, true, None, &job).unwrap();
+        let source = futures::stream::iter(["a", "b", "c"].into_iter().map(|key| {
+            let hydration = job.buffer(64 << 10).unwrap();
+            let mut image = unique_row(key, key, 3);
+            image.unique_probes_loaded.insert(target_tuple.clone());
+            if key == "c" {
+                image
+                    .unique_owners
+                    .insert(target_tuple.clone(), foreign.clone());
+            }
+            Ok(SelectedAdministrativeInput::OwnedOneRow {
+                clause: 0,
+                image,
+                hydration,
+            })
+        }));
+        let scan = futures::executor::block_on(scan_broad_group_to_sink(
+            &request,
+            &operation,
+            source,
+            &before,
+            &definition,
+            &QueueLimits::default(),
+            Arc::clone(&job),
+            |packet| {
+                delivered.set(delivered.get() + 1);
+                let authority = packet.initial_authority();
+                if delivered.get() == 3 {
+                    assert_eq!(packet.outcome(), &AdministrativeOutcome::UniqueConflict);
+                    assert!(
+                        packet.command().is_none() && packet.accepted_unique_effects().is_none()
+                    );
+                    assert_eq!(authority.unique_owners.get(&target_tuple), Some(&foreign));
+                } else {
+                    assert!(packet.command().is_some());
+                }
+                futures::future::ready(reducer.observe(UniqueEvidence {
+                    tuple: &target_tuple,
+                    initial_loaded: authority.unique_probes_loaded.contains(&target_tuple),
+                    initial_owner: authority.unique_owners.get(&target_tuple),
+                    effect: UniqueEvidenceEffect::Observe,
+                }))
+            },
+        ));
+        assert_eq!(delivered.get(), 3);
+        assert!(matches!(scan, Err(QueueError::OutcomeUnknown(_))));
+        assert!(reducer.finish().is_err());
+        assert_eq!(admission.usage().unwrap(), (1, 0));
+    }
+
+    #[test]
+    fn sink_and_source_failures_or_invalid_late_authority_never_return_scan_summary() {
+        use std::sync::Arc;
+        for failure in 0..3 {
+            let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let definition = schema();
+            let request = ordinary();
+            let operation = intent(AdministrativeAction::Update {
+                patch: WorkPatch {
+                    priority: Some(7),
+                    ..Default::default()
+                },
+                lifecycle: AdministrativeLifecycle::Keep,
+                lease_guard: AdministrativeLeaseGuard::RejectActive,
+                remove_field_prefixes: BTreeSet::new(),
+            });
+            let before = RecordSnapshot {
+                next_sequence: 2,
+                ..Default::default()
+            };
+            let delivered = Cell::new(0);
+            let source =
+                futures::stream::iter(["a", "b"].into_iter().enumerate().map(|(index, key)| {
+                    if failure == 0 && index == 1 {
+                        return Err(QueueError::Busy);
+                    }
+                    let hydration = job.buffer(64 << 10).unwrap();
+                    let mut image = one_row(row(), key, 2);
+                    if failure == 2 && index == 1 {
+                        image.next_sequence = 3;
+                    }
+                    Ok(SelectedAdministrativeInput::OwnedOneRow {
+                        clause: 0,
+                        image,
+                        hydration,
+                    })
+                }));
+            let scan = futures::executor::block_on(scan_broad_group_to_sink(
+                &request,
+                &operation,
+                source,
+                &before,
+                &definition,
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                |_| {
+                    delivered.set(delivered.get() + 1);
+                    futures::future::ready(if failure == 1 {
+                        Err(QueueError::Invalid("sink fault".into()))
+                    } else {
+                        Ok(())
+                    })
+                },
+            ));
+            assert!(matches!(scan, Err(QueueError::OutcomeUnknown(_))));
+            assert_eq!(delivered.get(), 1);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
+    }
+    #[test]
+    fn suspended_sink_blocks_source_advance_and_owner_drop_releases_packet() {
+        use futures::{FutureExt, task::noop_waker_ref};
+        use std::sync::Arc;
+        use std::task::{Context, Poll};
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let definition = schema();
+        let request = ordinary();
+        let operation = intent(AdministrativeAction::Update {
+            patch: WorkPatch {
+                priority: Some(7),
+                ..Default::default()
+            },
+            lifecycle: AdministrativeLifecycle::Keep,
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+            remove_field_prefixes: BTreeSet::new(),
+        });
+        let before = RecordSnapshot {
+            next_sequence: 2,
+            ..Default::default()
+        };
+        let produced = Cell::new(0);
+        let source = futures::stream::iter(["a", "b"].into_iter().map(|key| {
+            let hydration = job.buffer(64 << 10).unwrap();
+            produced.set(produced.get() + 1);
+            Ok(SelectedAdministrativeInput::OwnedOneRow {
+                clause: 0,
+                image: one_row(row(), key, 2),
+                hydration,
+            })
+        }));
+        let limits = QueueLimits::default();
+        let mut owner = scan_broad_group_to_sink(
+            &request,
+            &operation,
+            source,
+            &before,
+            &definition,
+            &limits,
+            Arc::clone(&job),
+            |packet| async move {
+                futures::future::pending::<()>().await;
+                // Keep the guarded packet owned throughout the suspended await.
+                assert!(packet.command().is_some());
+                Ok(())
+            },
+        )
+        .boxed_local();
+        assert!(matches!(
+            owner
+                .as_mut()
+                .poll(&mut Context::from_waker(noop_waker_ref())),
+            Poll::Pending
+        ));
+        assert_eq!(produced.get(), 1);
+        assert!(admission.usage().unwrap().1 > 65536);
+        drop(owner);
+        assert_eq!(produced.get(), 1);
+        assert_eq!(admission.usage().unwrap(), (1, 0));
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+}
+
+/// Transient row resolved against immutable fenced authority. Only accepted
+/// rows have a command. No-op, precondition or lease-only rejections update
+/// histograms without emitting a packet. Emitted packets expose consulted unique authority, including
+/// per-target UniqueConflict rejections. A sink must retain those observations
+/// separately from accepted effects and later validate complete evidence EOF.
+/// Copying an accessor's payload requires separate admission.
+pub struct ResolvedAdministrativeRow {
+    outcome: AdministrativeOutcome,
+    clause: usize,
+    before: RecordSnapshot,
+    delta: CommitDelta,
+    effects: crate::queue_fields::UniqueFieldEffects,
+    accepted: bool,
+    _charge: crate::queue_admission::OwnedQueueBufferCharge,
+}
+impl ResolvedAdministrativeRow {
+    pub fn outcome(&self) -> &AdministrativeOutcome {
+        &self.outcome
+    }
+    pub fn clause(&self) -> usize {
+        self.clause
+    }
+    pub fn initial_authority(&self) -> &RecordSnapshot {
+        &self.before
+    }
+    pub fn command(&self) -> Option<&CommitDelta> {
+        self.accepted.then_some(&self.delta)
+    }
+    pub fn accepted_unique_effects(&self) -> Option<&crate::queue_fields::UniqueFieldEffects> {
+        self.accepted.then_some(&self.effects)
+    }
+}
+/// Successful selected-source and awaited-sink EOF. This does not certify
+/// complete uniqueness reduction, ordinary CAS/lease checks or publication.
+/// The backend keeps its fence until all those checks and atomic storage finish.
+pub struct AdmittedAdministrativeScan {
+    result: AdministrativeResult,
+    overlap: bool,
+    _charge: crate::queue_admission::OwnedQueueBufferCharge,
+}
+impl AdmittedAdministrativeScan {
+    pub fn result(&self) -> &AdministrativeResult {
+        &self.result
+    }
+    pub fn overlaps_explicit_work(&self) -> bool {
+        self.overlap
+    }
+}
+
+/// Resolve and await one owned row at a time. The scan retains only an admitted
+/// previous key, input-sized explicit identities and clause histograms. A sink
+/// must spill rather than collect row payloads; it owns command/evidence storage.
+/// Continue full row validation after provisional overlap/collision/overflow.
+/// Any source, resolution, admission or sink failure returns OutcomeUnknown and
+/// grants no scan summary. No ordinary ownership clock is sampled here.
+#[allow(clippy::too_many_arguments)]
+pub async fn scan_broad_group_to_sink<'s, 'r, F, Fut>(
+    ordinary: &CommitGroup,
+    intent: &AdministrativeIntent,
+    targets: impl futures::Stream<Item = QueueResult<SelectedAdministrativeInput<'s, 'r>>>,
+    ordinary_image: &RecordSnapshot,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+    reservation: std::sync::Arc<QueueReservation>,
+    mut sink: F,
+) -> QueueResult<AdmittedAdministrativeScan>
+where
+    F: FnMut(ResolvedAdministrativeRow) -> Fut,
+    Fut: std::future::Future<Output = QueueResult<()>>,
+{
+    use futures::StreamExt;
+    let AdministrativeOperation::SelectFirst(clauses) = &intent.operation else {
+        return Err(QueueError::Invalid(
+            "sink scan requires selector administration".into(),
+        ));
+    };
+    intent.validate(schema, limits)?;
+    validate_snapshot(ordinary_image)?;
+    let root_bytes = add(
+        intent_headers(intent)?,
+        add(
+            ordinary_bound(ordinary, ordinary_image)?,
+            add(
+                scale(wire(intent)?, 12)?,
+                add(scale(wire(schema)?, 12)?, 8192)?,
+            )?,
+        )?,
+    )?;
+    let root = reservation.buffer(add(root_bytes, scale(clauses.len() as u64, 8192)?)?)?;
+    let mut result = AdministrativeResult {
+        histogram: Default::default(),
+        items: vec![],
+        clauses: clauses
+            .iter()
+            .map(|clause| AdministrativeClauseResult {
+                id: clause.id.clone(),
+                histogram: Default::default(),
+            })
+            .collect(),
+    };
+    let explicit: BTreeSet<&str> = work_keys(ordinary).collect();
+    let mut last: Option<(String, QueueBufferCharge<'_>)> = None;
+    let mut overlap = false;
+    futures::pin_mut!(targets);
+    while let Some(input) = targets.next().await {
+        let input = input.map_err(|_| unknown("administrative source failed before EOF"))?;
+        let (key, clause, image) = match &input {
+            SelectedAdministrativeInput::BorrowedFullImage { key, clause, image } => {
+                (*key, *clause, *image)
+            }
+            SelectedAdministrativeInput::OwnedOneRow { clause, image, .. } => {
+                if image.work.len() != 1 || image.versions.len() != 1 || !image.state.is_empty() {
+                    return Err(unknown(
+                        "streamed administrative authority is not one live row",
+                    ));
+                }
+                (
+                    image.work.keys().next().expect("one row").as_str(),
+                    *clause,
+                    image,
+                )
+            }
+        };
+        let _key_scratch = reservation.buffer(add(scale(key.len() as u64, 4)?, 2048)?)?;
+        if last
+            .as_ref()
+            .is_some_and(|(previous, _)| previous.as_bytes() >= key.as_bytes())
+        {
+            return Err(unknown(
+                "administrative stream keys are not strictly ordered",
+            ));
+        }
+        let last_charge = reservation.buffer(add(key.len() as u64, 256)?)?;
+        last = Some((key.into(), last_charge));
+        let row = selected_row(key, image, ordinary_image.next_sequence)?;
+        let definition = selected_clause(row, clause, intent, schema)?;
+        overlap |= explicit.contains(key);
+        let _planning = reservation.buffer(row_bound(row)?)?;
+        let mut proposal = propose_target_view(
+            TargetRequest {
+                key,
+                expected_version: None,
+                precondition: &definition.precondition,
+                action: &definition.action,
+            },
+            Some(row),
+            Some(row.record.version),
+            intent.evaluated_at,
+            None,
+            schema,
+            limits,
+        )?;
+        if let Some(candidate) =
+            resolve_candidate(key, row, image, &mut proposal, schema, &reservation)?
+        {
+            let owned = ResolvedAdministrativeRow {
+                outcome: proposal.outcome.clone(),
+                clause,
+                before: candidate.before,
+                delta: candidate.delta,
+                effects: candidate.effects,
+                accepted: candidate.accepted,
+                _charge: candidate
+                    ._charge
+                    .into_owned(std::sync::Arc::clone(&reservation))?,
+            };
+            sink(owned)
+                .await
+                .map_err(|_| unknown("administrative sink failed before EOF"))?;
+        }
+        result.histogram.record(&proposal.outcome)?;
+        result.clauses[clause].histogram.record(&proposal.outcome)?;
+    }
+    Ok(AdmittedAdministrativeScan {
+        result,
+        overlap,
+        _charge: root.into_owned(std::sync::Arc::clone(&reservation))?,
+    })
 }

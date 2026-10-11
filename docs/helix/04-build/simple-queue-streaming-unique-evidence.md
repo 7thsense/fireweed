@@ -207,3 +207,47 @@ shutdown must reject new queue admission, finish existing operations and drain
 final reservations before closing the scheduler, so accepted queue work not yet
 registered for scratch can still finish. Selected-source EOF, command streaming,
 logical-size receipts, publication and backend parity remain pending.
+
+## Sink-driven selected-row resolution — iteration 49
+
+The new internal scan_broad_group_to_sink awaits one owned resolved row at a time.
+It retains only the admitted previous key, input-sized explicit identity set and
+clause histograms. selected_row, selected_clause and resolve_candidate are shared
+with the existing admitted reference accumulator, so the sink path uses identical
+first-clause ownership, operator-time decisions, prefix edits, dependency pruning,
+unique effects and immutable initial-owner acceptance. Its source must remain
+fenced through later finalization and atomic storage.
+
+No-op, precondition and lease-only outcomes update histograms without a packet.
+Each resolved-candidate packet exposes the row outcome/clause, predecessor/highwater and
+consulted unique authority. Only accepted packets expose a resolved command and
+accepted effects. Rejected UniqueConflict candidates still deliver their consulted
+probe observations. Scratch evidence now supports an ephemeral Observe tag that
+validates the exact initial owner without changing release/claim state. This does
+not change any durable FWQP1 or consumer request/receipt encoding. The eventual
+physical sink must write those observations separately from accepted effects.
+
+The scan continues complete row validation and sink delivery after provisional
+overlap. It never calls the aggregate accumulator's doom path and samples no
+ordinary ownership clock. Source, sink, authority or admission errors return
+OutcomeUnknown without a scan summary. Successful EOF certifies selected-source
+and awaited-sink delivery only; it does not certify evidence reduction, ordinary
+CAS/lease validation, logical publication size or publication authority. Complete
+external authority reduction remains mandatory even after provisional business
+rejection. Final precedence remains overlap, administrative sibling collision,
+ordinary CAS/lease, combined uniqueness, then logical TooLarge.
+
+Tests drain 5,001 accepted updates and 5,001 accepted deletes under a 1 MiB
+operation-admission ceiling with constant retained driver memory, then release all
+charges. A late rejected candidate reports contradictory initial ownership after
+an earlier overlap and cannot escape as a business rejection. Injected source,
+sink and inconsistent highwater/sequence failures yield no summary. Physical
+Observe tests prove it neither claims nor releases and late contradictory
+observations poison complete evidence replay. A suspended sink prevents source
+advancement, and dropping that operation owner releases its row/root charges.
+
+This iteration supplies the bounded domain driver. It does not connect the native
+PostgreSQL cursor to physical command/evidence spools, activate public
+administration/preview, or supply S3/Turso parity. The existing aggregate driver
+remains an admitted reference adapter and must not be activated for native broad
+administration.
