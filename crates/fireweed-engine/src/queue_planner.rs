@@ -71,7 +71,10 @@ pub fn plan_insert_vector(
         let replaced = old.is_some();
         let mut group = CommitGroup {
             administration: None,
-            request_id: request.request_id.clone(),
+            // Per-item carrier receipts are packing-only. The original chunk
+            // identity is stored once by the adapter's insert receipt; cloning
+            // it here would multiply a potentially long ID by every item.
+            request_id: String::new(),
             claimed_updates: vec![],
             state_updates: vec![],
             work_inserts: vec![item.clone()],
@@ -1419,6 +1422,31 @@ pub fn plan_commit_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn insert_carrier_receipts_do_not_multiply_original_chunk_identity() {
+        let request = InsertRequest {
+            queue: QueueAddress {
+                tenant: "t".into(),
+                queue: "q".into(),
+            },
+            request_id: "identity/".repeat(8192),
+            mode: InsertMode::InsertOnly,
+            items: (0..257).map(|n| work(&format!("k{n}"))).collect(),
+        };
+        let mut snapshot = RecordSnapshot::default();
+        let (deltas, outcomes) =
+            plan_insert_vector(&request, &mut snapshot, &schema(), || Ok(1)).unwrap();
+        assert_eq!(deltas.len(), 257);
+        assert!(
+            deltas
+                .iter()
+                .all(|delta| delta.receipt.request_id.is_empty())
+        );
+        assert_eq!(outcomes.len(), request.items.len());
+        // Original identity binding is independent of synthetic packing IDs.
+        crate::queue_publication::PublicationReceipt::insert(&request, &outcomes).unwrap();
+    }
+
     fn schema() -> QueueSchema {
         QueueSchema {
             work: CollectionDefinition {

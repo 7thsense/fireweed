@@ -21,6 +21,15 @@ pub struct AdmittedInsertReplay {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedInsertReplay {
+    pub(super) fn from_outcomes(
+        outcomes: Vec<InsertOutcome>,
+        charges: Vec<OwnedQueueBufferCharge>,
+    ) -> Self {
+        Self {
+            outcomes,
+            _charges: charges,
+        }
+    }
     pub fn outcomes(&self) -> &[InsertOutcome] {
         &self.outcomes
     }

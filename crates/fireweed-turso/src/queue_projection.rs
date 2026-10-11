@@ -1,5 +1,6 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
+mod insert_prepare;
 mod insert_replay;
 mod prepare;
 mod receipt_metadata;
@@ -27,6 +28,7 @@ use fireweed_engine::{
     },
 };
 use fireweed_queue_spool::ScratchWorkers;
+pub use insert_prepare::PreparedInsert;
 pub use insert_replay::{AdmittedInsertReplay, InsertReplayInput};
 pub use prepare::PreparedClaim;
 pub use receipts::{AdmittedCommitReceipts, ReceiptReadInput};
@@ -630,27 +632,35 @@ async fn load_index_fields(
     job: &Arc<QueueReservation>,
 ) -> QueueResult<LoadedFields> {
     let names = affected_index_fields(change, definition);
+    load_selected_fields(connection, record_id, definition, &names, job).await
+}
+async fn load_selected_fields(
+    connection: &Connection,
+    record_id: i64,
+    definition: &CollectionDefinition,
+    names: &std::collections::BTreeSet<String>,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<LoadedFields> {
+    let name_bytes = names.iter().try_fold(4096u64, |n, name| {
+        n.checked_add(name.len() as u64)
+            .and_then(|n| n.checked_add(256))
+            .ok_or(QueueError::TooLarge)
+    })?;
     let mut loaded = LoadedFields {
         fields: Fields::new(),
-        _charges: vec![
-            job.owned_buffer(
-                (names.len() as u64)
-                    .checked_mul(256)
-                    .ok_or(QueueError::TooLarge)?,
-            )?,
-        ],
+        _charges: vec![job.owned_buffer(name_bytes.checked_mul(4).ok_or(QueueError::TooLarge)?)?],
     };
     for name in names {
-        let no = field_number(definition, &name)?;
+        let no = field_number(definition, name)?;
         let (metadata_sql, value_sql, params) = if no >= 0 {
             (
-                "SELECT length(value) FROM q7_fields WHERE record_id=?1 AND field=?2",
+                "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_fields WHERE record_id=?1 AND field=?2",
                 "SELECT value FROM q7_fields WHERE record_id=?1 AND field=?2",
                 vec![Value::Integer(record_id), Value::Integer(i64::from(no))],
             )
         } else {
             (
-                "SELECT length(value) FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
+                "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
                 "SELECT value FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
                 vec![
                     Value::Integer(record_id),
@@ -673,8 +683,10 @@ async fn load_index_fields(
                 .await?
                 .ok_or_else(|| unknown("field vanished under transaction"))?;
             let value: FieldValue = decode(bytes(&value[0])?)?;
-            definition.validate_value(&name, &value)?;
-            loaded.fields.insert(name, value);
+            definition
+                .validate_value(name, &value)
+                .map_err(|_| unknown("stored field type violates definition"))?;
+            loaded.fields.insert(name.clone(), value);
         }
     }
     Ok(loaded)
