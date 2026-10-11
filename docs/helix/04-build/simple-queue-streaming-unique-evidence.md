@@ -302,3 +302,45 @@ every fragment truncation, late file damage and incomplete packet delivery.
 This remains disposable preparation. Native PostgreSQL cursor/owned-worker wiring,
 combined ordinary evidence reduction, bounded logical overflow/result receipts,
 FWQP2/public administration/preview and S3/Turso parity remain required.
+
+## Native PostgreSQL owned scratch preparation — iteration 51
+
+The SQL compiler, FETCH-one cursor, one-row hydration, exact owner probes and EOF
+cursor close now live in one native_broad_source used by both the reference
+planner and physical scratch path. NativeAdministrativePreparation retains the
+ordinary addressed Loaded snapshot/prospective authority alongside the compact
+scan summary and sealed scratch. It does not reconstruct a broad delta/image,
+sample the ordinary ownership clock or write queue records/state/receipts.
+The caller retains the containing SQL transaction and queue fence through later
+finalization/publication; any source/sink failure requires whole-TX rollback.
+
+OwnedAdministrativeSink provides the shared runtime adapter around ScratchWorkers.
+Its states are Ready, InFlight, Sealed and Poisoned. Setup paths, queue names,
+containers and guards are admitted before cloning/allocation. It takes an owner
+under a small mutex, then runs all preparation/append/seal work outside that mutex.
+A whole-object TakenOwner cancellation guard prevents disjoint closure captures
+from bypassing cleanup. Queued cancellation poisons and drops taken resources;
+dispatched work retains ownership. Successful append restores its owner inside
+the physical worker before replying. Failures and overlapping/terminal use poison
+the sink. Sealing consumes the exact EOF summary and returns that summary with
+its sealed resources. Payloads/files drop before their owned guards, outside the
+state mutex.
+
+The actual PostgreSQL fixture streams 5,001 accepted metadata updates through
+owned workers under a 1 MiB operation-admission ceiling, checking constant retained
+row-boundary usage and exact sorted command versions/insertion order. Ordinary
+workflow state and next-work prospective authority remain retained. Preparation
+leaves all 5,001 SQL rows at their initial priority/version, inserts neither state
+nor next work, and allocates no physical record sequence. A late SQL source fault
+after completed earlier appends discards scratch and rolls back an earlier
+containing-transaction sentinel update. All 14 native/queue-store fixtures pass.
+
+Shared physical tests cover suspended queued append cancellation, concurrent use,
+and a dispatched append outliving all caller resources: files close and buffer
+charges release before final reservation notification and worker drain. The
+complete physical suite contains 43 passing tests.
+
+This qualifies native disposable preparation. It does not yet perform combined
+ordinary evidence reduction, logical-size/result-receipt finalization, resolved
+SQL application, public administration/preview, or S3/Turso execution. Those
+remain required to activate and qualify the identical interface.

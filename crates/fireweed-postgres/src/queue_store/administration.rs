@@ -204,28 +204,22 @@ thread_local! {
 /// Any error or cancellation of this owner future requires rollback of the
 /// entire containing transaction. Callers must not continue sibling groups in
 /// that transaction, even when a non-SQL error left it otherwise usable.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "private native provider qualification precedes public activation"
-    )
-)]
-#[allow(clippy::too_many_arguments)]
-async fn plan_native_broad<'r>(
-    tx: &Transaction<'_>,
-    queue: &QueueRow<'_>,
-    ordinary: &CommitGroup,
-    intent: &fireweed_core::queue_administration::AdministrativeIntent,
-    ownership_now: impl FnOnce() -> QueueResult<i64>,
+/// One fenced native source shared by reference and physical sink drivers.
+/// Successful EOF closes its cursor. Any failure/drop requires outer rollback.
+async fn native_broad_source<'s, 'r: 's>(
+    tx: &'s Transaction<'_>,
+    queue: &'s QueueRow<'_>,
+    intent: &'s fireweed_core::queue_administration::AdministrativeIntent,
     limits: &QueueLimits,
     reservation: &'r QueueReservation,
-) -> QueueResult<fireweed_engine::queue_administration::AdmittedAdministrativeGroupProposal<'r>> {
+) -> QueueResult<
+    impl futures::Stream<
+        Item = QueueResult<
+            fireweed_engine::queue_administration::SelectedAdministrativeInput<'s, 'r>,
+        >,
+    > + 's,
+> {
     use fireweed_core::queue_administration::AdministrativeOperation;
-    // Prospective ordinary tuples are independent of lease/CAS eligibility.
-    // Eligibility is decided once, with the fresh clock after successful EOF.
-    let mut ordinary_loaded = load_group(tx, queue, ordinary, reservation).await?;
-    load_prospective_unique_probes(tx, queue, &mut ordinary_loaded, ordinary, reservation).await?;
     let prepared = prepare_selection(queue, intent, limits, reservation)?;
     // Fixed metadata charge covers one FETCH result and command/driver scratch;
     // variable key and hydration bytes are charged after lengths, before data.
@@ -421,6 +415,31 @@ async fn plan_native_broad<'r>(
         }
         Ok(Some((input, state)))
     });
+    Ok(source)
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private native provider qualification precedes public activation"
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+async fn plan_native_broad<'r>(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    ordinary: &CommitGroup,
+    intent: &fireweed_core::queue_administration::AdministrativeIntent,
+    ownership_now: impl FnOnce() -> QueueResult<i64>,
+    limits: &QueueLimits,
+    reservation: &'r QueueReservation,
+) -> QueueResult<fireweed_engine::queue_administration::AdmittedAdministrativeGroupProposal<'r>> {
+    // Prospective ordinary tuples are independent of lease/CAS eligibility.
+    // Eligibility is decided once, with the fresh clock after successful EOF.
+    let mut ordinary_loaded = load_group(tx, queue, ordinary, reservation).await?;
+    load_prospective_unique_probes(tx, queue, &mut ordinary_loaded, ordinary, reservation).await?;
+    let source = native_broad_source(tx, queue, intent, limits, reservation).await?;
     fireweed_engine::queue_administration::plan_broad_group_stream(
         ordinary,
         intent,
@@ -434,10 +453,350 @@ async fn plan_native_broad<'r>(
     .await
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private native scratch qualification precedes public activation"
+    )
+)]
+struct NativeAdministrativePreparation<'r> {
+    scratch: fireweed_queue_spool::SealedAdministrativeScratch,
+    summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
+    ordinary: Loaded<'r>,
+}
+/// Preparation retains explicit ordinary authority and returns only bounded
+/// scratch plus compact results. No ordinary ownership clock or SQL write occurs.
+/// Any source/sink error requires whole outer transaction rollback.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private native scratch qualification precedes public activation"
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_native_scratch<'r>(
+    tx: &Transaction<'_>,
+    address: &QueueAddress,
+    queue: &QueueRow<'_>,
+    ordinary: &CommitGroup,
+    intent: &fireweed_core::queue_administration::AdministrativeIntent,
+    limits: &QueueLimits,
+    reservation: &'r Arc<QueueReservation>,
+    workers: &fireweed_queue_spool::ScratchWorkers,
+    directory: &std::path::Path,
+    quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
+) -> QueueResult<NativeAdministrativePreparation<'r>> {
+    let mut ordinary_loaded = load_group(tx, queue, ordinary, reservation).await?;
+    load_prospective_unique_probes(tx, queue, &mut ordinary_loaded, ordinary, reservation).await?;
+    let sink = fireweed_queue_spool::OwnedAdministrativeSink::new(
+        workers.clone(),
+        directory,
+        quota,
+        reservation,
+        address,
+        queue.definition_pin,
+        queue.next_sequence,
+    )
+    .await?;
+    let source = native_broad_source(tx, queue, intent, limits, reservation).await?;
+    let delivery = sink.clone();
+    let summary = fireweed_engine::queue_administration::scan_broad_group_to_sink(
+        ordinary,
+        intent,
+        source,
+        &ordinary_loaded.snapshot,
+        &queue.schema,
+        limits,
+        Arc::clone(reservation),
+        move |packet| {
+            let sink = delivery.clone();
+            async move { sink.append(packet).await }
+        },
+    )
+    .await?;
+    let (scratch, summary) = sink.seal(summary).await?;
+    Ok(NativeAdministrativePreparation {
+        scratch,
+        summary,
+        ordinary: ordinary_loaded,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fireweed_core::queue_administration::*;
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn native_owned_scratch_streams_5001_changes_without_queue_writes_and_rolls_back_source_failure()
+     {
+        use fireweed_engine::queue_publication::EffectRef;
+        use fireweed_queue_spool::{ScratchDiskQuota, ScratchWorkers};
+        let _fixture = physical_fixture().await;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let schema = QueueSchema {
+            work: CollectionDefinition {
+                fields: BTreeMap::new(),
+                indexes: BTreeMap::new(),
+                unique_indexes: BTreeSet::new(),
+                additional_field_prefixes: BTreeSet::new(),
+            },
+            state: BTreeMap::from([(
+                "instances".into(),
+                CollectionDefinition {
+                    fields: BTreeMap::new(),
+                    indexes: BTreeMap::new(),
+                    unique_indexes: BTreeSet::new(),
+                    additional_field_prefixes: BTreeSet::new(),
+                },
+            )]),
+            progress_bound_nanos: 1_000_000_000,
+            max_attempts: 3,
+        };
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let address = QueueAddress {
+            tenant: "native-scratch".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        store
+            .provision(ProvisionRequest {
+                queue: address.clone(),
+                schema,
+            })
+            .await
+            .unwrap();
+        let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            connection.await.unwrap();
+        });
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let seed_tx = client.transaction().await.unwrap();
+        let seed = queue_row(&seed_tx, &address, &job).await.unwrap();
+        let queue_id = seed.id;
+        seed_tx.execute("INSERT INTO fireweed_api007.records(queue_id,collection,key_hash,key,version,active,insertion_sequence) SELECT $1,0,sha256(convert_to('bulk-'||lpad(n::text,5,'0'),'UTF8')),convert_to('bulk-'||lpad(n::text,5,'0'),'UTF8'),1,TRUE,n::numeric FROM generate_series(1,5001) n", &[&queue_id]).await.unwrap();
+        seed_tx
+            .execute(
+                "UPDATE fireweed_api007.queues SET next_sequence=5001 WHERE id=$1",
+                &[&queue_id],
+            )
+            .await
+            .unwrap();
+        drop(seed);
+        seed_tx.commit().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        let fenced = queue_row(&tx, &address, &job).await.unwrap();
+        let sequence_before: i64 = tx
+            .query_one("SELECT last_value FROM fireweed_api007.records_id_seq", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let group = CommitGroup {
+            request_id: "native-scratch-state-and-next".into(),
+            claimed_updates: vec![],
+            work_updates: vec![],
+            state_updates: vec![StateUpdate {
+                collection: "instances".into(),
+                key: "workflow".into(),
+                expect: StateExpect::Absent,
+                change: StateChange::Put {
+                    fields: BTreeMap::new(),
+                    value: vec![1].into(),
+                },
+            }],
+            work_inserts: vec![NewWork {
+                key: "next".into(),
+                priority: 0,
+                available_at: 0,
+                fields: BTreeMap::new(),
+                body: Default::default(),
+            }],
+        };
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                id: "all".into(),
+                selector: WorkSelector::all(vec![]),
+                precondition: WorkSelector::all(vec![]),
+                action: AdministrativeAction::Update {
+                    patch: WorkPatch {
+                        priority: Some(17),
+                        ..Default::default()
+                    },
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    remove_field_prefixes: BTreeSet::new(),
+                },
+            }]),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let quota = ScratchDiskQuota::new(8 << 20).unwrap();
+        let workers = ScratchWorkers::new(2, 4).unwrap();
+        let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count_hook = count.clone();
+        let observed_hook = observed.clone();
+        let admission_hook = admission.clone();
+        ROW_BOUNDARY.with(|hook| {
+            *hook.borrow_mut() = Some((
+                queue_id,
+                Box::new(move |_| {
+                    let n = count_hook.get();
+                    count_hook.set(n + 1);
+                    let bytes = admission_hook.usage().unwrap().1;
+                    if n == 1 {
+                        observed_hook.set(Some(bytes));
+                    } else if n > 1 {
+                        assert_eq!(observed_hook.get(), Some(bytes));
+                    }
+                }),
+            ))
+        });
+        struct ResetBoundary;
+        impl Drop for ResetBoundary {
+            fn drop(&mut self) {
+                ROW_BOUNDARY.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let reset = ResetBoundary;
+        {
+            let prepared = prepare_native_scratch(
+                &tx,
+                &address,
+                &fenced,
+                &group,
+                &intent,
+                &QueueLimits::default(),
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            assert_eq!(count.get(), 5001);
+            drop(reset);
+            let NativeAdministrativePreparation {
+                mut scratch,
+                summary,
+                ordinary,
+            } = prepared;
+            assert_eq!(summary.packet_count(), 5001);
+            assert_eq!(summary.result().histogram.matched, 5001);
+            assert_eq!(ordinary.snapshot.next_sequence, 5001);
+            assert!(ordinary.snapshot.work.is_empty() && ordinary.snapshot.state.is_empty());
+            let expected_address = address.clone();
+            let pin = fenced.definition_pin;
+            workers
+                .run(move || {
+                    scratch.verify_context(&expected_address, pin, 5001)?;
+                    assert!(!scratch.reduce_evidence()?.final_collision);
+                    let mut n = 0;
+                    while let Some(packet) = scratch.next_command()? {
+                        let command = packet.command()?;
+                        assert_eq!(command.identity.key, format!("bulk-{:05}", n + 1));
+                        assert_eq!(command.expected_version, Some(1));
+                        assert_eq!(command.output_highwater, 2);
+                        let EffectRef::WorkPut { metadata, .. } = command.effect else {
+                            panic!("put")
+                        };
+                        assert_eq!(metadata.priority, 17);
+                        assert_eq!(metadata.insertion_sequence, n + 1);
+                        n += 1;
+                    }
+                    assert_eq!(n, 5001);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            drop(summary);
+            drop(ordinary);
+        }
+        assert_eq!(quota.usage().unwrap(), 0);
+        let unchanged: i64 = tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=1 AND priority=0", &[&queue_id]).await.unwrap().get(0);
+        assert_eq!(unchanged, 5001);
+        let count_all: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1",
+                &[&queue_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count_all, 5001); // neither workflow state nor next work was inserted
+        let sequence_after: i64 = tx
+            .query_one("SELECT last_value FROM fireweed_api007.records_id_seq", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(sequence_before, sequence_after);
+        // Earlier tentative sibling SQL effects cannot survive a late source fault.
+        tx.execute(
+            "UPDATE fireweed_api007.records SET priority=99 WHERE queue_id=$1 AND key=$2",
+            &[&queue_id, &b"bulk-00001".as_slice()],
+        )
+        .await
+        .unwrap();
+        let before_failure = admission.usage().unwrap().1;
+        SQL_FAILURE_AFTER.with(|fault| fault.set(Some((queue_id, 2))));
+        struct ResetFailure;
+        impl Drop for ResetFailure {
+            fn drop(&mut self) {
+                SQL_FAILURE_AFTER.with(|fault| fault.set(None));
+            }
+        }
+        let reset = ResetFailure;
+        assert!(matches!(
+            prepare_native_scratch(
+                &tx,
+                &address,
+                &fenced,
+                &group,
+                &intent,
+                &QueueLimits::default(),
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota)
+            )
+            .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        drop(reset);
+        assert_eq!(quota.usage().unwrap(), 0);
+        assert_eq!(admission.usage().unwrap().1, before_failure);
+        tx.rollback().await.unwrap();
+        let priority: i64 = client
+            .query_one(
+                "SELECT priority FROM fireweed_api007.records WHERE queue_id=$1 AND key=$2",
+                &[&queue_id, &b"bulk-00001".as_slice()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(priority, 0);
+        drop(fenced);
+        drop(job);
+        workers.close_and_drain().await.unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        store.shutdown().await.unwrap();
+    }
     fn operation(selectors: Vec<WorkSelector>, time: i64) -> AdministrativeIntent {
         AdministrativeIntent {
             evaluated_at: time,

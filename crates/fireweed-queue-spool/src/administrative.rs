@@ -349,7 +349,7 @@ impl SealedAdministrativeScratch {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use fireweed_core::queue_administration::*;
     use fireweed_core::queue_contract::*;
@@ -361,13 +361,13 @@ mod tests {
     use fireweed_engine::queue_planner::{RecordIdentity, RecordSnapshot, StoredWork};
     use fireweed_engine::queue_publication::{BodyCommandRef, EffectRef, FieldsCommandRef};
     use std::collections::{BTreeMap, BTreeSet};
-    fn queue() -> QueueAddress {
+    pub(crate) fn queue() -> QueueAddress {
         QueueAddress {
             tenant: "scratch".into(),
             queue: "administrative".into(),
         }
     }
-    fn pin() -> DefinitionPin {
+    pub(crate) fn pin() -> DefinitionPin {
         DefinitionPin::from_persisted_bytes(b"raw-definition")
     }
     fn schema(unique: bool) -> QueueSchema {
@@ -394,7 +394,7 @@ mod tests {
             max_attempts: 3,
         }
     }
-    fn run_scan(
+    pub(crate) fn run_scan(
         count: u64,
         large: usize,
         unique: bool,

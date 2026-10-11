@@ -23,6 +23,7 @@ tokio-postgres = "0.7"
 tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
+fireweed-queue-spool = { path = "../fireweed-queue-spool" }
 fireweed-projection = { path = "../fireweed-projection" }
 fireweed-objectlog = { path = "../fireweed-objectlog" }
 axon-esf.workspace = true
@@ -43,6 +44,7 @@ default = []
 tls = ["dep:native-tls", "dep:postgres-native-tls"]
 
 [dev-dependencies]
+tempfile = "3.27"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 # The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
 # durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
