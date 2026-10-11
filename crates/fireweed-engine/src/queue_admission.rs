@@ -194,6 +194,10 @@ impl QueueReservation {
     }
 }
 impl OwnedQueueBufferCharge {
+    /// Logical retained capacity; not a resident-memory measurement.
+    pub fn admitted_bytes(&self) -> u64 {
+        self.bytes
+    }
     /// Child capacity belongs to the same retained job, with no counter gap.
     pub fn child_buffer(&self, bytes: u64) -> QueueResult<Self> {
         self.reservation.owned_buffer(bytes)

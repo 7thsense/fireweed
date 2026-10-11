@@ -1637,6 +1637,7 @@ dependencies = [
  "fireweed-core",
  "fireweed-engine",
  "fireweed-projection",
+ "fireweed-queue-spool",
  "fireweed-relational",
  "serde_json",
  "tempfile",

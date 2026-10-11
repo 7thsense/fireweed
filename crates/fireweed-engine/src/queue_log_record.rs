@@ -218,6 +218,32 @@ pub struct OwnedQueueLogRecord {
     _charge: OwnedQueueBufferCharge,
 }
 impl OwnedQueueLogRecord {
+    /// Transfer pre-admitted immutable bytes without copying or releasing their
+    /// guard. Construct the whole owner before validation so failures drop bytes
+    /// before capacity. This does not establish storage-source qualification.
+    pub fn from_admitted_bytes(
+        bytes: Bytes,
+        charge: OwnedQueueBufferCharge,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        let record = Self {
+            bytes,
+            _charge: charge,
+        };
+        if !record.belongs_to(job) {
+            return Err(invalid("queue record belongs to another operation"));
+        }
+        let required = u64::try_from(record.bytes.len())
+            .map_err(|_| QueueError::TooLarge)?
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or(QueueError::TooLarge)?;
+        if record._charge.admitted_bytes() < required {
+            return Err(QueueError::TooLarge);
+        }
+        record.view()?;
+        Ok(record)
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -575,6 +601,37 @@ mod tests {
                 assert!(view_queue_log_record(&changed).is_err(), "offset={offset}");
             }
         }
+    }
+    #[test]
+    fn ingress_rejects_wrong_job_and_insufficient_capacity_before_releasing_owner() {
+        let admission = QueueAdmission::new(2, 1 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let other = Arc::new(admission.reserve(0).unwrap());
+        let raw = golden();
+        let required = raw.len() as u64 * 4 + 4096;
+        let charge = job.owned_buffer(required).unwrap();
+        let bytes = Bytes::copy_from_slice(&raw);
+        let pointer = bytes.as_ptr();
+        let record = OwnedQueueLogRecord::from_admitted_bytes(bytes, charge, &job).unwrap();
+        assert_eq!(record.bytes().as_ptr(), pointer);
+        assert_eq!(admission.usage().unwrap().1, required);
+        drop(record);
+        assert_eq!(admission.usage().unwrap().1, 0);
+        let charge = job.owned_buffer(required).unwrap();
+        assert!(matches!(
+            OwnedQueueLogRecord::from_admitted_bytes(Bytes::copy_from_slice(&raw), charge, &other),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(admission.usage().unwrap().1, 0);
+        let charge = job.owned_buffer(required - 1).unwrap();
+        assert!(matches!(
+            OwnedQueueLogRecord::from_admitted_bytes(Bytes::copy_from_slice(&raw), charge, &job),
+            Err(QueueError::TooLarge)
+        ));
+        assert_eq!(admission.usage().unwrap().1, 0);
+        drop(job);
+        drop(other);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
     }
     #[test]
     fn payload_clones_and_slices_retain_final_reservation_until_last_alias() {

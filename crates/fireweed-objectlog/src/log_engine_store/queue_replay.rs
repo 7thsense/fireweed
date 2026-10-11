@@ -3,7 +3,7 @@ use super::*;
 use fireweed_core::queue_contract::{QueueError, QueueResult};
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
-    queue_log_record::{QueueLogRecordView, view_queue_log_record},
+    queue_log_record::{OwnedQueueLogRecord, QueueLogRecordView, view_queue_log_record},
     queue_namespace::{encode_address, view_address},
 };
 use fireweed_queue_spool::ScratchWorkers;
@@ -151,6 +151,14 @@ pub struct AdmittedApi007Read {
     _charge: OwnedQueueBufferCharge,
 }
 impl AdmittedApi007Read {
+    /// Zero-copy transfer of the original read capacity into the engine owner.
+    pub fn into_record(
+        self,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<(u64, OwnedQueueLogRecord)> {
+        let record = OwnedQueueLogRecord::from_admitted_bytes(self.bytes, self._charge, job)?;
+        Ok((self.offset, record))
+    }
     pub fn offset(&self) -> u64 {
         self.offset
     }
@@ -572,6 +580,13 @@ mod tests {
             .unwrap();
         assert_eq!(value.offset(), 0);
         assert_eq!(value.view().unwrap().address().tenant, address.tenant);
+        let pointer = value.bytes.as_ptr();
+        let (offset, owned) = value.into_record(&job).unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(owned.bytes().as_ptr(), pointer);
+        assert!(owned.belongs_to(&job));
+        assert_eq!(owned.view().unwrap().address().tenant, address.tenant);
+        drop(owned);
         let eof = store.plan_api007_read(&namespace, 1, 65536, &job).unwrap();
         assert!(eof.is_eof());
         assert!(eof.read(&workers, 0).await.unwrap().is_none());
@@ -603,7 +618,6 @@ mod tests {
             .await
             .unwrap();
         assert!(store.plan_api007_read(&namespace, 2, 65536, &job).is_err());
-        drop(value);
         drop(record);
         drop(bad);
         drop(definition);
