@@ -513,7 +513,7 @@ fn record(row: &Row, fields: Fields, body: Vec<u8>) -> QueueResult<StoredWork> {
         lease_hash: hash_value
             .map(|b| b.try_into().map_err(|_| storage("corrupt lease hash")))
             .transpose()?,
-        fields_loaded: true,
+        field_coverage: fireweed_engine::queue_fields::FieldCoverage::Complete,
         body_loaded: true,
     })
 }
@@ -819,6 +819,18 @@ async fn persist_delta(
     before: &RecordSnapshot,
     loaded: &mut Loaded<'_>,
 ) -> QueueResult<()> {
+    // Physical selective read/apply is a separately reviewed activation. Never
+    // let an internal partial view reach the existing full-regeneration SQL.
+    if delta.work.iter().any(|row| {
+        !matches!(
+            row.field_coverage,
+            fireweed_engine::queue_fields::FieldCoverage::Complete
+        )
+    }) {
+        return Err(storage(
+            "selective work view not activated in PostgreSQL persistence",
+        ));
+    }
     let work_by_key: BTreeMap<_, _> = delta
         .work
         .iter()
@@ -1345,7 +1357,7 @@ impl QueueStore for PostgresQueueStore {
                         out.push(delta.receipt.clone());
                         deltas.push(delta);
                     }
-                    let combined = combine_deltas(&deltas, queue.next_sequence);
+                    let combined = combine_deltas(&deltas, queue.next_sequence)?;
                     let _output_charge = reservation.buffer(
                         encoded_len(&combined)?
                             .checked_mul(4)
@@ -1418,7 +1430,7 @@ impl QueueStore for PostgresQueueStore {
                         plan_insert_vector(&request, &mut loaded.snapshot, &queue.schema, || {
                             timestamp_nanos(clock.now())
                         })?;
-                    let combined = combine_deltas(&deltas, queue.next_sequence);
+                    let combined = combine_deltas(&deltas, queue.next_sequence)?;
                     let _charge = reservation.buffer(
                         encoded_len(&combined)?
                             .checked_mul(4)

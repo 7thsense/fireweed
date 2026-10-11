@@ -8,7 +8,7 @@ pub type FieldEdits = BTreeMap<String, Option<FieldValue>>;
 fn unknown(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(message.into())
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldCoverage {
     Complete,
     Selected {

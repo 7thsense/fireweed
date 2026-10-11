@@ -873,7 +873,7 @@ mod tests {
                     lease_expires_at: None,
                 },
                 lease_hash: None,
-                fields_loaded: true,
+                field_coverage: crate::queue_fields::FieldCoverage::Complete,
                 body_loaded: true,
             },
         );

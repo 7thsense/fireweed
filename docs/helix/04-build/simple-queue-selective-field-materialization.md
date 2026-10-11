@@ -60,10 +60,10 @@ unchanged unique ownership, swaps, fresh-tuple collision and missing probes.
 This is logical delta-size evidence, not physical performance qualification.
 
 No selective delta is activated in QueueStore, PostgreSQL persistence or S3/Turso
-by this slice. StoredWork and combine_deltas still use the existing complete-field
-representation. Integrate the checked view/materialization into those paths next,
-including exact tuple releases and index-preserving SQL writes, before streaming
-accumulation and a versioned canonical durable envelope. This internal serde shape
+by this slice. StoredWork now carries checked read coverage, and combine_deltas composes exact
+field commands in request order. Physical selective reads and index-preserving SQL
+writes remain for the next activation before streaming accumulation and a
+versioned canonical durable envelope. This internal serde shape
 is not a published command version. All new/retained/scratch buffers still require
 admission before allocation; semantic publication TooLarge needs exact complete
 envelope/result measurement rather than these provisional field components.
@@ -89,3 +89,30 @@ in the complete-field path. Complete field authority remains mandatory. Before
 partial reads activate, PostgreSQL physical-owner reconciliation must use checked
 tuple authority or an explicit release/claim overlay rather than treating an
 unloaded component as absent.
+
+## Engine selective views and explicit writes
+
+StoredWork replaces its all-or-nothing field flag with FieldCoverage. CommitDelta
+stores one explicit ResolvedFields command for every changed live work row;
+missing, orphan or duplicate mappings fail closed. The same production planner
+accepts complete or selected views, freezes actual differences, checks every
+component of affected query/unique indexes, and preserves untouched owners.
+Create/replacement commands carry full bags; delete commands have no live row.
+State Put remains a full image. Ordinary patch/delete lease and version rules,
+receipt identities and public request fingerprints are unchanged.
+
+Speculative application uses the command against the prior checked view. Packed
+commands compose in order; a later metadata Preserve cannot erase an earlier
+field edit, and delete/reinsert discards prior commands and requires Replace.
+Command/view disagreement fails closed before source mutation. Materialization
+knowledge is excluded from administrative business-change detection, so expanding
+a selected-name certificate does not advance a no-op's version.
+
+Differential tests run the same planner with complete versus selected field bags,
+including a megabyte unrelated attribute, unique rekeys/sparse transitions,
+metadata following edits, malformed commands, missing affected components and
+packed deletion/reinsertion. This establishes planner semantics only. PostgreSQL
+still loads complete fields and rejects partial views before its existing full
+regeneration SQL. The pure broad administrative oracle also remains complete-only.
+No new durable S3/Turso codec is activated; admission and canonical publication
+qualification still belong to later integration slices.

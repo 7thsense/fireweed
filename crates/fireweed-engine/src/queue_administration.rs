@@ -81,8 +81,10 @@ fn propose_target_view(
             replacement: None,
         });
     };
-    if !target.fields_loaded
-        || target.record.work.key != entry.key
+    if !matches!(
+        target.field_coverage,
+        crate::queue_fields::FieldCoverage::Complete
+    ) || target.record.work.key != entry.key
         || target.record.version == 0
         || highwater != Some(target.record.version)
         || target.record.insertion_sequence == 0
@@ -236,9 +238,20 @@ pub fn propose_group(
     use std::collections::BTreeMap;
     intent.validate(schema, limits)?;
     validate_snapshot(snapshot)?;
+    if snapshot.work.values().any(|row| {
+        !matches!(
+            row.field_coverage,
+            crate::queue_fields::FieldCoverage::Complete
+        )
+    }) {
+        return Err(unknown(
+            "selective administrative target planning not activated",
+        ));
+    }
     let rejected = |reason| AdministrativeGroupProposal {
         delta: CommitDelta {
             work: vec![],
+            work_fields: BTreeMap::new(),
             deleted_work: vec![],
             state: vec![],
             deleted_state: vec![],
@@ -382,7 +395,21 @@ pub fn propose_group(
                 | AdministrativeOutcome::Deleted { version } => version,
                 _ => unreachable!(),
             };
+            let work_fields = proposal
+                .replacement
+                .as_ref()
+                .map(|row| {
+                    (
+                        row.record.work.key.clone(),
+                        crate::queue_fields::ResolvedFields::Replace(
+                            row.record.work.fields.clone(),
+                        ),
+                    )
+                })
+                .into_iter()
+                .collect();
             let delta = CommitDelta {
+                work_fields,
                 work: proposal.replacement.take().into_iter().collect(),
                 deleted_work: if matches!(proposal.outcome, AdministrativeOutcome::Deleted { .. }) {
                     vec![entry.key.to_owned()]
@@ -435,13 +462,14 @@ pub fn propose_group(
     // still resolve against the initial image. Final uniqueness sees all effects.
     let mut candidate = addressed_snapshot(ordinary, snapshot);
     validate_group_snapshot(&candidate, ordinary)?;
-    let normal = match apply_group(ordinary, &mut candidate, ownership_now, schema) {
+    let mut normal = match apply_group(ordinary, &mut candidate, ownership_now, schema) {
         Ok(delta) => delta,
         Err(reason) => return Ok(rejected(reason)),
     };
+    resolve_group_fields(ordinary, snapshot, &mut normal, schema)?;
     let ordinary_receipt = normal.receipt.clone();
     deltas.push(normal);
-    let mut combined = combine_deltas(&deltas, snapshot.next_sequence);
+    let mut combined = combine_deltas(&deltas, snapshot.next_sequence)?;
     if let Err(reason) = validate_uniques(&combined, snapshot, schema)? {
         return Ok(rejected(reason));
     }
@@ -491,7 +519,7 @@ mod tests {
                 lease_expires_at: None,
             },
             lease_hash: None,
-            fields_loaded: true,
+            field_coverage: crate::queue_fields::FieldCoverage::Complete,
             body_loaded: false,
         }
     }
@@ -717,7 +745,10 @@ mod tests {
             proposal(&body, &row, 0).outcome,
             AdministrativeOutcome::NoChange
         );
-        row.fields_loaded = false;
+        row.field_coverage = crate::queue_fields::FieldCoverage::Selected {
+            names: Default::default(),
+            prefixes: Default::default(),
+        };
         assert!(matches!(
             propose_target(
                 &entry(update()),

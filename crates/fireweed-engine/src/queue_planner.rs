@@ -1,7 +1,7 @@
 //! Storage-independent API-007 commit semantics. Storage loads only addressed
 //! records, calls this planner under its atomic boundary, and durably stores the
 //! returned delta plus receipt. No SQL or log implementation belongs here.
-use crate::queue_fields::UniqueFieldEffects;
+use crate::queue_fields::{CheckedFields, FieldCoverage, ResolvedFields, UniqueFieldEffects};
 use fireweed_core::queue_contract::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,11 +16,11 @@ pub struct RecordIdentity {
 pub struct StoredWork {
     pub record: WorkRecord,
     pub lease_hash: Option<[u8; 32]>,
-    /// Internal materialization flags: false means preserve stored payload, not empty.
+    /// Checked field read coverage, separate from delta write intent.
     /// An unloaded body is not a complete user-facing WorkRecord. Durable log
     /// envelopes must version this representation and apply Preserve against the
     /// existing record; explicit Some(empty) patches instead materialize an empty body.
-    pub fields_loaded: bool,
+    pub field_coverage: crate::queue_fields::FieldCoverage,
     pub body_loaded: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -43,6 +43,7 @@ pub struct RecordSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitDelta {
     pub work: Vec<StoredWork>,
+    pub work_fields: BTreeMap<String, ResolvedFields>,
     pub deleted_work: Vec<String>,
     pub state: Vec<StateRecord>,
     pub deleted_state: Vec<(String, String)>,
@@ -121,16 +122,31 @@ pub fn plan_insert_vector(
 /// Coalesce ordered speculative changes for physical storage publication. This
 /// does not coalesce request identities: stores retain every original receipt
 /// separately; the internal receipt on this packing result is never public.
-pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> CommitDelta {
+pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<CommitDelta> {
+    let mut commands: BTreeMap<String, ResolvedFields> = BTreeMap::new();
     let mut work: BTreeMap<String, Option<StoredWork>> = BTreeMap::new();
     let mut states: BTreeMap<(String, String), Option<StateRecord>> = BTreeMap::new();
     let mut versions = BTreeMap::new();
     let mut next = initial;
     for delta in deltas {
+        validate_field_commands(delta)?;
         for row in &delta.work {
+            let key = &row.record.work.key;
+            let after = delta.work_fields[key].clone();
+            if matches!(work.get(key), Some(None)) && !matches!(after, ResolvedFields::Replace(_)) {
+                return Err(QueueError::OutcomeUnknown(
+                    "partial field command follows packed deletion".into(),
+                ));
+            }
+            let change = commands
+                .remove(key)
+                .unwrap_or(ResolvedFields::Preserve)
+                .then(after);
+            commands.insert(key.clone(), change);
             work.insert(row.record.work.key.clone(), Some(row.clone()));
         }
         for key in &delta.deleted_work {
+            commands.remove(key);
             work.insert(key.clone(), None);
         }
         for row in &delta.state {
@@ -152,6 +168,7 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> CommitDelta {
     }
     let mut out = CommitDelta {
         work: vec![],
+        work_fields: commands,
         deleted_work: vec![],
         state: vec![],
         deleted_state: vec![],
@@ -174,7 +191,8 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> CommitDelta {
             None => out.deleted_state.push(key),
         }
     }
-    out
+    validate_field_commands(&out)?;
+    Ok(out)
 }
 /// Union only the addressed materialization read-set. Cross-group duplicate keys
 /// are expected; never validate or execute this envelope as one atomic group.
@@ -252,6 +270,9 @@ fn patch_work(stored: &mut StoredWork, patch: &WorkPatch) {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone())),
     );
+    if let FieldCoverage::Selected { names, .. } = &mut stored.field_coverage {
+        names.extend(patch.fields.keys().cloned());
+    }
     // Existing eligible age is preserved; moving eligibility into the future
     // cannot cause an old eligible item to appear younger once it is due again.
 }
@@ -323,7 +344,7 @@ pub(crate) fn apply_administrative_update(
     {
         stored.record.eligible_since = now.max(stored.record.work.available_at);
     }
-    Ok(*stored != before)
+    Ok(stored.record != before.record || stored.lease_hash != before.lease_hash)
 }
 pub(crate) fn apply_group(
     group: &CommitGroup,
@@ -333,6 +354,7 @@ pub(crate) fn apply_group(
 ) -> Result<CommitDelta, Rejection> {
     let mut delta = CommitDelta {
         work: vec![],
+        work_fields: BTreeMap::new(),
         deleted_work: vec![],
         state: vec![],
         deleted_state: vec![],
@@ -506,7 +528,7 @@ pub(crate) fn apply_group(
                         lease_expires_at: None,
                     },
                     lease_hash: None,
-                    fields_loaded: true,
+                    field_coverage: crate::queue_fields::FieldCoverage::Complete,
                     body_loaded: true,
                 };
                 snapshot.work.insert(update.key.clone(), stored.clone());
@@ -544,7 +566,7 @@ pub(crate) fn apply_group(
                 lease_expires_at: None,
             },
             lease_hash: None,
-            fields_loaded: true,
+            field_coverage: crate::queue_fields::FieldCoverage::Complete,
             body_loaded: true,
         };
         snapshot.work.insert(work.key.clone(), record.clone());
@@ -585,6 +607,32 @@ pub(crate) fn record_unique_keys(
     }
     Ok(keys)
 }
+fn checked_unique_keys(
+    collection: Option<String>,
+    view: &CheckedFields<'_>,
+    definition: &CollectionDefinition,
+) -> QueueResult<Vec<UniqueIdentity>> {
+    let mut keys = vec![];
+    for index in &definition.unique_indexes {
+        let columns = definition
+            .indexes
+            .get(index)
+            .ok_or_else(|| QueueError::OutcomeUnknown("missing unique index".into()))?;
+        let values = columns
+            .iter()
+            .map(|name| view.get(name))
+            .collect::<QueueResult<Vec<_>>>()?;
+        if values.iter().any(Option::is_none) {
+            continue;
+        }
+        keys.push(UniqueIdentity {
+            collection: collection.clone(),
+            index: index.clone(),
+            full_sort_key: crate::queue_index::ordered_key(&values)?,
+        });
+    }
+    Ok(keys)
+}
 /// Complete prospective tuples for an insert vector, independent of per-item
 /// acceptance. Load authority once, then apply individual items in request order.
 /// Sparse tuples remain NULLS DISTINCT; duplicate tuples are probed once.
@@ -597,11 +645,8 @@ pub fn insert_unique_probes(
     for item in items {
         keys.extend(record_unique_keys(None, &item.fields, &schema.work)?);
         if let Some(old) = snapshot.work.get(&item.key) {
-            keys.extend(record_unique_keys(
-                None,
-                &old.record.work.fields,
-                &schema.work,
-            )?);
+            let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+            keys.extend(checked_unique_keys(None, &view, &schema.work)?);
         }
     }
     Ok(keys)
@@ -616,9 +661,10 @@ pub fn required_unique_probes(
 ) -> QueueResult<BTreeSet<UniqueIdentity>> {
     let mut candidate = addressed_snapshot(group, snapshot);
     validate_group_snapshot(&candidate, group)?;
-    let Ok(delta) = apply_group(group, &mut candidate, now, schema) else {
+    let Ok(mut delta) = apply_group(group, &mut candidate, now, schema) else {
         return Ok(BTreeSet::new());
     };
+    resolve_group_fields(group, snapshot, &mut delta, schema)?;
     let effects = unique_effects(&delta, snapshot, schema)?;
     Ok(effects
         .releases
@@ -627,13 +673,95 @@ pub fn required_unique_probes(
         .chain(effects.claims.into_iter().map(|(tuple, _)| tuple))
         .collect())
 }
-/// Exact initial-to-final ownership effects. Complete fields remain mandatory.
+/// Freeze exact field writes after business planning, before ownership validation
+/// or mutation of the original speculative image. Internal, unversioned shape.
+pub(crate) fn resolve_group_fields(
+    group: &CommitGroup,
+    before: &RecordSnapshot,
+    delta: &mut CommitDelta,
+    schema: &QueueSchema,
+) -> QueueResult<()> {
+    let replacements: BTreeSet<_> = group
+        .work_updates
+        .iter()
+        .filter(|u| matches!(u.change, UnclaimedChange::Replace(_)))
+        .map(|u| u.key.as_str())
+        .collect();
+    for row in &delta.work {
+        let key = &row.record.work.key;
+        let replace = !before.work.contains_key(key) || replacements.contains(key.as_str());
+        let change = if replace {
+            ResolvedFields::Replace(row.record.work.fields.clone())
+        } else {
+            let old = &before.work[key];
+            let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+            let mut edits = BTreeMap::new();
+            for name in old
+                .record
+                .work
+                .fields
+                .keys()
+                .chain(row.record.work.fields.keys())
+            {
+                let old_value = view.get(name)?;
+                let new_value = row.record.work.fields.get(name);
+                if old_value != new_value {
+                    edits.insert(name.clone(), new_value.cloned());
+                }
+            }
+            crate::queue_fields::resolve_edits(&view, &edits, &BTreeSet::new(), &schema.work)?
+        };
+        delta.work_fields.insert(key.clone(), change);
+    }
+    validate_field_commands(delta)
+}
+fn validate_field_commands(delta: &CommitDelta) -> QueueResult<()> {
+    let keys: BTreeSet<_> = delta
+        .work
+        .iter()
+        .map(|row| row.record.work.key.as_str())
+        .collect();
+    if keys.len() != delta.work.len()
+        || delta.work_fields.len() != delta.work.len()
+        || delta
+            .work
+            .iter()
+            .any(|row| !delta.work_fields.contains_key(&row.record.work.key))
+    {
+        return Err(QueueError::OutcomeUnknown(
+            "inconsistent resolved work field commands".into(),
+        ));
+    }
+    for row in &delta.work {
+        let fields = &row.record.work.fields;
+        match &delta.work_fields[&row.record.work.key] {
+            ResolvedFields::Replace(replacement) if replacement != fields => {
+                return Err(QueueError::OutcomeUnknown(
+                    "resolved replacement/view mismatch".into(),
+                ));
+            }
+            ResolvedFields::Edit(edits)
+                if edits
+                    .iter()
+                    .any(|(name, value)| fields.get(name) != value.as_ref()) =>
+            {
+                return Err(QueueError::OutcomeUnknown(
+                    "resolved field edit/view mismatch".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+/// Exact initial-to-final ownership effects from certified affected components.
 /// Version changes alone never release ownership; sparse tuples own nothing.
 fn unique_effects(
     delta: &CommitDelta,
     original: &RecordSnapshot,
     schema: &QueueSchema,
 ) -> QueueResult<UniqueFieldEffects> {
+    validate_field_commands(delta)?;
     let mut effects = UniqueFieldEffects::default();
     let work: BTreeMap<_, _> = delta
         .work
@@ -650,31 +778,96 @@ fn unique_effects(
             collection: version.collection.clone(),
             key: version.key.clone(),
         };
-        let (old, new, definition) = if let Some(collection) = &version.collection {
-            let definition = schema
-                .state
-                .get(collection)
-                .ok_or_else(|| QueueError::OutcomeUnknown("missing state schema".into()))?;
-            (
-                original
-                    .state
-                    .get(&(collection.clone(), version.key.clone()))
-                    .map(|s| &s.fields),
-                state
-                    .get(&(collection.as_str(), version.key.as_str()))
-                    .copied(),
-                definition,
-            )
-        } else {
-            (
-                original
-                    .work
-                    .get(&version.key)
-                    .map(|s| &s.record.work.fields),
-                work.get(version.key.as_str()).copied(),
-                &schema.work,
-            )
-        };
+        if owner.collection.is_none() {
+            let old = original.work.get(&version.key);
+            let new = work.get(version.key.as_str()).copied();
+            if let Some(fields) = new {
+                let change = &delta.work_fields[&version.key];
+                match (old, change) {
+                    (_, ResolvedFields::Replace(replacement)) if replacement == fields => {}
+                    (Some(old), ResolvedFields::Preserve) if &old.record.work.fields == fields => {}
+                    (Some(old), ResolvedFields::Edit(edits)) => {
+                        let view =
+                            CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                        let mut expected_len = old.record.work.fields.len();
+                        for (name, value) in edits {
+                            let previous = view.get(name)?;
+                            if previous.is_none() && value.is_some() {
+                                expected_len += 1;
+                            }
+                            if previous.is_some() && value.is_none() {
+                                expected_len -= 1;
+                            }
+                            if fields.get(name) != value.as_ref() {
+                                return Err(QueueError::OutcomeUnknown(
+                                    "resolved field edit/view mismatch".into(),
+                                ));
+                            }
+                        }
+                        if expected_len != fields.len()
+                            || old.record.work.fields.iter().any(|(name, value)| {
+                                !edits.contains_key(name) && fields.get(name) != Some(value)
+                            })
+                        {
+                            return Err(QueueError::OutcomeUnknown(
+                                "resolved field edit/view mismatch".into(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(QueueError::OutcomeUnknown(
+                            "resolved field command/view mismatch".into(),
+                        ));
+                    }
+                }
+            }
+            if let Some(old) = old {
+                let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                if new.is_some() {
+                    let index_effects = crate::queue_fields::resolve_index_effects(
+                        &view,
+                        &delta.work_fields[&version.key],
+                        &schema.work,
+                    )?;
+                    effects.extend(&owner, &index_effects)?;
+                } else {
+                    for tuple in checked_unique_keys(None, &view, &schema.work)? {
+                        if effects
+                            .releases
+                            .get(&tuple)
+                            .is_some_and(|prior| prior != &owner)
+                        {
+                            return Err(QueueError::OutcomeUnknown(
+                                "contradictory released tuple ownership".into(),
+                            ));
+                        }
+                        effects.releases.insert(tuple, owner.clone());
+                    }
+                }
+            } else if let Some(fields) = new {
+                if !matches!(delta.work_fields[&version.key], ResolvedFields::Replace(_)) {
+                    return Err(QueueError::OutcomeUnknown(
+                        "partial field command cannot insert".into(),
+                    ));
+                }
+                for tuple in record_unique_keys(None, fields, &schema.work)? {
+                    effects.claims.push((tuple, owner.clone()));
+                }
+            }
+            continue;
+        }
+        let collection = owner.collection.as_ref().unwrap();
+        let definition = schema
+            .state
+            .get(collection)
+            .ok_or_else(|| QueueError::OutcomeUnknown("missing state schema".into()))?;
+        let old = original
+            .state
+            .get(&(collection.clone(), version.key.clone()))
+            .map(|s| &s.fields);
+        let new = state
+            .get(&(collection.as_str(), version.key.as_str()))
+            .copied();
         let old: BTreeSet<_> = old
             .map(|f| record_unique_keys(owner.collection.clone(), f, definition))
             .transpose()?
@@ -764,6 +957,26 @@ fn merge_delta(
     // All fallible checks/encoding precede mutation. Only exact tuple releases
     // are removed; unchanged ownership survives metadata/version changes.
     let effects = unique_effects(delta, snapshot, schema)?;
+    let mut merged_work = Vec::with_capacity(delta.work.len());
+    for row in &delta.work {
+        let mut merged = row.clone();
+        if let Some(old) = snapshot.work.get(&row.record.work.key) {
+            merged.record.work.fields = old.record.work.fields.clone();
+            merged.field_coverage = old.field_coverage.clone();
+        } else {
+            merged.record.work.fields.clear();
+            merged.field_coverage = FieldCoverage::Selected {
+                names: BTreeSet::new(),
+                prefixes: BTreeSet::new(),
+            };
+        }
+        crate::queue_fields::apply_to_view(
+            &mut merged.record.work.fields,
+            &mut merged.field_coverage,
+            delta.work_fields[&row.record.work.key].clone(),
+        );
+        merged_work.push(merged);
+    }
     for key in effects.releases.keys() {
         snapshot.unique_owners.remove(key);
     }
@@ -776,10 +989,8 @@ fn merge_delta(
     for key in &delta.deleted_state {
         snapshot.state.remove(key);
     }
-    for record in &delta.work {
-        snapshot
-            .work
-            .insert(record.record.work.key.clone(), record.clone());
+    for record in merged_work {
+        snapshot.work.insert(record.record.work.key.clone(), record);
     }
     for record in &delta.state {
         snapshot.state.insert(
@@ -801,12 +1012,12 @@ fn merge_delta(
 }
 pub(crate) fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
     for (key, stored) in &snapshot.work {
+        CheckedFields::new(&stored.record.work.fields, &stored.field_coverage)?;
         let id = RecordIdentity {
             collection: None,
             key: key.clone(),
         };
-        if !stored.fields_loaded
-            || stored.record.work.key != *key
+        if stored.record.work.key != *key
             || stored.record.version == 0
             || snapshot.versions.get(&id) != Some(&stored.record.version)
             || stored.record.insertion_sequence == 0
@@ -839,7 +1050,24 @@ pub(crate) fn validate_group_snapshot(
     group: &CommitGroup,
 ) -> QueueResult<()> {
     validate_snapshot(candidate)?;
+    let check_patch = |key: &str, patch: &WorkPatch| -> QueueResult<()> {
+        if let Some(old) = candidate.work.get(key) {
+            let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+            for name in patch.fields.keys() {
+                view.get(name)?;
+            }
+        }
+        Ok(())
+    };
+    for update in &group.claimed_updates {
+        check_patch(&update.key, &update.patch)?;
+    }
     for update in &group.work_updates {
+        if let UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } =
+            &update.change
+        {
+            check_patch(&update.key, patch)?;
+        }
         if matches!(&update.change,UnclaimedChange::Administrative {patch,..} if patch.body.is_some())
             && candidate
                 .work
@@ -865,12 +1093,14 @@ pub fn plan_commit_group(
     let mut candidate = addressed_snapshot(group, snapshot);
     validate_group_snapshot(&candidate, group)?;
     match apply_group(group, &mut candidate, now, schema) {
-        Ok(delta) => {
+        Ok(mut delta) => {
+            resolve_group_fields(group, snapshot, &mut delta, schema)?;
             let additions = match validate_uniques(&delta, snapshot, schema)? {
                 Ok(additions) => additions,
                 Err(reason) => {
                     return Ok(CommitDelta {
                         work: vec![],
+                        work_fields: BTreeMap::new(),
                         deleted_work: vec![],
                         state: vec![],
                         deleted_state: vec![],
@@ -888,6 +1118,7 @@ pub fn plan_commit_group(
         }
         Err(reason) => Ok(CommitDelta {
             work: vec![],
+            work_fields: BTreeMap::new(),
             deleted_work: vec![],
             state: vec![],
             deleted_state: vec![],
@@ -976,7 +1207,7 @@ mod tests {
                     lease_expires_at: Some(100),
                 },
                 lease_hash: Some(lease_hash(b"token")),
-                fields_loaded: true,
+                field_coverage: crate::queue_fields::FieldCoverage::Complete,
                 body_loaded: true,
             },
         );
@@ -1239,6 +1470,199 @@ mod tests {
         plan_commit_group(group, snapshot, 0, s).unwrap()
     }
     #[test]
+    fn complete_and_selected_planning_match_without_unrelated_payload() {
+        let mut s = unique_schema();
+        s.work.additional_field_prefixes.insert("/payload/".into());
+        let mut full = RecordSnapshot::default();
+        let mut seed = group();
+        let mut item = unique_work("a", "x");
+        item.fields
+            .insert("/payload/blob".into(), FieldValue::Bytes(vec![7; 1 << 20]));
+        seed.work_inserts.push(item);
+        probe_and_plan(&seed, &mut full, &s);
+        let mut selected = full.clone();
+        let row = selected.work.get_mut("a").unwrap();
+        row.record.work.fields.remove("/payload/blob");
+        row.field_coverage = FieldCoverage::Selected {
+            names: BTreeSet::from(["target".into()]),
+            prefixes: BTreeSet::new(),
+        };
+        let mut full_deltas = vec![];
+        let mut selected_deltas = vec![];
+        for (version, value) in [(1, Some("y")), (2, None), (3, Some("z"))] {
+            let mut g = group();
+            g.work_updates.push(UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(version),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    fields: BTreeMap::from([(
+                        "target".into(),
+                        value.map(|v| FieldValue::Text(v.into())),
+                    )]),
+                    ..WorkPatch::default()
+                }),
+            });
+            let left = probe_and_plan(&g, &mut full, &s);
+            let right = probe_and_plan(&g, &mut selected, &s);
+            assert_eq!(left.receipt, right.receipt);
+            assert_eq!(left.work_fields, right.work_fields);
+            assert_eq!(full.unique_owners, selected.unique_owners);
+            assert!(
+                !selected.work["a"]
+                    .record
+                    .work
+                    .fields
+                    .contains_key("/payload/blob")
+            );
+            full_deltas.push(left);
+            selected_deltas.push(right);
+        }
+        let mut metadata = group();
+        metadata.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(4),
+            change: UnclaimedChange::Patch(WorkPatch {
+                priority: Some(99),
+                ..WorkPatch::default()
+            }),
+        });
+        full_deltas.push(probe_and_plan(&metadata, &mut full, &s));
+        selected_deltas.push(probe_and_plan(&metadata, &mut selected, &s));
+        let complete = combine_deltas(&full_deltas, 1).unwrap();
+        let partial = combine_deltas(&selected_deltas, 1).unwrap();
+        assert_eq!(complete.work_fields, partial.work_fields);
+        assert!(matches!(partial.work_fields["a"], ResolvedFields::Edit(_)));
+        let mut persisted = seed.work_inserts[0].fields.clone();
+        partial.work_fields["a"].clone().apply(&mut persisted);
+        assert_eq!(persisted, full.work["a"].record.work.fields);
+    }
+    #[test]
+    fn packed_delete_reinsert_requires_full_replace_and_preserves_highwater() {
+        let s = unique_schema();
+        let mut snapshot = RecordSnapshot::default();
+        let mut seed = group();
+        seed.work_inserts.push(unique_work("a", "x"));
+        probe_and_plan(&seed, &mut snapshot, &s);
+        let mut remove = group();
+        remove.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        let deleted = probe_and_plan(&remove, &mut snapshot, &s);
+        let mut insert = group();
+        insert.work_inserts.push(unique_work("a", "y"));
+        let inserted = probe_and_plan(&insert, &mut snapshot, &s);
+        let packed = combine_deltas(&[deleted.clone(), inserted.clone()], 1).unwrap();
+        let mut partial_insert = inserted;
+        partial_insert
+            .work_fields
+            .insert("a".into(), ResolvedFields::Preserve);
+        assert!(combine_deltas(&[deleted.clone(), partial_insert.clone()], 1).is_err());
+        partial_insert.work_fields.insert(
+            "a".into(),
+            ResolvedFields::Edit(BTreeMap::from([(
+                "target".into(),
+                Some(FieldValue::Text("y".into())),
+            )])),
+        );
+        assert!(combine_deltas(&[deleted, partial_insert], 1).is_err());
+        assert!(packed.deleted_work.is_empty());
+        assert_eq!(packed.work[0].record.version, 3);
+        assert!(matches!(
+            packed.work_fields["a"],
+            ResolvedFields::Replace(_)
+        ));
+        assert_eq!(snapshot.unique_owners.values().next().unwrap().key, "a");
+    }
+    #[test]
+    fn selected_administrative_noop_does_not_advance_version_when_knowledge_expands() {
+        let mut s = schema();
+        s.work.fields.insert("gate".into(), FieldType::Boolean);
+        for coverage in [
+            FieldCoverage::Complete,
+            FieldCoverage::Selected {
+                names: BTreeSet::new(),
+                prefixes: BTreeSet::new(),
+            },
+        ] {
+            let mut snapshot = claimed_snapshot();
+            let row = snapshot.work.get_mut("input").unwrap();
+            row.record
+                .work
+                .fields
+                .insert("gate".into(), FieldValue::Boolean(true));
+            row.field_coverage = coverage;
+            let mut g = group();
+            g.work_updates.push(UnclaimedUpdate {
+                key: "input".into(),
+                expect: StateExpect::Version(2),
+                change: UnclaimedChange::Administrative {
+                    patch: WorkPatch {
+                        fields: BTreeMap::from([("gate".into(), Some(FieldValue::Boolean(true)))]),
+                        ..WorkPatch::default()
+                    },
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RequireActive,
+                },
+            });
+            let delta = plan_commit_group(&g, &mut snapshot, 10, &s).unwrap();
+            assert_eq!(snapshot.work["input"].record.version, 2);
+            assert_eq!(delta.work_fields["input"], ResolvedFields::Preserve);
+        }
+    }
+    #[test]
+    fn missing_affected_composite_component_and_malformed_commands_fail_closed() {
+        let mut s = schema();
+        s.work.fields = BTreeMap::from([
+            ("a".into(), FieldType::Integer),
+            ("b".into(), FieldType::Text),
+        ]);
+        s.work
+            .indexes
+            .insert("by_ab".into(), vec!["a".into(), "b".into()]);
+        let mut snapshot = claimed_snapshot();
+        let row = snapshot.work.get_mut("input").unwrap();
+        row.field_coverage = FieldCoverage::Selected {
+            names: BTreeSet::from(["a".into()]),
+            prefixes: BTreeSet::new(),
+        };
+        let mut g = group();
+        let mut u = update();
+        u.patch
+            .fields
+            .insert("a".into(), Some(FieldValue::Integer(2)));
+        g.claimed_updates.push(u);
+        let before = snapshot.clone();
+        assert!(plan_commit_group(&g, &mut snapshot, 10, &s).is_err());
+        assert_eq!(snapshot.work, before.work);
+        assert_eq!(snapshot.unique_owners, before.unique_owners);
+        let mut good = claimed_snapshot();
+        let mut simple = group();
+        simple.claimed_updates.push(update());
+        let mut delta = plan_commit_group(&simple, &mut good, 10, &schema()).unwrap();
+        delta.work_fields.clear();
+        assert!(combine_deltas(&[delta.clone()], 1).is_err());
+        delta
+            .work_fields
+            .insert("orphan".into(), ResolvedFields::Preserve);
+        assert!(combine_deltas(&[delta.clone()], 1).is_err());
+        delta.work_fields.clear();
+        delta.work_fields.insert(
+            "input".into(),
+            ResolvedFields::Replace(BTreeMap::from([("extra".into(), FieldValue::Integer(1))])),
+        );
+        assert!(combine_deltas(&[delta.clone()], 1).is_err());
+        delta.work_fields.insert(
+            "input".into(),
+            ResolvedFields::Edit(BTreeMap::from([(
+                "extra".into(),
+                Some(FieldValue::Integer(1)),
+            )])),
+        );
+        assert!(combine_deltas(&[delta], 1).is_err());
+    }
+    #[test]
     fn exact_unique_effects_preserve_metadata_owners_and_sparse_transitions() {
         let s = unique_schema();
         let mut snapshot = RecordSnapshot::default();
@@ -1491,10 +1915,19 @@ mod tests {
     #[test]
     fn incomplete_fields_fail_before_any_effect() {
         let mut snapshot = claimed_snapshot();
-        snapshot.work.get_mut("input").unwrap().fields_loaded = false;
+        snapshot.work.get_mut("input").unwrap().field_coverage =
+            crate::queue_fields::FieldCoverage::Selected {
+                names: Default::default(),
+                prefixes: Default::default(),
+            };
         let original = snapshot.clone();
         let mut g = group();
-        g.claimed_updates.push(update());
+        let mut claimed = update();
+        claimed
+            .patch
+            .fields
+            .insert("unloaded".into(), Some(FieldValue::Integer(1)));
+        g.claimed_updates.push(claimed);
         g.work_inserts.push(work("next"));
         assert!(matches!(
             plan_commit_group(&g, &mut snapshot, 10, &schema()),
@@ -1575,7 +2008,10 @@ mod tests {
         assert_eq!(fresh.record.insertion_sequence, 2);
         assert_eq!(fresh.record.version, 3);
         assert!(fresh.body_loaded);
-        assert!(fresh.fields_loaded);
+        assert!(matches!(
+            fresh.field_coverage,
+            crate::queue_fields::FieldCoverage::Complete
+        ));
         assert_eq!(fresh.lease_hash, None);
         assert_eq!(
             plan_commit_group(&g, &mut snapshot, 10, &schema())
