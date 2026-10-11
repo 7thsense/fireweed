@@ -921,7 +921,7 @@ async fn persist_delta_with_mode(
     loaded: &mut Loaded<'_>,
     mode: FieldPersistenceMode,
 ) -> QueueResult<()> {
-    fireweed_engine::queue_planner::validate_field_commands(delta)?;
+    fireweed_engine::queue_planner::validate_resolved_writes(delta)?;
     let work_by_key: BTreeMap<_, _> = delta
         .work
         .iter()

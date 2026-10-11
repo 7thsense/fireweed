@@ -252,6 +252,7 @@ pub fn propose_group(
         delta: CommitDelta {
             work: vec![],
             work_fields: BTreeMap::new(),
+            work_bodies: BTreeMap::new(),
             deleted_work: vec![],
             state: vec![],
             deleted_state: vec![],
@@ -408,8 +409,23 @@ pub fn propose_group(
                 })
                 .into_iter()
                 .collect();
+            let work_bodies = proposal
+                .replacement
+                .as_ref()
+                .map(|row| {
+                    let change =
+                        if target.is_some_and(|old| old.record.work.body != row.record.work.body) {
+                            crate::queue_body::ResolvedBody::Replace(row.record.work.body.clone())
+                        } else {
+                            crate::queue_body::ResolvedBody::Preserve
+                        };
+                    (row.record.work.key.clone(), change)
+                })
+                .into_iter()
+                .collect();
             let delta = CommitDelta {
                 work_fields,
+                work_bodies,
                 work: proposal.replacement.take().into_iter().collect(),
                 deleted_work: if matches!(proposal.outcome, AdministrativeOutcome::Deleted { .. }) {
                     vec![entry.key.to_owned()]
@@ -466,7 +482,7 @@ pub fn propose_group(
         Ok(delta) => delta,
         Err(reason) => return Ok(rejected(reason)),
     };
-    resolve_group_fields(ordinary, snapshot, &mut normal, schema)?;
+    resolve_group_writes(ordinary, snapshot, &mut normal, schema)?;
     let ordinary_receipt = normal.receipt.clone();
     deltas.push(normal);
     let mut combined = combine_deltas(&deltas, snapshot.next_sequence)?;

@@ -183,3 +183,23 @@ Production selected reads/writes and guard removal remain pending a concrete
 implementation review and the required activation approval. No S3/Turso command
 codec, administrative wire activation or exceptional performance qualification is
 claimed by this staging slice.
+
+## Explicit opaque body intent
+
+CommitDelta now carries a parallel exact work_bodies map. ResolvedBody is Preserve
+or Replace(Bytes), independent of whether the read view materialized an opaque
+body. Ordinary explicit body patches and insert/replacement carry Replace,
+including explicit empty or equal bytes; metadata-only updates carry Preserve.
+Administrative equality may elide a body write only with the already-required
+loaded comparison authority. Map keys, loaded replacement data and final view
+contents are checked before speculative mutation.
+
+Packed body writes compose in order: metadata Preserve cannot erase an earlier
+Replace; deletion discards body intent; reinsertion requires both full field and
+body replacement. Speculative application retains loaded/unknown body knowledge
+without publishing it. Complete-versus-unknown old-body tests prove identical
+explicit write commands, and metadata/field-only operations preserve a megabyte
+opaque body without including it in their command. This is an internal precursor
+to a versioned durable envelope; no new S3/Turso frame is activated by this slice.
+The separately requested PostgreSQL field activation remains unapplied while its
+explicit approval is pending; existing Complete-only production guards remain.

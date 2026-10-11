@@ -45,6 +45,7 @@ mod ownership;
 mod port;
 pub mod queue_administration;
 pub mod queue_admission;
+pub mod queue_body;
 pub mod queue_contract;
 pub mod queue_fields;
 pub mod queue_index;
