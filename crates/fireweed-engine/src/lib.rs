@@ -50,6 +50,7 @@ pub mod queue_contract;
 pub mod queue_fields;
 pub mod queue_index;
 pub mod queue_planner;
+pub mod queue_unique_stream;
 pub mod schema_validation;
 pub mod sequenced_metadata;
 mod types;
