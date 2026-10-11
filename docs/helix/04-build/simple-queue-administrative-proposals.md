@@ -36,10 +36,23 @@ have no helper match-count cap and return aggregates rather than before rows.
 Before metadata retains stored lifecycle, version, attempts, due/eligible time and
 lease expiry plus explicitly selected fields, never the body or a lease token.
 Prefix removal is restricted to provisioned additional namespaces. Removal happens
-before explicit edits, so additions win. Complete field authority is required;
-old body authority is required only when comparing an explicit body replacement.
-An unloaded body stays Preserve. Proposals validate durable version high water
-and fail closed on inconsistent authority or exhausted versions.
+before explicit edits, so additions win. Per-target proposals accept certified
+selective field authority. The checked selector helper validates every Field/Present
+reference, including type validity of loaded values, before evaluating any truth;
+unloaded absence cannot become a match. Before fields require the same certificates.
+Prefix removals require complete prefix enumeration. Explicit edits are resolved
+once into exact Edit/Preserve commands; every actually touched composite-index
+component is certified, including nonunique indexes. Deletion requires all unique
+components. Unrelated payload fields need not be loaded or republished.
+
+Old body authority is required only when comparing an explicit body replacement.
+Equal explicit bodies produce Preserve; changed bodies, including empty bytes,
+produce Replace. Metadata-only proposals preserve unloaded bodies. Only Changed
+has a candidate and exact field/body commands; no-op/rejection/deletion has none.
+Proposals validate durable version high water and fail closed on inconsistent
+authority or exhausted versions. The complete-image group oracle consumes these
+exact commands and retains initial-owner/final combined uniqueness checks; its
+complete-only input requirement remains until the streaming planner is qualified.
 
 Existing version-fenced Administrative updates now call one extracted transition
 helper with unchanged operational-clock semantics. Administrative proposals call

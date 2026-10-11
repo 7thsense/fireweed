@@ -1,5 +1,7 @@
 //! Pure, per-target administrative proposals. These are not durable outcomes:
 //! a fenced operation still validates uniqueness/overlap/state CAS and publication.
+use crate::queue_body::ResolvedBody;
+use crate::queue_fields::{CheckedFields, ResolvedFields, resolve_edits};
 use crate::queue_planner::{StoredWork, apply_administrative_update};
 use fireweed_core::{queue_administration::*, queue_contract::*};
 use std::collections::BTreeSet;
@@ -10,9 +12,41 @@ pub struct AdministrativeProposal {
     pub before: Option<AdministrativeBefore>,
     /// Candidate replacement; absent for a rejection, no-op or deletion.
     pub replacement: Option<StoredWork>,
+    /// Exact publication intent; read coverage is never a field replacement.
+    pub resolved_fields: Option<ResolvedFields>,
+    pub resolved_body: Option<ResolvedBody>,
 }
 fn unknown(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(message.into())
+}
+fn certify_field(
+    view: &CheckedFields<'_>,
+    name: &str,
+    definition: &CollectionDefinition,
+) -> QueueResult<()> {
+    if let Some(value) = view.get(name)? {
+        definition
+            .validate_value(name, value)
+            .map_err(|_| unknown("invalid administrative field authority"))?;
+    }
+    Ok(())
+}
+/// Certify every field reference before evaluating any boolean truth. Unknown
+/// absence on a partial map must never become a predicate result.
+pub fn checked_selector_matches(
+    selector: &WorkSelector,
+    target: &StoredWork,
+    evaluated_at: i64,
+    definition: &CollectionDefinition,
+) -> QueueResult<bool> {
+    selector.validate(definition)?;
+    let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
+    for node in &selector.nodes {
+        if let SelectorNode::Field { name, .. } | SelectorNode::Present { name, .. } = node {
+            certify_field(&view, name, definition)?;
+        }
+    }
+    Ok(selector.matches(&target.record, evaluated_at))
 }
 #[derive(Clone, Copy)]
 struct TargetRequest<'a> {
@@ -31,7 +65,7 @@ impl<'a> From<&'a AdministrativeEntry> for TargetRequest<'a> {
         }
     }
 }
-/// The caller supplies complete fenced raw authority and its durable version high
+/// The caller supplies certified fenced raw authority and its durable version high
 /// water. Do not normalize expired leases before passing the administrative time.
 /// Duplicate addressed inputs must be reported positionally as Invalid by the
 /// operation planner before this per-target helper is called.
@@ -79,17 +113,22 @@ fn propose_target_view(
             outcome: AdministrativeOutcome::NotFound,
             before: None,
             replacement: None,
+            resolved_fields: None,
+            resolved_body: None,
         });
     };
-    if !matches!(
-        target.field_coverage,
-        crate::queue_fields::FieldCoverage::Complete
-    ) || target.record.work.key != entry.key
+    if target.record.work.key != entry.key
         || target.record.version == 0
         || highwater != Some(target.record.version)
         || target.record.insertion_sequence == 0
     {
         return Err(unknown("incomplete administrative target authority"));
+    }
+    let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
+    if let Some(names) = before_fields {
+        for name in names {
+            certify_field(&view, name, &schema.work)?;
+        }
     }
     let before = before_fields.map(|names| AdministrativeBefore {
         version: target.record.version,
@@ -116,6 +155,8 @@ fn propose_target_view(
                 outcome: $outcome,
                 before,
                 replacement: None,
+                resolved_fields: None,
+                resolved_body: None,
             }
         };
     }
@@ -127,9 +168,11 @@ fn propose_target_view(
             actual_version: target.record.version,
         }));
     }
-    if !entry.precondition.matches(&target.record, evaluated_at) {
+    if !checked_selector_matches(entry.precondition, target, evaluated_at, &schema.work)? {
         return Ok(rejected!(AdministrativeOutcome::PreconditionFailed));
     }
+    let fields_change;
+    let mut body_change = ResolvedBody::Preserve;
     let (changed, mut replacement) = match &entry.action {
         AdministrativeAction::Delete { lease_guard } => {
             let active = lease_active(&target.record, evaluated_at);
@@ -141,6 +184,16 @@ fn propose_target_view(
                     return Ok(rejected!(AdministrativeOutcome::LeaseRequired));
                 }
                 _ => {}
+            }
+            for index in &schema.work.unique_indexes {
+                let columns = schema
+                    .work
+                    .indexes
+                    .get(index)
+                    .ok_or_else(|| unknown("missing administrative unique index"))?;
+                for name in columns {
+                    certify_field(&view, name, &schema.work)?;
+                }
             }
             let version = target
                 .record
@@ -158,17 +211,42 @@ fn propose_target_view(
             if patch.body.is_some() && !target.body_loaded {
                 return Err(unknown("administrative body authority not loaded"));
             }
-            let mut resolved = patch.clone();
-            // Prefix removal precedes explicit field edits, matching gate removal
-            // then add precedence. Opaque work/state bodies are never interpreted.
-            for name in target.record.work.fields.keys() {
-                if remove_field_prefixes
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-                    && !patch.fields.contains_key(name)
-                {
-                    resolved.fields.insert(name.clone(), None);
+            // Validate values as well as absence/enumeration certificates.
+            for name in patch.fields.keys() {
+                certify_field(&view, name, &schema.work)?;
+            }
+            for prefix in remove_field_prefixes {
+                for (name, _) in view.prefix(prefix)? {
+                    certify_field(&view, name, &schema.work)?;
                 }
+            }
+            fields_change =
+                resolve_edits(&view, &patch.fields, remove_field_prefixes, &schema.work)?;
+            for columns in schema.work.indexes.values() {
+                if matches!(&fields_change, ResolvedFields::Edit(edits) if columns.iter().any(|name| edits.contains_key(name)))
+                {
+                    for name in columns {
+                        certify_field(&view, name, &schema.work)?;
+                    }
+                }
+            }
+            let resolved_fields = match &fields_change {
+                ResolvedFields::Preserve => Default::default(),
+                ResolvedFields::Edit(edits) => edits.clone(),
+                ResolvedFields::Replace(_) => {
+                    unreachable!("administrative edits cannot replace a field bag")
+                }
+            };
+            let resolved = WorkPatch {
+                priority: patch.priority,
+                available_at: patch.available_at,
+                fields: resolved_fields,
+                body: patch.body.clone(),
+            };
+            if let Some(body) = &patch.body
+                && body != &target.record.work.body
+            {
+                body_change = ResolvedBody::Replace(body.clone());
             }
             let mut replacement = target.clone();
             match apply_administrative_update(
@@ -206,6 +284,8 @@ fn propose_target_view(
         },
         before,
         replacement: Some(replacement),
+        resolved_fields: Some(fields_change),
+        resolved_body: Some(body_change),
     })
 }
 
@@ -385,6 +465,8 @@ pub fn propose_group(
                 outcome: AdministrativeOutcome::Invalid,
                 before,
                 replacement: None,
+                resolved_fields: None,
+                resolved_body: None,
             }
         };
         if matches!(
@@ -397,30 +479,15 @@ pub fn propose_group(
                 _ => unreachable!(),
             };
             let work_fields = proposal
-                .replacement
-                .as_ref()
-                .map(|row| {
-                    (
-                        row.record.work.key.clone(),
-                        crate::queue_fields::ResolvedFields::Replace(
-                            row.record.work.fields.clone(),
-                        ),
-                    )
-                })
+                .resolved_fields
+                .take()
+                .map(|change| (entry.key.to_owned(), change))
                 .into_iter()
                 .collect();
             let work_bodies = proposal
-                .replacement
-                .as_ref()
-                .map(|row| {
-                    let change =
-                        if target.is_some_and(|old| old.record.work.body != row.record.work.body) {
-                            crate::queue_body::ResolvedBody::Replace(row.record.work.body.clone())
-                        } else {
-                            crate::queue_body::ResolvedBody::Preserve
-                        };
-                    (row.record.work.key.clone(), change)
-                })
+                .resolved_body
+                .take()
+                .map(|change| (entry.key.to_owned(), change))
                 .into_iter()
                 .collect();
             let delta = CommitDelta {
@@ -773,7 +840,13 @@ mod tests {
         };
         assert!(matches!(
             propose_target(
-                &entry(update()),
+                &AdministrativeEntry {
+                    precondition: WorkSelector::leaf(SelectorNode::Present {
+                        name: "/gates/unloaded".into(),
+                        present: false,
+                    }),
+                    ..entry(update())
+                },
                 Some(&row),
                 Some(1),
                 0,
@@ -816,6 +889,281 @@ mod tests {
             AdministrativeOutcome::LeaseRequired
         );
         assert_eq!(row.record.version, 1);
+    }
+    fn selective_row(
+        mut source: StoredWork,
+        names: BTreeSet<String>,
+        prefixes: BTreeSet<String>,
+    ) -> StoredWork {
+        source.record.work.fields.retain(|name, _| {
+            names.contains(name) || prefixes.iter().any(|prefix| name.starts_with(prefix))
+        });
+        source.record.work.body = Default::default();
+        source.body_loaded = false;
+        source.field_coverage = crate::queue_fields::FieldCoverage::Selected { names, prefixes };
+        source
+    }
+    #[test]
+    fn checked_selector_certifies_all_fields_before_truth_and_checks_types() {
+        let source = selective_row(row(), BTreeSet::new(), BTreeSet::new());
+        let missing = || {
+            WorkSelector::leaf(SelectorNode::Present {
+                name: "/gates/unknown".into(),
+                present: false,
+            })
+        };
+        for selector in [
+            missing(),
+            WorkSelector::any(vec![missing(), WorkSelector::all(vec![])]),
+            WorkSelector::all(vec![missing(), WorkSelector::any(vec![])]),
+        ] {
+            assert!(matches!(
+                checked_selector_matches(&selector, &source, 0, &schema().work),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+        }
+        let certified = selective_row(
+            row(),
+            BTreeSet::from(["/gates/unknown".into()]),
+            BTreeSet::new(),
+        );
+        assert!(checked_selector_matches(&missing(), &certified, 0, &schema().work).unwrap());
+        let mut definition = schema().work;
+        definition
+            .fields
+            .insert("number".into(), FieldType::Integer);
+        let mut corrupt = row();
+        corrupt
+            .record
+            .work
+            .fields
+            .insert("number".into(), FieldValue::Text("7".into()));
+        let predicate = WorkSelector::leaf(SelectorNode::Present {
+            name: "number".into(),
+            present: true,
+        });
+        assert!(matches!(
+            checked_selector_matches(&predicate, &corrupt, 0, &definition),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+    }
+    #[test]
+    fn selective_administration_preserves_unloaded_payload_and_exact_edit_parity() {
+        let mut full = row();
+        full.record.work.fields.insert(
+            "/payload/large".into(),
+            FieldValue::Bytes(vec![42; 1 << 20]),
+        );
+        full.record.work.body = bytes::Bytes::from(vec![43; 1 << 20]);
+        let selected = selective_row(
+            full.clone(),
+            BTreeSet::new(),
+            BTreeSet::from(["/gates/".into()]),
+        );
+        let request = entry(AdministrativeAction::Update {
+            patch: WorkPatch {
+                priority: Some(9),
+                fields: BTreeMap::from([
+                    ("/gates/a".into(), Some(FieldValue::Boolean(false))),
+                    ("/gates/new".into(), Some(FieldValue::Boolean(true))),
+                ]),
+                ..Default::default()
+            },
+            lifecycle: AdministrativeLifecycle::Keep,
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+            remove_field_prefixes: BTreeSet::from(["/gates/".into()]),
+        });
+        let names = BTreeSet::from(["/gates/a".into(), "/gates/missing".into()]);
+        let plan = |target: &StoredWork| {
+            propose_target(
+                &request,
+                Some(target),
+                Some(1),
+                0,
+                Some(&names),
+                &schema(),
+                &QueueLimits::default(),
+            )
+            .unwrap()
+        };
+        let complete = plan(&full);
+        let partial = plan(&selected);
+        assert_eq!(complete.outcome, partial.outcome);
+        assert_eq!(complete.before, partial.before);
+        assert_eq!(complete.resolved_fields, partial.resolved_fields);
+        assert_eq!(complete.resolved_body, partial.resolved_body);
+        assert_eq!(partial.resolved_body, Some(ResolvedBody::Preserve));
+        assert!(
+            matches!(&partial.resolved_fields, Some(ResolvedFields::Edit(edits)) if edits.len() == 3)
+        );
+        let candidate = partial.replacement.as_ref().unwrap();
+        assert!(!candidate.record.work.fields.contains_key("/payload/large"));
+        assert!(candidate.record.work.body.is_empty());
+        crate::queue_planner::validate_work_write_view(
+            Some(&selected),
+            candidate,
+            partial.resolved_fields.as_ref().unwrap(),
+            partial.resolved_body.as_ref().unwrap(),
+        )
+        .unwrap();
+        let mut materialized = full.record.work.fields.clone();
+        partial.resolved_fields.unwrap().apply(&mut materialized);
+        assert_eq!(
+            materialized,
+            complete.replacement.unwrap().record.work.fields
+        );
+        let no_op = proposal(&entry(update()), &selected, 0);
+        assert_eq!(no_op.outcome, AdministrativeOutcome::NoChange);
+        assert!(
+            no_op.replacement.is_none()
+                && no_op.resolved_fields.is_none()
+                && no_op.resolved_body.is_none()
+        );
+        assert!(matches!(
+            propose_target(
+                &request,
+                Some(&selected),
+                Some(1),
+                0,
+                Some(&BTreeSet::from(["/payload/unloaded".into()])),
+                &schema(),
+                &QueueLimits::default()
+            ),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+    }
+    #[test]
+    fn selective_prefix_and_composite_dependencies_are_mandatory_even_when_sparse() {
+        let mut definition = schema();
+        definition.work.indexes.insert(
+            "pair".into(),
+            vec!["/gates/a".into(), "/payload/other".into()],
+        );
+        definition.work.unique_indexes.insert("pair".into());
+        definition
+            .work
+            .fields
+            .insert("/gates/a".into(), FieldType::Boolean);
+        definition
+            .work
+            .fields
+            .insert("/payload/other".into(), FieldType::Integer);
+        definition.validate().unwrap();
+        let selected = selective_row(row(), BTreeSet::from(["/gates/a".into()]), BTreeSet::new());
+        let request = entry(AdministrativeAction::Update {
+            patch: WorkPatch {
+                fields: BTreeMap::from([("/gates/a".into(), Some(FieldValue::Boolean(false)))]),
+                ..Default::default()
+            },
+            lifecycle: AdministrativeLifecycle::Keep,
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+            remove_field_prefixes: BTreeSet::new(),
+        });
+        let plan = |entry: &AdministrativeEntry, row: &StoredWork| {
+            propose_target(
+                entry,
+                Some(row),
+                Some(1),
+                0,
+                None,
+                &definition,
+                &QueueLimits::default(),
+            )
+        };
+        assert!(matches!(
+            plan(&request, &selected),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let mut nonunique = definition.clone();
+        nonunique.work.unique_indexes.clear();
+        nonunique.validate().unwrap();
+        assert!(matches!(
+            propose_target(
+                &request,
+                Some(&selected),
+                Some(1),
+                0,
+                None,
+                &nonunique,
+                &QueueLimits::default()
+            ),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let certified = selective_row(
+            row(),
+            BTreeSet::from(["/gates/a".into(), "/payload/other".into()]),
+            BTreeSet::new(),
+        );
+        assert!(matches!(
+            plan(&request, &certified).unwrap().outcome,
+            AdministrativeOutcome::Changed { .. }
+        ));
+        let delete = entry(AdministrativeAction::Delete {
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+        });
+        assert!(matches!(
+            plan(&delete, &selected),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let deleted = plan(&delete, &certified).unwrap();
+        assert!(matches!(
+            deleted.outcome,
+            AdministrativeOutcome::Deleted { .. }
+        ));
+        assert!(
+            deleted.replacement.is_none()
+                && deleted.resolved_fields.is_none()
+                && deleted.resolved_body.is_none()
+        );
+        let prefix = entry(AdministrativeAction::Update {
+            remove_field_prefixes: BTreeSet::from(["/gates/".into()]),
+            patch: WorkPatch::default(),
+            lifecycle: AdministrativeLifecycle::Keep,
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+        });
+        assert!(matches!(
+            plan(&prefix, &certified),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+    }
+    #[test]
+    fn administrative_body_commands_require_comparison_and_distinguish_empty() {
+        let mut source = row();
+        source.record.work.body = bytes::Bytes::from_static(b"body");
+        source.body_loaded = true;
+        for (body, command) in [
+            (bytes::Bytes::from_static(b"body"), ResolvedBody::Preserve),
+            (
+                bytes::Bytes::new(),
+                ResolvedBody::Replace(bytes::Bytes::new()),
+            ),
+        ] {
+            let request = entry(AdministrativeAction::Update {
+                patch: WorkPatch {
+                    priority: Some(9),
+                    body: Some(body),
+                    ..Default::default()
+                },
+                lifecycle: AdministrativeLifecycle::Keep,
+                lease_guard: AdministrativeLeaseGuard::RejectActive,
+                remove_field_prefixes: BTreeSet::new(),
+            });
+            assert_eq!(proposal(&request, &source, 0).resolved_body, Some(command));
+            let mut unloaded = source.clone();
+            unloaded.body_loaded = false;
+            assert!(matches!(
+                propose_target(
+                    &request,
+                    Some(&unloaded),
+                    Some(1),
+                    0,
+                    None,
+                    &schema(),
+                    &QueueLimits::default()
+                ),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+        }
     }
     #[test]
     fn selector_depth_validation_and_wide_traversal_are_iterative() {
