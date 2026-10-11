@@ -6,6 +6,7 @@
 pub use crate::{Bytes, Clock, ConfigSecret, SystemClock, UtcTimestamp};
 pub use fireweed_core::queue_administration::*;
 pub use fireweed_core::queue_contract::*;
+pub use fireweed_core::queue_runtime::QueueRuntimeOptions;
 use fireweed_engine::queue_contract::QueueStore;
 use std::{fmt, sync::Arc};
 /// Owned-operation future. Once admitted, dropping this caller future cannot
@@ -55,6 +56,7 @@ pub struct PostgresOptions {
     pub url: ConfigSecret,
     pub limits: QueueLimits,
     pub pool_size: usize,
+    pub runtime: QueueRuntimeOptions,
 }
 #[cfg(feature = "postgres")]
 impl PostgresOptions {
@@ -63,6 +65,7 @@ impl PostgresOptions {
             url,
             limits: QueueLimits::default(),
             pool_size: 2,
+            runtime: QueueRuntimeOptions::default(),
         }
     }
 }
@@ -72,11 +75,12 @@ impl Queue {
     /// controls logical eligibility/lease semantics, independently of operation
     /// admission and infrastructure deadlines. Use SystemClock in production.
     pub async fn postgres(options: PostgresOptions, clock: Arc<dyn Clock>) -> QueueResult<Self> {
-        let store = fireweed_postgres::PostgresQueueStore::connect(
+        let store = fireweed_postgres::PostgresQueueStore::connect_with_runtime(
             &options.url.0.0,
             clock,
             options.limits,
             options.pool_size,
+            options.runtime,
         )
         .await?;
         Ok(Self {

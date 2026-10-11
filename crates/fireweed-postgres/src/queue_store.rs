@@ -130,7 +130,25 @@ impl PostgresQueueStore {
         limits: QueueLimits,
         pool_size: usize,
     ) -> QueueResult<Self> {
-        let runtime = fireweed_engine::queue_runtime::ValidatedQueueRuntime::for_limits(&limits)?;
+        Self::connect_with_runtime(
+            url,
+            clock,
+            limits,
+            pool_size,
+            fireweed_core::queue_runtime::QueueRuntimeOptions::default(),
+        )
+        .await
+    }
+    pub async fn connect_with_runtime(
+        url: &str,
+        clock: Arc<dyn Clock>,
+        limits: QueueLimits,
+        pool_size: usize,
+        options: fireweed_core::queue_runtime::QueueRuntimeOptions,
+    ) -> QueueResult<Self> {
+        let runtime = fireweed_engine::queue_runtime::ValidatedQueueRuntime::with_options(
+            &limits, options, pool_size,
+        )?;
         if !(1..=32).contains(&pool_size) {
             return Err(QueueError::Invalid("pool size must be 1..32".into()));
         }
@@ -144,8 +162,10 @@ impl PostgresQueueStore {
         // creation and schema DDL. No late arithmetic can fail after publication.
         let admission = QueueAdmission::new(runtime.operations(), runtime.retained_bytes())?;
         let scratch_quota = fireweed_queue_spool::ScratchDiskQuota::new(runtime.scratch_bytes())?;
-        let scratch_workers =
-            fireweed_queue_spool::ScratchWorkers::new(pool_size, runtime.operations())?;
+        let scratch_workers = fireweed_queue_spool::ScratchWorkers::new(
+            runtime.scratch_workers(),
+            runtime.operations(),
+        )?;
         let mut clients = vec![];
         let mut drivers = vec![];
         for connection_index in 0..pool_size {
@@ -3840,9 +3860,19 @@ mod tests {
         let _fixture = physical_fixture().await;
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
-        let store = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 1)
-            .await
-            .unwrap();
+        let store = PostgresQueueStore::connect_with_runtime(
+            &url,
+            clock.clone(),
+            QueueLimits::default(),
+            1,
+            fireweed_core::queue_runtime::QueueRuntimeOptions {
+                operations: 1,
+                scratch_workers: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -3908,6 +3938,18 @@ mod tests {
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
         assert_eq!(store.inner.admission.usage().unwrap().0, 1);
+        assert_eq!(
+            store
+                .clone()
+                .read_commit(ReceiptReadRequest {
+                    queue: queue.clone(),
+                    request_ids: vec!["owned-commit".into()],
+                    max_bytes: 1024,
+                })
+                .await,
+            Err(QueueError::Busy)
+        );
+
         held.commit().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), store.shutdown())
             .await

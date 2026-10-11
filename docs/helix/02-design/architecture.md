@@ -11,7 +11,7 @@ ddx:
       to: api-queue-claim-commit-contract
 ---
 
-This is the target design and its acceptance contract. The public PostgreSQL path is implemented; S3/Turso assembly and the single Snorri adapter cutover remain pending. PostgreSQL construction validates limits, pool size, parsed URLs and checked admission/scratch multipliers before connection or DDL, with credential-redaction and no-I/O negative tests. S3/Turso construction and explicit custom capacity settings remain implementation gates. Existing code is not qualified merely by this specification.
+This is the target design and its acceptance contract. The public PostgreSQL path is implemented; S3/Turso assembly and the single Snorri adapter cutover remain pending. PostgreSQL construction validates limits, pool size, parsed URLs and checked admission/scratch multipliers before connection or DDL, with credential-redaction and no-I/O negative tests. Typed custom capacities reach PostgreSQL admission and scratch execution. S3/Turso construction remains an implementation gate. Existing code is not qualified merely by this specification.
 
 
 # Fireweed architecture

@@ -11,7 +11,7 @@ ddx:
       to: api-queue-claim-commit-contract
 ---
 
-This is the target design and its acceptance contract. The public PostgreSQL path validates interface limits, pool size, checked admission/scratch multipliers and the required parsed URL before connection or DDL; configuration and connection-setup errors redact credentials. S3/Turso assembly, explicit custom capacity settings and the single Snorri adapter cutover remain pending. Existing code is not qualified merely by this specification.
+This is the target design and its acceptance contract. The public PostgreSQL path validates interface limits, pool size, checked admission/scratch multipliers and the required parsed URL before connection or DDL; configuration and connection-setup errors redact credentials. Typed custom operation, retained-byte, scratch-byte and scratch-worker capacities reach PostgreSQL admission and scratch execution. S3/Turso assembly and the single Snorri adapter cutover remain pending. Existing code is not qualified merely by this specification.
 
 
 # Queue construction and configuration
@@ -41,9 +41,9 @@ and database sessions MUST NOT become consumer workflow state or operation DTOs.
 | Projection and scratch roots | Host; explicit local paths for S3/Turso | Validate writable/layout ownership during construction; raw tenant/queue names never form unsafe path components |
 | Queue limits | Shared defaults below | Checked arithmetic, positive counts/bytes and consistent nesting; same settings on both adapters |
 | Operational clock | Host; production system clock, test clock explicitly injected | Fresh sampling at claim/commit authority linearization; operator evaluated_at is a separate classification input |
-| Admission | Shared runtime; 64 operations and 8×request-byte retained budget by default | Checked multiplication before I/O; all clones share capacity; ownership survives caller cancellation |
-| Scratch storage | Shared runtime; 2 GiB logical temporary quota by default | Counts retained data/index/merge files; exhaustion is explicit; no authoritative second log |
-| Scratch execution | Shared bounded runtime; explicit worker and owned-operation capacities | Positive capacities; queued/started work is bounded; worker drain and final reservation drain remain distinct |
+| Admission | Shared runtime; QueueRuntimeOptions; 64 operations and 8×request-byte retained budget by default | Checked multiplication before I/O; all clones share capacity; ownership survives caller cancellation |
+| Scratch storage | Shared runtime; 16×group-byte logical temporary quota (2 GiB at default limits) | Counts retained data/index/merge files; exhaustion is explicit; no authoritative second log |
+| Scratch execution | Shared bounded runtime; explicit worker and owned-operation capacities | PostgreSQL defaults workers to pool size; explicit worker count is positive and at most the owned-operation capacity; queued/started work is bounded; worker drain and final reservation drain remain distinct |
 | Infrastructure deadlines | Host/runtime; finite documented backend deadlines | Independent of injected logical clock; an expired publication reply may remain OutcomeUnknown |
 | Diagnostics | Caller-owned; disabled exporter permitted | No collector is mandatory; redaction and loss behavior follow diagnostics Contract |
 
@@ -54,7 +54,7 @@ resolved unit obeys the common publication/result bound. Identifiers, field name
 key sets and payload attributes have no separate backend-specific count/length cap.
 All effective limits are immutable for a handle and shared by its clones.
 
-A host MAY select different explicit resource capacities. Qualification MUST
+A host MAY select different explicit resource capacities through QueueRuntimeOptions. Optional byte/worker values derive defaults only when absent; zero and inconsistent bounds fail before I/O. Qualification MUST
 record them and compare equal interface limits and durability guarantees. An
 internal physical frame or parameter limit MUST NOT silently reduce the public
 interface, truncate results, or turn native filtering into a client scan.

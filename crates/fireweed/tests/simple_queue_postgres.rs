@@ -145,6 +145,37 @@ async fn invalid_construction_never_contacts_server_and_redacts_secrets() {
         invalid.pool_size = pool;
         cases.push((invalid, false));
     }
+    for runtime in [
+        QueueRuntimeOptions {
+            operations: 0,
+            ..Default::default()
+        },
+        QueueRuntimeOptions {
+            operations: usize::MAX,
+            ..Default::default()
+        },
+        QueueRuntimeOptions {
+            retained_bytes: Some(0),
+            ..Default::default()
+        },
+        QueueRuntimeOptions {
+            scratch_bytes: Some(0),
+            ..Default::default()
+        },
+        QueueRuntimeOptions {
+            scratch_workers: Some(0),
+            ..Default::default()
+        },
+        QueueRuntimeOptions {
+            operations: 1,
+            scratch_workers: Some(2),
+            ..Default::default()
+        },
+    ] {
+        let mut invalid = PostgresOptions::new(ConfigSecret::new(url.clone()));
+        invalid.runtime = runtime;
+        cases.push((invalid, false));
+    }
     let mut overflow = PostgresOptions::new(ConfigSecret::new(url.clone()));
     overflow.limits.max_request_bytes = u64::MAX / 8 + 1;
     cases.push((overflow, true));
@@ -174,4 +205,38 @@ async fn invalid_construction_never_contacts_server_and_redacts_secrets() {
             assert!(matches!(error, QueueError::Invalid(_)));
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+async fn explicit_retained_capacity_is_enforced_through_public_clones() {
+    let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+    let mut options = PostgresOptions::new(ConfigSecret::new(url));
+    options.runtime = QueueRuntimeOptions {
+        operations: 1,
+        retained_bytes: Some(1),
+        scratch_bytes: Some(1),
+        scratch_workers: Some(1),
+    };
+    let queue = Queue::postgres(options, Arc::new(TestClock::default()))
+        .await
+        .unwrap();
+    let clone = queue.clone();
+    let request = ReceiptReadRequest {
+        queue: QueueAddress {
+            tenant: "capacity-test".into(),
+            queue: "missing".into(),
+        },
+        request_ids: vec!["original".into()],
+        max_bytes: 1024,
+    };
+    // This valid request would reach QueueNotFound if construction ignored the
+    // explicit retained-byte setting. Both clones reject before any queue read.
+    assert_eq!(
+        queue.read_commit(request.clone()).await,
+        Err(QueueError::Busy)
+    );
+    assert_eq!(clone.read_commit(request).await, Err(QueueError::Busy));
+    queue.shutdown().await.unwrap();
+    clone.shutdown().await.unwrap();
 }
