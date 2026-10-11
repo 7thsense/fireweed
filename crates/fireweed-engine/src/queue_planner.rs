@@ -244,16 +244,13 @@ fn patch_work(stored: &mut StoredWork, patch: &WorkPatch) {
         record.work.body.clone_from(body);
         stored.body_loaded = true;
     }
-    for (key, value) in &patch.fields {
-        match value {
-            Some(value) => {
-                record.work.fields.insert(key.clone(), value.clone());
-            }
-            None => {
-                record.work.fields.remove(key);
-            }
-        }
-    }
+    crate::queue_fields::apply_field_edits(
+        &mut record.work.fields,
+        patch
+            .fields
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
     // Existing eligible age is preserved; moving eligibility into the future
     // cannot cause an old eligible item to appear younger once it is due again.
 }

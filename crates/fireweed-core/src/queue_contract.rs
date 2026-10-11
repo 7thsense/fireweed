@@ -539,7 +539,7 @@ impl CollectionDefinition {
                 .iter()
                 .any(|prefix| key.starts_with(prefix))
     }
-    fn validate_value(&self, key: &str, value: &FieldValue) -> QueueResult<()> {
+    pub fn validate_value(&self, key: &str, value: &FieldValue) -> QueueResult<()> {
         name(key)?;
         if let Some(expected) = self.fields.get(key) {
             field(value, *expected)
