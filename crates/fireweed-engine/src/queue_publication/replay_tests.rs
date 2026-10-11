@@ -87,6 +87,9 @@ fn apply_reference(
     schema: &QueueSchema,
 ) -> PublicationResult<()> {
     let view = view_publication(raw)?;
+    if view.format() != PublicationFormat::V1 {
+        return invalid("FWQP1 reference does not apply FWQP2");
+    }
     let summary = view.summary();
     if summary.queue != (q.tenant.as_str(), q.queue.as_str())
         || summary.definition_pin != DefinitionPin::from_persisted_bytes(definition).as_bytes()

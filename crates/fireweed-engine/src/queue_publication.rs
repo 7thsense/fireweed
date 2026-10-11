@@ -10,8 +10,11 @@ use crate::{
     queue_schema_codec::DefinitionPin,
 };
 use fireweed_core::queue_contract::*;
+use sha2::{Digest, Sha256};
 
+mod administrative_frame;
 mod administrative_receipt;
+pub use administrative_frame::*;
 mod administrative_result;
 pub use administrative_receipt::*;
 mod measurement;
@@ -25,6 +28,12 @@ pub use measurement::*;
 pub use view::*;
 
 const MAGIC: &[u8; 5] = b"FWQP1";
+const MAGIC_V2: &[u8; 5] = b"FWQP2";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationFormat {
+    V1,
+    V2,
+}
 #[derive(Debug, PartialEq, Eq)]
 pub enum PublicationError {
     Invalid(&'static str),
@@ -66,32 +75,7 @@ impl<'a> PublicationReceipt<'a> {
             return invalid("not a fresh commit receipt");
         }
         if let GroupOutcome::Committed { versions } = &receipt.outcome {
-            let expected = group
-                .claimed_updates
-                .iter()
-                .map(|u| (None, u.key.as_str()))
-                .chain(
-                    group
-                        .state_updates
-                        .iter()
-                        .map(|u| (Some(u.collection.as_str()), u.key.as_str())),
-                )
-                .chain(group.work_updates.iter().map(|u| (None, u.key.as_str())))
-                .chain(group.work_inserts.iter().map(|u| (None, u.key.as_str())));
-            let count = group
-                .claimed_updates
-                .len()
-                .checked_add(group.state_updates.len())
-                .and_then(|n| n.checked_add(group.work_updates.len()))
-                .and_then(|n| n.checked_add(group.work_inserts.len()))
-                .ok_or(PublicationError::Overflow)?;
-            if count != versions.len()
-                || expected.zip(versions).any(|(id, v)| {
-                    id != (v.collection.as_deref(), v.key.as_str()) || v.version == 0
-                })
-            {
-                return invalid("commit result identity/order");
-            }
+            validate_commit_result_versions(group, versions)?;
         }
         Ok(Self {
             queue,
@@ -145,6 +129,39 @@ impl<'a> PublicationReceipt<'a> {
             self.id,
         )
     }
+}
+
+fn validate_commit_result_versions(
+    group: &CommitGroup,
+    versions: &[RecordVersion],
+) -> PublicationResult<()> {
+    let expected = group
+        .claimed_updates
+        .iter()
+        .map(|u| (None, u.key.as_str()))
+        .chain(
+            group
+                .state_updates
+                .iter()
+                .map(|u| (Some(u.collection.as_str()), u.key.as_str())),
+        )
+        .chain(group.work_updates.iter().map(|u| (None, u.key.as_str())))
+        .chain(group.work_inserts.iter().map(|u| (None, u.key.as_str())));
+    let count = group
+        .claimed_updates
+        .len()
+        .checked_add(group.state_updates.len())
+        .and_then(|n| n.checked_add(group.work_updates.len()))
+        .and_then(|n| n.checked_add(group.work_inserts.len()))
+        .ok_or(PublicationError::Overflow)?;
+    if count != versions.len()
+        || expected
+            .zip(versions)
+            .any(|(id, v)| id != (v.collection.as_deref(), v.key.as_str()) || v.version == 0)
+    {
+        return invalid("commit result identity/order");
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -516,6 +533,7 @@ fn validate_lease(life: Lifecycle, expiry: bool, hash: bool) -> PublicationResul
 enum Sink<'a> {
     Count(u64),
     Buffer(&'a mut Vec<u8>),
+    Digest(Sha256),
 }
 impl Sink<'_> {
     fn raw(&mut self, bytes: &[u8]) -> PublicationResult<()> {
@@ -526,6 +544,7 @@ impl Sink<'_> {
                     .ok_or(PublicationError::Overflow)?
             }
             Self::Buffer(v) => v.extend_from_slice(bytes),
+            Self::Digest(hash) => hash.update(bytes),
         };
         Ok(())
     }
@@ -750,7 +769,18 @@ fn write_frame_header(
     final_sequence: u64,
     commands: u64,
 ) -> PublicationResult<()> {
-    s.raw(MAGIC)?;
+    write_frame_header_as(s, queue, pin, initial, final_sequence, commands, MAGIC)
+}
+fn write_frame_header_as(
+    s: &mut Sink<'_>,
+    queue: &QueueAddress,
+    pin: DefinitionPin,
+    initial: u64,
+    final_sequence: u64,
+    commands: u64,
+    magic: &[u8; 5],
+) -> PublicationResult<()> {
+    s.raw(magic)?;
     s.text(&queue.tenant)?;
     s.text(&queue.queue)?;
     s.raw(pin.as_bytes())?;
@@ -786,22 +816,7 @@ fn write_frame(
         if v.version == prior.highwater {
             continue;
         }
-        write_mutation_header(s, v, prior.version(), prior.highwater)?;
-        if let Some(c) = &v.collection {
-            let row = d
-                .state
-                .binary_search_by(|r| {
-                    (r.collection.as_str(), r.key.as_str()).cmp(&(c.as_str(), v.key.as_str()))
-                })
-                .ok()
-                .map(|index| &d.state[index]);
-            write_state_value(s, row)?;
-        } else if let Ok(i) = d.work.binary_search_by(|r| r.record.work.key.cmp(&v.key)) {
-            let row = &d.work[i];
-            write_work_value(s, row, &d.work_fields[&v.key], &d.work_bodies[&v.key])?;
-        } else {
-            s.tag(0)?;
-        }
+        write_delta_mutation(s, v, &prior, d)?;
     }
     s.n(receipts.len() as u64)?;
     for r in receipts {
@@ -810,6 +825,37 @@ fn write_frame(
     Ok(())
 }
 
+fn write_delta_mutation(
+    s: &mut Sink<'_>,
+    version: &RecordVersion,
+    prior: &Prior<'_>,
+    delta: &CommitDelta,
+) -> PublicationResult<()> {
+    write_mutation_header(s, version, prior.version(), prior.highwater)?;
+    if let Some(collection) = &version.collection {
+        let row = delta
+            .state
+            .binary_search_by(|row| {
+                (row.collection.as_str(), row.key.as_str())
+                    .cmp(&(collection.as_str(), version.key.as_str()))
+            })
+            .ok()
+            .map(|i| &delta.state[i]);
+        write_state_value(s, row)
+    } else if let Ok(index) = delta
+        .work
+        .binary_search_by(|row| row.record.work.key.cmp(&version.key))
+    {
+        write_work_value(
+            s,
+            &delta.work[index],
+            &delta.work_fields[&version.key],
+            &delta.work_bodies[&version.key],
+        )
+    } else {
+        s.tag(0)
+    }
+}
 /// Full zero-allocation scan. Length bounds come from the supplied frame slice;
 /// no decoded payload, list or seen-set is retained. Receipt outcomes preserve
 /// request order; only outer receipt identities are canonical sorted identities.

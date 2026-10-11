@@ -158,7 +158,10 @@ fn write_outcome(s: &mut Sink<'_>, outcome: &AdministrativeOutcome) -> Publicati
         _ => Ok(()),
     }
 }
-fn write_result(s: &mut Sink<'_>, result: &AdministrativeResult) -> PublicationResult<()> {
+pub(super) fn write_result(
+    s: &mut Sink<'_>,
+    result: &AdministrativeResult,
+) -> PublicationResult<()> {
     validate_result(result)?;
     s.raw(RESULT_MAGIC)?;
     write_histogram(s, &result.histogram)?;

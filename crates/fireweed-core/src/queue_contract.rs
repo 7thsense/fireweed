@@ -488,8 +488,15 @@ impl std::io::Write for CanonicalWriter {
 /// Domain-separated versioned canonical encoding: sorted map keys, preserved
 /// vector order and exact byte values. Streaming avoids a second full body copy.
 pub fn fingerprint<T: Serialize>(domain: &str, value: &T) -> QueueResult<[u8; 32]> {
+    fingerprint_format(b"fireweed-api007-v3\0", domain, value)
+}
+fn fingerprint_format<T: Serialize>(
+    format: &[u8],
+    domain: &str,
+    value: &T,
+) -> QueueResult<[u8; 32]> {
     let mut hash = Sha256::new();
-    hash.update(b"fireweed-api007-v3\0");
+    hash.update(format);
     hash.update((domain.len() as u64).to_le_bytes());
     hash.update(domain.as_bytes());
     let writer = CanonicalWriter {
@@ -1040,6 +1047,22 @@ impl<'a> From<&'a CommitGroup> for CommitFingerprintV3<'a> {
         }
     }
 }
+/// Explicit six-field projection. The sixth field is the administration VALUE,
+/// with no Option::Some marker. Future DTO additions cannot alter this layout.
+#[derive(Serialize)]
+struct CommitFingerprintV4<'a> {
+    request_id: &'a str,
+    claimed_updates: &'a [ClaimedUpdate],
+    state_updates: &'a [StateUpdate],
+    work_inserts: &'a [NewWork],
+    work_updates: &'a [UnclaimedUpdate],
+    administration: AdministrativeFingerprintValue<'a>,
+}
+#[derive(Serialize)]
+struct AdministrativeFingerprintValue<'a> {
+    intent: &'a crate::queue_administration::AdministrativeIntent,
+    max_result_bytes: u64,
+}
 /// Borrowed legacy envelope accounting. Serialize each frozen group directly;
 /// neither an added DTO field nor a temporary vector can alter ordinary limits.
 struct OrdinaryCommitEnvelope<'a>(&'a CommitBatch);
@@ -1066,6 +1089,33 @@ impl Serialize for OrdinaryCommitEnvelope<'_> {
 impl CommitGroup {
     pub fn fingerprint(&self, queue: &QueueAddress) -> QueueResult<[u8; 32]> {
         fingerprint("commit", &(queue, CommitFingerprintV3::from(self)))
+    }
+    /// Administrative binding alone uses format 4; ordinary groups, claims and
+    /// inserts retain format 3. Storage receipt domain remains commit/domain 2.
+    pub fn administrative_fingerprint(
+        &self,
+        queue: &QueueAddress,
+        intent: &crate::queue_administration::AdministrativeIntent,
+        max_result_bytes: u64,
+    ) -> QueueResult<[u8; 32]> {
+        fingerprint_format(
+            b"fireweed-api007-v4\0",
+            "commit",
+            &(
+                queue,
+                CommitFingerprintV4 {
+                    request_id: &self.request_id,
+                    claimed_updates: &self.claimed_updates,
+                    state_updates: &self.state_updates,
+                    work_inserts: &self.work_inserts,
+                    work_updates: &self.work_updates,
+                    administration: AdministrativeFingerprintValue {
+                        intent,
+                        max_result_bytes,
+                    },
+                },
+            ),
+        )
     }
 }
 
@@ -2063,5 +2113,79 @@ mod tests {
         request.max_bytes = 512;
         request.filter.keys = Some(BTreeSet::from(["k".repeat(1025)]));
         assert_eq!(request.preflight(&limits), Err(QueueError::TooLarge));
+    }
+}
+
+#[cfg(test)]
+mod administrative_fingerprint_tests {
+    use super::*;
+    use crate::queue_administration::{AdministrativeIntent, AdministrativeOperation};
+    #[test]
+    fn administrative_v4_sixth_value_is_direct_and_ordinary_v3_remains_distinct() {
+        let queue = QueueAddress {
+            tenant: "t".into(),
+            queue: "q".into(),
+        };
+        let group = CommitGroup {
+            request_id: "g".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+        };
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            operation: AdministrativeOperation::SelectFirst(vec![]),
+            before_fields: None,
+        };
+        let projection = CommitFingerprintV4 {
+            request_id: &group.request_id,
+            claimed_updates: &group.claimed_updates,
+            state_updates: &group.state_updates,
+            work_inserts: &group.work_inserts,
+            work_updates: &group.work_updates,
+            administration: AdministrativeFingerprintValue {
+                intent: &intent,
+                max_result_bytes: 300,
+            },
+        };
+        assert_eq!(
+            postcard::to_allocvec(&(&queue, projection)).unwrap(),
+            b"\x01t\x01q\x01g\0\0\0\0\0\x01\0\0\xac\x02"
+        );
+        let fingerprint = group
+            .administrative_fingerprint(&queue, &intent, 300)
+            .unwrap();
+        assert_eq!(
+            fingerprint
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "737cd7ad8cc1315aab34c1132738be2081bf8c1b1048d6626f82e3de4de89bcc"
+        );
+        assert_ne!(fingerprint, group.fingerprint(&queue).unwrap());
+        assert_ne!(
+            fingerprint,
+            group
+                .administrative_fingerprint(&queue, &intent, 301)
+                .unwrap()
+        );
+        let mut changed = intent.clone();
+        changed.evaluated_at = 1;
+        assert_ne!(
+            fingerprint,
+            group
+                .administrative_fingerprint(&queue, &changed, 300)
+                .unwrap()
+        );
+        assert_eq!(
+            group.fingerprint(&queue).unwrap(),
+            fingerprint_format(
+                b"fireweed-api007-v3\0",
+                "commit",
+                &(&queue, CommitFingerprintV3::from(&group))
+            )
+            .unwrap()
+        );
     }
 }

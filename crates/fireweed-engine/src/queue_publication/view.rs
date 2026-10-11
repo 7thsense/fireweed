@@ -1,6 +1,9 @@
 //! Borrowed FWQP1 consumption. This is also the sole structural parser used by
 //! scan_publication; only a fully validated immutable frame exposes iterators.
-use super::{MAGIC, PublicationResult, PublicationSummary, Scan, invalid, validate_lease};
+use super::{
+    AdministrativeResultRef, MAGIC, MAGIC_V2, PublicationFormat, PublicationResult,
+    PublicationSummary, Scan, invalid, validate_lease, view_administrative_result,
+};
 use fireweed_core::queue_contract::{FieldType, Lifecycle};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ValueRef<'a> {
@@ -132,6 +135,7 @@ pub enum RejectionRef<'a> {
     Invalid(&'a str),
     UniqueConflict,
     Terminal,
+    TooLarge,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct VersionRef<'a> {
@@ -179,6 +183,10 @@ impl<'a> Iterator for VersionsIter<'a> {
 pub enum CommitOutcomeRef<'a> {
     Committed(VersionsRef<'a>),
     Rejected(RejectionRef<'a>),
+    AdministrativeCommitted {
+        versions: VersionsRef<'a>,
+        administration: AdministrativeResultRef<'a>,
+    },
 }
 #[derive(Debug, Clone, Copy)]
 pub enum InsertOutcomeRef<'a> {
@@ -247,7 +255,8 @@ pub struct ReceiptRef<'a> {
     encoded_outcome: &'a [u8],
 }
 impl<'a> ReceiptRef<'a> {
-    /// Frozen FWQP1 result bytes, useful for immutable authority comparison.
+    /// Original fixed-format result bytes, useful for immutable authority comparison.
+    /// Binary outcome tags are distinct from Postcard receipt variant ordinals.
     pub fn encoded_outcome(self) -> &'a [u8] {
         self.encoded_outcome
     }
@@ -261,8 +270,17 @@ pub struct PublicationView<'a> {
     summary: PublicationSummary<'a>,
     commands: &'a [u8],
     receipts: &'a [u8],
+    format: PublicationFormat,
 }
 impl<'a> PublicationView<'a> {
+    pub fn format(&self) -> PublicationFormat {
+        self.format
+    }
+    pub fn command_fragments(&self) -> CommandFragmentsIter<'a> {
+        CommandFragmentsIter {
+            commands: self.commands(),
+        }
+    }
     pub fn summary(&self) -> &PublicationSummary<'a> {
         &self.summary
     }
@@ -282,6 +300,7 @@ impl<'a> PublicationView<'a> {
                 rest: self.receipts,
             },
             left: self.summary.receipts,
+            format: self.format,
         }
     }
 }
@@ -308,6 +327,7 @@ impl<'a> Iterator for CommandsIter<'a> {
 pub struct ReceiptsIter<'a> {
     scan: Scan<'a>,
     left: u64,
+    format: PublicationFormat,
 }
 impl<'a> Iterator for ReceiptsIter<'a> {
     type Item = PublicationResult<ReceiptRef<'a>>;
@@ -316,7 +336,7 @@ impl<'a> Iterator for ReceiptsIter<'a> {
             return None;
         }
         self.left -= 1;
-        let result = parse_receipt(&mut self.scan);
+        let result = parse_receipt(&mut self.scan, self.format);
         if result.is_err() {
             self.left = 0;
         }
@@ -408,7 +428,7 @@ fn parse_insert<'a>(s: &mut Scan<'a>) -> PublicationResult<InsertOutcomeRef<'a>>
         _ => return invalid("unknown insert result"),
     })
 }
-fn parse_command<'a>(
+pub(super) fn parse_command<'a>(
     s: &mut Scan<'a>,
     initial: u64,
     final_sequence: u64,
@@ -501,33 +521,62 @@ fn parse_command<'a>(
         effect,
     })
 }
-fn parse_receipt<'a>(s: &mut Scan<'a>) -> PublicationResult<ReceiptRef<'a>> {
+fn parse_versions<'a>(s: &mut Scan<'a>) -> PublicationResult<VersionsRef<'a>> {
+    let count = s.count()?;
+    let entries = s.rest;
+    for _ in 0..count {
+        parse_version(s)?;
+    }
+    Ok(VersionsRef {
+        entries: &entries[..entries.len() - s.rest.len()],
+        count,
+    })
+}
+fn parse_administrative_rejection<'a>(s: &mut Scan<'a>) -> PublicationResult<RejectionRef<'a>> {
+    if s.rest.first() == Some(&8) {
+        s.tag()?;
+        return Ok(RejectionRef::TooLarge);
+    }
+    let reason = parse_rejection(s)?;
+    if let RejectionRef::Invalid(message) = reason
+        && message.len() > 256
+    {
+        return invalid("administrative diagnostic exceeds 256 UTF-8 bytes");
+    }
+    Ok(reason)
+}
+fn parse_receipt<'a>(
+    s: &mut Scan<'a>,
+    format: PublicationFormat,
+) -> PublicationResult<ReceiptRef<'a>> {
     let domain = s.tag()?;
     if !matches!(domain, 0 | 2) {
         return invalid("unknown receipt domain");
     }
     let request_id = s.text()?;
     let fingerprint_format = s.tag()?;
-    if fingerprint_format != 3 {
-        return invalid("unsupported fingerprint format");
+    if fingerprint_format != 3
+        && !(fingerprint_format == 4 && format == PublicationFormat::V2 && domain == 2)
+    {
+        return invalid("unsupported fingerprint format/domain");
     }
     let fingerprint = s.raw(32)?.try_into().unwrap();
     let start = s.rest;
     let outcome = if domain == 2 {
         ReceiptOutcomeRef::Commit(match s.tag()? {
-            0 => {
-                let count = s.count()?;
-                let entries = s.rest;
-                for _ in 0..count {
-                    parse_version(s)?;
+            0 if fingerprint_format == 3 => CommitOutcomeRef::Committed(parse_versions(s)?),
+            1 => CommitOutcomeRef::Rejected(if fingerprint_format == 4 {
+                parse_administrative_rejection(s)?
+            } else {
+                parse_rejection(s)?
+            }),
+            4 if format == PublicationFormat::V2 && fingerprint_format == 4 => {
+                CommitOutcomeRef::AdministrativeCommitted {
+                    versions: parse_versions(s)?,
+                    administration: view_administrative_result(s.bytes()?)?,
                 }
-                CommitOutcomeRef::Committed(VersionsRef {
-                    entries: &entries[..entries.len() - s.rest.len()],
-                    count,
-                })
             }
-            1 => CommitOutcomeRef::Rejected(parse_rejection(s)?),
-            _ => return invalid("non-fresh commit outcome"),
+            _ => return invalid("non-fresh or incompatible commit outcome"),
         })
     } else {
         let count = s.count()?;
@@ -549,12 +598,25 @@ fn parse_receipt<'a>(s: &mut Scan<'a>) -> PublicationResult<ReceiptRef<'a>> {
         encoded_outcome: &start[..start.len() - s.rest.len()],
     })
 }
+
 /// Validate the entire frozen frame before exposing any replay commands.
 pub fn view_publication(raw: &[u8]) -> PublicationResult<PublicationView<'_>> {
-    let mut s = Scan { rest: raw };
-    if s.raw(MAGIC.len())? != MAGIC {
+    let mut scan = Scan { rest: raw };
+    if scan.raw(MAGIC.len())? != MAGIC {
         return invalid("unsupported publication version");
     }
+    view_resolved_publication(raw)
+}
+
+/// Shared version-dispatch reader. The legacy FWQP1 entry point stays strict;
+/// qualified new storage replay uses this reader for both frozen formats.
+pub fn view_resolved_publication(raw: &[u8]) -> PublicationResult<PublicationView<'_>> {
+    let mut s = Scan { rest: raw };
+    let format = match s.raw(MAGIC.len())? {
+        bytes if bytes == MAGIC => PublicationFormat::V1,
+        bytes if bytes == MAGIC_V2 => PublicationFormat::V2,
+        _ => return invalid("unsupported publication version"),
+    };
     let queue = (s.text()?, s.text()?);
     let definition_pin = s.raw(32)?;
     let initial_sequence = s.n()?;
@@ -577,7 +639,35 @@ pub fn view_publication(raw: &[u8]) -> PublicationResult<PublicationView<'_>> {
     let receipt_start = s.rest;
     let mut last = None;
     for _ in 0..receipts {
-        let receipt = parse_receipt(&mut s)?;
+        let receipt = parse_receipt(&mut s, format)?;
+        if receipts == 1 && receipt.fingerprint_format == 4 {
+            match receipt.outcome {
+                ReceiptOutcomeRef::Commit(CommitOutcomeRef::Rejected(_))
+                    if commands != 0 || final_sequence != initial_sequence =>
+                {
+                    return invalid("rejected logical administrative frame has effects");
+                }
+                ReceiptOutcomeRef::Commit(CommitOutcomeRef::AdministrativeCommitted {
+                    versions,
+                    administration,
+                }) => {
+                    let mut changed = 0u64;
+                    for count in administration.histogram.iter() {
+                        let (kind, n) = count?;
+                        if matches!(kind,fireweed_core::queue_administration::AdministrativeOutcomeKind::Changed|fireweed_core::queue_administration::AdministrativeOutcomeKind::Deleted) {
+                            changed=changed.checked_add(n).ok_or(super::PublicationError::Overflow)?;
+                        }
+                    }
+                    let maximum = changed
+                        .checked_add(versions.len())
+                        .ok_or(super::PublicationError::Overflow)?;
+                    if commands < changed || commands > maximum {
+                        return invalid("logical administrative mutation/result counts differ");
+                    }
+                }
+                _ => {}
+            }
+        }
         if last.is_some_and(|last| last >= (receipt.domain, receipt.request_id)) {
             return invalid("receipt identity order");
         }
@@ -598,6 +688,7 @@ pub fn view_publication(raw: &[u8]) -> PublicationResult<PublicationView<'_>> {
         },
         commands: command_bytes,
         receipts: receipt_bytes,
+        format,
     })
 }
 pub(super) fn summary(raw: &[u8]) -> PublicationResult<PublicationSummary<'_>> {
@@ -617,6 +708,48 @@ pub fn parse_administrative_work_fragment(
         || command.expected_version.is_none()
     {
         return invalid("not one initial administrative work fragment");
+    }
+    Ok(command)
+}
+
+/// Exact original validated bytes alongside a borrowed command; no reencoding.
+pub struct CommandFragmentRef<'a> {
+    pub command: CommandRef<'a>,
+    bytes: &'a [u8],
+}
+impl<'a> CommandFragmentRef<'a> {
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+}
+pub struct CommandFragmentsIter<'a> {
+    commands: CommandsIter<'a>,
+}
+impl<'a> Iterator for CommandFragmentsIter<'a> {
+    type Item = PublicationResult<CommandFragmentRef<'a>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.commands.scan.rest;
+        self.commands.next().map(|result| {
+            result.map(|command| CommandFragmentRef {
+                command,
+                bytes: &start[..start.len() - self.commands.scan.rest.len()],
+            })
+        })
+    }
+}
+/// Parse exactly one resolved work or state mutation with its insertion bounds.
+pub fn parse_resolved_command_fragment(
+    raw: &[u8],
+    initial: u64,
+    final_sequence: u64,
+) -> PublicationResult<CommandRef<'_>> {
+    if final_sequence < initial {
+        return invalid("regressing insertion sequence");
+    }
+    let mut s = Scan { rest: raw };
+    let command = parse_command(&mut s, initial, final_sequence)?;
+    if !s.rest.is_empty() {
+        return invalid("trailing resolved command bytes");
     }
     Ok(command)
 }
