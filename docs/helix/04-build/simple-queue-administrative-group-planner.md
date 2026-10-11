@@ -48,14 +48,35 @@ and delta coalescing are reused. No full source/unique-owner map is cloned; only
 ordinary addressed records, per-target proposals and accepted effects are copied.
 Histogram addition is checked and fail-closed on overflow.
 
-This helper currently accepts an in-memory RecordSnapshot and native target slice.
-It is an oracle for complete semantics, not a qualified streaming execution path.
-Before backend activation, split orchestration into a shared admitted accumulator
-and bounded native row/probe provider, so large no-op selections do not require a
-complete queue image. Stream/spool accepted effects within checked publication
-admission. Pure proposals, record images and results still require caller-owned
-buffer charges; this helper alone does not enforce serialized-result/publication
-bytes or produce a positional durable TooLarge receipt.
+The shipped planner now uses one admitted accumulator and finalizer for addressed
+and broad controls. A broad source supplies byte-ordered, first-clause-owned rows
+and must establish fenced completeness. The driver reaches the finalizer only
+after successful EOF. Owned one-row sources retain hydration admission throughout
+validation/planning; the complete-image reference adapter validates its caller-owned
+snapshot once and admits its sorting references. That adapter is an oracle route,
+not the native backend selection strategy.
+
+No-op/rejected broad rows retain no record/probe images. Accepted mutations retain
+only exact edited/composite dependencies and necessary initial ownership probes;
+selector-only values, coverage prefixes and preserved bodies are discarded. One
+aggregate delta carries the common receipt identity once. The output owns buffer
+guards until drop; explicit caller copies through borrowed accessors require their
+own admission. Source/ordering/capacity failures are unknown outcomes with no
+partial result. Late overlap dominates deferred sibling uniqueness conflict;
+the independent ordinary ownership clock is sampled only after selection EOF.
+
+Allocation bounds cover absent-name/prefix certificate containers, ordinary request
+field headers, administrative action containers, and long identities multiplied
+across configured indexes before tuple generation. Index identity accounting is
+conservative; it is not a qualified performance result. Differential tests apply
+both planners' exact commands to the same complete initial image and compare full
+records, lease metadata, state, versions, deletions and insertion sequence. The old
+whole-image group planner remains test-only as that differential oracle.
+
+Native indexed streaming and fenced EOF authority, canonical result/publication
+size admission, positional durable TooLarge receipts and preview remain required
+before backend activation. This internal planner does not acknowledge an
+administrative operation or implement the public control API.
 
 Pure regressions cover atomic administration/state/new work, CAS rollback,
 positional missing/duplicates/initial before metadata, missing/skipped overlap,

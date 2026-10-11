@@ -909,7 +909,7 @@ pub fn validate_work_write_view(
 
 /// Exact initial-to-final ownership effects from certified affected components.
 /// Version changes alone never release ownership; sparse tuples own nothing.
-fn unique_effects(
+pub(crate) fn unique_effects(
     delta: &CommitDelta,
     original: &RecordSnapshot,
     schema: &QueueSchema,

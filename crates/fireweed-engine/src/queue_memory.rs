@@ -338,12 +338,23 @@ impl IncomingHeaders for InsertRequest {
 }
 impl IncomingHeaders for CommitBatch {
     fn headers(&self) -> QueueResult<u64> {
+        self.groups.iter().try_fold(0u64, |bytes, group| {
+            bytes
+                .checked_add(group.headers()?)
+                .ok_or(QueueError::TooLarge)
+        })
+    }
+}
+
+impl IncomingHeaders for CommitGroup {
+    fn headers(&self) -> QueueResult<u64> {
         let mut bytes = 0u64;
         let mut add = |n: u64| -> QueueResult<()> {
             bytes = bytes.checked_add(n).ok_or(QueueError::TooLarge)?;
             Ok(())
         };
-        for group in &self.groups {
+        let group = self;
+        {
             for work in &group.work_inserts {
                 add(record_headers(1, work.fields.len())?)?;
             }

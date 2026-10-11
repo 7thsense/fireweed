@@ -289,6 +289,11 @@ fn propose_target_view(
     })
 }
 
+mod stream;
+pub use stream::{
+    AdmittedAdministrativeGroupProposal, SelectedAdministrativeInput, plan_broad_group,
+};
+
 /// Native selection ownership, resolved under the containing queue fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedAdministrativeTarget {
@@ -301,11 +306,37 @@ pub struct AdministrativeGroupProposal {
     /// None on outer rejection. Never acknowledge prior speculative successes.
     pub administration: Option<AdministrativeResult>,
 }
+/// Caller-admitted complete-image reference adapter. Broad native execution
+/// must stream directly through plan_broad_group, never construct this image.
+#[allow(clippy::too_many_arguments)]
+pub fn propose_group<'r>(
+    ordinary: &CommitGroup,
+    intent: &AdministrativeIntent,
+    selected: &[SelectedAdministrativeTarget],
+    snapshot: &crate::queue_planner::RecordSnapshot,
+    ownership_now: impl FnOnce() -> QueueResult<i64>,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+    reservation: &'r crate::queue_admission::QueueReservation,
+) -> QueueResult<AdmittedAdministrativeGroupProposal<'r>> {
+    stream::plan_complete_group(
+        ordinary,
+        intent,
+        selected,
+        snapshot,
+        ownership_now,
+        schema,
+        limits,
+        reservation,
+    )
+}
+
 /// Pure combined planning only. The caller validates the ordinary wire envelope,
 /// admits all planning/publication buffers, and supplies complete native selection
 /// plus initial owner/nonowner probes under one queue fence. Neither this proposal
 /// nor its legacy ordinary receipt is an administrative durable execution receipt.
-pub fn propose_group(
+#[cfg(test)]
+fn propose_group_legacy(
     ordinary: &CommitGroup,
     intent: &AdministrativeIntent,
     selected: &[SelectedAdministrativeTarget],
@@ -566,8 +597,117 @@ pub fn propose_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queue_planner::{CommitDelta, RecordIdentity, RecordSnapshot};
     use std::collections::BTreeMap;
-    fn schema() -> QueueSchema {
+    // Existing pure semantic tests deliberately detach a clone in test-only
+    // code. Bounded driver tests exercise the actual charged output lifetime.
+    fn propose_group(
+        ordinary: &CommitGroup,
+        intent: &AdministrativeIntent,
+        selected: &[SelectedAdministrativeTarget],
+        snapshot: &crate::queue_planner::RecordSnapshot,
+        now: i64,
+        schema: &QueueSchema,
+        limits: &QueueLimits,
+    ) -> QueueResult<AdministrativeGroupProposal> {
+        let admission = crate::queue_admission::QueueAdmission::new(1, 2 << 30)?;
+        let job = admission.reserve(0)?;
+        let plan = super::propose_group(
+            ordinary,
+            intent,
+            selected,
+            snapshot,
+            || Ok(now),
+            schema,
+            limits,
+            &job,
+        )?;
+        let original =
+            super::propose_group_legacy(ordinary, intent, selected, snapshot, now, schema, limits)
+                .expect("new planner accepted a legacy infrastructure failure");
+        assert_eq!(plan.proposal().administration, original.administration);
+        assert_eq!(plan.proposal().delta.receipt, original.delta.receipt);
+        assert_eq!(
+            plan.proposal().delta.work_fields,
+            original.delta.work_fields
+        );
+        assert_eq!(
+            plan.proposal().delta.work_bodies,
+            original.delta.work_bodies
+        );
+        fn materialize(before: &RecordSnapshot, delta: &CommitDelta) -> RecordSnapshot {
+            let mut result = before.clone();
+            for row in &delta.work {
+                let key = &row.record.work.key;
+                let mut full = row.clone();
+                full.record.work.fields = before
+                    .work
+                    .get(key)
+                    .map(|old| old.record.work.fields.clone())
+                    .unwrap_or_default();
+                delta.work_fields[key]
+                    .clone()
+                    .apply(&mut full.record.work.fields);
+                full.record.work.body = before
+                    .work
+                    .get(key)
+                    .map(|old| old.record.work.body.clone())
+                    .unwrap_or_default();
+                delta.work_bodies[key]
+                    .clone()
+                    .apply_to_view(&mut full.record.work.body, &mut full.body_loaded);
+                full.field_coverage = crate::queue_fields::FieldCoverage::Complete;
+                full.body_loaded = true;
+                result.work.insert(key.clone(), full);
+            }
+            for key in &delta.deleted_work {
+                result.work.remove(key);
+            }
+            for row in &delta.state {
+                result
+                    .state
+                    .insert((row.collection.clone(), row.key.clone()), row.clone());
+            }
+            for key in &delta.deleted_state {
+                result.state.remove(key);
+            }
+            for version in &delta.versions {
+                result.versions.insert(
+                    RecordIdentity {
+                        collection: version.collection.clone(),
+                        key: version.key.clone(),
+                    },
+                    version.version,
+                );
+            }
+            result.next_sequence = delta.next_sequence;
+            result
+        }
+        let actual = materialize(snapshot, &plan.proposal().delta);
+        let expected = materialize(snapshot, &original.delta);
+        assert_eq!(actual.work, expected.work);
+        assert_eq!(actual.state, expected.state);
+        assert_eq!(actual.versions, expected.versions);
+        assert_eq!(actual.next_sequence, expected.next_sequence);
+        assert_eq!(
+            plan.proposal()
+                .delta
+                .deleted_work
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            original.delta.deleted_work.iter().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            plan.proposal()
+                .delta
+                .deleted_state
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            original.delta.deleted_state.iter().collect::<BTreeSet<_>>()
+        );
+        Ok(plan.proposal().clone())
+    }
+    pub(super) fn schema() -> QueueSchema {
         QueueSchema {
             work: CollectionDefinition {
                 fields: BTreeMap::new(),
@@ -580,7 +720,7 @@ mod tests {
             max_attempts: 3,
         }
     }
-    fn row() -> StoredWork {
+    pub(super) fn row() -> StoredWork {
         StoredWork {
             record: WorkRecord {
                 work: NewWork {
@@ -606,7 +746,7 @@ mod tests {
             body_loaded: false,
         }
     }
-    fn update() -> AdministrativeAction {
+    pub(super) fn update() -> AdministrativeAction {
         AdministrativeAction::Update {
             patch: WorkPatch::default(),
             lifecycle: AdministrativeLifecycle::Keep,
@@ -614,7 +754,7 @@ mod tests {
             remove_field_prefixes: BTreeSet::new(),
         }
     }
-    fn entry(action: AdministrativeAction) -> AdministrativeEntry {
+    pub(super) fn entry(action: AdministrativeAction) -> AdministrativeEntry {
         AdministrativeEntry {
             key: "a".into(),
             expected_version: None,
@@ -1279,7 +1419,7 @@ mod tests {
             Err(QueueError::Invalid(_))
         ));
     }
-    fn ordinary() -> CommitGroup {
+    pub(super) fn ordinary() -> CommitGroup {
         CommitGroup {
             request_id: "atomic-admin".into(),
             claimed_updates: vec![],
@@ -1288,7 +1428,7 @@ mod tests {
             work_updates: vec![],
         }
     }
-    fn source() -> crate::queue_planner::RecordSnapshot {
+    pub(super) fn source() -> crate::queue_planner::RecordSnapshot {
         let mut source = crate::queue_planner::RecordSnapshot {
             next_sequence: 1,
             ..Default::default()
