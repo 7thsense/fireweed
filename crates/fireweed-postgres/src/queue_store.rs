@@ -901,6 +901,107 @@ async fn load_unique_authority<'a>(
     Ok(())
 }
 
+/// Resolve only accepted changed identities after planning, including deletes and
+/// retained tombstones. A selected row's transient hydration ID must not become
+/// an unbounded retained scan list. The caller keeps the same queue fence through
+/// this read and publication. This function never allocates database sequences.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "resolved administrative publication prerequisite")
+)]
+async fn load_delta_ids<'a>(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    delta: &CommitDelta,
+    before: &RecordSnapshot,
+    reservation: &'a QueueReservation,
+) -> QueueResult<Loaded<'a>> {
+    let bytes = delta.versions.iter().try_fold(4096u64, |bytes, version| {
+        let identity = (version.key.len() as u64)
+            .checked_add(
+                version
+                    .collection
+                    .as_ref()
+                    .map_or(0, |name| name.len() as u64),
+            )
+            .and_then(|bytes| bytes.checked_mul(16))
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(|| storage("changed identity allocation overflow"))?;
+        bytes
+            .checked_add(identity)
+            .ok_or_else(|| storage("changed identity allocation overflow"))
+    })?;
+    let charge = reservation.buffer(bytes)?;
+    let mut ids = BTreeMap::new();
+    let mut distinct = BTreeSet::new();
+    for chunk in delta.versions.chunks(512) {
+        let mut columns = Vec::with_capacity(chunk.len());
+        let mut hashes = Vec::with_capacity(chunk.len());
+        let mut keys = Vec::with_capacity(chunk.len());
+        for version in chunk {
+            let identity = RecordIdentity {
+                collection: version.collection.clone(),
+                key: version.key.clone(),
+            };
+            if !distinct.insert(identity) {
+                return Err(storage("duplicate changed identity"));
+            }
+            columns.push(collection(&queue.schema, version.collection.as_deref())?);
+            hashes.push(probe_hash(version.key.as_bytes()));
+            keys.push(version.key.as_bytes().to_vec());
+        }
+        let rows = tx.query(
+            "SELECT p.ordinal,r.id,r.version::text,r.active FROM UNNEST($2::int[],$3::bytea[],$4::bytea[]) WITH ORDINALITY AS p(col,hash,key,ordinal) LEFT JOIN fireweed_api007.records r ON r.queue_id=$1 AND r.collection=p.col AND r.key_hash=p.hash AND r.key=p.key ORDER BY p.ordinal",
+            &[&queue.id, &columns, &hashes, &keys],
+        ).await.map_err(storage)?;
+        if rows.len() != chunk.len() {
+            return Err(storage("changed identity authority cardinality mismatch"));
+        }
+        for (index, row) in rows.into_iter().enumerate() {
+            if row.get::<_, i64>(0) != index as i64 + 1 {
+                return Err(storage("changed identity authority ordinal mismatch"));
+            }
+            let version = &chunk[index];
+            let identity = RecordIdentity {
+                collection: version.collection.clone(),
+                key: version.key.clone(),
+            };
+            let expected = before.versions.get(&identity).copied().unwrap_or(0);
+            let present_version = match &identity.collection {
+                None => before.work.get(&identity.key).map(|row| row.record.version),
+                Some(collection) => before
+                    .state
+                    .get(&(collection.clone(), identity.key.clone()))
+                    .map(|row| row.version),
+            };
+            if present_version.is_some_and(|version| version == 0 || version != expected) {
+                return Err(storage("changed identity live authority mismatch"));
+            }
+            let id: Option<i64> = row.get(1);
+            let stored: Option<String> = row.get(2);
+            let active: Option<bool> = row.get(3);
+            match (id, stored, active) {
+                (Some(id), Some(stored), Some(active))
+                    if expected != 0
+                        && stored.parse::<u64>().map_err(storage)? == expected
+                        && active == present_version.is_some() =>
+                {
+                    ids.insert(identity, id);
+                }
+                (None, None, None) if expected == 0 && present_version.is_none() => {}
+                _ => return Err(storage("changed identity predecessor mismatch")),
+            }
+        }
+    }
+    Ok(Loaded {
+        snapshot: RecordSnapshot::default(),
+        ids,
+        _charge: charge,
+        _selection_charge: None,
+        _probe_charges: Vec::new(),
+    })
+}
+
 async fn persist_delta(
     tx: &Transaction<'_>,
     queue: &QueueRow<'_>,

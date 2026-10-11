@@ -888,6 +888,158 @@ mod tests {
                 .iter()
                 .any(|tuple| tuple.index == "unrelated_unique")
         );
+        // Planning retained no physical scan IDs. Resolve only accepted outputs,
+        // then exercise the actual writer without changing the surrounding fixture.
+        tx.batch_execute("SAVEPOINT accepted_identity_fixture")
+            .await
+            .unwrap();
+        let old_ids: Vec<i64> = tx.query("SELECT id FROM fireweed_api007.records WHERE queue_id=$1 AND collection=0 AND key=ANY($2) ORDER BY key", &[&fenced.id, &vec![b"a".to_vec(), b"c".to_vec()]]).await.unwrap().iter().map(|row| row.get(0)).collect();
+        let mut accepted = load_delta_ids(
+            &tx,
+            &fenced,
+            &plan.proposal().delta,
+            plan.initial_authority(),
+            &job,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.ids.len(), 2);
+        assert_eq!(
+            accepted.ids.values().copied().collect::<BTreeSet<_>>(),
+            old_ids.iter().copied().collect()
+        );
+        assert!(accepted.snapshot.work.is_empty());
+        persist_delta(
+            &tx,
+            &fenced,
+            &plan.proposal().delta,
+            plan.initial_authority(),
+            &mut accepted,
+        )
+        .await
+        .unwrap();
+        let persisted = tx.query("SELECT id,key,active,version::text FROM fireweed_api007.records WHERE queue_id=$1 AND collection=0 AND key=ANY($2) ORDER BY key", &[&fenced.id, &vec![b"a".to_vec(), b"c".to_vec()]]).await.unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(
+            persisted
+                .iter()
+                .map(|row| row.get::<_, i64>(0))
+                .collect::<Vec<_>>(),
+            old_ids
+        );
+        assert!(persisted[0].get::<_, bool>(2));
+        assert!(!persisted[1].get::<_, bool>(2));
+        for row in &persisted {
+            let key = String::from_utf8(row.get(1)).unwrap();
+            let version = plan
+                .proposal()
+                .delta
+                .versions
+                .iter()
+                .find(|version| version.key == key)
+                .unwrap();
+            assert_eq!(row.get::<_, String>(3), version.version.to_string());
+        }
+        // The inactive delete row remains the same durable identity. Reloading
+        // predecessor IDs must include tombstones and must allocate no sequence.
+        let current = RecordSnapshot {
+            work: plan
+                .proposal()
+                .delta
+                .work
+                .iter()
+                .map(|row| (row.record.work.key.clone(), row.clone()))
+                .collect(),
+            state: plan
+                .proposal()
+                .delta
+                .state
+                .iter()
+                .map(|row| ((row.collection.clone(), row.key.clone()), row.clone()))
+                .collect(),
+            versions: plan
+                .proposal()
+                .delta
+                .versions
+                .iter()
+                .map(|version| {
+                    (
+                        RecordIdentity {
+                            collection: version.collection.clone(),
+                            key: version.key.clone(),
+                        },
+                        version.version,
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let sequence_before: i64 = tx
+            .query_one("SELECT last_value FROM fireweed_api007.records_id_seq", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let tombstones = load_delta_ids(&tx, &fenced, &plan.proposal().delta, &current, &job)
+            .await
+            .unwrap();
+        assert_eq!(tombstones.ids, accepted.ids);
+        let wrong_absence = RecordSnapshot {
+            versions: current.versions.clone(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            load_delta_ids(&tx, &fenced, &plan.proposal().delta, &wrong_absence, &job).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let mut wrong_presence = current.clone();
+        let mut deleted = plan.initial_authority().work["c"].clone();
+        deleted.record.version = current.versions[&RecordIdentity {
+            collection: None,
+            key: "c".into(),
+        }];
+        wrong_presence.work.insert("c".into(), deleted);
+        assert!(matches!(
+            load_delta_ids(&tx, &fenced, &plan.proposal().delta, &wrong_presence, &job).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        // Chunk boundaries are transport batching, not a changed-identity cap.
+        // The same key in a declared state collection must remain distinct.
+        let mut chunked = plan.proposal().delta.clone();
+        chunked.versions.extend((0..513).map(|index| RecordVersion {
+            collection: None,
+            key: format!("absent-{index}"),
+            version: 1,
+        }));
+        chunked.versions.push(RecordVersion {
+            collection: Some("instances".into()),
+            key: "a".into(),
+            version: 1,
+        });
+        let chunked_ids = load_delta_ids(&tx, &fenced, &chunked, &current, &job)
+            .await
+            .unwrap();
+        assert_eq!(chunked_ids.ids, accepted.ids);
+        drop(chunked_ids);
+        let sequence_after: i64 = tx
+            .query_one("SELECT last_value FROM fireweed_api007.records_id_seq", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(sequence_before, sequence_after);
+        let mismatch = load_delta_ids(
+            &tx,
+            &fenced,
+            &plan.proposal().delta,
+            plan.initial_authority(),
+            &job,
+        )
+        .await;
+        assert!(matches!(mismatch, Err(QueueError::OutcomeUnknown(_))));
+        drop(tombstones);
+        drop(accepted);
+        tx.batch_execute("ROLLBACK TO SAVEPOINT accepted_identity_fixture")
+            .await
+            .unwrap();
         drop(plan);
         let mut failing = operation(vec![WorkSelector::all(vec![])], 0);
         let AdministrativeOperation::SelectFirst(clauses) = &mut failing.operation else {

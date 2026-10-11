@@ -235,3 +235,31 @@ No public administration input, receipt format or preview is activated. Bounded
 incremental canonical counting/spooling, complete-result budgets and rejection
 publication floors, ordinary exact-limit size compatibility, physical changed-ID
 resolution, FWQP2, durable replay and preview remain prerequisites for activation.
+
+## Accepted physical identities — iteration 42
+
+Private resolved publication can recover physical IDs from only the accepted
+changed identities after successful planning. The lookup includes inactive
+version tombstones and checks exact queue, collection, full key and discovery
+hash using paired query inputs. Predecessor high-water values must match the
+fenced planner authority; missing identities are allowed only for prior absence.
+Physical live/tombstone presence and present-record versions must also agree
+with the frozen predecessor. Cardinality, ordinals, duplicates and predecessor
+mismatches fail closed.
+
+Variable keys, collection names, retained maps and fixed query windows are
+charged before construction. Internal 512-identity query chunks do not impose a
+logical target cap. Lookup allocates no database sequence; publication retains
+responsibility for genuinely new identities. Payloads and selector fields are
+not loaded or retained by this identity lookup.
+
+The physical fixture resolves accepted metadata update and valid claimed delete,
+then runs the actual delta writer under a savepoint. Original IDs are preserved,
+versions advance, and deletion becomes an inactive tombstone. Reload includes
+the tombstone without allocating a sequence; high-water mismatch and same-version
+wrong live/tombstone presence in either direction fail closed.
+More than 512 identities and the same key in a different declared collection
+exercise transport boundaries and full collection identity. The fixture rolls
+back its speculative write. This is not public administrative activation or a
+solution to unbounded retained unique evidence; streaming/spooling is still
+required before the full control path can land.
