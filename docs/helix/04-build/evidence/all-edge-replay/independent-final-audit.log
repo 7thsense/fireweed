@@ -1,0 +1,96 @@
+{
+  "action_counts": {
+    "Claim:0": 12106,
+    "Claim:1": 12106,
+    "ConcurrentClaims": 3919,
+    "ConcurrentMixedFence": 26,
+    "DrainApply": 12281,
+    "Handoff": 15387,
+    "LoseResponse:0": 8545,
+    "LoseResponse:1": 8543,
+    "Reaffirm": 9792,
+    "Reopen": 15010,
+    "Replay:0": 6339,
+    "Replay:1": 6335,
+    "StaleClaim:0": 9561,
+    "StaleClaim:1": 7258
+  },
+  "artifacts": {
+    "corpus": {
+      "path": "/tmp/fireweed-all-edge-results/replay-scoped-corpus.json",
+      "sha256": "8607c14f44998fc96b6ded416ab6d03a1e26ba3d9c186d04ce9fb7a329825f30"
+    },
+    "log": {
+      "path": "/tmp/fireweed-all-edge-results/replay-scoped.log",
+      "sha256": "2c9b12a655837eaaa2478bce85983136c4cf2af343ee6906185974bb66ed85dc"
+    },
+    "native_cas": {
+      "path": "/tmp/fireweed-all-edge-results/replay-scoped-s3-cas.json",
+      "sha256": "a542ecbc89ae118bef89801323f6857ae57b10ded478a284bab703179faba847"
+    },
+    "observations": {
+      "path": "/tmp/fireweed-all-edge-results/replay-scoped-observations.json",
+      "sha256": "11c71ce1100d3bad7cf313221a15d6e60c2dc540cb8b28adab4c6bcfde0c6c90"
+    },
+    "progress": {
+      "path": "/tmp/fireweed-all-edge-results/replay-scoped-progress.jsonl",
+      "sha256": "162f93bfe0a3ac063b869a7b45fa5ef9e914046c9b5fece7cb9229bfe3d4e27d"
+    },
+    "report": {
+      "path": "/tmp/fireweed-all-edge-results/replay-scoped.json",
+      "sha256": "a83979c040ce45fceb591c5f818644d937b73e35c90032128b404d9e84fb798f"
+    }
+  },
+  "audit_script_sha256": "c2fb04cacf6aa9ceed3fbc3f843fa3f6e49e659f5920005231d015d704b56b85",
+  "canonical_graph": {
+    "complete": true,
+    "edges": 20913,
+    "states": 6386
+  },
+  "case_elapsed_ms": {
+    "max": 5012,
+    "median": 1333.0,
+    "min": 566
+  },
+  "concurrent_claim_item_orders": {
+    "[0, 1]": 3919
+  },
+  "coverage": {
+    "graph_edge_exhaustive": false,
+    "intended": 20913,
+    "intended_unwitnessed": 3918,
+    "matched": 16995
+  },
+  "current_source_files_verified": 399,
+  "disposition": "APPROVE within declared bounded backend replay scope",
+  "exact_rust_tests_verified": [
+    "generated_replay_claim_tail_guard_rejects_unproven_suffixes",
+    "generated_replay_decoder_rejects_malformed_empty_and_stale_corpora",
+    "generated_replay_oracle_rejects_corrupted_observations_and_branch_switching",
+    "generated_replay_storage_generation_scan_is_world_scoped",
+    "generated_s3_turso_model_traces_match_every_observation"
+  ],
+  "limits": [
+    "one-process ephemeral control plane",
+    "real local RustFS and Turso, not production-cloud S3",
+    "backend-level composition, not facade routing or API-007 queue pipeline",
+    "graceful reopen, not process-kill recovery",
+    "simulated client nonreceipt",
+    "matched edge coverage is not graph-exhaustive",
+    "no universal refinement or numeric production deadline claim"
+  ],
+  "progress_events_reconciled": 17002,
+  "reopen_counts": {
+    "retained_state": 6362,
+    "tail_repaired": 8648
+  },
+  "rust_test_elapsed_seconds": 2843.32,
+  "rustfs_binary_sha256": "a2dedb783bdf1ff6c97a25a0a07230e6488b3b63cef4eb80a2ab4c94006002bd",
+  "rustfs_binary_verified": true,
+  "schema": "fireweed-independent-all-edge-audit-v1",
+  "source_head": "7a6cb8606fb80b531b1d9245743ae880646b8a1b",
+  "status": "PASS",
+  "steps": 127208,
+  "traces": 17002,
+  "workers": 8
+}

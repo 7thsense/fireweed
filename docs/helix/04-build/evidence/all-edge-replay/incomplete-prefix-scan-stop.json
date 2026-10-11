@@ -1,0 +1,8 @@
+{
+  "status": "INCOMPLETE_CONTROLLED_RESTART",
+  "pre_signal_diagnostic_sha256": "b23f5d576bf1e99b4726f2f7d200c02cb53ae327a8cfaffc1bf5dae54a75df8d",
+  "final_progress_sha256": "fe23ad6df28ab2deb41b17c8c2c1c3039f79354793d5dff32ae3f7440075a593",
+  "final_completed": 1927,
+  "final_passed": 1927,
+  "note": "Progress may complete between pre-signal snapshot and controlled SIGINT; both are retained. No full qualification is claimed."
+}

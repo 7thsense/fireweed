@@ -57,9 +57,9 @@ python3 scripts/formal/generate_replay.py --validate target/replay-corpus.json
 CARGO_INCREMENTAL=0 python3 scripts/formal/with_rustfs.py \
   --binary /absolute/path/to/rustfs --replay-profile smoke \
   --output target/model-replay.json
-# Deeper, potentially lengthy: prefixes intended for every modeled edge.
+# Full corpus: 17,002 prefixes / 127,208 steps, intended for all 20,913 edges.
 CARGO_INCREMENTAL=0 python3 scripts/formal/with_rustfs.py \
-  --binary /absolute/path/to/rustfs --replay-profile edges \
+  --binary /absolute/path/to/rustfs --replay-profile edges --workers 8 \
   --output target/model-replay-edges.json
 ```
 
@@ -70,3 +70,13 @@ transitions and selection metadata. A search cap, changed source, stale corpus,
 zero/ignored cases or missing evidence fails closed. Execution covers one process
 with an ephemeral CP kernel, graceful reopen and simulated client nonreceipt;
 it does not qualify cloud S3 or process-kill recovery.
+
+`--workers` accepts 1–16 (default1); worlds have independent S3/Turso/CP state.
+The `*-progress.jsonl` file records each completed trace and elapsed milliseconds,
+with immediate flush; it is progress rather than final qualification. On failure
+no new traces start and already-running traces drain. The final report reconciles
+all corpus identities and action counts, and records intended/matched/unwitnessed
+edge coverage. Eight-world smoke is qualified before deeper execution. Compact
+reports retain all observations; evidence may be gzip-compressed with original
+and compressed SHA-256 hashes. Concurrent prefixes permit either order, so a full
+corpus pass alone cannot witness both mutually exclusive targeted edges.

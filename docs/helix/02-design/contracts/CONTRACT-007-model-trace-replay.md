@@ -100,3 +100,27 @@ or reacquisition from PendingFence is a new incarnation and must not reuse an ol
 storage fence. Receipt expiry observations are restricted to sources that actually
 store expiry: returned item, durable Claim and applied item row. Request receipt
 payloads contain no expiry field.
+
+## Complete all-edge corpus qualification
+
+The canonical `edges` profile contains 17,002 distinct prefixes with 127,208
+operation steps and intends all 20,913 edges of the 6,386-state graph. Completion
+requires every selected prefix and every step to execute successfully against
+real S3/Turso, with exact identity/count/action evidence and unchanged source
+hashes. One corpus pass can realize only one of two mutually exclusive concurrent
+claim orders per prefix. Full corpus completion therefore does not imply all
+model edges were actually witnessed; report intended, matched and unwitnessed
+edge counts separately. No expected outcome is changed to force a selected edge.
+
+Replay may run 1–16 independent worlds concurrently (default1). Each world retains
+its own CP kernel, S3 namespace and Turso file. Per-trace20s timeout and independent
+oracle remain unchanged. After a failure launch no further worlds, drain those
+already started, retain their failing/completed prefixes and return FAIL. Durable
+progress identifies each completed trace and is never sufficient for final PASS;
+final evidence reconciles it against the canonical corpus and full observations.
+
+Each world uses canonical `/fwlog/` and `/fwmeta/` data/metadata suffixes.
+Storage-generation detection must resolve their common namespace parent, never
+fall back to an empty whole-bucket prefix. A regression checks the production
+prefix resolver against the actual fixture factory. This prevents unrelated
+completed worlds from changing the cost/scope of initial open and reopen.

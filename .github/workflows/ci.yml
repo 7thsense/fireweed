@@ -77,6 +77,7 @@ jobs:
             target/replay-corpus.json
             target/model-replay*.json
             target/model-replay.log
+            target/model-replay-progress.jsonl
           if-no-files-found: error
 
       - name: Public release validation gate

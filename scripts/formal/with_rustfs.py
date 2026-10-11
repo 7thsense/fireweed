@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--workers', type=int, choices=range(1,17), default=1)
     parser.add_argument('--replay-profile', choices=('smoke', 'edges'))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
@@ -59,7 +60,7 @@ def main():
                 command = [sys.executable, str(root / 'scripts/formal' / runner),
                            '--output', str(args.output)]
                 if args.replay_profile:
-                    command += ['--profile', args.replay_profile]
+                    command += ['--profile', args.replay_profile, '--workers', str(args.workers)]
                 if args.offline:
                     command.append('--offline')
                 result = subprocess.run(command, cwd=root, env=env)
@@ -72,7 +73,9 @@ def main():
                                        'binary_sha256': digest.hexdigest(),
                                        'native_cas_evidence': str(preflight.resolve()),
                                        'lifetime': 'task-owned child terminated in finally'}
-                args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+                with args.output.open('w') as output:
+                    json.dump(report, output, sort_keys=True, separators=(',', ':'))
+                    output.write('\n')
                 return result.returncode
             finally:
                 server.terminate()

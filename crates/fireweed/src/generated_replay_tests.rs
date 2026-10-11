@@ -5,10 +5,11 @@ use fireweed_engine::{
     ControlPlaneConfig, InMemoryControlPlane, OwnedSession, OwnershipOutcome, QueueControlPlane,
     acquire_and_fence,
 };
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
+use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -177,20 +178,45 @@ impl Drop for World {
     }
 }
 
+fn fixture_storage_prefixes(namespace: &str) -> (String, String) {
+    // Canonical suffixes keep storage-generation scans inside this world.
+    (
+        format!("{namespace}/fwlog/"),
+        format!("{namespace}/fwmeta/"),
+    )
+}
+
+#[test]
+fn generated_replay_storage_generation_scan_is_world_scoped() {
+    let (data, meta) = fixture_storage_prefixes("owned-world");
+    assert_eq!(
+        fireweed_objectlog::storage_generation::generation_scan_prefix(&data, &meta),
+        "owned-world/"
+    );
+    assert_eq!(
+        fireweed_objectlog::storage_generation::generation_scan_prefix(
+            "owned-world/log/",
+            "owned-world/meta/"
+        ),
+        ""
+    );
+}
+
 impl World {
     async fn open(
         root: &std::path::Path,
         namespace: &str,
     ) -> Result<DerivedObjectLogTursoBackend, String> {
         let s3 = fireweed_objectlog::shared_s3_test_env();
+        let (data_prefix, meta_prefix) = fixture_storage_prefixes(namespace);
         let log = ObjectLogEngineStore::open_s3_with_prefixes(
             &s3.endpoint,
             &s3.region,
             &s3.bucket,
             &s3.access_key,
             &s3.secret_key,
-            format!("{namespace}/log/"),
-            format!("{namespace}/meta/"),
+            data_prefix,
+            meta_prefix,
             flush_config_from_segment(256 * 1024, 5),
         )
         .await
@@ -788,25 +814,51 @@ async fn generated_s3_turso_model_traces_match_every_observation() {
         "corpus_sha256":digest_hex(input.as_bytes()),"model_sha256":corpus["model_sha256"],
         "model_graph":corpus["graph"],"selection":corpus["selection"],"attempted":0,"passed":0,"cases":[],
         "attribution":"real local-S3/Turso; one-process ephemeral CP; graceful reopen; simulated client nonreceipt"});
+    let workers = std::env::var("FIREWEED_REPLAY_WORKERS")
+        .map_or(Ok(1usize), |value| value.parse())
+        .expect("workers must be an integer");
+    assert!((1..=16).contains(&workers), "workers must be in 1..=16");
+    report["workers"] = json!(workers);
+    let progress_path = std::env::var("FIREWEED_REPLAY_PROGRESS").ok();
+    let mut progress =
+        progress_path.map(|path| std::fs::File::create(path).expect("create fresh progress"));
+    let traces = array(&corpus["traces"]).unwrap();
+    let execute = |index: usize| {
+        let corpus = &corpus;
+        let trace = &traces[index];
+        async move {
+            let started = std::time::Instant::now();
+            let mut observations = Vec::new();
+            let result = AssertUnwindSafe(tokio::time::timeout(
+                Duration::from_secs(20),
+                run_trace(corpus, trace, &mut observations),
+            ))
+            .catch_unwind()
+            .await;
+            let result = match result {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("trace execution timed out".into()),
+                Err(panic) => Err(panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or("trace panicked".into())),
+            };
+            (index, observations, result, started.elapsed().as_millis())
+        }
+    };
+    let mut pending = futures::stream::FuturesUnordered::new();
+    let mut next = 0;
+    for _ in 0..workers.min(traces.len()) {
+        pending.push(execute(next));
+        next += 1;
+    }
     let mut matched = BTreeSet::new();
-    for trace in array(&corpus["traces"]).unwrap() {
-        let mut observations = Vec::new();
-        let result = AssertUnwindSafe(tokio::time::timeout(
-            Duration::from_secs(20),
-            run_trace(&corpus, trace, &mut observations),
-        ))
-        .catch_unwind()
-        .await;
+    let mut cases = std::collections::BTreeMap::new();
+    let mut failed = false;
+    while let Some((index, observations, result, elapsed_ms)) = pending.next().await {
+        let trace = &traces[index];
         report["attempted"] = json!(number(&report["attempted"]).unwrap() + 1);
-        let result = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("trace execution timed out".into()),
-            Err(panic) => Err(panic
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                .unwrap_or("trace panicked".into())),
-        };
         let error = match result {
             Ok(edges) => {
                 matched.extend(edges);
@@ -814,24 +866,42 @@ async fn generated_s3_turso_model_traces_match_every_observation() {
             }
             Err(error) => Some(error),
         };
-        report["cases"].as_array_mut().unwrap().push(
-            json!({"trace":trace["id"],"status":if error.is_some(){"FAIL"}else{"PASS"},
-            "intended_edges":trace["intended_edges"],"steps":observations,"error":error}),
-        );
         if error.is_some() {
+            failed = true;
             report["status"] = json!("FAIL");
-            break;
+        } else {
+            report["passed"] = json!(number(&report["passed"]).unwrap() + 1);
         }
-        report["passed"] = json!(number(&report["passed"]).unwrap() + 1);
+        let status = if error.is_some() { "FAIL" } else { "PASS" };
+        let event = json!({"schema":"fireweed-replay-progress-v1","index":index,"trace":trace["id"],
+            "status":status,"completed":report["attempted"],"passed":report["passed"],
+            "total":traces.len(),"elapsed_ms":elapsed_ms,"matched_edges":matched.len()});
+        if let Some(progress) = &mut progress {
+            serde_json::to_writer(&mut *progress, &event).expect("write progress event");
+            writeln!(progress).expect("write progress newline");
+            progress.flush().expect("flush progress");
+        }
+        cases.insert(index,json!({"index":index,"trace":trace["id"],"status":status,
+            "intended_edges":trace["intended_edges"],"steps":observations,"error":error,"elapsed_ms":elapsed_ms}));
+        // After a failure launch nothing further, but drain already-owned traces.
+        if !failed && next < traces.len() {
+            pending.push(execute(next));
+            next += 1;
+        }
     }
+    report["cases"] = json!(cases.into_values().collect::<Vec<_>>());
+    report["started"] = json!(next);
     report["matched_edges"] = json!(matched);
     report["sut_graph_edge_exhaustive"] =
         json!(matched.len() == number(&corpus["graph"]["edges"]).unwrap() as usize);
     report["all_selected_traces_executed"] =
         json!(number(&report["passed"]).unwrap() == array(&corpus["traces"]).unwrap().len() as u64);
     if let Ok(path) = std::env::var("FIREWEED_REPLAY_EVIDENCE") {
-        std::fs::write(path, serde_json::to_string_pretty(&report).unwrap() + "\n")
-            .expect("write replay evidence");
+        let mut output =
+            std::io::BufWriter::new(std::fs::File::create(path).expect("create replay evidence"));
+        serde_json::to_writer(&mut output, &report).expect("write replay evidence");
+        writeln!(output).expect("write evidence newline");
+        output.flush().expect("flush replay evidence");
     }
     assert_eq!(
         report["status"],

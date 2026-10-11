@@ -72,3 +72,22 @@ artifacts even on failure. Deeper replay is an explicit command, not a claimed
 completed qualification. These witnesses do not discharge universal Rust
 refinement, multi-process control-plane safety, process kill, production cloud
 S3 or the numeric FR-12 deadline.
+
+### Full all-edge run
+
+Run `with_rustfs.py --replay-profile edges --workers 8`
+on an isolated committed-source checkout. Require 17,002/17,002 completed traces,
+127,208 successful action observations, all Rust controls passing, zero ignored,
+strict canonical/progress/case/action reconciliation and matching before/after
+source hashes. Progress is a flushed JSONL event stream; final compressed evidence
+retains exact byte hashes for corpus, observations, report, progress, Cargo log
+and CAS preflight. Intended coverage is20,913 edges; actual concurrent branches
+are independently observed and unwitnessed edges are reported explicitly.
+Eight-world execution must first pass the smoke corpus. A timeout under load is
+retained as a failed qualified run, never converted to a permitted model result.
+
+The fixture-prefix regression requires `generation_scan_prefix` of the actual
+`fwlog/fwmeta` pair to equal the single world's namespace parent. Retain the
+incomplete pre-fix progress and source-bound diagnostic as fixture-scaling
+evidence, not a passing qualification or product safety counterexample. After
+correction rerun smoke and the entire full corpus on the corrected source.
