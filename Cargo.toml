@@ -7,6 +7,7 @@
 members = [
     "crates/fireweed-core",
     "crates/fireweed-engine",
+    "crates/fireweed-queue-spool",
     "crates/fireweed-projection",
     "crates/fireweed-relational",
     "crates/fireweed-turso",

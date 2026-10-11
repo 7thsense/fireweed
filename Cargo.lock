@@ -1541,6 +1541,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fireweed-queue-spool"
+version = "0.31.32"
+dependencies = [
+ "fireweed-core",
+ "fireweed-engine",
+ "tempfile",
+]
+
+[[package]]
 name = "fireweed-relational"
 version = "0.31.32"
 dependencies = [

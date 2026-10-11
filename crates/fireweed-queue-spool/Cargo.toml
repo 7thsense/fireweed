@@ -1,0 +1,13 @@
+[package]
+name = "fireweed-queue-spool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Shared disposable physical scratch adapter. The domain remains I/O-free.
+[dependencies]
+fireweed-core = { path = "../fireweed-core" }
+fireweed-engine = { path = "../fireweed-engine" }
+tempfile = "3.27"
