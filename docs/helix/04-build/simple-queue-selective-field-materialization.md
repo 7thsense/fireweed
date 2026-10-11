@@ -67,3 +67,25 @@ accumulation and a versioned canonical durable envelope. This internal serde sha
 is not a published command version. All new/retained/scratch buffers still require
 admission before allocation; semantic publication TooLarge needs exact complete
 envelope/result measurement rather than these provisional field components.
+
+## Exact ownership integration before selective activation
+
+The complete-field production planner now derives exact initial-to-final unique
+releases and claims for work and state creates, changes and deletes. It probes
+both sets, validates releases against exact loaded owners, validates claims
+against initial ownership or an exact release, and merges only accepted effects.
+Metadata/version-only changes preserve existing ownership. Administrative per-row
+checks still use immutable initial owners; combined outer effects use the same
+validator. Rejected groups preserve speculative ownership and loaded probes.
+
+Insert vectors still load authority in one batch, now including old tuples of
+addressed existing records as well as all prospective new tuples. This covers
+shrinking upserts without per-item SQL probes. Ordered groups see ownership from
+prior accepted groups, including deletions that free a tuple.
+
+This removes a version-based ownership inference before selective activation;
+it does not establish a previously exploitable metadata-only uniqueness defect
+in the complete-field path. Complete field authority remains mandatory. Before
+partial reads activate, PostgreSQL physical-owner reconciliation must use checked
+tuple authority or an explicit release/claim overlay rather than treating an
+unloaded component as absent.

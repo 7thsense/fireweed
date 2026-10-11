@@ -1409,9 +1409,10 @@ impl QueueStore for PostgresQueueStore {
                             &loaded.snapshot,
                             &queue.schema,
                         )?)?);
-                    let probes = insert_unique_probes(&request.items, &queue.schema)?
-                        .into_iter()
-                        .collect();
+                    let probes =
+                        insert_unique_probes(&request.items, &loaded.snapshot, &queue.schema)?
+                            .into_iter()
+                            .collect();
                     load_unique_authority(&tx, &queue, &mut loaded, probes, &reservation).await?;
                     let (deltas, outcomes) =
                         plan_insert_vector(&request, &mut loaded.snapshot, &queue.schema, || {
