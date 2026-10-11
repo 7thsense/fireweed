@@ -20,7 +20,7 @@ clean-cutover architecture exposes exactly **two** interfaces over one CQRS engi
 wire front ([TD-006](../technical-designs/TD-006-resp-wire-adapter.md)) and a Rust library facade (the
 `fireweed` crate) — and Kafka compatibility is not among them (ADR-007 §"Interface sprawl"). This ADR is
 retained for historical context only; its decision is no longer in effect. See
-[`hexagonal-migration-plan.md`](../../04-build/hexagonal-migration-plan.md).
+[`hexagonal-migration-plan.md`](../../04-build/simple-queue-postgres-refactor-plan.md).
 
 **Scope note (2026-07-05)**: this ADR's "consumer-side Kafka APIs are permanently out of scope" verdict
 applies to the **queue data plane** (Kafka committed-offset semantics do not compose with mutable

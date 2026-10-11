@@ -1,2 +1,0 @@
-# Preserve exact Cargo output bytes (including final blank lines) for SHA-256 evidence.
-conformance-logs/*.log -whitespace

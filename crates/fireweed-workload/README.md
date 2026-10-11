@@ -50,7 +50,7 @@ scripts/perf/workflow-capacity.py --qualify --profile mutable --items 500000 --b
 The historical all-due original-row profile qualified at 11.8–12.1k workflows/sec
 with 32 physical shards and eight workers per shard. It does not include the new
 campaign reporting and future-backlog workload. See the
-[review and raw evidence](../../docs/helix/04-build/workflow-capacity-review.md).
+[settled benchmark requirements](../../docs/helix/03-test/test-plans/TP-005-fireweed-performance-matrix.md).
 Run the exact qualification pair twice with one command (the output directory
 must not exist):
 

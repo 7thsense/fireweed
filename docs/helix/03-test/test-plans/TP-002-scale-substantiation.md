@@ -1,12 +1,7 @@
 ---
 ddx:
   id: tp-scale-substantiation
-  depends_on:
-    - prd
-    - adr-cqrs-log-projection-storage-model
-    - adr-queue-as-shard-unit-and-projection-families
-    - td-storage-architecture-backend-contracts
-    - td-sharding-and-shard-ownership
+  depends_on: [prd, architecture, api-queue-claim-commit-contract, td-storage-architecture-backend-contracts]
   review:
     self_hash: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
     deps:
@@ -20,26 +15,11 @@ ddx:
 
 # Test Plan: TP-002 Scale Substantiation
 
-## Public cell (ADR-024)
+## Identical interface and scale applicability
 
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: S3 object-log × Turso projection
-(`s3 log × turso projection`). `ResponseBarrier` has only `AsyncProjection`.
-The other eleven axis pairs and `Strict` are not a roadmap. Class A durability
-is the object log. Turso is rebuildable through `projection_control` and is
-not the command log.
+API-007 and ADR-026 govern PostgreSQL and S3/object-log with stock Turso 0.8.2. Apply the same exact-outcome, numeric-progress, bounded-resource and density gates to both. TP-004 public-path qualification precedes measurement; TP-005 requires matched useful work and complete settlement/drain. Durable ACK latency cannot substitute for completed work or fresh successful reads/claims.
 
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference.
-
-`10000` and `12500` are non-portable capacity observations for a named cell and
-commit, not product pass bars. The campaign plan states the same rule: the
-12.5k result stays attributed to filesystem × Turso at `49f1b6b3` (2026-09-16)
-and is not a qualification pin; v0.31.30 s3 × Turso (~9507 on `bcef51f9`) is
-not a qualification pin. A miss of those script gates is not a product failure.
-
+Machine-specific historical rates are observations, not universal pass bars or new-contract qualification. Preserve their provenance in Git/run evidence rather than active specifications. PostgreSQL is the mandatory baseline; S3/Turso assembly, full manifest bounds and shared settled scale campaigns remain required before readiness claims.
 
 ## Scope
 

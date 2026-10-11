@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 mode="${1:---check}"
-baseline="${repo_root}/docs/helix/04-build/evidence-source-io-baseline.json"
+baseline="${repo_root}/scripts/ci/manifests/evidence-source-io-baseline.json"
 
 case "${mode}" in
     --check|--self-test|--write) ;;
@@ -50,7 +50,7 @@ def read_text(relative: str) -> str:
 tracked = set(git_files())
 identity_path = "scripts/public-identity-allowlist.json"
 generator_path = "scripts/ci/inventory-evidence-source-io.sh"
-baseline_path = "docs/helix/04-build/evidence-source-io-baseline.json"
+baseline_path = "scripts/ci/manifests/evidence-source-io-baseline.json"
 identity = json.loads(read_text(identity_path))
 historical = sorted((
     entry

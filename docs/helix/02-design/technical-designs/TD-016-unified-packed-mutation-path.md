@@ -18,7 +18,7 @@ ddx:
     - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: td-batch-shape-and-critical-section-audit}
-    - {kind: informed_by, to: ss-objectlog-turso-memory-goal}
+    - {kind: informed_by, to: architecture}
   status: accepted
 ---
 

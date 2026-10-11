@@ -27,11 +27,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FACADE = ROOT / "crates/fireweed/src/facade.rs"
-MANIFEST = ROOT / "docs/helix/04-build/storage-authority-manifest.json"
+MANIFEST = ROOT / "scripts/ci/manifests/storage-authority-manifest.json"
 SUITE_SUPPORT = ROOT / "crates/fireweed/tests/support/public_interface.rs"
 SUITE_LOCAL = ROOT / "crates/fireweed/tests/public_interface_conformance.rs"
 SUITE_EXTERNAL = ROOT / "crates/fireweed/tests/public_interface_external_conformance.rs"
-OWNERSHIP_MAP = ROOT / "docs/helix/04-build/api005-suite-ownership-map.json"
+OWNERSHIP_MAP = ROOT / "scripts/ci/manifests/api005-suite-ownership-map.json"
 
 # Family → semantic owner. Method membership is discovered; families are fixed
 # policy from the storage-closure plan, not a method count.

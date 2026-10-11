@@ -2,7 +2,7 @@
 ddx:
   id: adr-postgres-baseline-queue-contract
   depends_on:
-    - adr-s3-turso-public-cell
+    - prd
   status: accepted
 ---
 
@@ -34,17 +34,18 @@ API-007 specifies the target contract against current Snorri requirements.
   safety and formal reliability tests. Partitioning/snapshot/truncation proposals
   remain separately measurement-gated and are not authorized by this decision.
 
-## Delivery status
+## Module and configuration ownership
 
-This decision accepts a target, not completed implementation. Current public
-construction still rejects PostgreSQL; filtered-claim fallbacks and existing
-adapter APIs require implementation. API-001/API-005 remain descriptions of the
-current binding until the new binding and migration pass API-007 acceptance.
-Shared DTO/validation/receipt/conformance code must be reused; storage algorithms
-need not be identical. No Snorri state/output limit is silently reduced.
+Architecture owns the module map, integration translation and construction root.
+Core/planners retain shared semantic policy; adapters own native persistence.
+The construction Contract defines caller-owned typed configuration and operational
+clock with validation before I/O. The diagnostics Contract defines caller-owned
+instrumentation and separately bounded best-effort logging. Library code does
+not discover environment, exporters or service topology in its hot path.
 
-Next implementation work: finalize concrete DTO/limit bindings; restore baseline
-construction; implement mandatory filtered claims and atomic commit groups;
-migrate the single Snorri adapter; run both qualification lanes and comparative
-performance evidence. This documentation change files no execution beads and
-claims no performance or qualification result.
+HELIX v0.15.4 modularity and encapsulation applies to handwritten source.
+Enforce production dependency/visibility controls before dependent feature work;
+record exact legacy exceptions and remove them at cutover. Formal assurance is
+scoped to reviewed properties, assumptions, models and correspondence. Results
+that permit stale empty claims or reused expired request identities cannot
+qualify this contract. The build plan owns remaining execution and evidence.

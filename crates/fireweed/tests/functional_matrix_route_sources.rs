@@ -5,7 +5,7 @@
 //! them. Broad substring cargo filters are forbidden — each leaf uses a full
 //! exact test name under this target.
 //!
-//! Governing axes: `docs/helix/04-build/storage-authority-manifest.json`
+//! Governing axes: `scripts/ci/manifests/storage-authority-manifest.json`
 //! (`memory|postgres|filesystem|s3` × `memory|turso|postgres`).
 //!
 //! Leaf families:

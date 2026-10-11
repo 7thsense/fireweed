@@ -17,6 +17,9 @@ ddx:
     reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
+> Legacy qualification definition only. API-007, ADR-026, Architecture and the current queue refactor plan take precedence over every storage/interface/status statement below. PostgreSQL's API-007 public path exists; S3/Turso assembly, the single Snorri adapter cutover and full qualification remain pending. This retained legacy definition supports existing CI/release consumers; it is not current product qualification. The queue integration maintainer owns migration/removal of those consumers before deleting this fixture.
+
+
 # Public Preview Boundary
 
 ## What This Preview Is
@@ -66,7 +69,7 @@ projections; it is the only public projection.
 **Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`, `objectlog`, `inmemory`,
 and combined-profile SKUs. Public env/Helm hard-reject those names. Historical Hybrid evidence is
 non-governing provenance only
-([tp002-objectlog-hybrid-evidence.md](../perf/tp002-objectlog-hybrid-evidence.md)).
+([tp002-objectlog-hybrid-evidence.md](../../perf/tp002-objectlog-hybrid-evidence.md)).
 
 ### Durability
 
@@ -110,7 +113,7 @@ empty while apply lags; that is a poll, not a lost mutation.
 Conformance obligations by durability class:
 [storage-matrix-conformance-classes.md](../04-build/storage-matrix-conformance-classes.md).
 Composition inventory:
-[storage-matrix-composition-inventory.md](../04-build/storage-matrix-composition-inventory.md).
+[storage-matrix-composition-inventory.md](../04-build/simple-queue-postgres-refactor-plan.md).
 Deployment readiness evidence (scale, cost, broader topologies) does not redefine which cells are
 in the public support set; it informs production claims beyond this preview boundary.
 

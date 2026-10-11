@@ -12,15 +12,7 @@ ddx:
 ## Mission Statement
 
 fireweed is a batch-centric state-machine queue engine for applications that need
-ordered, recoverable work execution at scale. It provides one external
-transaction contract on one storage cell (ADR-024): accepted mutations are
-durable on the object log at the `AsyncProjection` barrier,
-rejected mutations have no committed effect, and ambiguous retries are resolved
-by request identity rather than by caller-side storage choreography. Durability
-after process death follows the selected log class instead of being overstated
-as uniform. Seventh Sense is the first validation use case: timestamp-ordered
-delivery work with idempotent writes, durable claims, batch execution, and no
-lost work.
+ordered, recoverable work execution at scale. One simple claim-group/commit-group interface works on PostgreSQL and S3/object-log with Turso. Durable acknowledgement, atomic workflow state and next work, native filtered priority claims, fresh successful reads and recoverable retries are mandatory on both. Seventh Sense is the first validation workload.
 
 ## Positioning
 
@@ -41,29 +33,13 @@ priority, progress, and selected durability-class guarantees, with no lost work
 inside that boundary, no concurrent execution of the same claim, and an
 explicit final state.
 
-### Storage product law
+## Queue product boundary
 
-ADR-024 is the storage law. The public product is one cell: an object-log
-published to S3, a Turso projection, and `AsyncProjection`. There is no public
-storage matrix. Class A durability is the object log. The Turso projection is
-rebuildable through `Fireweed::projection_control` and is not the command log.
-The control plane is not a storage cell and is not a mandatory PostgreSQL tier.
+[API-007](../02-design/contracts/API-007-queue-claim-commit-contract.md) and ADR-026 define one simple queue interface implemented by PostgreSQL and S3/object-log with a stock Turso 0.8.2 projection. PostgreSQL is the mandatory durable baseline. Both backends satisfy identical observable guarantees and the same public conformance suite. Insert a chunk, claim a natively filtered chunk in priority order, and commit a claimed group with atomic workflow-state updates and next-work inserts. State queries and queue statistics use that same facade. Consumers do not manage storage transactions or filter a broadly claimed queue.
 
-The log engine is `fireweed-objectlog`. Filesystem publication is an adapter
-inside that engine for one process on local disk. S3 publication is the public
-adapter. A filesystem log test is not a Fireweed support cell.
+Success acknowledges durable effects. Every successful later read or claim covers the acknowledged history; projection lag cannot justify a stale empty result. An ambiguous publication resolves through its original request identity. An expired identity remains a tombstone and cannot authorize a new mutation. The object log remains authoritative for S3/Turso; PostgreSQL commits the same logical effects atomically in its native transaction. Neither backend exposes its database or log session to consumers.
 
-Queue-semantics tests and small non-durable benches use Turso `:memory:`
-(`TursoConfig::in_memory`), the same SQL projection with no WAL file. WAL,
-reopen, and rebuild tests use a temporary Turso file. The separate
-`InMemoryProjection` map is not a product projection and is not coverage of
-this cell.
-
-A successful mutation is durable on the object log. A later claim polls applied
-Turso rows; an empty claim is a poll, not a failure of the mutation. Public
-reads may wait projection coverage. Selectors other than this cell reject
-before storage I/O (`RETIRED_STORAGE_CELL`). That error is fail-closed
-construction, not a list of products to restore.
+The [Architecture](../02-design/architecture.md) owns module boundaries. Its configuration, diagnostics, durable-record and Snorri contracts define the construction and integration details. Helix v0.15.4 concerns apply to this library: encapsulation, typed configuration, caller-owned telemetry/logging, and precisely scoped formal analysis. Passing historical models or legacy facade tests does not qualify the new interface.
 
 ## User Experience
 
@@ -87,9 +63,9 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 | Bounded progress guarantees | Relaxed priority ordering can scale without starving eligible work |
 | Durable execution lifecycle | Work remains recoverable across worker and process failures |
 | Batch and group-aware claims | Workers can efficiently satisfy downstream API batch constraints |
-| Composition-independent transaction integrity | The public cell (ADR-024) preserves commit, rejection, and request-id replay; restart recovery replays the object log into Turso through `projection_control`. Empty claim is a poll, not a lost mutation |
+| Atomic queue and workflow integrity | Commit claimed work, workflow state and next work together, with durable acknowledgement and exact replay on both backends |
 | Tunable durability economics | Operators can configure the object-log segment size target and maximum flush latency to trade batching delay against request cost and batch density |
-| One durable cell | Operators run S3 object-log durability with a rebuildable Turso projection (ADR-024). That pairing is the product, not one row of a larger matrix |
+| One interface, two durable implementations | PostgreSQL is the baseline; S3/object-log with Turso must pass the same guarantees and comparable settled benchmarks |
 
 ## Success Definition
 

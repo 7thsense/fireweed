@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ROUTE_SOURCES = ROOT / "docs/helix/04-build/functional-matrix-route-sources.json"
+ROUTE_SOURCES = ROOT / "scripts/ci/manifests/functional-matrix-route-sources.json"
 ALLOWLIST = ROOT / "scripts/ci/governed-product-allowlist.json"
 SERVICES = ROOT / "scripts/ci/governed-product-services.json"
 P8K_FIXTURE = ROOT / "crates/fireweed-server/tests/support/external_kafka_fixture.rs"

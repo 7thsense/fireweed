@@ -7,7 +7,7 @@ cd "$REPO_ROOT"
 
 QUAL="$REPO_ROOT/scripts/ci/s3-qualification-endpoint.sh"
 PREFLIGHT="$REPO_ROOT/scripts/ci/s3-native-cas-preflight.py"
-MANIFEST="$REPO_ROOT/docs/helix/04-build/storage-authority-manifest.json"
+MANIFEST="$REPO_ROOT/scripts/ci/manifests/storage-authority-manifest.json"
 
 SECRET_DIR=$(mktemp -d /tmp/fireweed-s3-secrets-test-XXXXXX)
 export FIREWEED_S3_SECRET_DIR="$SECRET_DIR"

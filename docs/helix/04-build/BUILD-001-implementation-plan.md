@@ -36,6 +36,9 @@ ddx:
     reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
+> Legacy qualification definition only. API-007, ADR-026, Architecture and the current queue refactor plan take precedence over every storage/interface/status statement below. PostgreSQL's API-007 public path exists; S3/Turso assembly, the single Snorri adapter cutover and full qualification remain pending. This retained legacy definition supports existing CI/release consumers; it is not current product qualification. The queue integration maintainer owns migration/removal of those consumers before deleting this fixture.
+
+
 # Build Plan: BUILD-001 Implementation Sequence
 
 > **Superseded-as-target note (ADR-008 reframe).** The intra-queue-shard build
@@ -122,7 +125,7 @@ scope.
 
 ## Canonical storage authority manifest
 
-[`storage-authority-manifest.json`](storage-authority-manifest.json) is the
+[`storage-authority-manifest.json`](../../../scripts/ci/manifests/storage-authority-manifest.json) is the
 machine-readable P1 authority boundary for the storage-matrix closure campaign.
 It binds the governed prose to the exact public axes, durability classes,
 response-barrier applicability, validation order, delivery profiles, legacy

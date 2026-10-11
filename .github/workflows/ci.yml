@@ -54,6 +54,9 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Enforce queue module boundaries and negative controls
+        run: python3 scripts/ci/check_queue_boundaries.py --controls
+
       - name: Verify workflow policy
         run: bash scripts/ci/verify-github-actions-policy.sh
 

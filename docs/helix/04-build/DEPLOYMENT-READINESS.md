@@ -20,6 +20,9 @@ ddx:
     reviewed_at: "2026-07-20T20:03:42Z"
 ---
 
+> Legacy qualification definition only. API-007, ADR-026, Architecture and the current queue refactor plan take precedence over every storage/interface/status statement below. PostgreSQL's API-007 public path exists; S3/Turso assembly, the single Snorri adapter cutover and full qualification remain pending. This retained legacy definition supports existing CI/release consumers; it is not current product qualification. The queue integration maintainer owns migration/removal of those consumers before deleting this fixture.
+
+
 # Production Deployment Readiness Contract
 
 ## Scope

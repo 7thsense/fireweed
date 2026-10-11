@@ -7,133 +7,124 @@ ddx:
   status: accepted
 ---
 
-# Simple queue refactor and PostgreSQL baseline plan
+# Queue refactor and identical durable backends
 
-## Authorization and review protocol
+## Scope
 
-Owner requests a complete modularity refactor, an identical PostgreSQL baseline,
-matched benchmarks/tests, learning from and discarding the API-006 branch, and
-Astra Ultra plan review before implementation plus review of every iteration
-before committing and pushing main. No squash/rebase or audit-history rewrites.
-Review is gpt-6-astra at ultra. Resolve findings and rerun review before landing.
-Never commit user edits. Fetch/check current main before each fast-forward push;
-merge divergence without rewriting history. No deployment or live email sending.
+Governing artifacts: PRD, Architecture, ADR-026, API-007, Snorri integration,
+construction configuration, diagnostics and durable-record Contracts; TP-004,
+TP-005 and TP-006. Use HELIX v0.15.4 for concern propagation and authoring.
 
-## Target and learning boundary
+Deliver one concrete facade, one Snorri adapter, native PostgreSQL and S3/Turso
+with identical mandatory behavior, shared business planning and comparable
+settled benchmarks. Implementation is authorized; Astra Ultra reviews the whole
+plan before code and every final iteration before committing/pushing main.
+Preserve DDx history without squash, rebase or rewritten closing pointers.
 
-API-007 is the target: insert, filtered ordered claim, atomic commit group and
-stats, with typed state read/query/receipt access. Atomic commit carries claimed
-updates, CAS state/audit and emitted work; no exposed transaction session. One
-Snorri adapter, mandatory equal behavior, PostgreSQL SQL baseline and S3/Turso.
-Existing behavior remains available until cutover passes; no hybrid public APIs
-remain after completion. Do not remove current reliability regression coverage.
+## Shared Constraints
 
-Preserve API-006 lessons as a dated evidence inventory: projected fields avoid
-loading unneeded large values; indexed point lookup avoids key IN-list cliffs;
-lean claim rows separate selection from large-value hydration; explicit canonical
-limits; separate admin authority; mandatory black-box conformance and lost-response
-fault hooks. Measurements are engine/source-specific, not inherited benchmarks.
-Do not adopt stages/WholeGroups, weaken Snorri state-version rules, force 64 KiB
-state, or replace numeric progress requirements with quiescent-only liveness.
-Preserve originals as an immutable Git archive tag and evidence docs, then delete
-only the API-006 rescue WIP branch after verifying archive reachability and extracting
-useful evidence. Other rescue/tooling branches and main remain untouched.
+Native storage filtering precedes claim; never broad-claim/client-filter.
+Claim-group commit includes atomic workflow/audit state, claimed updates, new
+work and immutable results. Original request identity survives rebatching,
+rejected replay and expired retention. Fresh successful reads/claims cover ACKed
+authority. Current lease validation uses a fresh independent operational clock.
 
-## Modules and dependency law
+Core/planners own semantic policy once; adapters own SQL and durable publication.
+Field/body knowledge is not write intent. Preserve full unsigned versions,
+complete identities, JSON equality and original raw definition/secret. Keep
+stock Turso, log authority, conditional fencing, exact genesis and real durability
+checks. Runtime resource and internal frame limitations cannot weaken the common
+consumer domain or manufacture a known rejection after ambiguous publication.
 
-- fireweed-core: shared public DTOs, schema/filter/order/limit validation, canonical
-  fingerprints and receipt/error vocabulary; no database or object-store dependency.
-- fireweed-engine: backend-neutral orchestration and atomic-group semantic planning;
-  storage port covers entire groups rather than exposing low-level transaction handles.
-  Backend-specific atomic execution is behind one internal async boundary.
-- fireweed-postgres: native async SQL transactions, row-level selection/locking,
-  SQL state/work/receipt persistence and restart; no S3/objectlog/Turso runtime requirement.
-- fireweed-turso plus objectlog composition: same commands and outcomes, durable log
-  authority, committed visibility, apply/rebuild; ownership clocks remain independent.
-- fireweed facade: thin construction/delegation, one concrete consumer handle; explicit
-  PostgreSQL and S3/Turso constructors, no capability-based ordinary-operation fallback.
-- fireweed-conformance: one public-handle suite, shared workload generator and assertions;
-  adapter-specific fixtures/fault hooks only. Query semantics and CAS checks shared,
-  SQL generation/storage scheduling necessarily adapter-specific.
-- Snorri adapter: maps transition entries to commit groups and reads to typed state;
-  business validation/state-version/digests remain in Snorri. Host owns maintenance.
+## Implementation Slices
 
-## Ordered iterations and exit gates
+| Slice | Area | Depends on | Gate |
+|---|---|---|---|
+| Boundary adoption and document cleanup | core/api/testing | Current Architecture and Contracts | Real Cargo dependency/visibility checker, permitted/forbidden controls, link/graph/consumer checks |
+| Shared interface and planners | core/api | Boundary map | DTO/limit/fingerprint/outcome tests; complete/grouped/partial-knowledge invariants |
+| PostgreSQL baseline | data/testing | Shared semantics | Concrete-handle mandatory suite; native selection, state/new-work atomicity, physical loss/reopen and cancellation |
+| S3/Turso full interface | data/infra | Shared semantics and revised formal correspondence | All ten mandatory operations, native selection/hydration, conditional publication, fresh observations, replay and exact rebuild |
+| Bounded authoritative metadata | infra | Native object-log contracts | No full-manifest retained/rewrite growth outside admission; corruption/missing-authority/fencing tests; scale measurements |
+| Single Snorri adapter | api | Both complete constructors | Real worker/control/visibility/recovery tests, JSON/model pins, accumulated state, transitions and await consumption |
+| Diagnostics/configuration integration | api/infra | Exact Contracts | Validation/redaction/no-I/O controls; real OTel receiver and loss/retrieval tests; overhead measurements |
+| Formal correspondence | core/testing | Revised properties | Reachable positive witnesses, targeted replayable negative controls, bounds/assumptions and model/code/test maps |
+| Settled matched benchmarks | testing/infra | Identical qualified behavior | Same host/source/seed/limits/durability; 10M hot, 1000 cold+hot, density/numeric/drain/cost evidence |
+| Consumer cutover and legacy removal | api/data | All preceding gates | One adapter/facade, no legacy side-record or capability fallback; affected tests, examples and docs align |
 
-1. Documentation/evidence: review API-007/ADR-026 and this whole plan; extract lessons,
-   pin archived branch, mark API-006 superseded. Validate graph/link semantics. No code
-   implementation before Astra Ultra approves the plan. Land docs after review.
-2. Contract binding: concrete Rust DTOs/validation/limits and receipt/error semantics;
-   compile consumer examples and tests for fingerprints, independent group outcomes,
-   rebatching including durable rejected outcomes, full claim fingerprint/replay
-   (empty, partial settle, renewal, restart, cleanup), ABA-safe versions, ordered overlapping-record
-   groups and size bounds. Preserve Snorri vectorized_resplit_replay_check and
-   same_instance_siblings_use_independent_candidate_projections unchanged. Measure current Snorri instance
-   serialization before fixing limits. Support its 1 MiB output/512 effects/512 awaits
-   without hidden weakening. Bind query/filter work-kind/schedule/keys/run/version fields.
-3. Modular ports/facade: remove monolithic LibBackend requirement from new surface;
-   isolate shared planning from stores, build public conformance factory and dependency
-   guards. Retain compatibility internally until migration. Native async SQL boundary.
-4. PostgreSQL baseline: implement indexed filtered priority claims, durable leases/CAS,
-   atomic state+new-work commit groups, per-group durable receipts, typed reads/stats/pages.
-   Real DB lane including multi-process contention, lost responses, process-kill reopen,
-   clock separation, limits and cancellation. No mocks or missing-fixture pass.
-5. S3/Turso parity: implement identical interface, log-first per-group receipt ownership,
-   known-rejection/unknown distinction and fresh successful observations. Paused-applier,
-   ownership handoff, corruption, poison, shutdown and exact rebuild tests; preserve stock
-   Turso schema/transaction exclusion and formal/model replay gates. Do not introduce
-   snapshots/truncation or unrelated partition redesign to complete this iteration.
-   The necessary versioned collision-free address encoding and checked old-address
-   migration are required by the actual consumer integration binding.
-6. Snorri migration: single adapter against both constructors. Remove claim-all/filter,
-   side-record consumer API, capability downgrade and client projection polling. Preserve
-   atomic per-transition independent replay and state-version behavior including await
-   consumption. Convert bootstrap/migration/recovery to claimless CAS commit groups,
-   typed state queries and durable receipt resolution. Move maintenance into host-owned
-   component without weakening lifecycle ownership. Run Snorri full shared conformance,
-   native durable timers/effects/awaits, recovery/audit and process restart on both stores.
-7. Benchmarks: same generator/seed/source/host/topology/concurrency, item/body/state sizes,
-   eligible/filter distributions and identical settlement correctness. Record insert,
-   filtered claim, commit with state+fanout, stats/query, full lifecycle, 10M resident hot
-   queue and 1000 cold+hot density. Record p50/p95/p99, useful settled rate, drain/apply
-   debt, RSS, storage and S3 requests/cost. Separate warmup/setup/recovery; PostgreSQL is
-   reference, no cheaper durability on either side. Failed correctness disqualifies rates.
-   Report improvement or failure honestly; no portable 10k/12.5k bar invented.
-8. Persisted-data cutover/cleanup: gate old main fixture reopen, versioned crash-safe
-   migration/backfill, old and new command genesis rebuild, stable namespace/keys,
-   lease authority and receipt preservation before enabling writes or removing readers; remove superseded public surfaces and dead fallback paths,
-   regenerate docs/examples/public API/dependency guards, full workspace fmt/clippy/test,
-   Snorri/Cayce compile/conformance, formal replay, docs/site gates when affected. Record
-   exact commits and limitations. Baseline and S3/Turso both mandatory in CI correctness;
-   controlled performance lane separate from hosted CI. No obsolete accepted docs left
-   that contradict constructors, freshness, leases, replay or state storage.
+Boundary adoption is first. The actual command is
+`python3 scripts/ci/check_queue_boundaries.py --controls`, shared locally, in
+pre-commit configuration and CI. Precise legacy exceptions name source, target,
+owner and removal trigger. Do not enlarge a baseline to accept new violations.
 
-## Mandatory common tests
+## Execution Contract
 
-API-007 section 8 is normative. Test insert identity, exact filtered ordered selection,
-concurrent disjoint leases, expiry/renewal, atomic state+work update, rejection no-effects,
-independent group replay across rebatching, freshness with delayed apply, process loss,
-state nonclaimability, await race/state-version, audit corruption, cancellation/shutdown,
-stats/query parity, envelope boundaries and durable retention. Include active overload
-progress obligations independently of quiescent tests: shared skew/near-bound
-scenario verifies progress-guard precedence within filter, eligibility/age anchors
-and stats age, preserving the existing queue-global numeric bound. Benchmark correctness uses the
-same reference oracle; never compare databases by backend-private fast paths.
+For each iteration, implement its complete bounded unit, run meaningful checks,
+obtain Astra Ultra actual-source approval, then commit and push main. Review
+findings remain in scope until resolved. Do not request already-granted approval
+again. A passing internal primitive does not activate a complete backend or
+establish exceptional durability/performance. Do not stop at a partial slice.
 
-## Actual consumer integration gate
+Keep chronological review transcripts, subprocess logs, benchmark snapshots and
+historical completion narratives out of active HELIX. Git preserves retired
+text; runner-owned target artifacts and CI uploads retain current evidence with
+source/config/tool identity and explicit retention/loss. Exact live test fixtures
+belong with tests, not among governed specifications. Keep current requirements,
+contracts, designs and this execution plan concise and maintained in place.
 
-The [consumer integration binding](simple-queue-consumer-integration-binding.md)
-closes actual-source gaps before cutover: indexed additional attributes, one
-server-resolved Addressed/SelectFirst administrative intent within commit groups,
-compact exact outcomes, read-only preview without identity retention, one-snapshot
-bucket stats and collision-free object-log address migration. Its reviewed sequence
-extends this plan; the current native adapter is not yet full Snorri conformance.
-No fixed-field restriction, client-side selector scan, 4096-match truncation or
-per-item group translation may substitute for the original whole-operation result.
+## Continuation Evidence
 
-## Open bindings to settle during reviewed iteration 2
+The concrete PostgreSQL interface and public mandatory suite exist. Native S3
+transport/fence/recovery and stock-Turso atomic projection, current claim replay
+and filtered candidate selection are internal primitives. Their local checks
+are not a public S3/Turso qualification. The full constructor/QueueStore, candidate
+hydration/resolved claim producer, remaining reads/mutations and public parity
+must still land. Full-manifest memory/rewrite growth remains unqualified.
 
-Concrete state/request/body bounds from actual serialization, receipt retention cleanup
-representation and capacity, fair priority/progress implementation, query declaration
-shape, and clock trait adapters. These are bounded binding decisions, not permission to
-change user-visible guarantees or delay baseline implementation indefinitely.
+The single Snorri adapter and matched settled release workloads remain required.
+Stats as_of and negative-epoch hourly grouping must satisfy the consumer binding.
+Old formal models/corpora that permit stale empty claims or expired identity reuse
+are superseded for changed properties; revised correspondence is mandatory.
+No completion claim is permitted while any of these required gates is absent.
+
+## Validation Plan
+
+Run the identical public-handle scenarios on both stores without capability skips.
+Exercise exact filtered priority/age/schedule order, wide key/field/value sets,
+collisions, full unsigned values, state CAS and uniqueness, successful/rejected
+regrouping, empty replay, renewal/current versions, whole-claim expiry, preview,
+large administration, result limits and shutdown/caller cancellation.
+
+Use real PostgreSQL and qualified S3/stock Turso. Missing fixtures, ignored tests,
+only memory whitebox passes and current debug primitive timings are not parity or
+capacity evidence. Include paused apply, lost replies, writer/server process
+loss, fencing races, corrupt authority, native rollback/poison and exact rebuild.
+
+Snorri retains vectorized_resplit_replay_check and
+same_instance_siblings_use_independent_candidate_projections. Verify full JSON
+state and body model pins on read/write. State_version advances on transitions
+and await consumption, not dispatch/timeout/timer bookkeeping. Host maintenance
+must preserve ownership and resource drain semantics.
+
+Benchmark useful completed work after full settle/drain. Measure p50/p95/p99,
+RSS/retained memory, projection debt, storage volume and S3 requests/cost, with
+matched state/fanout/filter mixes and interleaved controls. Failed correctness
+invalidates every reported rate; shorter or cheaper durability is not comparable.
+
+## Risks and Rollbacks
+
+| Risk | Response |
+|---|---|
+| Stale/partial authority or missing original genesis | Fail closed; preserve authority; resolve original identity |
+| Large selector or value set | Native index intersection and admitted streaming/spool; no hidden cap |
+| Native parser/VM/cache resource growth | Bounded-depth query shape, explicit admission and measured SDK residency |
+| Documentation pruning breaks a live gate | Relocate exact fixtures and update readers/generators atomically; run negative controls |
+| Model/spec drift | Invalidate affected assurance and recheck correspondence before readiness |
+| Consumer cutover mismatch | Keep accepted semantics; fix adapter and rerun both real lanes before cutover |
+
+## Exit Criteria
+
+Both constructors implement API-007 identically. One real Snorri adapter passes
+both mandatory suites and recovery/durability paths. Architecture/configuration/
+diagnostics/formal obligations have executed evidence. Bounded metadata and
+matched settled 10M/density/numeric/drain/cost workloads qualify the claimed
+performance envelope. Every required slice and final Astra review passes.

@@ -140,7 +140,7 @@ Correctness and progress requirements for the facade execution path:
    Per-cell residual inventory (which matrix cells still wrap
    `BlockingLibBackend`, whether inner product poll would block a Tokio
    worker, and exit criteria): 
-   [async-runtime-blocking-matrix-inventory](../../04-build/async-runtime-blocking-matrix-inventory.md).
+   [async-runtime-blocking-matrix-inventory](../../04-build/simple-queue-postgres-refactor-plan.md).
 
 5. **Two-phase mutate and discover (required).** Mutating calls
    (`commit`, packed `complete` / `retry` / `release`, push, `upsert`) complete

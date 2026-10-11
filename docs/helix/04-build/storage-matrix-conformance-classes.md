@@ -3,10 +3,13 @@ ddx:
   id: storage-matrix-conformance-classes
   depends_on:
     - orthogonal-storage-matrix-brief
-    - storage-matrix-composition-inventory
+    - build-simple-queue-postgres-refactor
     - td-storage-architecture-backend-contracts
   status: accepted
 ---
+
+> Legacy qualification definition only. API-007, ADR-026, Architecture and the current queue refactor plan take precedence over every storage/interface/status statement below. PostgreSQL's API-007 public path exists; S3/Turso assembly, the single Snorri adapter cutover and full qualification remain pending. This retained legacy definition supports existing CI/release consumers; it is not current product qualification. The queue integration maintainer owns migration/removal of those consumers before deleting this fixture.
+
 
 # Storage matrix conformance by durability class (A / B)
 
@@ -17,7 +20,7 @@ may make, and the **CI job shapes** that produce evidence.
 **Normative sources**:
 [orthogonal-storage-matrix-brief](../02-design/orthogonal-storage-matrix-brief.md)
 §2.2–2.4, [TD-001](../02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md)
-conformance classes, [composition inventory](storage-matrix-composition-inventory.md).
+conformance classes, [composition inventory](simple-queue-postgres-refactor-plan.md).
 
 This is Phase-3 **evidence orientation** for the matrix program: which suite
 obligations bind which cells, and what CI must exercise. It does **not** replace

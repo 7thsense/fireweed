@@ -8,8 +8,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
 
-MANIFEST="${ROOT}/docs/helix/04-build/route-feature-manifest.json"
-ROUTE_SOURCES="${ROOT}/docs/helix/04-build/functional-matrix-route-sources.json"
+MANIFEST="${ROOT}/scripts/ci/manifests/route-feature-manifest.json"
+ROUTE_SOURCES="${ROOT}/scripts/ci/manifests/functional-matrix-route-sources.json"
 
 if [[ $# -lt 1 ]]; then
     echo "usage: $0 <suite-name> | --manifest-leaf <leaf-id>" >&2

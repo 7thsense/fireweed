@@ -390,7 +390,7 @@ fn s3_api005_ownership_matches_provider_neutral_method_set() {
     let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     root.pop();
     root.pop();
-    let map_path = root.join("docs/helix/04-build/api005-suite-ownership-map.json");
+    let map_path = root.join("scripts/ci/manifests/api005-suite-ownership-map.json");
     let text = std::fs::read_to_string(&map_path)
         .unwrap_or_else(|e| panic!("ownership map missing at {}: {e}", map_path.display()));
     let doc: Value = serde_json::from_str(&text).expect("ownership map json");

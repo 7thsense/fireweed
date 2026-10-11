@@ -2,7 +2,7 @@
 ddx:
   id: contract-formal-queue-semantics
   type: contract
-  depends_on: [prd, adr-s3-turso-public-cell, adr-async-commit-strategy-and-dispatch]
+  depends_on: [prd, architecture, api-queue-claim-commit-contract]
   status: accepted
 ---
 
@@ -10,40 +10,21 @@ ddx:
 
 ## Domain and authority
 
-This contract defines proof obligations for the current public cell, not a new
-API or storage selector. Let q=(tenant,queue), e be a monotonically advancing
-storage fence epoch, Lq the ordered authoritative committed command history,
-Pq a serving projection, and aq its applied cursor. Log publication means the
-protocol's authoritative conditional manifest/head publication, not merely an
-uploaded segment. Unknown I/O outcome is neither proven rejection nor success.
-Recovery must resolve that outcome from authority before deciding to re-execute.
-Physical storage durability and correct atomic conditional publication are
-assumptions to be exercised by public S3 qualification, not proven by a model.
+This contract defines API-007 proof obligations for both durable backends. Let q=(tenant,queue), Hq be an abstract serialized committed history and Sq its logical state. Hq is a mathematical witness, not a requirement to persist a second command log in PostgreSQL. Nonoverlapping successful operations respect real-time order. Unknown I/O outcome is neither proven rejection nor success; original request identity resolves it before re-execution.
+
+PostgreSQL refines this witness through native atomic transactions over state and receipts. S3/Turso refines it through authoritative conditional log publication and atomic projection-prefix application. Physical provider durability, database atomicity and conditional publication are declared assumptions exercised by real fault tests, not facts established by a finite model.
 
 ## Safety definitions
 
-**F-ACK**: successful mutation acknowledgment implies its exact command envelope
-and replay metadata are in Lq. AsyncProjection does not imply aq has advanced.
-A claim polls applied rows; an empty poll before catch-up is legal.
+**F-ACK**: a successful mutation is durably committed with its exact replay metadata and has one position in Hq. Every successful later consumer read/claim observes a state covering acknowledged authority. A wait, catch-up or explicit failure is permitted; a stale empty claim is not.
 
-**F-PREFIX**: Pq = Fold(snapshot, Lq[snapshot_cursor:aq]) for a validated snapshot
-and contiguous committed suffix. Apply advances the cursor and affected state
-atomically; repeat apply is idempotent. A projection can lag, but cannot contain
-an effect absent from committed authority. Hints never define Lq. Snapshot and
-retention lineage must be validated; missing/corrupt authority fails closed.
+**F-PREFIX**: serving state corresponds to a contiguous prefix of Hq. PostgreSQL state and receipts commit in the same native transaction. S3/Turso state and applied cursor advance atomically from original genesis and a validated contiguous log prefix. Reapply is idempotent; no effect absent from committed authority may appear. Missing/corrupt known authority fails closed.
 
-**F-FENCE**: append publication checks expected_epoch=e in its atomic authority
-update. A stale owner may finish previously published work, but cannot publish a
-new command after a successor advances e. Serving requires successful acquire,
-durable fence confirmation and an unexpired serving ownership session. Lease
-assignment epoch and durable storage epoch are distinct domains; cold ephemeral
-control-plane restart reconciles them without same-owner self-fencing.
+**F-FENCE**: conflicting writes have a valid serial order and cannot commit with superseded authority. PostgreSQL uses its native transaction/isolation preconditions. S3 publication atomically compares acquired authoritative writer epoch and expected head; recovery uses the matching acquisition result, original genesis and contiguous history. Hints, cached epochs and host placement credentials cannot authorize publication or initialize an empty replacement over known authority.
 
 **F-LEASE**: each item has at most one active queue lease. A lease is active when
 its lifecycle permits leased work and its token/generation is current and its
-expiry exceeds logical now. The caller's owner epoch is independently checked
-for mutations; ownership handoff alone must not silently invalidate item leases
-unless the existing contract says so. Finalize/renew/reassign validate the exact
+expiry exceeds logical now. Finalize/renew/reassign validate the exact
 current credential and applicable expiry rules. At expiry, a replacement token
 cannot be affected by the old token. Already-running external effects are not
 queue leases and may overlap after expiry (FR-28).
@@ -52,17 +33,18 @@ queue leases and may overlap after expiry (FR-28).
 fingerprint. During the configured retention window, equal key/body replays the
 stored disposition, including partial/rejected/empty results where required;
 different body conflicts without a new durable effect. Claim replay additionally
-obeys its active-lease conditions. Retention expiry permits documented reuse;
-this is not an eternal exactly-once guarantee. Fingerprint format and operation
+obeys its active-lease conditions. After result retention expires, the identity remains an expired tombstone:
+equal content returns RequestExpired and changed content conflicts. Reuse cannot
+create a fresh effect. This does not promise exactly-once external execution. Fingerprint format and operation
 namespace follow production, rather than being changed by this definition.
 
 **F-BATCH**: a compatible microbatch has a serial witness respecting per-queue
 command order and nonoverlapping completed calls. Its projected per-request
 results, selected items, tokens and replay identities equal that witness.
-Compatibility includes tenant/queue, explicit fence semantics, mutation kind,
-claim-unit, eligibility lane and all existing grouping/cohort constraints.
+Compatibility includes full tenant/queue identity, mutation kind, original request/group identity and all API-007 preconditions.
 Cancellation of a result waiter does not remove dispatcher-owned accepted work.
-The witness need not expose not-yet-applied durable effects to an empty poll.
+Successful consumer observations cover acknowledged effects in that witness;
+projection debt does not authorize an empty poll that hides eligible work.
 
 **F-BUDGET**: retained serialized jobs own noncloneable permits. Charged global
 and tenant bytes equal owned charged allocations and never exceed configured
@@ -71,11 +53,27 @@ ownership transfer and terminal resolved cleanup release exactly once. Crash
 forgets volatile allocations/permits together; durable replay debt is a separate
 bounded quantity, not an allocation that survives process death.
 
-**F-KEY**: logical `client_item_key` deduplication is separate from request
-receipts. Within its configured retention scope, repeated pushes with that key
-converge on one logical item according to current conflict policy. A new request
-ID does not bypass item-key deduplication; a changed request fingerprint is not
-an instruction to create another logical item.
+**F-KEY**: full work keys and unique-index identities retain their defined insert/rekey/conflict semantics. Digest equality alone is insufficient. A new request identity cannot bypass work-key uniqueness.
+
+**F-GROUP**: claimed updates, workflow/audit state CAS, newly inserted work and
+the immutable committed/rejected group result have one atomic boundary. A rejected
+group has zero work/state/new-work effects. Successful independent siblings retain
+their own identities across rebatching; infrastructure failure never fabricates a
+known successful subset.
+
+**F-CURRENT-REPLAY**: the original ordered claim membership must all retain live
+current credentials. Completing/deleting/expiring any member expires the whole
+claim replay. Renewal keeps the token and returns current record version/expiry;
+creation-version equality cannot reject a valid renewal.
+
+**F-CLOCK**: lease ownership samples a fresh independent operational clock at
+linearization after authority acquisition. Operator evaluated_at classifies
+administration only. A queued caller timestamp or log sequencing clock cannot
+make an expired credential live.
+
+**F-ABA**: a key's version never repeats, including after deletion/reinsertion.
+Full unsigned version/sequence and complete namespace/key identity survive every
+physical representation, hash collision and restart.
 
 ## Progress definitions
 
@@ -132,3 +130,21 @@ owner handoff → retained replay, and caller cancellation → publication respo
 ambiguity → authoritative resolution/recovery. Group/cohort claim units and mixed
 per-entry outcomes need explicit refinement fixtures or named production
 conformance obligations; an item-only model does not prove those cases.
+
+## Assurance applicability and invalidation
+
+Migration rigor is precise reviewed specification. Executable analysis is required
+for the affected lease/fence/replay/group/admission slices before readiness claims.
+Each property needs its actual model configuration and completed result, reachable
+success/recovery witnesses, targeted guard-weakening counterexamples and named
+code/test correspondence. Excluded routine sequential/document work records why
+an analyzer does not apply. No solver installation is implied.
+
+Existing model/corpus results that allowed stale empty claims or expired identity
+reuse are superseded for F-ACK/F-BATCH/F-REPLAY and cannot qualify API-007.
+F-GROUP/F-CURRENT-REPLAY/F-CLOCK/F-ABA require revised or explicitly mapped models
+and implementation oracles. Unchanged property results count only after source,
+assumption and correspondence review. Old pass counts are not renewed assurance.
+Finite safety exploration is not universal Rust refinement; liveness, provider
+conditional-write durability, physical process loss, and numeric progress require
+their separately stated assumptions and real implementation evidence.

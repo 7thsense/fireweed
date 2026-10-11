@@ -21,7 +21,7 @@ EXPECTED_SOURCE=""
 EXPECTED_REMOTE=""
 EXPECTED_REF=""
 PROMOTED_ALLOWLIST=""
-AUTHORITY_MANIFEST="${REPO_DEFAULT}/docs/helix/04-build/storage-authority-manifest.json"
+AUTHORITY_MANIFEST="${REPO_DEFAULT}/scripts/ci/manifests/storage-authority-manifest.json"
 
 usage() {
     cat <<'EOF' >&2

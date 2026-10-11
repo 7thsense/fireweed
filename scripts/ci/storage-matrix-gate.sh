@@ -10,13 +10,13 @@
 #
 # Broad substring cargo filters are forbidden (P10r). Every cargo test filter is
 # an exact harness ID from:
-#   docs/helix/04-build/functional-matrix-route-sources.json
+#   scripts/ci/manifests/functional-matrix-route-sources.json
 #
 # Governing bars:
 #   docs/helix/04-build/storage-matrix-completion-brief.md §2 (Phase 6)
 #   docs/helix/04-build/DEPLOYMENT-READINESS.md (product storage model)
 #   scripts/ci/s3-matrix-job-requirements.md (generated from authority manifest)
-#   docs/helix/04-build/storage-authority-manifest.json
+#   scripts/ci/manifests/storage-authority-manifest.json
 #
 # Usage:
 #   bash scripts/ci/storage-matrix-gate.sh
@@ -48,7 +48,7 @@ CARGO="${CARGO:-rustup run 1.99.0 cargo}"
 REQUIRE_FULL="${FIREWEED_STORAGE_MATRIX_REQUIRE_FULL:-0}"
 SKIP_HELM=0
 SKIP_CARGO=0
-ROUTE_SOURCES="${REPO_ROOT}/docs/helix/04-build/functional-matrix-route-sources.json"
+ROUTE_SOURCES="${REPO_ROOT}/scripts/ci/manifests/functional-matrix-route-sources.json"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -149,7 +149,7 @@ import sys
 from pathlib import Path
 
 root = Path(os.environ["REPO_ROOT"])
-registry = json.loads((root / "docs/helix/04-build/functional-matrix-route-sources.json").read_text())
+registry = json.loads((root / "scripts/ci/manifests/functional-matrix-route-sources.json").read_text())
 cargo = os.environ.get("CARGO", "rustup run 1.99.0 cargo").split()
 kinds = {"class_b_server", "inline_lib", "external_kafka"}
 groups: dict[tuple[str, ...], list[tuple[str, str]]] = {}

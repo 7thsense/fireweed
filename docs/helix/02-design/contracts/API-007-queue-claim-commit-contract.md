@@ -242,7 +242,7 @@ This preserves RuntimeStateStorePort's actual rule: committed transitions and
 await consumption advance state_version; ordinary dispatch/timeouts/timer
 bookkeeping do not independently do so. State and audit remain non-work data.
 Snorri owns business semantics; Fireweed owns atomic persistence and leasing.
-The [actual consumer integration binding](../../04-build/simple-queue-consumer-integration-binding.md)
+The [actual consumer integration binding](CONTRACT-snorri-integration.md)
 is normative for arbitrary indexed payload equality, membership/eligibility and
 precedence, administration/preview clocks, compact results/overflow, bucket stats
 and versioned collision-free object-log address migration. Its source inventory
@@ -301,3 +301,14 @@ timers, effects, migrations, recovery and native durable process restart. Keep
 main's formal/fault regressions, ownership fencing, authoritative rebuild and
 stock-Turso schema/transaction serialization gates. New contract tests supplement
 those protections; old implementation proof is not proof of a new storage path.
+
+## Construction, module ownership and diagnostics
+
+[Architecture](../architecture.md) owns modules and integration boundaries.
+[Construction configuration](CONTRACT-construction-config.md) owns typed settings,
+defaults, precedence, validation and secret redaction.
+[Diagnostics](CONTRACT-diagnostics.md) owns safe structured events, OpenTelemetry
+mapping, caller-owned export and bounded capture/retrieval. Instrumentation must
+not alter durability, replay, selection, admission or atomic state semantics.
+The [formal contract](CONTRACT-006-formal-queue-semantics.md) defines named
+properties and the bounds on any executable assurance.

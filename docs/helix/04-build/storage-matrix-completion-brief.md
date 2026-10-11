@@ -3,7 +3,7 @@ ddx:
   id: storage-matrix-completion-brief
   depends_on:
     - orthogonal-storage-matrix-brief
-    - storage-matrix-composition-inventory
+    - build-simple-queue-postgres-refactor
     - storage-matrix-conformance-classes
     - public-preview-boundary
     - api-fireweed-rust-facade
@@ -18,6 +18,9 @@ ddx:
       storage-matrix-conformance-classes: d58ba90b499526a8bdb1b8097597701ed6ae58dd3afa6315e69d9e52dbee830c
     reviewed_at: "2026-08-04T04:52:28Z"
 ---
+
+> Legacy qualification definition only. API-007, ADR-026, Architecture and the current queue refactor plan take precedence over every storage/interface/status statement below. PostgreSQL's API-007 public path exists; S3/Turso assembly, the single Snorri adapter cutover and full qualification remain pending. This retained legacy definition supports existing CI/release consumers; it is not current product qualification. The queue integration maintainer owns migration/removal of those consumers before deleting this fixture.
+
 
 # Storage Matrix Completion Brief — Zero Gap
 
@@ -133,7 +136,7 @@ Capacity evidence (10M recovery, E3 cost) is **not** a substitute for T0–T4 ce
 | Artifact | Role |
 |----------|------|
 | [orthogonal-storage-matrix-brief](../02-design/orthogonal-storage-matrix-brief.md) | Product axes and Class A/B |
-| [storage-matrix-composition-inventory](./storage-matrix-composition-inventory.md) | Wire-up map (update as gaps close) |
+| [storage-matrix-composition-inventory](simple-queue-postgres-refactor-plan.md) | Wire-up map (update as gaps close) |
 | [storage-matrix-conformance-classes](./storage-matrix-conformance-classes.md) | Capability claims by class |
 | [public-preview-boundary](../00-discover/public-preview-boundary.md) | End state: 20 supported |
 | [API-005](../02-design/contracts/API-005-fireweed-rust-facade.md) | `StorageConfig` open surface |

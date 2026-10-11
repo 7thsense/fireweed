@@ -4,11 +4,11 @@ ddx:
   depends_on:
     - api-native-client-interface
     - adr-queue-as-shard-unit-and-projection-families
-    - build-foqs-inspired-interface-and-boundary
+    - build-simple-queue-postgres-refactor
   links:
     - {kind: informed_by, to: api-native-client-interface}
     - {kind: informed_by, to: adr-queue-as-shard-unit-and-projection-families}
-    - {kind: governs, to: build-foqs-inspired-interface-and-boundary}
+    - {kind: governs, to: build-simple-queue-postgres-refactor}
   status: accepted
 ---
 

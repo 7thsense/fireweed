@@ -28,7 +28,7 @@ import sys
 
 ROOT = Path.cwd()
 MODE = os.environ["FIREWEED_AUTHORITY_VERIFY_MODE"]
-MANIFEST_PATH = Path("docs/helix/04-build/storage-authority-manifest.json")
+MANIFEST_PATH = Path("scripts/ci/manifests/storage-authority-manifest.json")
 BUILD_PATH = Path("docs/helix/04-build/BUILD-001-implementation-plan.md")
 
 EXPECTED_TOP_LEVEL = {
@@ -203,7 +203,7 @@ def expected_historical_paths() -> set[str]:
     ]
     require(historical, "historical performance identity entries missing")
     baseline = json.loads(
-        Path("docs/helix/04-build/evidence-source-io-baseline.json").read_text()
+        Path("scripts/ci/manifests/evidence-source-io-baseline.json").read_text()
     )
     return {path for entry in historical for path in entry["paths"]} | set(
         baseline["tracked_tp003_paths"]

@@ -3,14 +3,14 @@
 assertion-binding overlay.
 
 Consumes:
-  - docs/helix/04-build/storage-authority-manifest.json (P1 semantic selectors)
-  - docs/helix/04-build/functional-matrix-route-sources.json (P10r leaves)
+  - scripts/ci/manifests/storage-authority-manifest.json (P1 semantic selectors)
+  - scripts/ci/manifests/functional-matrix-route-sources.json (P10r leaves)
   - scripts/ci/storage-remediation-inventory.json (post-placement harness IDs)
 
 Produces:
-  - docs/helix/04-build/evidence-semantic-requirements.json
-  - docs/helix/04-build/evidence-route-overlay.json
-  - docs/helix/04-build/route-feature-manifest.json
+  - scripts/ci/manifests/evidence-semantic-requirements.json
+  - scripts/ci/manifests/evidence-route-overlay.json
+  - scripts/ci/manifests/route-feature-manifest.json
   - scripts/ci/product-workflow-required-names.json
   - scripts/ci/release-repeat-suites.toml
 
@@ -30,12 +30,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-AUTHORITY = ROOT / "docs/helix/04-build/storage-authority-manifest.json"
-ROUTE_SOURCES = ROOT / "docs/helix/04-build/functional-matrix-route-sources.json"
+AUTHORITY = ROOT / "scripts/ci/manifests/storage-authority-manifest.json"
+ROUTE_SOURCES = ROOT / "scripts/ci/manifests/functional-matrix-route-sources.json"
 INVENTORY = ROOT / "scripts/ci/storage-remediation-inventory.json"
-SEMANTIC_OUT = ROOT / "docs/helix/04-build/evidence-semantic-requirements.json"
-OVERLAY_OUT = ROOT / "docs/helix/04-build/evidence-route-overlay.json"
-MANIFEST_OUT = ROOT / "docs/helix/04-build/route-feature-manifest.json"
+SEMANTIC_OUT = ROOT / "scripts/ci/manifests/evidence-semantic-requirements.json"
+OVERLAY_OUT = ROOT / "scripts/ci/manifests/evidence-route-overlay.json"
+MANIFEST_OUT = ROOT / "scripts/ci/manifests/route-feature-manifest.json"
 REQUIRED_NAMES_OUT = ROOT / "scripts/ci/product-workflow-required-names.json"
 SUITES_OUT = ROOT / "scripts/ci/release-repeat-suites.toml"
 

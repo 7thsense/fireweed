@@ -16,7 +16,7 @@ from fireweed_test_placement import generate as generate_fireweed_test_placement
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "scripts/ci/storage-remediation-inventory.json"
-AUTHORITY = ROOT / "docs/helix/04-build/storage-authority-manifest.json"
+AUTHORITY = ROOT / "scripts/ci/manifests/storage-authority-manifest.json"
 WORKSPACES = [
     "Cargo.toml",
     "crates/fireweed-bench/Cargo.toml",
@@ -83,7 +83,7 @@ def sql_timing_diagnostic_detail(path: str, attribute: str, following: str) -> s
     spec = SQL_TIMING_DIAGNOSTICS.get((path, name))
     if spec is None or attribute != spec[0]:
         return ""
-    evidence_path = "docs/helix/04-build/evidence/workflow-capacity/" + spec[1]
+    evidence_path = "tests/fixtures/diagnostics/" + spec[1]
     evidence = ROOT / evidence_path
     if not evidence.is_file():
         return ""

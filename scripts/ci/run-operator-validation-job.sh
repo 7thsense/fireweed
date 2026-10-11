@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
-MANIFEST="${ROOT}/docs/helix/04-build/route-feature-manifest.json"
+MANIFEST="${ROOT}/scripts/ci/manifests/route-feature-manifest.json"
 
 STAGE=""
 CAMPAIGN="shared"

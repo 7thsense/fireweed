@@ -8,7 +8,7 @@ ddx:
     - td-sharding-and-shard-ownership
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
-    - build-sp02-deterministic-storage-simulation
+    - build-simple-queue-postgres-refactor
   links:
     - {kind: informed_by, to: prd}
     - {kind: informed_by, to: adr-queue-as-shard-unit-and-projection-families}
@@ -16,7 +16,7 @@ ddx:
     - {kind: informed_by, to: td-sharding-and-shard-ownership}
     - {kind: informed_by, to: tp-scale-substantiation}
     - {kind: informed_by, to: tp-verification-acceptance-criteria}
-    - {kind: informed_by, to: build-sp02-deterministic-storage-simulation}
+    - {kind: informed_by, to: build-simple-queue-postgres-refactor}
   status: proposed
 ---
 

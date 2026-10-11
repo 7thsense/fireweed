@@ -1,7 +1,0 @@
-{
-  "provenance": "Transcript of the observed pre-fix tool result, retained after the run; not a separately redirected subprocess log.",
-  "command": "CARGO_INCREMENTAL=0 cargo test --locked --offline -p fireweed-engine expired_pending_same_owner -- --test-threads=1",
-  "exit_code": 101,
-  "before_change": "prior_owner equality alone qualified ephemeral same-session fence reuse",
-  "observed_output": "running 2 tests\ntest async_control_plane::tests::expired_pending_same_owner_async_gets_a_new_storage_fence ... FAILED\ntest ownership::tests::expired_pending_same_owner_gets_a_new_storage_fence ... FAILED\n\n---- async_control_plane::tests::expired_pending_same_owner_async_gets_a_new_storage_fence stdout ----\nassertion `left == right` failed\n  left: (2, 2)\n right: (2, 3)\n\n---- ownership::tests::expired_pending_same_owner_gets_a_new_storage_fence stdout ----\nassertion `left == right` failed\n  left: (2, 2)\n right: (2, 3)\n\ntest result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 281 filtered out; finished in 0.00s"
-}

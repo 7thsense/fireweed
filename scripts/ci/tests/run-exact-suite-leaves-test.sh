@@ -12,7 +12,7 @@ cat "$EXACT_SUITE_FIXTURE"
 exit "${EXACT_SUITE_EXIT:-0}"
 FAKE
 chmod +x "$CASE_DIR/bin/rustup"
-LEAF=$(python3 - "$ROOT/docs/helix/04-build/functional-matrix-route-sources.json" <<'PY'
+LEAF=$(python3 - "$ROOT/scripts/ci/manifests/functional-matrix-route-sources.json" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1]))["leaves"][0]["leaf_id"])
 PY

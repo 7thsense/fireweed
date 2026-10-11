@@ -19,7 +19,7 @@ from fireweed_test_placement import validate as validate_fireweed_test_placement
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "scripts/ci/storage-remediation-inventory.json"
-AUTHORITY = ROOT / "docs/helix/04-build/storage-authority-manifest.json"
+AUTHORITY = ROOT / "scripts/ci/manifests/storage-authority-manifest.json"
 MODE_FILE = ROOT / "scripts/ci/storage-remediation-policy.mode"
 GENERATOR = ROOT / "scripts/ci/inventory-storage-remediation.py"
 CI = ROOT / ".github/workflows/ci.yml"

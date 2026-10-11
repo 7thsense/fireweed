@@ -10,22 +10,13 @@ kind: product
 
 # Product Requirements Document
 
-## Public cell (ADR-024)
+## Queue product boundary
 
-ADR-024 supersedes the 2026-09-17 storage-selector amendment for public
-selectors. The public product is one cell: an object-log published to S3, a
-Turso projection, and `AsyncProjection`. There is no public storage matrix.
-Filesystem publication stays inside `fireweed-objectlog` as the local adapter
-of that log. Turso `:memory:` is the non-durable form of the same projection.
-The separate in-memory map is not a product projection. Class A durability is
-the object log. Turso is rebuildable through `projection_control` and is not
-the command log.
+[API-007](../02-design/contracts/API-007-queue-claim-commit-contract.md) and ADR-026 define one simple queue interface implemented by PostgreSQL and S3/object-log with a stock Turso 0.8.2 projection. PostgreSQL is the mandatory durable baseline. Both backends satisfy identical observable guarantees and the same public conformance suite. Insert a chunk, claim a natively filtered chunk in priority order, and commit a claimed group with atomic workflow-state updates and next-work inserts. State queries and queue statistics use that same facade. Consumers do not manage storage transactions or filter a broadly claimed queue.
 
-The 2026-09-17 amendment is historical. It does not define current selectors.
-Historical DDx IDs, requirement IDs, artifact names, and original measurements
-retain their identity. SQLite selectors stay retired and are not a differential
-reference. See [the current Rust interface](../02-design/contracts/API-005-fireweed-rust-facade.md)
-and [storage authority manifest](../04-build/storage-authority-manifest.json).
+Success acknowledges durable effects. Every successful later read or claim covers the acknowledged history; projection lag cannot justify a stale empty result. An ambiguous publication resolves through its original request identity. An expired identity remains a tombstone and cannot authorize a new mutation. The object log remains authoritative for S3/Turso; PostgreSQL commits the same logical effects atomically in its native transaction. Neither backend exposes its database or log session to consumers.
+
+The [Architecture](../02-design/architecture.md) owns module boundaries. Its configuration, diagnostics, durable-record and Snorri contracts define the construction and integration details. Helix v0.15.4 concerns apply to this library: encapsulation, typed configuration, caller-owned telemetry/logging, and precisely scoped formal analysis. Passing historical models or legacy facade tests does not qualify the new interface.
 
 ## Summary
 
@@ -36,16 +27,7 @@ Clients push and update items idempotently, workers claim eligible items under a
 lease, and claimed items are finalized as complete, failed, retryable, or
 released.
 
-fireweed is also the transaction mapping layer for this centralized state-machine
-workflow. The native interface is batch-centric. The public storage cell
-(ADR-024) is S3 object-log × Turso projection with `AsyncProjection` only.
-A successful mutation is durable on the object log. A later claim polls applied
-rows; an empty claim is a poll, not a failure of the mutation. A rejected
-mutation has no committed effect. An interrupted or timed-out mutation can be
-resolved through `request_id` without duplicating state transitions. Class A
-durability is the object log. Turso rebuilds through `projection_control` and
-is not the command log. Latency, cost, and recovery time MUST NOT silently
-change state-machine integrity.
+The queue owns atomic claim-group commits, including workflow state and newly inserted work. Success, rejection, ambiguity, recovery and freshness have the same meaning on both backends. Latency and cost optimizations cannot weaken those guarantees.
 
 The product is general-purpose and may become open source. Seventh Sense is the
 first validation workload: several delivery, action, job, and connector queues
@@ -65,25 +47,6 @@ Throughput and latency distributions are reported with the exact topology and
 resource envelope; they are capacity observations, not host-independent pass bars.
 Each measure references a recorded evidence artifact (see "Scale
 Substantiation").
-
-The public durable cell is S3 object-log × Turso projection (ADR-024): object-store
-durability and a rebuildable serving projection. It is the product, not one row
-of a larger matrix. Retired log and projection selectors are not a roadmap.
-
-### Storage product boundary
-
-The public product is one cell: S3 object log × Turso projection (ADR-024).
-`ResponseBarrier` has only `AsyncProjection`. Turso means the embedded/local
-Turso 0.7 adapter in ordinary WAL mode. It is not a default among other
-projections, and it is not a SQLite differential reference. Public selectors
-do not include `memory`, `sqlite`, `postgres`, or `filesystem` logs, `memory`
-or `postgres` projections, `objectlog`, `inmemory`, Hybrid aliases, or `Strict`.
-
-Class A durability is the object log. The log remains authoritative after
-restart and Turso recovers through `projection_control` (high-water plus tail
-replay). There is no public Class B cell. The control plane is not a storage
-cell and not a mandatory PostgreSQL dependency. Public composition is native
-async.
 
 ## Problem and Goals
 
@@ -120,9 +83,9 @@ queue with timestamp ordering as a first-class validation case.
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
 7. Callers can depend on one transaction contract on the public cell
-   (S3 object-log × Turso, `AsyncProjection` only, ADR-024) without
-   backend-specific choreography. Success is durable on the object log.
-   Claim polls applied rows.
+   (PostgreSQL and S3/object-log × Turso, API-007) without
+   backend-specific choreography. Success commits durable atomic effects on the
+   selected backend; successful later reads and claims cover those acknowledgements.
 
 ### Success Metrics
 
@@ -133,7 +96,7 @@ queue with timestamp ordering as a first-class validation case.
 | Queue density | At least 1000 cold queues plus one designated hot queue are active concurrently; all queues become progress-eligible, the hot and cold phases complete exactly, and shared workers/connections/tasks remain bounded rather than growing per queue | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Hot queue scale | At least 10M items resident in one active queue remain writable, claimable, observable, and exactly recoverable under the declared topology | Benchmark per TP-002 E1 and E3 |
 | Core operation capacity | Throughput and p50/p95/p99 for batch push, update, claim, and finalize are published with workload, host, topology, and resource limits; pass/fail uses correctness, progress, bounded resources, and same-run degradation rather than absolute speed | Benchmark harness under representative Seventh Sense and synthetic workloads |
-| External transaction integrity | The public cell (s3 × turso, `AsyncProjection`, ADR-024) satisfies success/error/unknown-outcome semantics and proves crash recovery from the object log. Empty claim is a poll, not a lost mutation. This row does not record a 10M-resident or 1000-queue pass | Cell conformance plus fault injection per TP-003 on that cell |
+| External transaction integrity | Both backends provide atomic group/state/new-work commits, durable ACK, fresh successful reads/claims and exact request replay after crash | Identical public conformance and backend fault injection; no scale pass inferred |
 | Commit latency and cost dial | Applicable Class A logs publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
 | Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
@@ -267,13 +230,12 @@ priority, retry, claim, and state logic with different table shapes.
     connection per queue.
     Aggregate single-node throughput is reported for the declared node;
     multi-node deployment provides aggregate headroom.
-15. Transaction contract on the public cell (ADR-024): S3 object-log × Turso
-    projection and `AsyncProjection` only. Batch mutation success is durable on
-    the object log. Structured rejection has no committed effect. Unknown
-    retries resolve by `request_id`. Idempotency replay and claim exclusivity
-    hold. An empty claim polls applied rows and is not a command failure.
-    Recovery replays the object log through `projection_control`. No caller
-    needs a second cell or a `Strict` barrier.
+15. API-007 applies identically to PostgreSQL and S3/object-log with Turso.
+    Successful group commits durably and atomically update claimed work, workflow
+    state and next work. Rejected groups have zero effects. Ambiguity resolves
+    through original identity; expired identities cannot authorize reuse.
+    Successful later reads and claims cover acknowledgements, including after
+    restart/recovery. No consumer transaction or stale-empty polling escape exists.
 16. Applicable Class A log configurations MUST expose an
     operator-configurable commit-latency
     bound that controls group-commit cadence. Lower bounds reduce mutation

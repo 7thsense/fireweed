@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: queue-module-boundaries
+        name: Queue module boundaries and negative controls
+        entry: python3 scripts/ci/check_queue_boundaries.py --controls
+        language: system
+        pass_filenames: false
+        always_run: true
