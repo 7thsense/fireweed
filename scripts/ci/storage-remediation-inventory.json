@@ -10690,8 +10690,8 @@
           "P2f"
         ],
         "detail": "error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "b37794c49a75aaf0fa4f",
-        "identity": "6e98fd8eda2c366f68e1b75d4f518dd223ef77594d4404ff18e5821123d60329",
+        "id": "1b87249d9542a003f200",
+        "identity": "efbf5d4710496e65bc924932624b4e5a6422abe63a004d4c07ddf0bb3ea6cc01",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -16752,6 +16752,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::receipt_read_discards_stale_absence_and_confirms_current_errors",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::receipt_read_discards_stale_absence_and_confirms_current_errors",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::receipt_read_discards_stale_absence_and_confirms_current_errors"
       },
       {
         "exact_invocation": [
@@ -24338,10 +24358,10 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "618a42235bd18a0d2ccd05a21d897c0000da2903d9e2500fdb9ad14b1548e6a2",
+  "source_inventory_sha256": "a6630572ad5ebc400a6ab38fdb188346a153bbf8745b79a4fd155f30f1ea607e",
   "workspaces": [
     {
-      "listing_error_sha256": "6e98fd8eda2c366f68e1b75d4f518dd223ef77594d4404ff18e5821123d60329",
+      "listing_error_sha256": "efbf5d4710496e65bc924932624b4e5a6422abe63a004d4c07ddf0bb3ea6cc01",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"

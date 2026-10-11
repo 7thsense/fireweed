@@ -37,7 +37,7 @@ impl QueueRecoveryPipeline {
                 .and_then(|n| n.checked_add(65536))
                 .ok_or(QueueError::TooLarge)?,
         )?;
-        let slot = Arc::clone(&self.claim_slots)
+        let slot = Arc::clone(&self.operation_slots)
             .try_acquire_owned()
             .map_err(|_| QueueError::Busy)?;
         let task = ClaimTask {
@@ -105,20 +105,10 @@ impl ClaimTask {
         // Fresh time alone is insufficient: a renewal can publish after recovery
         // but before replay. Validate an authoritative cut after EVERY outcome,
         // including expiry, and discard stale classifications as well as responses.
-        let namespace = self
+        if !self
             .pipeline
-            .store
-            .bind_api007_namespace(&self.request.queue, &self.job)
-            .await?;
-        let current = self
-            .pipeline
-            .store
-            .read_api007_state(namespace, &self.job, &self.pipeline.workers)
-            .await?;
-        let state = current.state();
-        if state.log_start != 0
-            || state.epoch < recovered.acquired_epoch
-            || u64::try_from(state.next_offset).ok() != Some(recovered.target_next_offset)
+            .head_matches(&self.request.queue, recovered, &self.job)
+            .await?
         {
             return Err(unknown("claim replay authority advanced"));
         }

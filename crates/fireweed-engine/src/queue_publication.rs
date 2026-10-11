@@ -12,6 +12,8 @@ use crate::{
 use fireweed_core::queue_contract::*;
 use sha2::{Digest, Sha256};
 
+mod insert_binding;
+pub use insert_binding::validate_insert_receipt;
 mod administrative_frame;
 mod administrative_receipt;
 pub use administrative_frame::*;
@@ -97,29 +99,7 @@ impl<'a> PublicationReceipt<'a> {
         request: &'a InsertRequest,
         outcomes: &'a [InsertOutcome],
     ) -> PublicationResult<Self> {
-        if request.items.len() != outcomes.len() {
-            return invalid("insert result cardinality");
-        }
-        for (item, outcome) in request.items.iter().zip(outcomes) {
-            if request.mode == InsertMode::InsertOnly
-                && matches!(outcome, InsertOutcome::Replaced { .. })
-            {
-                return invalid("replacement result for insert-only request");
-            }
-            let key = match outcome {
-                InsertOutcome::Inserted { key, version }
-                | InsertOutcome::Replaced { key, version } => {
-                    if *version == 0 {
-                        return invalid("zero insert result version");
-                    }
-                    key
-                }
-                InsertOutcome::Rejected { key, .. } => key,
-            };
-            if key != &item.key {
-                return invalid("insert positional identity");
-            }
-        }
+        insert_binding::validate_owned(request, outcomes)?;
         Ok(Self {
             queue: &request.queue,
             id: &request.request_id,

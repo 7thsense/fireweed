@@ -226,32 +226,20 @@ pub(super) async fn claim_receipt_size(
     queue_id: i64,
     request: &ClaimRequest,
 ) -> QueueResult<Option<u64>> {
-    let identity_hash = discovery_digest(request.request_id.as_bytes());
-    let params = || {
-        vec![
-            Value::Integer(queue_id),
-            blob(&identity_hash),
-            blob(request.request_id.as_bytes()),
-        ]
-    };
-    let metadata = one(connection,"SELECT CASE WHEN typeof(fingerprint_format)='integer' THEN fingerprint_format ELSE NULL END,CASE WHEN typeof(fingerprint)='blob' AND length(fingerprint)=32 THEN fingerprint ELSE NULL END,CASE WHEN typeof(expired)='integer' THEN expired ELSE NULL END,CASE WHEN typeof(outcome)='blob' THEN length(outcome) ELSE -1 END FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",params(),4).await?;
-    let Some(metadata) = metadata else {
-        return Ok(None);
-    };
-    if integer(&metadata[0])? != 3 {
-        return Err(unknown("unsupported claim fingerprint format"));
+    use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
+    match read_receipt_metadata(
+        connection,
+        queue_id,
+        ReceiptDomain::Claim,
+        &request.request_id,
+        Some((3, request.fingerprint()?)),
+    )
+    .await?
+    {
+        ReceiptMetadata::Absent => Ok(None),
+        ReceiptMetadata::Expired => Err(QueueError::RequestExpired),
+        ReceiptMetadata::Present { size, .. } => Ok(Some(size)),
     }
-    let fingerprint: [u8; 32] = bytes(&metadata[1])?.try_into().map_err(unknown)?;
-    if fingerprint != request.fingerprint()? {
-        return Err(QueueError::RequestConflict);
-    }
-    match integer(&metadata[2])? {
-        0 => {}
-        1 => return Err(QueueError::RequestExpired),
-        _ => return Err(unknown("invalid receipt expiry")),
-    }
-    let size = u64::try_from(integer(&metadata[3])?).map_err(unknown)?;
-    Ok(Some(size))
 }
 fn add_payload(
     total: &mut u64,

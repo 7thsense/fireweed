@@ -1,6 +1,8 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
+mod insert_replay;
 mod prepare;
+mod receipt_metadata;
 mod receipts;
 mod replay;
 mod selection;
@@ -25,6 +27,7 @@ use fireweed_engine::{
     },
 };
 use fireweed_queue_spool::ScratchWorkers;
+pub use insert_replay::{AdmittedInsertReplay, InsertReplayInput};
 pub use prepare::PreparedClaim;
 pub use receipts::{AdmittedCommitReceipts, ReceiptReadInput};
 pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
@@ -1338,7 +1341,7 @@ mod tests {
             max_attempts: 3,
         }
     }
-    fn work(key: &str, u: i64, opaque: bool) -> NewWork {
+    pub(super) fn work(key: &str, u: i64, opaque: bool) -> NewWork {
         let mut fields = Fields::from([("u".into(), FieldValue::Integer(u))]);
         if opaque {
             fields.insert("opaque".into(), FieldValue::Bytes(vec![7; 1 << 20]));

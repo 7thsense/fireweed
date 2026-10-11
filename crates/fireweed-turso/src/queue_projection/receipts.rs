@@ -134,24 +134,26 @@ impl NativeTransactionWork for ReceiptWorker {
                     blob(identity.as_bytes()),
                 ]
             };
-            let metadata=one(connection,"SELECT CASE WHEN typeof(fingerprint_format)='integer' THEN fingerprint_format ELSE NULL END,CASE WHEN typeof(fingerprint)='blob' AND length(fingerprint)=32 THEN 1 ELSE 0 END,CASE WHEN typeof(expired)='integer' THEN expired ELSE NULL END,CASE WHEN typeof(outcome)='blob' THEN length(outcome) ELSE -1 END FROM q7_requests WHERE queue_id=?1 AND domain=2 AND identity_hash=?2 AND identity=?3",params(),4).await?;
-            let Some(metadata) = metadata else {
-                raw.push(None);
-                continue;
-            };
-            let format = u8::try_from(integer(&metadata[0])?).map_err(unknown)?;
-            if !matches!(format, 3 | 4) || integer(&metadata[1])? != 1 {
-                return Err(unknown("invalid stored receipt fingerprint"));
-            }
-            match integer(&metadata[2])? {
-                1 => {
-                    raw.push(Some((format, None)));
+            use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
+            let (format, size) = match read_receipt_metadata(
+                connection,
+                snapshot.queue_id,
+                ReceiptDomain::Commit,
+                identity,
+                None,
+            )
+            .await?
+            {
+                ReceiptMetadata::Absent => {
+                    raw.push(None);
                     continue;
                 }
-                0 => {}
-                _ => return Err(unknown("invalid stored receipt expiry")),
-            }
-            let size = u64::try_from(integer(&metadata[3])?).map_err(unknown)?;
+                ReceiptMetadata::Expired => {
+                    raw.push(Some((3, None)));
+                    continue;
+                }
+                ReceiptMetadata::Present { format, size } => (format, size),
+            };
             self.charges.push(
                 self.job.owned_buffer(
                     size.checked_mul(4)
