@@ -310,8 +310,27 @@ pub enum InsertOutcome {
     Replaced { key: String, version: u64 },
     Rejected { key: String, reason: Rejection },
 }
+/// Numeric interval bounds are exact values of one scalar type; no coercion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NumericBucket {
+    pub label: String,
+    pub lower_inclusive: FieldValue,
+    pub upper_exclusive: FieldValue,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NumericBucketDimension {
+    pub field: String,
+    pub buckets: Vec<NumericBucket>,
+    pub missing_label: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketCounts {
+    pub label: String,
+    pub counts: Counts,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatsRequest {
+    pub buckets: Option<NumericBucketDimension>,
     pub queue: QueueAddress,
     pub filter: Filter,
     pub group_by: Vec<String>,
@@ -332,6 +351,8 @@ pub struct StatsGroup {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueStats {
+    /// Declaration-order bins, including zero counts, followed by missing.
+    pub buckets: Vec<BucketCounts>,
     pub totals: Counts,
     pub groups: Vec<StatsGroup>,
 }
@@ -991,11 +1012,67 @@ impl CommitGroup {
         fingerprint("commit", &(queue, self))
     }
 }
+impl NumericBucketDimension {
+    pub fn validate(&self, definition: &CollectionDefinition) -> QueueResult<()> {
+        name(&self.field)?;
+        name(&self.missing_label)?;
+        if !definition.admits_field(&self.field) || self.buckets.len() > 50 {
+            return Err(invalid("invalid numeric bucket dimension"));
+        }
+        let mut kind = definition.fields.get(&self.field).copied();
+        for bucket in &self.buckets {
+            name(&bucket.label)?;
+            let ty = bucket.lower_inclusive.field_type();
+            if !matches!(ty, FieldType::Integer | FieldType::Float) || kind.is_some_and(|k| k != ty)
+            {
+                return Err(invalid("numeric bucket type mismatch"));
+            }
+            kind = Some(ty);
+            definition.validate_value(&self.field, &bucket.lower_inclusive)?;
+            definition.validate_value(&self.field, &bucket.upper_exclusive)?;
+            if compare_fields(&bucket.lower_inclusive, &bucket.upper_exclusive)
+                != Some(std::cmp::Ordering::Less)
+            {
+                return Err(invalid("invalid numeric bucket interval"));
+            }
+        }
+        for (i, a) in self.buckets.iter().enumerate() {
+            for b in &self.buckets[..i] {
+                if compare_fields(&a.lower_inclusive, &b.upper_exclusive)
+                    == Some(std::cmp::Ordering::Less)
+                    && compare_fields(&b.lower_inclusive, &a.upper_exclusive)
+                        == Some(std::cmp::Ordering::Less)
+                {
+                    return Err(invalid("overlapping numeric buckets"));
+                }
+            }
+        }
+        if kind.is_some_and(|k| !matches!(k, FieldType::Integer | FieldType::Float)) {
+            return Err(invalid("non-numeric bucket field"));
+        }
+        Ok(())
+    }
+    /// Reference oracle for indexed aggregate implementations. Present values
+    /// of another scalar type and present out-of-range values are omitted.
+    pub fn classify(&self, value: Option<&FieldValue>) -> Option<usize> {
+        let Some(value) = value else {
+            return Some(self.buckets.len());
+        };
+        self.buckets.iter().position(|bucket| {
+            compare_fields(value, &bucket.lower_inclusive)
+                .is_some_and(|o| o != std::cmp::Ordering::Less)
+                && compare_fields(value, &bucket.upper_exclusive) == Some(std::cmp::Ordering::Less)
+        })
+    }
+}
 impl StatsRequest {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
         self.preflight(limits)?;
         limits.validate()?;
         self.filter.validate(&schema.work)?;
+        if let Some(dimension) = &self.buckets {
+            dimension.validate(&schema.work)?;
+        }
         let mut seen = BTreeSet::new();
         for key in &self.group_by {
             if !schema.work.admits_field(key) || !seen.insert(key) {
@@ -1122,7 +1199,11 @@ impl RequestPreflight for StateReadRequest {
 }
 impl RequestPreflight for StatsRequest {
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
-        envelope(&self.queue, self, limits)
+        envelope(&self.queue, self, limits)?;
+        if self.buckets.as_ref().is_some_and(|d| d.buckets.len() > 50) {
+            return Err(invalid("too many numeric buckets"));
+        }
+        Ok(())
     }
 }
 impl RequestPreflight for InsertRequest {

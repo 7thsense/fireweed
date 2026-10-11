@@ -1084,6 +1084,95 @@ fn refs(params: &Parameters) -> Vec<&(dyn ToSql + Sync)> {
         .map(|v| v.as_ref() as &(dyn ToSql + Sync))
         .collect()
 }
+// Covers predicates, five repeated aggregate expressions, joined/final SQL,
+// construction temporaries and bounded numeric parameter containers. Full name
+// bytes are bound once and charged by the owned request budget separately.
+fn bucket_sql_scratch(request: &StatsRequest) -> QueueResult<u64> {
+    request.buckets.as_ref().map_or(Ok(0), |dimension| {
+        (dimension.buckets.len() as u64)
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(16_384))
+            .and_then(|n| n.checked_add((request.filter.fields.len() as u64).checked_mul(4096)?))
+            .ok_or(QueueError::TooLarge)
+    })
+}
+fn field_identity_sql(
+    field: &str,
+    def: &CollectionDefinition,
+    params: &mut Parameters,
+) -> QueueResult<(&'static str, String)> {
+    let no = field_no(def, field)?;
+    let result = if no >= 0 {
+        let no = parameter(params, no);
+        ("fireweed_api007.fields", format!("f.field={no}"))
+    } else {
+        let hash = parameter(params, probe_hash(field.as_bytes()));
+        let name = parameter(params, field.as_bytes().to_vec());
+        (
+            "fireweed_api007.additional_fields",
+            format!("f.name_hash={hash} AND f.name={name}"),
+        )
+    };
+    Ok(result)
+}
+fn field_predicate_sql(predicate: &Predicate, params: &mut Parameters) -> QueueResult<String> {
+    let mut sql = String::new();
+    match predicate {
+        Predicate::Equal(value) => {
+            let bytes = ordered_key(&[Some(value)])?;
+            let hp = parameter(params, probe_hash(&bytes));
+            let vp = parameter(params, bytes);
+            sql.push_str(&format!(" AND f.hash={hp} AND f.full_key={vp}"));
+        }
+        Predicate::In(values) => {
+            let bytes: Vec<_> = values
+                .iter()
+                .map(|v| ordered_key(&[Some(v)]))
+                .collect::<QueueResult<_>>()?;
+            let hashes: Vec<_> = bytes.iter().map(|b| probe_hash(b)).collect();
+            let hp = parameter(params, hashes);
+            let vp = parameter(params, bytes);
+            sql.push_str(&format!(" AND f.hash=ANY({hp}) AND f.full_key=ANY({vp})"));
+        }
+        Predicate::Range { lower, upper } => {
+            let first = lower
+                .as_ref()
+                .or(upper.as_ref())
+                .ok_or_else(|| QueueError::Invalid("empty range".into()))?;
+            let value = match first {
+                Bound::Included(v) | Bound::Excluded(v) => v,
+            };
+            let floor = scalar_type_prefix(value.field_type());
+            let mut ceiling = floor;
+            ceiling[2] += 1;
+            let fp = parameter(params, floor.to_vec());
+            let cp = parameter(params, ceiling.to_vec());
+            sql.push_str(&format!(" AND f.prefix>={fp} AND f.prefix<{cp}"));
+            for (bound, lower) in [(lower, true), (upper, false)] {
+                if let Some(bound) = bound {
+                    let (value, inclusive) = match bound {
+                        Bound::Included(v) => (v, true),
+                        Bound::Excluded(v) => (v, false),
+                    };
+                    let bytes = ordered_key(&[Some(value)])?;
+                    let pp = parameter(params, prefix(&bytes));
+                    let vp = parameter(params, bytes);
+                    let prefix_op = if lower { ">=" } else { "<=" };
+                    let op = match (lower, inclusive) {
+                        (true, true) => ">=",
+                        (true, false) => ">",
+                        (false, true) => "<=",
+                        (false, false) => "<",
+                    };
+                    sql.push_str(&format!(
+                        " AND f.prefix{prefix_op}{pp} AND f.full_key{op}{vp}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(sql)
+}
 fn filter_sql(
     filter: &Filter,
     def: &CollectionDefinition,
@@ -1098,73 +1187,9 @@ fn filter_sql(
         sql.push_str(&format!(" AND r.key_hash=ANY({hp}) AND r.key=ANY({kp})"));
     }
     for (field, predicate) in &filter.fields {
-        let no = field_no(def, field)?;
-        let (table, identity) = if no >= 0 {
-            let no = parameter(params, no);
-            ("fireweed_api007.fields", format!("f.field={no}"))
-        } else {
-            let hash = parameter(params, probe_hash(field.as_bytes()));
-            let name = parameter(params, field.as_bytes().to_vec());
-            (
-                "fireweed_api007.additional_fields",
-                format!("f.name_hash={hash} AND f.name={name}"),
-            )
-        };
+        let (table, identity) = field_identity_sql(field, def, params)?;
         sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity}"));
-        match predicate {
-            Predicate::Equal(value) => {
-                let bytes = ordered_key(&[Some(value)])?;
-                let hp = parameter(params, probe_hash(&bytes));
-                let vp = parameter(params, bytes);
-                sql.push_str(&format!(" AND f.hash={hp} AND f.full_key={vp}"));
-            }
-            Predicate::In(values) => {
-                let bytes: Vec<_> = values
-                    .iter()
-                    .map(|v| ordered_key(&[Some(v)]))
-                    .collect::<QueueResult<_>>()?;
-                let hashes: Vec<_> = bytes.iter().map(|b| probe_hash(b)).collect();
-                let hp = parameter(params, hashes);
-                let vp = parameter(params, bytes);
-                sql.push_str(&format!(" AND f.hash=ANY({hp}) AND f.full_key=ANY({vp})"));
-            }
-            Predicate::Range { lower, upper } => {
-                let first = lower
-                    .as_ref()
-                    .or(upper.as_ref())
-                    .ok_or_else(|| QueueError::Invalid("empty range".into()))?;
-                let value = match first {
-                    Bound::Included(v) | Bound::Excluded(v) => v,
-                };
-                let floor = scalar_type_prefix(value.field_type());
-                let mut ceiling = floor;
-                ceiling[2] += 1;
-                let fp = parameter(params, floor.to_vec());
-                let cp = parameter(params, ceiling.to_vec());
-                sql.push_str(&format!(" AND f.prefix>={fp} AND f.prefix<{cp}"));
-                for (bound, lower) in [(lower, true), (upper, false)] {
-                    if let Some(bound) = bound {
-                        let (value, inclusive) = match bound {
-                            Bound::Included(v) => (v, true),
-                            Bound::Excluded(v) => (v, false),
-                        };
-                        let bytes = ordered_key(&[Some(value)])?;
-                        let pp = parameter(params, prefix(&bytes));
-                        let vp = parameter(params, bytes);
-                        let prefix_op = if lower { ">=" } else { "<=" };
-                        let op = match (lower, inclusive) {
-                            (true, true) => ">=",
-                            (true, false) => ">",
-                            (false, true) => "<=",
-                            (false, false) => "<",
-                        };
-                        sql.push_str(&format!(
-                            " AND f.prefix{prefix_op}{pp} AND f.full_key{op}{vp}"
-                        ));
-                    }
-                }
-            }
-        }
+        sql.push_str(&field_predicate_sql(predicate, params)?);
         sql.push(')');
     }
     Ok(sql)
@@ -1574,10 +1599,12 @@ impl QueueStore for PostgresQueueStore {
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
             let incoming_headers = incoming_headers(&request)?;
+            let sql_scratch = bucket_sql_scratch(&request)?;
             let charge = encoded_len(&request)?
                 .checked_mul(4)
                 .and_then(|n| n.checked_add(limits.max_response_bytes.checked_mul(4)?))
                 .and_then(|n| n.checked_add(incoming_headers))
+                .and_then(|n| n.checked_add(sql_scratch))
                 .ok_or(QueueError::TooLarge)?;
             self.dispatch(charge,move |client,reservation|Box::pin(async move {
                 let _owned_job=reservation;
@@ -1585,7 +1612,7 @@ impl QueueStore for PostgresQueueStore {
                 let mut params:Parameters=vec![Box::new(queue.id),Box::new(now),Box::new(request.eligible_at)];
                 let filter=filter_sql(&request.filter,&queue.schema.work,&mut params)?;
                 let effective="CASE WHEN r.lifecycle=1 AND r.lease_until<=$2 THEN 0 ELSE r.lifecycle END";
-                let lifecycle_filter=if let Some(state)=request.filter.lifecycle {let p=parameter(&mut params,life(state));format!(" AND ({effective})={p}")}else{String::new()};
+                let lifecycle_filter=if let Some(state)=request.filter.lifecycle {let p=parameter(&mut params,life(state));format!(" AND ({effective})={p}::smallint")}else{String::new()};
                 let aggregate=format!("count(*) FILTER(WHERE ({effective})=0),count(*) FILTER(WHERE ({effective})=1),count(*) FILTER(WHERE ({effective})=2),count(*) FILTER(WHERE ({effective})=3),min(r.eligible_since) FILTER(WHERE ({effective})=0 AND r.available_at<=$3)");
                 let base=format!("r.queue_id=$1 AND r.collection=0 AND r.active{filter}{lifecycle_filter}");
                 let total=tx.query_one(&format!("SELECT {aggregate} FROM fireweed_api007.records r WHERE {base}"),&refs(&params)).await.map_err(storage)?;
@@ -1626,7 +1653,35 @@ impl QueueStore for PostgresQueueStore {
 
 
                 }
-                let result=QueueStats {totals,groups};if encoded_len(&result)?>limits.max_response_bytes{return Err(QueueError::TooLarge);}Ok(result)
+                drop(params);
+                let mut buckets = Vec::new();
+                if let Some(dimension) = &request.buckets {
+                    let mut params: Parameters = vec![Box::new(queue.id), Box::new(now), Box::new(request.eligible_at)];
+                    let filter = filter_sql(&request.filter, &queue.schema.work, &mut params)?;
+                    let lifecycle_filter = if let Some(state) = request.filter.lifecycle {
+                        let p = parameter(&mut params, life(state)); format!(" AND ({effective})={p}::smallint")
+                    } else { String::new() };
+                    let base = format!("r.queue_id=$1 AND r.collection=0 AND r.active{filter}{lifecycle_filter}");
+                    // Bind full field identity once, even for long names and 50 bins.
+                    let (table, identity) = field_identity_sql(&dimension.field, &queue.schema.work, &mut params)?;
+                    let mut predicates = Vec::new();
+                    for bucket in &dimension.buckets {
+                        let predicate = Predicate::Range {
+                            lower: Some(Bound::Included(bucket.lower_inclusive.clone())),
+                            upper: Some(Bound::Excluded(bucket.upper_exclusive.clone())),
+                        };
+                        let range = field_predicate_sql(&predicate, &mut params)?;
+                        predicates.push(format!("EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity}{range})"));
+                    }
+                    let missing = format!("NOT EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity})");
+                    predicates.push(missing);
+                    let columns = predicates.iter().map(|p| aggregate.replace("WHERE ", &format!("WHERE ({p}) AND "))).collect::<Vec<_>>().join(",");
+                    let row = tx.query_one(&format!("SELECT {columns} FROM fireweed_api007.records r WHERE {base}"), &refs(&params)).await.map_err(storage)?;
+                    for (i, label) in dimension.buckets.iter().map(|b| &b.label).chain(std::iter::once(&dimension.missing_label)).enumerate() {
+                        buckets.push(BucketCounts { label: label.clone(), counts: counts(&row, i * 5)? });
+                    }
+                }
+                let result=QueueStats {totals,groups,buckets};if encoded_len(&result)?>limits.max_response_bytes{return Err(QueueError::TooLarge);}Ok(result)
             })).await
         })
     }
@@ -1649,7 +1704,7 @@ impl QueueStore for PostgresQueueStore {
                 let after=if let Some(raw)=&request.cursor {Some(read_cursor(raw,&queue.secret,scope)?)}else{None};
                 let mut params:Parameters=vec![Box::new(queue.id),Box::new(col)];
                 let mut filter=filter_sql(&request.filter,def,&mut params)?;
-                if let Some(state)=request.filter.lifecycle {let p=parameter(&mut params,life(state));let np=parameter(&mut params,now);filter.push_str(&format!(" AND (CASE WHEN r.lifecycle=1 AND r.lease_until<={np} THEN 0 ELSE r.lifecycle END)={p}"));}
+                if let Some(state)=request.filter.lifecycle {let p=parameter(&mut params,life(state));let np=parameter(&mut params,now);filter.push_str(&format!(" AND (CASE WHEN r.lifecycle=1 AND r.lease_until<={np} THEN 0 ELSE r.lifecycle END)={p}::smallint"));}
                 let (join,sort)=if request.index=="$key"{(String::new(),"r.key")}else{let p=parameter(&mut params,index_no(def,&request.index)?);(format!(" JOIN fireweed_api007.indexes i ON i.record_id=r.id AND i.index_no={p}"),"i.full_key")};
                 if let Some(after)=&after {let sp=parameter(&mut params,after.sort.clone());let kp=parameter(&mut params,after.key.clone());let op=if request.descending{"<"}else{">"};filter.push_str(&format!(" AND ({sort},r.key){op}({sp},{kp})"));}
                 let direction=if request.descending{"DESC"}else{"ASC"};let lp=parameter(&mut params,i64::from(request.max_records)+1);
@@ -2003,6 +2058,12 @@ mod tests {
             tenant: format!("hash-collision-{nonce}-{tenant}"),
             queue: name.into(),
         };
+        fireweed_conformance::queue_contract::numeric_bucket_stats(
+            &store,
+            &clock,
+            q("left", "buckets"),
+        )
+        .await;
         let left = q("left", "same-name");
         let right = q("right", "same-name");
         let another = q("left", "other-name");
@@ -2143,7 +2204,58 @@ mod tests {
         );
         request.cursor = None;
         assert_eq!(store.query(request).await, Err(QueueError::Busy));
+        let mut stats = StatsRequest {
+            queue: QueueAddress {
+                tenant: "t".into(),
+                queue: "q".into(),
+            },
+            filter: Filter::default(),
+            group_by: vec![],
+            eligible_at: 0,
+            buckets: Some(NumericBucketDimension {
+                field: "score".into(),
+                missing_label: "missing".into(),
+                buckets: (0..51)
+                    .map(|i| NumericBucket {
+                        label: "b".into(),
+                        lower_inclusive: FieldValue::Integer(i),
+                        upper_exclusive: FieldValue::Integer(i + 1),
+                    })
+                    .collect(),
+            }),
+        };
+        assert!(matches!(
+            store.stats(stats.clone()).await,
+            Err(QueueError::Invalid(_))
+        ));
+        stats.buckets.as_mut().unwrap().buckets.pop();
+        assert_eq!(store.stats(stats).await, Err(QueueError::Busy));
         drop(charges);
+        let byte_charge = store.inner.admission.reserve(65_536).unwrap();
+        // An otherwise-valid 50-bin request fits its wire/result allowance but
+        // its SQL scratch cannot fit the remaining 64 KiB. Reject before lookup.
+        let stats = StatsRequest {
+            queue: QueueAddress {
+                tenant: "t".into(),
+                queue: "q".into(),
+            },
+            filter: Filter::default(),
+            group_by: vec![],
+            eligible_at: 0,
+            buckets: Some(NumericBucketDimension {
+                field: "score".into(),
+                missing_label: "missing".into(),
+                buckets: (0..50)
+                    .map(|i| NumericBucket {
+                        label: "b".into(),
+                        lower_inclusive: FieldValue::Integer(i),
+                        upper_exclusive: FieldValue::Integer(i + 1),
+                    })
+                    .collect(),
+            }),
+        };
+        assert_eq!(store.stats(stats).await, Err(QueueError::Busy));
+        drop(byte_charge);
         store.shutdown().await.unwrap();
     }
 }

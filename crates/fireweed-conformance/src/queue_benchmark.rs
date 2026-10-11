@@ -225,6 +225,7 @@ pub async fn run(
     let start = Instant::now();
     let final_stats = store
         .stats(StatsRequest {
+            buckets: None,
             queue: queue.clone(),
             filter: Filter::default(),
             group_by: vec![],

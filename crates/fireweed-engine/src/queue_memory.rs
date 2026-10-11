@@ -610,7 +610,13 @@ impl IncomingHeaders for QueryRequest {
 }
 impl IncomingHeaders for StatsRequest {
     fn headers(&self) -> QueueResult<u64> {
+        let bucket_headers = self
+            .buckets
+            .as_ref()
+            .map_or(0, |d| 256 + d.buckets.len() as u64 * 192);
         filter_headers(&self.filter)?
+            .checked_add(bucket_headers)
+            .ok_or(QueueError::TooLarge)?
             .checked_add(
                 (self.group_by.len() as u64)
                     .checked_mul(64)

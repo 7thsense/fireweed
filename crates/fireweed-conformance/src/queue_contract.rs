@@ -262,6 +262,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
     );
     let stats = store
         .stats(StatsRequest {
+            buckets: None,
             queue: queue.clone(),
             filter: filter("matching"),
             group_by: vec!["kind".into()],
@@ -535,6 +536,7 @@ pub async fn expiry_and_administration(
     );
     let stats = store
         .stats(StatsRequest {
+            buckets: None,
             queue,
             filter: Filter::default(),
             group_by: vec![],
@@ -1032,6 +1034,7 @@ pub async fn ordered_groups_sparse_stats_and_replay_precedence(
     );
     let stats = store
         .stats(StatsRequest {
+            buckets: None,
             queue: queue.clone(),
             filter: filter("groups"),
             group_by: vec!["score".into(), "kind".into()],
@@ -1170,6 +1173,7 @@ pub async fn unrestricted_names_obey_response_bounds(store: &dyn QueueStore, que
     assert!(selected.iter().all(|w| w.record.work.fields.is_empty()));
     let grouped = store
         .stats(StatsRequest {
+            buckets: None,
             queue: queue.clone(),
             filter: filter("names"),
             group_by: vec![name.clone()],
@@ -1356,6 +1360,7 @@ pub async fn verify_process_loss(
     assert_eq!(next[0].record.work.body.as_ref(), &[0, 1, 255]);
     let stats = store
         .stats(StatsRequest {
+            buckets: None,
             queue: queue.clone(),
             filter: Filter::default(),
             group_by: vec![],
@@ -1691,6 +1696,7 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
     );
     let groups = store
         .stats(StatsRequest {
+            buckets: None,
             queue: queue.clone(),
             filter: Filter::default(),
             group_by: vec!["/payload/mixed".into()],
@@ -1881,4 +1887,180 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
             .await,
         Err(QueueError::Invalid(_))
     ));
+}
+
+/// Mandatory numeric visibility oracle: positional bins and one lifecycle snapshot.
+pub async fn numeric_bucket_stats(store: &dyn QueueStore, clock: &TestClock, queue: QueueAddress) {
+    clock.set(0);
+    let mut definition = schema();
+    definition
+        .work
+        .additional_field_prefixes
+        .insert("/numeric/".into());
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: definition,
+        })
+        .await
+        .unwrap();
+    let field = format!("/numeric/{}", "p\0λ/".repeat(16384));
+    let mut items = Vec::new();
+    for (i, v) in [-1.0, 0.0, 0.25, 0.5, 0.75, 1.0].into_iter().enumerate() {
+        let mut work = item(&format!("n{i}"), "buckets", i as i64, i as i64);
+        work.fields.insert(field.clone(), FieldValue::Float(v));
+        items.push(work);
+    }
+    items.push(item("absent", "buckets", 8, 8));
+    let mut integer = item("integer", "buckets", 9, 9);
+    integer.fields.insert(field.clone(), FieldValue::Integer(0));
+    items.push(integer);
+    items.push(item("foreign", "foreign", 10, 10));
+    store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "bucket-seed".into(),
+            mode: InsertMode::InsertOnly,
+            items,
+        })
+        .await
+        .unwrap();
+    let bin = |label: &str, lo: f64, hi: f64| NumericBucket {
+        label: label.into(),
+        lower_inclusive: FieldValue::Float(lo),
+        upper_exclusive: FieldValue::Float(hi),
+    };
+    let dimension = NumericBucketDimension {
+        field: field.clone(),
+        buckets: vec![
+            bin("same", 0.5, 1.0),
+            bin("same", 0.0, 0.5),
+            bin("missing", 2.0, 3.0),
+        ],
+        missing_label: "missing".into(),
+    };
+    let request = StatsRequest {
+        buckets: Some(dimension.clone()),
+        queue: queue.clone(),
+        filter: filter("buckets"),
+        group_by: vec!["kind".into()],
+        eligible_at: 0,
+    };
+    let result = store.stats(request.clone()).await.unwrap();
+    assert_eq!(result.totals.pending, 8);
+    assert_eq!(result.groups.len(), 1);
+    assert_eq!(result.groups[0].counts, result.totals);
+    assert_eq!(
+        result
+            .buckets
+            .iter()
+            .map(|b| (b.label.as_str(), b.counts.pending))
+            .collect::<Vec<_>>(),
+        vec![("same", 2), ("same", 2), ("missing", 0), ("missing", 1)]
+    );
+    for value in [
+        FieldValue::Float(-1.0),
+        FieldValue::Float(1.0),
+        FieldValue::Integer(0),
+    ] {
+        assert_eq!(dimension.classify(Some(&value)), None);
+    }
+    assert_eq!(dimension.classify(None), Some(3));
+    let mut empty = request.clone();
+    empty.buckets.as_mut().unwrap().buckets.clear();
+    let result = store.stats(empty).await.unwrap();
+    assert_eq!(result.buckets.len(), 1);
+    assert_eq!(result.buckets[0].counts.pending, 1);
+    for intervals in [
+        vec![bin("a", 0.0, 1.0), bin("b", 0.5, 2.0)],
+        vec![bin("a", f64::NAN, 1.0)],
+        vec![bin("a", 1.0, 1.0)],
+        (0..51)
+            .map(|i| bin("a", i as f64, i as f64 + 1.0))
+            .collect(),
+    ] {
+        let mut invalid = request.clone();
+        invalid.buckets.as_mut().unwrap().buckets = intervals;
+        assert!(matches!(
+            store.stats(invalid).await,
+            Err(QueueError::Invalid(_))
+        ));
+    }
+    let mut fifty = request.clone();
+    fifty.buckets.as_mut().unwrap().buckets = (0..50)
+        .map(|i| bin("bin", i as f64, i as f64 + 1.0))
+        .collect();
+    assert_eq!(store.stats(fifty).await.unwrap().buckets.len(), 51);
+    let mut integers = request.clone();
+    integers.buckets = Some(NumericBucketDimension {
+        field: "score".into(),
+        missing_label: "missing".into(),
+        buckets: vec![
+            NumericBucket {
+                label: "high".into(),
+                lower_inclusive: FieldValue::Integer(3),
+                upper_exclusive: FieldValue::Integer(i64::MAX),
+            },
+            NumericBucket {
+                label: "low".into(),
+                lower_inclusive: FieldValue::Integer(i64::MIN),
+                upper_exclusive: FieldValue::Integer(3),
+            },
+        ],
+    });
+    assert_eq!(
+        store
+            .stats(integers)
+            .await
+            .unwrap()
+            .buckets
+            .iter()
+            .map(|b| b.counts.pending)
+            .collect::<Vec<_>>(),
+        vec![5, 3, 0]
+    );
+    let mut selection = claim(&queue, "bucket-claim", "buckets");
+    selection.filter.keys = Some(BTreeSet::from(["n1".into()]));
+    let lease = store.claim(selection).await.unwrap();
+    assert_eq!(lease.len(), 1);
+    let result = store.stats(request.clone()).await.unwrap();
+    assert_eq!(
+        (
+            result.buckets[1].counts.pending,
+            result.buckets[1].counts.leased
+        ),
+        (1, 1)
+    );
+    clock.set(1_000_000_000);
+    let mut pending = request.clone();
+    pending.filter.lifecycle = Some(Lifecycle::Pending);
+    let result = store.stats(pending).await.unwrap();
+    assert_eq!(result.totals.pending, 8);
+    assert_eq!(
+        (
+            result.buckets[1].counts.pending,
+            result.buckets[1].counts.leased
+        ),
+        (2, 0)
+    );
+    let visible = query_keys(
+        store,
+        QueryRequest {
+            queue: queue.clone(),
+            source: RecordSource::Work,
+            index: "$key".into(),
+            filter: Filter {
+                lifecycle: Some(Lifecycle::Pending),
+                ..filter("buckets")
+            },
+            descending: false,
+            cursor: None,
+            max_records: 20,
+            max_bytes: 1 << 24,
+        },
+    )
+    .await;
+    assert_eq!(visible.len(), 8);
+    assert!(visible.contains(&"n1".into()));
+    clock.set(0);
 }

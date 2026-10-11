@@ -79,6 +79,7 @@ async fn mandatory_competition_expiry_and_long_ordering() {
     suite::ordered_groups_sparse_stats_and_replay_precedence(&a, &clock, q("groups-stats-replay"))
         .await;
     suite::indexed_additional_attributes(&a, q("additional-attributes")).await;
+    suite::numeric_bucket_stats(&a, &clock, q("numeric-buckets")).await;
     suite::ordered_insert_uniqueness(&a, q("insert-uniqueness")).await;
     suite::shrinking_upsert_index_amplification(&a, q("shrinking-index-upsert")).await;
     suite::unrestricted_names_obey_response_bounds(&a, q("names-bounds")).await;
