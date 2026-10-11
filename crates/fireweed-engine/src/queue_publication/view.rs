@@ -562,7 +562,44 @@ fn parse_receipt<'a>(
     }
     let fingerprint = s.raw(32)?.try_into().unwrap();
     let start = s.rest;
-    let outcome = if domain == 2 {
+    let outcome = parse_receipt_outcome(s, format, domain, fingerprint_format)?;
+    Ok(ReceiptRef {
+        domain,
+        request_id,
+        fingerprint_format,
+        fingerprint,
+        outcome,
+        encoded_outcome: &start[..start.len() - s.rest.len()],
+    })
+}
+
+/// View an original stored FWQP result, not a Postcard DTO. The full result is
+/// structurally validated before any restartable iterator becomes available.
+/// Domain/fingerprint formats retain the same compatibility rules as envelopes.
+pub fn view_receipt_outcome(
+    domain: u8,
+    fingerprint_format: u8,
+    raw: &[u8],
+) -> PublicationResult<ReceiptOutcomeRef<'_>> {
+    let format = match (domain, fingerprint_format) {
+        (0 | 2, 3) => PublicationFormat::V1,
+        (2, 4) => PublicationFormat::V2,
+        _ => return invalid("unsupported stored receipt domain/fingerprint"),
+    };
+    let mut scan = Scan { rest: raw };
+    let outcome = parse_receipt_outcome(&mut scan, format, domain, fingerprint_format)?;
+    if !scan.rest.is_empty() {
+        return invalid("trailing stored receipt bytes");
+    }
+    Ok(outcome)
+}
+fn parse_receipt_outcome<'a>(
+    s: &mut Scan<'a>,
+    format: PublicationFormat,
+    domain: u8,
+    fingerprint_format: u8,
+) -> PublicationResult<ReceiptOutcomeRef<'a>> {
+    Ok(if domain == 2 {
         ReceiptOutcomeRef::Commit(match s.tag()? {
             0 if fingerprint_format == 3 => CommitOutcomeRef::Committed(parse_versions(s)?),
             1 => CommitOutcomeRef::Rejected(if fingerprint_format == 4 {
@@ -588,14 +625,6 @@ fn parse_receipt<'a>(
             entries: &entries[..entries.len() - s.rest.len()],
             count,
         })
-    };
-    Ok(ReceiptRef {
-        domain,
-        request_id,
-        fingerprint_format,
-        fingerprint,
-        outcome,
-        encoded_outcome: &start[..start.len() - s.rest.len()],
     })
 }
 

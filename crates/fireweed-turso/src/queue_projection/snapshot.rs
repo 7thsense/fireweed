@@ -12,15 +12,33 @@ impl NativeQueueSnapshot {
         input
             .request
             .validate(self.definition.schema(), &input.limits)?;
-        let view = input.genesis.view()?;
+        self.validate_point(
+            &input.genesis,
+            &input.request.queue,
+            (
+                input.required_next_offset,
+                input.required_insertion_sequence,
+                input.required_last_record_epoch,
+            ),
+        )
+    }
+    pub(super) fn validate_point(
+        &self,
+        genesis: &OwnedQueueLogRecord,
+        queue: &QueueAddress,
+        required: (u64, u64, u64),
+    ) -> QueueResult<()> {
+        let view = genesis.view()?;
         let address = view.address();
-        if input.request.queue.tenant != address.tenant
-            || input.request.queue.queue != address.queue
-            || self.next_offset != input.required_next_offset
-            || self.insertion_sequence != input.required_insertion_sequence
-            || self.last_record_epoch != input.required_last_record_epoch
+        if queue.tenant != address.tenant
+            || queue.queue != address.queue
+            || (
+                self.next_offset,
+                self.insertion_sequence,
+                self.last_record_epoch,
+            ) != required
         {
-            return Err(unknown("claim snapshot authority mismatch"));
+            return Err(unknown("queue snapshot authority mismatch"));
         }
         Ok(())
     }

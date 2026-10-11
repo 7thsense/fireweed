@@ -75,8 +75,9 @@ contracts, designs and this execution plan concise and maintained in place.
 
 The concrete PostgreSQL interface and public mandatory suite exist. Native S3
 transport/fence/recovery and stock-Turso atomic projection, current claim replay
-and filtered candidate selection, resolved claim preparation and owned conditional
-claim publication with original-identity resolution are internal primitives.
+and filtered candidate selection, resolved claim preparation, owned conditional
+claim publication with original-identity resolution and immutable native commit
+receipt lookup are internal primitives.
 Claim completion validates fresh current ownership and a subsequent authoritative
 head cut; provisional tokens cannot become a response. These local checks are
 not a public S3/Turso qualification. The full constructor/QueueStore, remaining

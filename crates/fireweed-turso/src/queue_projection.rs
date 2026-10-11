@@ -1,6 +1,7 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
 mod prepare;
+mod receipts;
 mod replay;
 mod selection;
 mod snapshot;
@@ -25,6 +26,7 @@ use fireweed_engine::{
 };
 use fireweed_queue_spool::ScratchWorkers;
 pub use prepare::PreparedClaim;
+pub use receipts::{AdmittedCommitReceipts, ReceiptReadInput};
 pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 pub use selection::AdmittedClaimSelection;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -1490,7 +1492,7 @@ mod tests {
         );
         snapshot
     }
-    fn group(id: &str) -> CommitGroup {
+    pub(super) fn group(id: &str) -> CommitGroup {
         CommitGroup {
             request_id: id.into(),
             claimed_updates: vec![],
@@ -1566,7 +1568,7 @@ mod tests {
         workers.close_and_drain().await.unwrap();
         assert_eq!(admission.usage().unwrap(), (0, 0));
     }
-    async fn apply_group_record(
+    pub(super) async fn apply_group_record(
         projection: &Arc<QueueProjection>,
         definition: &AdmittedQueueDefinition,
         snapshot: &mut RecordSnapshot,
@@ -1589,7 +1591,7 @@ mod tests {
             )
             .await
     }
-    fn patch(
+    pub(super) fn patch(
         key: &str,
         version: u64,
         priority: Option<i64>,
@@ -2322,6 +2324,48 @@ mod tests {
         ] {
             assert_eq!(inspect(&reopened,"SELECT fingerprint_format,fingerprint,outcome FROM q7_requests WHERE identity=?1",vec![blob(identity.as_bytes())],3).await,expected);
         }
+        let expected_public = vec![
+            ReceiptLookup::Found(CommitReceipt {
+                request_id: "admin-v2".into(),
+                outcome: GroupOutcome::AdministrativeCommitted {
+                    versions: vec![],
+                    administration: result.clone(),
+                },
+            }),
+            ReceiptLookup::Found(CommitReceipt {
+                request_id: "admin-too-large".into(),
+                outcome: GroupOutcome::Rejected(Rejection::TooLarge),
+            }),
+        ];
+        let read = reopened
+            .read_commit_receipts(
+                ReceiptReadInput {
+                    genesis: encode_checked_genesis(
+                        1,
+                        &queue,
+                        &definition,
+                        &[31; 32],
+                        1 << 20,
+                        &job,
+                    )
+                    .unwrap(),
+                    request: ReceiptReadRequest {
+                        queue: queue.clone(),
+                        request_ids: vec!["admin-v2".into(), "admin-too-large".into()],
+                        max_bytes: encoded_len(&expected_public).unwrap(),
+                    },
+                    limits: QueueLimits::default(),
+                    required_next_offset: 4,
+                    required_insertion_sequence: 2,
+                    required_last_record_epoch: 1,
+                },
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.receipts(), expected_public);
+        drop(read);
         workers.close_and_drain().await.unwrap();
     }
     #[tokio::test]

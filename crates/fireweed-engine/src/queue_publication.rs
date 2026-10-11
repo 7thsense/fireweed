@@ -21,6 +21,10 @@ mod measurement;
 pub use administrative_result::*;
 mod work_fragment;
 pub use work_fragment::*;
+mod receipt_projection;
+pub use receipt_projection::{
+    CommitReceiptProjection, ReceiptLookupProjection, receipt_outcome_heap_bound,
+};
 #[cfg(test)]
 mod replay_tests;
 mod view;
