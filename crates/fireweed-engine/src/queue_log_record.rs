@@ -1,5 +1,6 @@
 //! One raw API-007 authoritative record per logical log offset. Borrowed parsing
-//! establishes structure only; genesis schema semantics require admitted decode.
+//! verifies FWQL2 checksum and structure; FWQL1 remains structural-only.
+//! Genesis schema semantics require admitted decode.
 //! Epoch fences a writer. It is neither insertion order nor an apply cursor.
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -9,8 +10,31 @@ use crate::{
 };
 use bytes::Bytes;
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 const MAGIC: &[u8; 5] = b"FWQL1";
+const MAGIC_V2: &[u8; 5] = b"FWQL2";
+/// Checksummed framing detects corruption of this complete record, not
+/// authenticated provenance or substitution of a different valid history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueLogFormat {
+    LegacyV1,
+    ChecksummedV2,
+}
+impl QueueLogFormat {
+    fn trailer_len(self) -> usize {
+        match self {
+            Self::LegacyV1 => 0,
+            Self::ChecksummedV2 => 32,
+        }
+    }
+    fn magic(self) -> &'static [u8; 5] {
+        match self {
+            Self::LegacyV1 => MAGIC,
+            Self::ChecksummedV2 => MAGIC_V2,
+        }
+    }
+}
 const GENESIS: u8 = 0;
 const PUBLICATION: u8 = 1;
 fn invalid(message: &str) -> QueueError {
@@ -49,10 +73,14 @@ pub enum QueueLogPayload<'a> {
     Publication(PublicationView<'a>),
 }
 pub struct QueueLogRecordView<'a> {
+    format: QueueLogFormat,
     epoch: u64,
     payload: QueueLogPayload<'a>,
 }
 impl<'a> QueueLogRecordView<'a> {
+    pub fn format(&self) -> QueueLogFormat {
+        self.format
+    }
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -101,13 +129,41 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 }
-/// Complete borrowed structure validation. Genesis uniqueness, schema semantics,
+/// Complete borrowed structure validation; FWQL2 also verifies its checksum.
+/// FWQL1 remains structural-only and requires an explicit legacy policy. Genesis uniqueness, schema semantics,
 /// predecessor/receipt authority and atomic external cursor are store obligations.
 pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> {
-    let mut reader = Reader(raw);
-    if reader.take(5)? != MAGIC {
-        return Err(invalid("unsupported queue-log record version"));
-    }
+    let format = match raw.get(..5) {
+        Some(magic) if magic == MAGIC => QueueLogFormat::LegacyV1,
+        Some(magic) if magic == MAGIC_V2 => QueueLogFormat::ChecksummedV2,
+        _ => return Err(invalid("unsupported queue-log record version")),
+    };
+    let content = if format == QueueLogFormat::ChecksummedV2 {
+        if raw.len() < 54 {
+            return Err(invalid("truncated checksummed queue-log record"));
+        }
+        let payload_len = u64::from_le_bytes(
+            raw[14..22]
+                .try_into()
+                .map_err(|_| invalid("queue-log payload length"))?,
+        );
+        let expected = usize::try_from(payload_len)
+            .ok()
+            .and_then(|n| n.checked_add(54))
+            .ok_or_else(|| invalid("checksummed queue-log length overflow"))?;
+        if raw.len() != expected {
+            return Err(invalid("checksummed queue-log length mismatch"));
+        }
+        let (content, checksum) = raw.split_at(raw.len() - 32);
+        if Sha256::digest(content).as_slice() != checksum {
+            return Err(invalid("queue-log checksum mismatch"));
+        }
+        content
+    } else {
+        raw
+    };
+    let mut reader = Reader(content);
+    reader.take(5)?;
     let epoch = reader.u64()?;
     if epoch == 0 {
         return Err(invalid("queue-log record has no writer epoch"));
@@ -149,7 +205,11 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
         }
         _ => return Err(invalid("unknown queue-log record kind")),
     };
-    Ok(QueueLogRecordView { epoch, payload })
+    Ok(QueueLogRecordView {
+        format,
+        epoch,
+        payload,
+    })
 }
 
 /// Bytes and every copied header are owned before the admission guard drops.
@@ -210,11 +270,17 @@ fn admitted_output(
         charge,
     })
 }
-fn header(out: &mut Vec<u8>, epoch: u64, tag: u8, payload: usize) -> QueueResult<()> {
+fn header(
+    out: &mut Vec<u8>,
+    epoch: u64,
+    tag: u8,
+    payload: usize,
+    format: QueueLogFormat,
+) -> QueueResult<()> {
     if epoch == 0 {
         return Err(invalid("queue-log record has no writer epoch"));
     }
-    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(format.magic());
     out.extend_from_slice(&epoch.to_le_bytes());
     out.push(tag);
     out.extend_from_slice(
@@ -238,10 +304,23 @@ pub fn genesis_record_len(
     address: &QueueAddress,
     definition: &AdmittedQueueDefinition,
 ) -> QueueResult<u64> {
+    genesis_len_with_format(address, definition, QueueLogFormat::LegacyV1)
+}
+pub fn checked_genesis_record_len(
+    address: &QueueAddress,
+    definition: &AdmittedQueueDefinition,
+) -> QueueResult<u64> {
+    genesis_len_with_format(address, definition, QueueLogFormat::ChecksummedV2)
+}
+fn genesis_len_with_format(
+    address: &QueueAddress,
+    definition: &AdmittedQueueDefinition,
+    format: QueueLogFormat,
+) -> QueueResult<u64> {
     address.validate()?;
     let size = framed_address_len(address)?
         .checked_add(definition.raw().len())
-        .and_then(|n| n.checked_add(70))
+        .and_then(|n| n.checked_add(70 + format.trailer_len()))
         .ok_or(QueueError::TooLarge)?;
     u64::try_from(size).map_err(|_| QueueError::TooLarge)
 }
@@ -253,30 +332,90 @@ pub fn encode_genesis(
     max_bytes: u64,
     job: &Arc<QueueReservation>,
 ) -> QueueResult<OwnedQueueLogRecord> {
+    encode_genesis_with_format(
+        epoch,
+        address,
+        definition,
+        cursor_secret,
+        max_bytes,
+        job,
+        QueueLogFormat::LegacyV1,
+    )
+}
+pub fn encode_checked_genesis(
+    epoch: u64,
+    address: &QueueAddress,
+    definition: &AdmittedQueueDefinition,
+    cursor_secret: &[u8; 32],
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueLogRecord> {
+    encode_genesis_with_format(
+        epoch,
+        address,
+        definition,
+        cursor_secret,
+        max_bytes,
+        job,
+        QueueLogFormat::ChecksummedV2,
+    )
+}
+fn encode_genesis_with_format(
+    epoch: u64,
+    address: &QueueAddress,
+    definition: &AdmittedQueueDefinition,
+    cursor_secret: &[u8; 32],
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+    format: QueueLogFormat,
+) -> QueueResult<OwnedQueueLogRecord> {
     address.validate()?;
     if !definition.belongs_to(job) {
         return Err(invalid("genesis definition belongs to another job"));
     }
-    let size = usize::try_from(genesis_record_len(address, definition)?)
+    let size = usize::try_from(genesis_len_with_format(address, definition, format)?)
         .map_err(|_| QueueError::TooLarge)?;
-    let payload = size.checked_sub(22).ok_or(QueueError::TooLarge)?;
+    let payload = size
+        .checked_sub(22 + format.trailer_len())
+        .ok_or(QueueError::TooLarge)?;
     let mut out = admitted_output(size, max_bytes, job)?;
-    header(&mut out.bytes, epoch, GENESIS, payload)?;
+    header(&mut out.bytes, epoch, GENESIS, payload, format)?;
     let framed = encode_address(address)?;
     blob(&mut out.bytes, &framed)?;
     blob(&mut out.bytes, definition.raw())?;
     out.bytes.extend_from_slice(cursor_secret);
-    view_queue_log_record(&out.bytes)?;
-    Ok(OwnedQueueLogRecord {
-        bytes: out.bytes.into(),
-        _charge: out.charge,
-    })
+    let record = seal_record(out, format);
+    record.view()?;
+    Ok(record)
 }
 pub fn encode_publication_record(
     epoch: u64,
     publication: &[u8],
     max_bytes: u64,
     job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueLogRecord> {
+    encode_publication_with_format(epoch, publication, max_bytes, job, QueueLogFormat::LegacyV1)
+}
+pub fn encode_checked_publication_record(
+    epoch: u64,
+    publication: &[u8],
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueLogRecord> {
+    encode_publication_with_format(
+        epoch,
+        publication,
+        max_bytes,
+        job,
+        QueueLogFormat::ChecksummedV2,
+    )
+}
+fn encode_publication_with_format(
+    epoch: u64,
+    publication: &[u8],
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+    format: QueueLogFormat,
 ) -> QueueResult<OwnedQueueLogRecord> {
     let validated = view_resolved_publication(publication)
         .map_err(|_| invalid("invalid embedded queue publication"))?;
@@ -287,15 +426,28 @@ pub fn encode_publication_record(
     .validate()?;
     let size = publication
         .len()
-        .checked_add(22)
+        .checked_add(22 + format.trailer_len())
         .ok_or(QueueError::TooLarge)?;
     let mut out = admitted_output(size, max_bytes, job)?;
-    header(&mut out.bytes, epoch, PUBLICATION, publication.len())?;
+    header(
+        &mut out.bytes,
+        epoch,
+        PUBLICATION,
+        publication.len(),
+        format,
+    )?;
     out.bytes.extend_from_slice(publication);
-    Ok(OwnedQueueLogRecord {
+    Ok(seal_record(out, format))
+}
+fn seal_record(mut out: AdmittedOutput, format: QueueLogFormat) -> OwnedQueueLogRecord {
+    if format == QueueLogFormat::ChecksummedV2 {
+        let checksum = Sha256::digest(&out.bytes);
+        out.bytes.extend_from_slice(&checksum);
+    }
+    OwnedQueueLogRecord {
         bytes: out.bytes.into(),
         _charge: out.charge,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +458,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
     const GOLDEN: &str = "4657514c3107000000000000000060000000000000001a0000000000000046575141444452310100000000000000740100000000000000711600000000000000ffffffffffffffffffff465751443400000000000103a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
+    const GOLDEN_V2: &str = "4657514c3207000000000000000060000000000000001a0000000000000046575141444452310100000000000000740100000000000000711600000000000000ffffffffffffffffffff465751443400000000000103a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5083f3d5bca758a84e221d72cbf83450855b81ea52a5faa1e4922634eccd25717";
     fn hex(raw: &[u8]) -> String {
         raw.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -337,6 +490,91 @@ mod tests {
     }
     fn job() -> Arc<QueueReservation> {
         Arc::new(QueueAdmission::new(1, 1 << 20).unwrap().reserve(0).unwrap())
+    }
+    #[test]
+    fn checked_genesis_golden_bounds_and_every_single_bit_corruption() {
+        let job = job();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let n = checked_genesis_record_len(&address(), &definition).unwrap();
+        assert_eq!(n, 150);
+        let record =
+            encode_checked_genesis(7, &address(), &definition, &[0xa5; 32], n, &job).unwrap();
+        assert_eq!(hex(record.bytes()), GOLDEN_V2);
+        assert_eq!(
+            record.view().unwrap().format(),
+            QueueLogFormat::ChecksummedV2
+        );
+        assert_eq!(
+            view_queue_log_record(&golden()).unwrap().format(),
+            QueueLogFormat::LegacyV1
+        );
+        assert!(matches!(
+            encode_checked_genesis(7, &address(), &definition, &[0xa5; 32], n - 1, &job),
+            Err(QueueError::TooLarge)
+        ));
+        for offset in 0..record.bytes().len() {
+            for bit in 0..8 {
+                let mut changed = record.bytes().to_vec();
+                changed[offset] ^= 1 << bit;
+                assert!(
+                    view_queue_log_record(&changed).is_err(),
+                    "offset={offset}, bit={bit}"
+                );
+            }
+        }
+        let mut appended = record.bytes().to_vec();
+        appended.push(0);
+        assert!(view_queue_log_record(&appended).is_err());
+        assert!(view_queue_log_record(&record.bytes()[..record.bytes().len() - 1]).is_err());
+    }
+    #[test]
+    fn checked_publication_preserves_inner_versions_and_covers_complete_record() {
+        use crate::{
+            queue_planner::{RecordSnapshot, combine_deltas},
+            queue_publication::encode_publication_pinned,
+        };
+        let job = job();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let before = RecordSnapshot::default();
+        let delta = combine_deltas(&[], 0).unwrap();
+        let frame = encode_publication_pinned(
+            &address(),
+            definition.pin(),
+            &before,
+            &delta,
+            &[],
+            4096,
+            &job,
+        )
+        .unwrap();
+        for version in [b'1', b'2'] {
+            let mut inner = frame.as_bytes().to_vec();
+            inner[4] = version;
+            let n = inner.len() as u64 + 54;
+            let record = encode_checked_publication_record(9, &inner, n, &job).unwrap();
+            assert_eq!(
+                record.view().unwrap().format(),
+                QueueLogFormat::ChecksummedV2
+            );
+            assert_eq!(&record.bytes()[22..record.bytes().len() - 32], &inner);
+            assert!(matches!(
+                encode_checked_publication_record(9, &inner, n - 1, &job),
+                Err(QueueError::TooLarge)
+            ));
+            if version == b'1' {
+                assert_eq!(
+                    hex(record.bytes()),
+                    "4657514c3209000000000000000157000000000000004657515031010000000000000074010000000000000071ca34cd395acac8ddffbe8b24816de31c87573a5290d20f00070e62cf8ae9dfef0000000000000000000000000000000000000000000000000000000000000000138bea4f2fd135807bcb48096e538dd43d8418ce0482c153e0685f4032f72497"
+                );
+            }
+            for offset in 0..record.bytes().len() {
+                let mut changed = record.bytes().to_vec();
+                changed[offset] ^= 1;
+                assert!(view_queue_log_record(&changed).is_err(), "offset={offset}");
+            }
+        }
     }
     #[test]
     fn payload_clones_and_slices_retain_final_reservation_until_last_alias() {
@@ -523,7 +761,14 @@ mod tests {
                 .unwrap();
         assert!(encode_publication_record(1, frame.as_bytes(), 4096, &job).is_err());
         let mut wrapper = vec![];
-        header(&mut wrapper, 1, PUBLICATION, frame.as_bytes().len()).unwrap();
+        header(
+            &mut wrapper,
+            1,
+            PUBLICATION,
+            frame.as_bytes().len(),
+            QueueLogFormat::LegacyV1,
+        )
+        .unwrap();
         wrapper.extend_from_slice(frame.as_bytes());
         assert!(view_queue_log_record(&wrapper).is_err());
     }

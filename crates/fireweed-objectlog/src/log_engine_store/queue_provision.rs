@@ -4,7 +4,9 @@ use super::*;
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
-    queue_log_record::{QueueLogPayload, encode_genesis, genesis_record_len},
+    queue_log_record::{
+        QueueLogFormat, QueueLogPayload, checked_genesis_record_len, encode_checked_genesis,
+    },
     queue_schema_codec::AdmittedQueueDefinition,
 };
 use fireweed_queue_spool::ScratchWorkers;
@@ -19,6 +21,7 @@ pub struct ProvisionedApi007Genesis {
     definition: AdmittedQueueDefinition,
     cursor_secret: [u8; 32],
     target: object_log::AuthoritativePartitionState,
+    format: QueueLogFormat,
     _charge: OwnedQueueBufferCharge,
 }
 impl ProvisionedApi007Genesis {
@@ -30,6 +33,9 @@ impl ProvisionedApi007Genesis {
     }
     pub fn cursor_secret(&self) -> &[u8; 32] {
         &self.cursor_secret
+    }
+    pub fn format(&self) -> QueueLogFormat {
+        self.format
     }
     pub fn target(&self) -> object_log::AuthoritativePartitionState {
         self.target
@@ -122,7 +128,7 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             charge: Some(charge),
             _task_slot: task_slot,
         };
-        if genesis_record_len(&task.address, &task.incoming)? > max_record_bytes {
+        if checked_genesis_record_len(&task.address, &task.incoming)? > max_record_bytes {
             return Err(QueueError::TooLarge);
         }
         tokio::spawn(async move { task.execute().await })
@@ -144,7 +150,7 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> ProvisionTask<S> {
             }
             let mut namespace = acquired.into_namespace();
             if target.next_offset == 0 {
-                let record = encode_genesis(
+                let record = encode_checked_genesis(
                     target.epoch,
                     &self.address,
                     &self.incoming,
@@ -207,6 +213,7 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> ProvisionTask<S> {
                 definition,
                 cursor_secret,
                 target,
+                format: record.format(),
                 _charge: self.charge.take().expect("one authority charge"),
             });
         }
@@ -292,6 +299,7 @@ mod tests {
         let gb = gb.unwrap();
         assert_eq!(ga.cursor_secret(), gb.cursor_secret());
         assert!([1, 2].contains(&ga.cursor_secret()[0]));
+        assert_eq!(ga.format(), QueueLogFormat::ChecksummedV2);
         assert_eq!(ga.definition().raw(), legacy);
         assert_eq!(gb.definition().pin(), ga.definition().pin());
         assert_eq!(ga.target().next_offset, 1);
@@ -317,6 +325,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(current.format(), QueueLogFormat::ChecksummedV2);
         assert_eq!(current.definition().raw(), legacy);
         assert_eq!(current.definition().pin(), original_pin);
         assert_eq!(*current.cursor_secret(), original_secret);
@@ -337,6 +346,63 @@ mod tests {
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn actual_legacy_record_is_identified_and_never_reframed_on_reopen() {
+        let root = super::super::tests::temp_root("api007-legacy-record");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = open(&root).await;
+        let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let legacy = [0, 0, 0, 0, 1, 3];
+        let req = request(&store, &legacy, 71, &job).await;
+        let state = store
+            .acquire_api007_state(req.namespace, &job, &workers)
+            .await
+            .unwrap();
+        let record = fireweed_engine::queue_log_record::encode_genesis(
+            state.state().epoch,
+            &address(),
+            &req.definition,
+            &[71; 32],
+            65536,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(record.view().unwrap().format(), QueueLogFormat::LegacyV1);
+        let appended = store
+            .append_api007_record(state.into_namespace(), record, 0, &job, &workers)
+            .await
+            .unwrap();
+        assert!(appended.outcome().is_ok());
+        drop(appended);
+        drop(req.definition);
+        drop(job);
+        drop(store);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        let reopened = open(&root).await;
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let normalized = encode_definition(&schema()).unwrap();
+        let recovered = reopened
+            .provision_api007_genesis(
+                request(&reopened, &normalized, 99, &job).await,
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.format(), QueueLogFormat::LegacyV1);
+        assert_eq!(recovered.definition().raw(), legacy);
+        assert_eq!(recovered.cursor_secret(), &[71; 32]);
+        assert_eq!(recovered.target().next_offset, 1);
+        drop(recovered);
+        drop(job);
+        workers.close_and_drain().await.unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn different_schema_creators_have_one_original_winner() {
         let root = super::super::tests::temp_root("api007-provision-definition-race");
@@ -457,8 +523,10 @@ mod tests {
         drop(created);
         let path = root.join(location.object_id);
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(u64::from(location.byte_start)))
-            .unwrap();
+        file.seek(SeekFrom::Start(
+            u64::from(location.byte_start) + u64::from(location.byte_len) - 33,
+        ))
+        .unwrap();
         file.write_all(b"X").unwrap();
         drop(file);
         assert!(matches!(
