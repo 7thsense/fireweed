@@ -2228,6 +2228,16 @@ mod tests {
     }
 }
 
+/// Opaque identity of one completed or in-progress selected-source scan.
+#[derive(Clone)]
+pub struct AdministrativeScanIdentity(std::sync::Arc<()>);
+impl PartialEq for AdministrativeScanIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for AdministrativeScanIdentity {}
+
 /// Transient row resolved against immutable fenced authority. Only accepted
 /// rows have a command. No-op, precondition or lease-only rejections update
 /// histograms without emitting a packet. Emitted packets expose consulted unique authority, including
@@ -2235,6 +2245,8 @@ mod tests {
 /// separately from accepted effects and later validate complete evidence EOF.
 /// Copying an accessor's payload requires separate admission.
 pub struct ResolvedAdministrativeRow {
+    scan: AdministrativeScanIdentity,
+    ordinal: u64,
     outcome: AdministrativeOutcome,
     clause: usize,
     before: RecordSnapshot,
@@ -2244,6 +2256,15 @@ pub struct ResolvedAdministrativeRow {
     _charge: crate::queue_admission::OwnedQueueBufferCharge,
 }
 impl ResolvedAdministrativeRow {
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+    pub fn scan_identity(&self) -> AdministrativeScanIdentity {
+        self.scan.clone()
+    }
+    pub fn reservation(&self) -> &QueueReservation {
+        self._charge.reservation()
+    }
     pub fn outcome(&self) -> &AdministrativeOutcome {
         &self.outcome
     }
@@ -2264,11 +2285,26 @@ impl ResolvedAdministrativeRow {
 /// complete uniqueness reduction, ordinary CAS/lease checks or publication.
 /// The backend keeps its fence until all those checks and atomic storage finish.
 pub struct AdmittedAdministrativeScan {
+    scan: AdministrativeScanIdentity,
+    initial_sequence: u64,
+    packet_count: u64,
     result: AdministrativeResult,
     overlap: bool,
     _charge: crate::queue_admission::OwnedQueueBufferCharge,
 }
 impl AdmittedAdministrativeScan {
+    pub fn packet_count(&self) -> u64 {
+        self.packet_count
+    }
+    pub fn scan_identity(&self) -> AdministrativeScanIdentity {
+        self.scan.clone()
+    }
+    pub fn initial_sequence(&self) -> u64 {
+        self.initial_sequence
+    }
+    pub fn reservation(&self) -> &QueueReservation {
+        self._charge.reservation()
+    }
     pub fn result(&self) -> &AdministrativeResult {
         &self.result
     }
@@ -2317,6 +2353,8 @@ where
         )?,
     )?;
     let root = reservation.buffer(add(root_bytes, scale(clauses.len() as u64, 8192)?)?)?;
+    let scan = AdministrativeScanIdentity(std::sync::Arc::new(()));
+    let mut packet_count = 0u64;
     let mut result = AdministrativeResult {
         histogram: Default::default(),
         items: vec![],
@@ -2384,6 +2422,8 @@ where
             resolve_candidate(key, row, image, &mut proposal, schema, &reservation)?
         {
             let owned = ResolvedAdministrativeRow {
+                scan: scan.clone(),
+                ordinal: packet_count,
                 outcome: proposal.outcome.clone(),
                 clause,
                 before: candidate.before,
@@ -2397,11 +2437,17 @@ where
             sink(owned)
                 .await
                 .map_err(|_| unknown("administrative sink failed before EOF"))?;
+            packet_count = packet_count
+                .checked_add(1)
+                .ok_or_else(|| unknown("administrative packet count exhausted"))?;
         }
         result.histogram.record(&proposal.outcome)?;
         result.clauses[clause].histogram.record(&proposal.outcome)?;
     }
     Ok(AdmittedAdministrativeScan {
+        scan,
+        initial_sequence: ordinary_image.next_sequence,
+        packet_count,
         result,
         overlap,
         _charge: root.into_owned(std::sync::Arc::clone(&reservation))?,

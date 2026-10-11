@@ -13,9 +13,10 @@ fn memory_bound(bytes: u64) -> QueueResult<u64> {
         .and_then(|bytes| bytes.checked_add(8192))
         .ok_or_else(|| unknown("evidence allocation overflow"))
 }
-fn checksum(key: &UniqueIdentity, ordinal: u64, body: &[u8]) -> [u8; 32] {
+fn checksum(key: &UniqueIdentity, ordinal: u64, body: &[u8], binding: &[u8; 32]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"fireweed-scratch-unique-evidence-v1\0");
+    hash.update(binding);
     hash.update(ordinal.to_be_bytes());
     hash.update([u8::from(key.collection.is_some())]);
     for segment in [
@@ -47,10 +48,10 @@ impl QueueSpool {
         }
         result
     }
-    fn append_evidence_checked(
+    fn append_evidence_checked<T: serde::Serialize>(
         &mut self,
         key: &UniqueIdentity,
-        record: &ScratchUniqueEvidence,
+        record: &T,
     ) -> QueueResult<()> {
         let bytes = fireweed_core::queue_contract::encoded_len(record)
             .map_err(|_| unknown("evidence canonical measurement failed"))?;
@@ -60,7 +61,7 @@ impl QueueSpool {
         payload.extend_from_slice(MAGIC);
         // to_extend writes into the pre-admitted buffer; no second payload Vec.
         let mut payload = postcard::to_extend(record, payload).map_err(unknown)?;
-        let digest = checksum(key, self.count, &payload[MAGIC.len()..]);
+        let digest = checksum(key, self.count, &payload[MAGIC.len()..], &self.binding);
         payload.extend_from_slice(&digest);
         if payload.len() as u64 != bytes {
             return Err(unknown("evidence encoding size mismatch"));
@@ -68,6 +69,46 @@ impl QueueSpool {
         self.append(key, &payload)
     }
 }
+#[derive(serde::Serialize)]
+pub(super) enum BorrowedScratchEffect<'a> {
+    Release(&'a fireweed_engine::queue_planner::RecordIdentity),
+    Claim {
+        owner: &'a fireweed_engine::queue_planner::RecordIdentity,
+        origin: UniqueClaimOrigin,
+    },
+    Observe,
+}
+#[derive(serde::Serialize)]
+struct BorrowedScratchEvidence<'a> {
+    initial_loaded: bool,
+    initial_owner: Option<&'a fireweed_engine::queue_planner::RecordIdentity>,
+    effect: BorrowedScratchEffect<'a>,
+}
+impl QueueSpool {
+    pub(super) fn append_borrowed_evidence(
+        &mut self,
+        key: &UniqueIdentity,
+        initial_owner: Option<&fireweed_engine::queue_planner::RecordIdentity>,
+        effect: BorrowedScratchEffect<'_>,
+    ) -> QueueResult<()> {
+        if self.poisoned {
+            return Err(unknown("append evidence after poison"));
+        }
+        let result = self.append_evidence_checked(
+            key,
+            &BorrowedScratchEvidence {
+                initial_loaded: true,
+                initial_owner,
+                effect,
+            },
+        );
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+}
+
 struct AdmittedKey {
     key: UniqueIdentity,
     _charge: OwnedQueueBufferCharge,
@@ -134,7 +175,9 @@ impl SortedSpool {
             return Err(unknown("unknown evidence envelope"));
         }
         let body = &raw[MAGIC.len()..raw.len() - TRAILER];
-        if checksum(key, entry.descriptor.0[9], body).as_slice() != &raw[raw.len() - TRAILER..] {
+        if checksum(key, entry.descriptor.0[9], body, &self.binding).as_slice()
+            != &raw[raw.len() - TRAILER..]
+        {
             return Err(unknown("evidence checksum mismatch"));
         }
         let (record, tail) =
@@ -400,7 +443,7 @@ mod tests {
         let mut payload = MAGIC.to_vec();
         payload.extend_from_slice(body);
         payload.extend_from_slice(&if valid_digest {
-            checksum(tuple, spool.count, body)
+            checksum(tuple, spool.count, body, &spool.binding)
         } else {
             [0; 32]
         });
@@ -574,7 +617,7 @@ mod tests {
         let body = postcard::to_allocvec(&record).unwrap();
         let mut payload = MAGIC.to_vec();
         payload.extend_from_slice(&body);
-        payload.extend_from_slice(&checksum(&tuple, 0, &body));
+        payload.extend_from_slice(&checksum(&tuple, 0, &body, &spool.binding));
         spool.append(&tuple, &payload).unwrap();
         spool.append(&tuple, &payload).unwrap();
         let mut sorted = spool.seal().unwrap();

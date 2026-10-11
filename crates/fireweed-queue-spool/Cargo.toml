@@ -13,7 +13,9 @@ fireweed-engine = { path = "../fireweed-engine" }
 tempfile = "3.27"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 sha2 = "0.11"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "sync"] }
 
 [dev-dependencies]
+futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }

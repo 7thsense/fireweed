@@ -291,9 +291,9 @@ fn propose_target_view(
 
 mod stream;
 pub use stream::{
-    AdmittedAdministrativeGroupProposal, AdmittedAdministrativeScan, ResolvedAdministrativeRow,
-    SelectedAdministrativeInput, plan_broad_group, plan_broad_group_stream,
-    scan_broad_group_to_sink,
+    AdministrativeScanIdentity, AdmittedAdministrativeGroupProposal, AdmittedAdministrativeScan,
+    ResolvedAdministrativeRow, SelectedAdministrativeInput, plan_broad_group,
+    plan_broad_group_stream, scan_broad_group_to_sink,
 };
 
 /// Native selection ownership, resolved under the containing queue fence.

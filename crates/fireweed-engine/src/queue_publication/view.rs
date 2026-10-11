@@ -603,3 +603,20 @@ pub fn view_publication(raw: &[u8]) -> PublicationResult<PublicationView<'_>> {
 pub(super) fn summary(raw: &[u8]) -> PublicationResult<PublicationSummary<'_>> {
     view_publication(raw).map(|v| v.summary)
 }
+
+/// Disposable initial-image administrative command, not a standalone publication.
+/// It must contain one advancing live work command and preserve insertion order.
+pub fn parse_administrative_work_fragment(
+    bytes: &[u8],
+    initial_sequence: u64,
+) -> PublicationResult<CommandRef<'_>> {
+    let mut scan = Scan { rest: bytes };
+    let command = parse_command(&mut scan, initial_sequence, initial_sequence)?;
+    if !scan.rest.is_empty()
+        || command.identity.collection.is_some()
+        || command.expected_version.is_none()
+    {
+        return invalid("not one initial administrative work fragment");
+    }
+    Ok(command)
+}

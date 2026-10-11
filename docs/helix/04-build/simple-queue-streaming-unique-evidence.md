@@ -251,3 +251,54 @@ PostgreSQL cursor to physical command/evidence spools, activate public
 administration/preview, or supply S3/Turso parity. The existing aggregate driver
 remains an admitted reference adapter and must not be activated for native broad
 administration.
+
+## Joint command/evidence scratch owner — iteration 50
+
+AdministrativeScratch owns both disposable streams behind one sticky poison state.
+It binds the full queue, exact raw DefinitionPin and initial insertion sequence
+once, admitting context copies before construction. An operation-local held-alive
+identity contributes to the integrity binding of both streams. Each packet and
+summary also carries an opaque scan identity and its owning reservation; foreign
+scan/job delivery is rejected. No queue/request identifier is repeated per row.
+The integrity binding detects accidental corruption or crossed scratch images;
+it is not a new durable format or security authorization mechanism.
+
+Packets carry checked emitted ordinals, and the EOF summary carries their exact
+count. Append requires the next ordinal and advances its delivered count only
+after both streams succeed. Seal requires the same scan/job/initial sequence and
+exact delivery count, including rejected candidates. Skipped first/middle/last/all
+packets and delivery split across two owners cannot seal. Valid empty selections
+and no-op scans emit zero packets and can seal. Swallowing a physical append error
+cannot turn a poisoned owner into complete source evidence.
+
+All consulted probes produce borrowed Observe records; only accepted effects
+produce Release/Claim records. The borrowed encoder preserves existing ephemeral
+variant tags and measures/reserves its payload before allocation. A rejected
+UniqueConflict row can therefore expose contradictory fenced authority after a
+provisional sibling collision; complete reduction returns OutcomeUnknown.
+
+Command fragments reuse the shared resolved-command validation, exact measurement,
+writer and sole parser. They contain one advancing live work mutation: frozen
+predecessor/highwater, exact output metadata, ResolvedFields and ResolvedBody.
+Read-materialized dependency bags, selectors and preserved opaque bodies are
+omitted. The disposable FWWC1 wrapper binds the initial sequence, full key,
+producer ordinal and operation integrity context. This sequence is a validation
+bound for preserved administrative insertion order; ordinary finalization still
+determines the containing group's final sequence.
+
+Sorted command replay admits one raw payload, validates its exact full key through
+fixed windows, rejects duplicate identities/unknown formats/no-ops/trailing bytes,
+and never reruns selection, CAS, lease decisions or clocks. Late command/evidence
+failure poisons the joint owner. The backend must exhaust both sources before ACK
+and verify the expected queue/raw definition/initial sequence before application.
+
+Physical tests cover 5,001 commands under a 1 MiB admission budget and exact
+replay; a tiny composite-index edit with an unchanged 1 MiB dependency and body
+has over 8 MiB of exact evidence across two rows but command bytes below 256 per
+row. Tests inject a partial command write after evidence success, foreign scans,
+jobs, summaries and contexts, valid foreign file-image swaps, malformed fragments,
+every fragment truncation, late file damage and incomplete packet delivery.
+
+This remains disposable preparation. Native PostgreSQL cursor/owned-worker wiring,
+combined ordinary evidence reduction, bounded logical overflow/result receipts,
+FWQP2/public administration/preview and S3/Turso parity remain required.

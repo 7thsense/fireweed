@@ -12,6 +12,8 @@ use crate::{
 use fireweed_core::queue_contract::*;
 
 mod measurement;
+mod work_fragment;
+pub use work_fragment::*;
 #[cfg(test)]
 mod replay_tests;
 mod view;

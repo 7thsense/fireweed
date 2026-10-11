@@ -161,6 +161,7 @@ pub struct QueueSpool {
     index: File,
     spare: File,
     token: Arc<()>,
+    binding: [u8; 32],
     data_bytes: u64,
     count: u64,
     poisoned: bool,
@@ -181,6 +182,7 @@ impl QueueSpool {
             index: tempfile::tempfile_in(directory).map_err(unknown)?,
             spare: tempfile::tempfile_in(directory).map_err(unknown)?,
             token: Arc::new(()),
+            binding: [0; 32],
             data_bytes: 0,
             count: 0,
             poisoned: false,
@@ -191,18 +193,38 @@ impl QueueSpool {
         })
     }
     pub fn append(&mut self, key: &UniqueIdentity, payload: &[u8]) -> QueueResult<()> {
+        self.append_components(
+            key.collection.as_deref(),
+            &key.index,
+            &key.full_sort_key,
+            payload,
+        )
+    }
+    fn append_components(
+        &mut self,
+        collection: Option<&str>,
+        index: &str,
+        tuple: &[u8],
+        payload: &[u8],
+    ) -> QueueResult<()> {
         if self.poisoned {
             return Err(unknown("append after poisoned spool"));
         }
         self.poisoned = true;
-        self.append_checked(key, payload)?;
+        self.append_components_checked(collection, index, tuple, payload)?;
         self.poisoned = false;
         Ok(())
     }
-    fn append_checked(&mut self, key: &UniqueIdentity, payload: &[u8]) -> QueueResult<()> {
-        let collection = key.collection.as_deref().unwrap_or("").as_bytes();
-        let index = key.index.as_bytes();
-        let tuple = &key.full_sort_key;
+    fn append_components_checked(
+        &mut self,
+        collection: Option<&str>,
+        index: &str,
+        tuple: &[u8],
+        payload: &[u8],
+    ) -> QueueResult<()> {
+        let present = collection.is_some();
+        let collection = collection.unwrap_or("").as_bytes();
+        let index = index.as_bytes();
         let total = add(
             add(collection.len() as u64, index.len() as u64)?,
             add(tuple.len() as u64, payload.len() as u64)?,
@@ -217,7 +239,7 @@ impl QueueSpool {
         self.data
             .seek(SeekFrom::Start(self.data_bytes))
             .map_err(unknown)?;
-        for bytes in [collection, index, tuple.as_slice(), payload] {
+        for bytes in [collection, index, tuple, payload] {
             #[cfg(test)]
             if matches!(self.fault, Some(TestFault::PartialAppend)) && !bytes.is_empty() {
                 self.data.write_all(&bytes[..1]).map_err(unknown)?;
@@ -226,7 +248,7 @@ impl QueueSpool {
             self.data.write_all(bytes).map_err(unknown)?;
         }
         let entry = Descriptor([
-            u64::from(key.collection.is_some()),
+            u64::from(present),
             collection_offset,
             collection.len() as u64,
             index_offset,
@@ -263,6 +285,7 @@ impl QueueSpool {
             index: self.index,
             _spare: self.spare,
             token: self.token,
+            binding: self.binding,
             data_bytes: self.data_bytes,
             count: self.count,
             position: 0,
@@ -388,6 +411,7 @@ pub struct SortedSpool {
     index: File,
     _spare: File,
     token: Arc<()>,
+    binding: [u8; 32],
     data_bytes: u64,
     count: u64,
     position: u64,
@@ -823,7 +847,9 @@ mod tests {
     }
 }
 
+mod administrative;
 mod evidence;
+pub use administrative::*;
 
 mod worker;
 pub use worker::ScratchWorkers;
