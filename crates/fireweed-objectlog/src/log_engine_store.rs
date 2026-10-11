@@ -2280,6 +2280,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[tokio::test]
+    async fn api007_transport_isolates_delimiter_addresses_and_replays_oversized_first_batch() {
+        use fireweed_core::queue_contract::QueueAddress;
+        use fireweed_engine::queue_namespace::{
+            decode_namespace, namespace_component, view_address,
+        };
+        let root = temp_root("api007-namespace");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let addresses = [
+            QueueAddress {
+                tenant: "a\0b".into(),
+                queue: "c".into(),
+            },
+            QueueAddress {
+                tenant: "a".into(),
+                queue: "b\0c".into(),
+            },
+            QueueAddress {
+                tenant: "a/b".into(),
+                queue: "β".into(),
+            },
+            QueueAddress {
+                tenant: "a".into(),
+                queue: "b/β".into(),
+            },
+        ];
+        let definitions: Vec<_> = addresses
+            .iter()
+            .map(|address| {
+                let mut definition = qdef();
+                definition.tenant_id = TenantId::new("api007").unwrap();
+                definition.queue_id = QueueId::new(namespace_component(address).unwrap()).unwrap();
+                definition
+            })
+            .collect();
+        let large = "X".repeat(5 * 1024 * 1024);
+        {
+            // Isolated root only: no old partition is remapped by this bridge.
+            let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+                .await
+                .unwrap();
+            let command = |id: String| CommandEnvelope {
+                command_id: CommandId::new(id),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: vec![],
+                command: QueueCommand::PauseQueue(Default::default()),
+                checksum: CommandChecksum(0),
+                created_at: UtcTimestamp::new(1, 0).unwrap(),
+            };
+            for (index, definition) in definitions.iter().enumerate() {
+                log.create_or_read_definition(definition.clone())
+                    .await
+                    .unwrap();
+                let shard =
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                log.ensure_shard(shard.clone()).await.unwrap();
+                let mut epoch = 0;
+                for _ in 0..=index {
+                    epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+                }
+                assert_eq!(epoch, index as u64 + 1);
+                log.append(
+                    shard.clone(),
+                    vec![command(if index == 0 {
+                        large.clone()
+                    } else {
+                        format!("first-{index}")
+                    })],
+                    epoch,
+                )
+                .await
+                .unwrap();
+            }
+            // Interleave partitions: every first batch is durable before any tail.
+            for (index, definition) in definitions.iter().enumerate() {
+                let shard =
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                let epoch = index as u64 + 1;
+                let positions = log
+                    .append(shard.clone(), vec![command(format!("last-{index}"))], epoch)
+                    .await
+                    .unwrap();
+                log.set_emission_cursor(&shard, positions[0].clone())
+                    .await
+                    .unwrap();
+                for extra in 0..index {
+                    log.append(
+                        shard.clone(),
+                        vec![command(format!("extra-{index}-{extra}"))],
+                        epoch,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        for (index, definition) in definitions.iter().enumerate() {
+            let decoded = decode_namespace(definition.queue_id.as_str()).unwrap();
+            let identity = view_address(&decoded).unwrap();
+            assert_eq!(identity.tenant, addresses[index].tenant);
+            assert_eq!(identity.queue, addresses[index].queue);
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            log.ensure_shard(shard.clone()).await.unwrap();
+            let epoch = log.current_epoch(shard.clone()).await.unwrap();
+            let first = log.read_from(shard.clone(), None, 1).await.unwrap();
+            assert_eq!(first.entries.len(), 1);
+            assert_eq!(first.entries[0].0.sequence, 0);
+            assert_eq!(epoch, index as u64 + 1);
+            assert_eq!(first.entries[0].0.backend_epoch, epoch);
+            let expected_first = if index == 0 {
+                large.clone()
+            } else {
+                format!("first-{index}")
+            };
+            assert_eq!(first.entries[0].1.command_id.0.as_str(), expected_first);
+            let second = log
+                .read_from(shard.clone(), first.next.clone(), 1)
+                .await
+                .unwrap();
+            assert_eq!(second.entries.len(), 1);
+            assert_eq!(second.entries[0].0.sequence, 1);
+            assert_eq!(
+                second.entries[0].1.command_id.0.as_str(),
+                format!("last-{index}")
+            );
+            assert_eq!(log.emission_cursor(&shard).await.unwrap(), second.next);
+            let mut from = second.next;
+            for extra in 0..index {
+                let page = log.read_from(shard.clone(), from, 1).await.unwrap();
+                assert_eq!(page.entries.len(), 1);
+                assert_eq!(page.entries[0].0.sequence, extra as u64 + 2);
+                assert_eq!(
+                    page.entries[0].1.command_id.0.as_str(),
+                    format!("extra-{index}-{extra}")
+                );
+                from = page.next;
+            }
+            assert_eq!(log.high_water(shard.clone()).await.unwrap(), from);
+            let end = log.read_from(shard, from, 1).await.unwrap();
+            assert!(end.entries.is_empty());
+            assert!(end.next.is_none());
+        }
+    }
+
     /// fireweed-481d3e43: reopen must not overwrite sealed data objects (object-log v0.3.1).
     /// Large multi-command frames (~20KiB) are the snorri transition-commit shape.
     #[tokio::test]
