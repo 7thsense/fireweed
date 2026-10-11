@@ -1421,19 +1421,23 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             if stall_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(stall_ms)).await;
             }
-            // Epoch is checked under the queue permit. The permit is dropped
-            // before the object PUT so another produce can join the engine seal.
-            // Independent queues already have their own permits.
+            // Legacy epoch validation is serialized under the queue permit.
+            // Native epoch/head validation occurs in sequencer publication.
+            // Drop the permit before object PUT so produces can join a seal.
             let wait_started = Instant::now();
             let metadata = permit.lock().await;
             self.lock_wait.record_append(wait_started.elapsed());
-            let epoch = match job {
-                Some(job) => self.load_epoch_admitted(shard, job).await,
-                None => self.load_epoch(shard).await,
-            }
-            .map_err(PackedAppendError::BeforePosition)?;
-            if epoch != expected_epoch {
-                return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
+            // Native conditional publication validates epoch and head together
+            // in the durable sequencer. Legacy epoch hints are not its authority.
+            if expected_head.is_none() {
+                let epoch = match job {
+                    Some(job) => self.load_epoch_admitted(shard, job).await,
+                    None => self.load_epoch(shard).await,
+                }
+                .map_err(PackedAppendError::BeforePosition)?;
+                if epoch != expected_epoch {
+                    return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
+                }
             }
             let (payload, record_count) = encode()?;
             if record_count <= 0 {

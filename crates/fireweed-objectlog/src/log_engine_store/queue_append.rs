@@ -189,6 +189,7 @@ mod tests {
         let job = Arc::new(admission.reserve(0).unwrap());
         let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
         let shard = store.checked_api007_shard(&namespace).unwrap().clone();
+        store.acquire_epoch(shard.clone()).await.unwrap();
         let epoch = store.acquire_epoch(shard).await.unwrap();
         let raw = encode_definition(&schema()).unwrap();
         let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
@@ -202,7 +203,7 @@ mod tests {
         drop(result);
         let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
         let stale =
-            encode_genesis(epoch + 1, &address(), &definition, &[11; 32], 4096, &job).unwrap();
+            encode_genesis(epoch - 1, &address(), &definition, &[11; 32], 4096, &job).unwrap();
         let result = store
             .append_api007_record(namespace, stale, 1, &job, &workers)
             .await
@@ -348,7 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_io_and_oversized_epoch_fail_before_position() {
+    async fn custom_io_rejects_and_native_append_ignores_legacy_epoch_hint() {
         let root = super::super::tests::temp_root("bounded-epoch");
         std::fs::create_dir_all(&root).unwrap();
         let mut store = Arc::new(
@@ -399,25 +400,23 @@ mod tests {
             .set_len(2 << 20)
             .unwrap();
         store.epochs.lock().unwrap().clear();
+        assert!(store.load_epoch_admitted(&shard, &job).await.is_err());
         let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
         let record = encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
         let result = store
             .append_api007_record(namespace, record, 0, &job, &workers)
             .await
             .unwrap();
-        assert!(
-            matches!(result.outcome(), Err(PackedAppendError::BeforePosition(EngineError::Storage(message))) if message.contains("admitted buffer capacity exhausted")),
-            "{:?}",
-            result.outcome()
-        );
+        assert!(result.outcome().is_ok(), "{:?}", result.outcome());
         assert!(store.epochs.lock().unwrap().is_empty());
-        assert!(
+        assert_eq!(
             store
                 .engine
                 .plan_fetch(&partition_key(&shard), 0, 1, 65536, 1)
                 .unwrap()
                 .entries()
-                .is_empty()
+                .len(),
+            1
         );
         drop(result);
         drop(definition);
@@ -672,14 +671,7 @@ mod tests {
                     Ordering::SeqCst,
                 );
                 if phase == 1 {
-                    let paused = Arc::clone(&blob);
-                    let epoch_path = root.join("fwmeta/epochs");
-                    *super::super::namespace::METADATA_READ_HOOK.lock().unwrap() =
-                        Some(Arc::new(move |path| {
-                            if path.starts_with(&epoch_path) {
-                                crate::block_on_objectlog_future(paused.pause(1));
-                            }
-                        }));
+                    store.pre_position_stall_ms.store(100, Ordering::SeqCst);
                 }
                 blob.phase
                     .store(if phase == 4 { 2 } else { phase }, Ordering::SeqCst);
@@ -691,9 +683,11 @@ mod tests {
                         .append_api007_record(namespace, record, 0, &job, &owned_workers)
                         .await
                 });
-                tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
-                    .await
-                    .unwrap();
+                if phase != 1 {
+                    tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
+                        .await
+                        .unwrap();
+                }
                 tokio::time::sleep(Duration::from_millis(if phase == 3 { 1100 } else { 25 })).await;
                 assert!(!caller.is_finished());
                 let charged = admission.usage().unwrap();
