@@ -593,6 +593,42 @@ async fn prepare_native_scratch<'r>(
     directory: &std::path::Path,
     quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
 ) -> QueueResult<NativeAdministrativePreparation<'r>> {
+    prepare_native_scratch_bounded(
+        tx,
+        address,
+        queue,
+        ordinary,
+        intent,
+        limits,
+        u64::MAX,
+        reservation,
+        workers,
+        directory,
+        quota,
+    )
+    .await
+}
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "bounded native preparation precedes public activation"
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_native_scratch_bounded<'r>(
+    tx: &Transaction<'_>,
+    address: &QueueAddress,
+    queue: &QueueRow<'_>,
+    ordinary: &CommitGroup,
+    intent: &fireweed_core::queue_administration::AdministrativeIntent,
+    limits: &QueueLimits,
+    max_result_bytes: u64,
+    reservation: &'r Arc<QueueReservation>,
+    workers: &fireweed_queue_spool::ScratchWorkers,
+    directory: &std::path::Path,
+    quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
+) -> QueueResult<NativeAdministrativePreparation<'r>> {
     let mut ordinary_loaded = load_group(tx, queue, ordinary, reservation).await?;
     load_prospective_unique_probes(tx, queue, &mut ordinary_loaded, ordinary, reservation).await?;
     let sink = fireweed_queue_spool::OwnedAdministrativeSink::new(
@@ -627,7 +663,7 @@ async fn prepare_native_scratch<'r>(
         fireweed_core::queue_administration::AdministrativeOperation::Addressed(_) => {
             let source = native_addressed_source(tx, queue, intent, limits, reservation)?;
             let delivery = sink.clone();
-            fireweed_engine::queue_administration::scan_addressed_group_to_sink(
+            fireweed_engine::queue_administration::scan_addressed_group_to_sink_bounded(
                 ordinary,
                 intent,
                 source,
@@ -635,6 +671,7 @@ async fn prepare_native_scratch<'r>(
                 &queue.schema,
                 limits,
                 Arc::clone(reservation),
+                max_result_bytes,
                 move |packet| {
                     let sink = delivery.clone();
                     async move { sink.append(packet).await }
@@ -674,6 +711,31 @@ struct NativeProvisionalGroup {
     summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
     ordinary: fireweed_engine::queue_administration::ProvisionalOrdinaryCandidate,
     initial: OwnedLoaded,
+}
+impl NativeProvisionalGroup {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "exact native result gate precedes public activation"
+        )
+    )]
+    fn assess_result_limit(
+        &self,
+        group: &CommitGroup,
+        max_result_bytes: u64,
+    ) -> QueueResult<fireweed_engine::queue_publication::AdministrativeResultLimit> {
+        let GroupOutcome::Committed { versions } = &self.ordinary.delta().receipt.outcome else {
+            return Err(storage("provisional ordinary result is not committed"));
+        };
+        fireweed_engine::queue_publication::assess_administrative_result_limit(
+            group,
+            &self.summary,
+            versions,
+            max_result_bytes,
+        )
+        .map_err(|_| storage("exact administrative result measurement failed"))
+    }
 }
 #[cfg_attr(
     not(test),
@@ -1644,6 +1706,54 @@ mod tests {
                 fields: Default::default(),
                 body: Default::default(),
             });
+            let bounded = prepare_native_scratch_bounded(
+                &tx,
+                &address,
+                &queue,
+                &ordinary,
+                &addressed,
+                &QueueLimits::default(),
+                1024,
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            assert!(bounded.summary.result_overflowed());
+            let bounded_clock = std::cell::Cell::new(0);
+            let bounded = finalize_native_semantics(
+                bounded,
+                &address,
+                &ordinary,
+                &queue,
+                || {
+                    bounded_clock.set(bounded_clock.get() + 1);
+                    Ok(0)
+                },
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            if overlap {
+                assert!(matches!(bounded, Err(Rejection::Invalid(_))));
+                assert_eq!(bounded_clock.get(), 0);
+            } else {
+                let bounded = bounded.unwrap_or_else(|reason| {
+                    panic!("unexpected bounded business rejection {reason:?}")
+                });
+                assert_eq!(bounded_clock.get(), 1);
+                assert_eq!(
+                    bounded.assess_result_limit(&ordinary, 1024).unwrap(),
+                    fireweed_engine::queue_publication::AdministrativeResultLimit::TooLarge
+                );
+            }
+            let untouched: i64 = tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=2 AND priority=19", &[&queue.id]).await.unwrap().get(0);
+            assert_eq!(untouched, 0);
             let prepared = prepare_native_scratch(
                 &tx,
                 &address,
@@ -1703,6 +1813,26 @@ mod tests {
             } else {
                 let finalized = finalized.unwrap_or_else(|reason| panic!("unexpected {reason:?}"));
                 assert_eq!(clocks.get(), 1);
+                let fireweed_engine::queue_publication::AdministrativeResultLimit::Fits {
+                    complete_receipt_bytes,
+                } = finalized.assess_result_limit(&ordinary, u64::MAX).unwrap()
+                else {
+                    panic!("unbounded result")
+                };
+                assert_eq!(
+                    finalized
+                        .assess_result_limit(&ordinary, complete_receipt_bytes)
+                        .unwrap(),
+                    fireweed_engine::queue_publication::AdministrativeResultLimit::Fits {
+                        complete_receipt_bytes
+                    }
+                );
+                assert_eq!(
+                    finalized
+                        .assess_result_limit(&ordinary, complete_receipt_bytes - 1)
+                        .unwrap(),
+                    fireweed_engine::queue_publication::AdministrativeResultLimit::TooLarge
+                );
                 let NativeProvisionalGroup {
                     scratch,
                     summary,

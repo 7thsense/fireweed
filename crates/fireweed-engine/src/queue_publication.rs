@@ -131,7 +131,7 @@ impl<'a> PublicationReceipt<'a> {
     }
 }
 
-fn validate_commit_result_versions(
+pub(crate) fn validate_commit_result_versions(
     group: &CommitGroup,
     versions: &[RecordVersion],
 ) -> PublicationResult<()> {

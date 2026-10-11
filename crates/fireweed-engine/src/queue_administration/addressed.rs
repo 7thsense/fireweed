@@ -108,6 +108,7 @@ where
     let receipt_base_lower_bound =
         crate::queue_publication::measure_administrative_receipt_base_lower_bound(ordinary)
             .map_err(|_| unknown("administrative receipt framing measurement failed"))?;
+    let request_fingerprint = fingerprint("administrative-result-retention", ordinary)?;
     validate_snapshot(ordinary_image)?;
     let bytes = add(
         intent_headers(intent)?,
@@ -314,6 +315,8 @@ where
         result: if overflow {
             super::stream::AdministrativeScanResult::Overflow {
                 histogram: result.histogram,
+                request_fingerprint,
+                max_result_bytes,
             }
         } else {
             super::stream::AdministrativeScanResult::Complete(result)
@@ -431,6 +434,109 @@ mod tests {
                 .await
                 .is_err()
             );
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        });
+    }
+    #[test]
+    fn discarded_result_proof_cannot_be_reused_under_new_budget_or_shorter_id() {
+        futures::executor::block_on(async {
+            use crate::queue_publication::{
+                AdministrativeResultLimit, assess_administrative_result_limit,
+            };
+            let image = image();
+            let keys = ["a"];
+            let intent = intent(&keys);
+            let mut group = ordinary();
+            group.request_id = "α".repeat(10000);
+            let admission = QueueAdmission::new(1, 4 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let summary = scan_addressed_group_to_sink_bounded(
+                &group,
+                &intent,
+                borrowed(&keys, &image),
+                &image,
+                &schema(),
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                1024,
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                assess_administrative_result_limit(&group, &summary, &[], 1024).unwrap(),
+                AdministrativeResultLimit::TooLarge
+            );
+            assert!(assess_administrative_result_limit(&group, &summary, &[], u64::MAX).is_err());
+            group.request_id = "short".into();
+            assert!(assess_administrative_result_limit(&group, &summary, &[], 1024).is_err());
+            drop(summary);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        });
+    }
+    #[test]
+    fn final_gate_counts_empty_scans_and_actual_ordinary_version_widths() {
+        futures::executor::block_on(async {
+            use crate::queue_publication::{
+                AdministrativeReceiptOutcome, AdministrativeResultLimit,
+                assess_administrative_result_limit, measure_complete_administrative_receipt,
+            };
+            let image = image();
+            let keys = [];
+            let intent = intent(&keys);
+            let mut group = ordinary();
+            group.request_id = "α".repeat(10000);
+            group.work_inserts.push(NewWork {
+                key: "output\0α".into(),
+                priority: 0,
+                available_at: 0,
+                fields: Default::default(),
+                body: Default::default(),
+            });
+            let admission = QueueAdmission::new(1, 4 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let summary = scan_addressed_group_to_sink_bounded(
+                &group,
+                &intent,
+                borrowed(&keys, &image),
+                &image,
+                &schema(),
+                &QueueLimits::default(),
+                Arc::clone(&job),
+                1,
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap();
+            assert!(!summary.result_overflowed()); // No incremental visit; final gate is authoritative.
+            for version in [1, 127, 128, u64::MAX] {
+                let versions = [RecordVersion {
+                    collection: None,
+                    key: group.work_inserts[0].key.clone(),
+                    version,
+                }];
+                let size = measure_complete_administrative_receipt(
+                    &group.request_id,
+                    &AdministrativeReceiptOutcome::Committed {
+                        versions: &versions,
+                        administration: summary.result().unwrap(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    assess_administrative_result_limit(&group, &summary, &versions, size).unwrap(),
+                    AdministrativeResultLimit::Fits {
+                        complete_receipt_bytes: size
+                    }
+                );
+                assert_eq!(
+                    assess_administrative_result_limit(&group, &summary, &versions, size - 1)
+                        .unwrap(),
+                    AdministrativeResultLimit::TooLarge
+                );
+            }
+            assert!(assess_administrative_result_limit(&group, &summary, &[], u64::MAX).is_err());
+            drop(summary);
             assert_eq!(admission.usage().unwrap(), (1, 0));
         });
     }

@@ -2293,7 +2293,11 @@ impl ResolvedAdministrativeRow {
 /// The backend keeps its fence until all those checks and atomic storage finish.
 pub enum AdministrativeScanResult {
     Complete(AdministrativeResult),
-    Overflow { histogram: AdministrativeHistogram },
+    Overflow {
+        histogram: AdministrativeHistogram,
+        request_fingerprint: [u8; 32],
+        max_result_bytes: u64,
+    },
 }
 
 pub struct AdmittedAdministrativeScan {
@@ -2326,8 +2330,28 @@ impl AdmittedAdministrativeScan {
     pub fn histogram(&self) -> &AdministrativeHistogram {
         match &self.result {
             AdministrativeScanResult::Complete(result) => &result.histogram,
-            AdministrativeScanResult::Overflow { histogram } => histogram,
+            AdministrativeScanResult::Overflow { histogram, .. } => histogram,
         }
+    }
+    pub fn verify_overflow_context(
+        &self,
+        group: &CommitGroup,
+        max_result_bytes: u64,
+    ) -> QueueResult<()> {
+        if let AdministrativeScanResult::Overflow {
+            request_fingerprint,
+            max_result_bytes: original_budget,
+            ..
+        } = &self.result
+        {
+            let current = fingerprint("administrative-result-retention", group)?;
+            if current != *request_fingerprint || max_result_bytes != *original_budget {
+                return Err(unknown(
+                    "overflow proof belongs to a different request or result budget",
+                ));
+            }
+        }
+        Ok(())
     }
     pub fn result_overflowed(&self) -> bool {
         matches!(self.result, AdministrativeScanResult::Overflow { .. })

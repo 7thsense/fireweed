@@ -113,6 +113,40 @@ pub fn measure_administrative_receipt_base_lower_bound(
     }
     Ok(bytes)
 }
+/// Result-size decision after complete business validation. Overflow summaries
+/// cannot be serialized; complete summaries count the actual ordinary versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdministrativeResultLimit {
+    Fits { complete_receipt_bytes: u64 },
+    TooLarge,
+}
+pub fn assess_administrative_result_limit(
+    group: &CommitGroup,
+    scan: &crate::queue_administration::AdmittedAdministrativeScan,
+    versions: &[RecordVersion],
+    max_result_bytes: u64,
+) -> PublicationResult<AdministrativeResultLimit> {
+    validate_commit_result_versions(group, versions)?;
+    scan.verify_overflow_context(group, max_result_bytes)
+        .map_err(PublicationError::Admission)?;
+    let Some(administration) = scan.result() else {
+        return Ok(AdministrativeResultLimit::TooLarge);
+    };
+    let bytes = measure_complete_administrative_receipt(
+        &group.request_id,
+        &AdministrativeReceiptOutcome::Committed {
+            versions,
+            administration,
+        },
+    )?;
+    Ok(if bytes > max_result_bytes {
+        AdministrativeResultLimit::TooLarge
+    } else {
+        AdministrativeResultLimit::Fits {
+            complete_receipt_bytes: bytes,
+        }
+    })
+}
 /// Exact full Postcard CommitReceipt size: request ID, outcome, all ordinary
 /// producer-order versions and complete administrative result. This differs from
 /// FWAR1's fixed-width canonical binary component and includes no envelope list.
