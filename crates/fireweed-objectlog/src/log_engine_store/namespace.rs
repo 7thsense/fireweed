@@ -127,7 +127,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     ) -> QueueResult<()> {
         self.checked_api007_shard(namespace).map(|_| ())
     }
-    fn checked_api007_shard<'a>(
+    pub(super) fn checked_api007_shard<'a>(
         &self,
         namespace: &'a VerifiedApi007Namespace,
     ) -> QueueResult<&'a QueueKey> {

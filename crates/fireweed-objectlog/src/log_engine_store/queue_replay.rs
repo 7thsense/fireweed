@@ -1,0 +1,462 @@
+//! Operation-scoped, one-record bounded replay. No projection or cursor writes.
+use super::*;
+use fireweed_core::queue_contract::{QueueError, QueueResult};
+use fireweed_engine::{
+    queue_admission::{OwnedQueueBufferCharge, QueueReservation},
+    queue_log_record::{QueueLogRecordView, view_queue_log_record},
+    queue_namespace::{encode_address, view_address},
+};
+use fireweed_queue_spool::ScratchWorkers;
+use object_log::{BoundedSequencer, FetchPlan};
+
+fn unknown(error: impl std::fmt::Display) -> QueueError {
+    QueueError::OutcomeUnknown(format!("API-007 replay: {error}"))
+}
+/// Empty means installed sequencer snapshot EOF, never budget truncation.
+/// Recovery owners must refresh/acquire the durable fence before trusting coverage.
+pub struct Api007ReadPlan<S: Sequencer> {
+    plan: FetchPlan<S>,
+    engine: Arc<LogEngine<S>>,
+    address: Bytes,
+    offset: u64,
+    _charge: OwnedQueueBufferCharge,
+}
+/// Exact bytes retain admission until the consumer drops them.
+pub struct AdmittedApi007Read {
+    bytes: Bytes,
+    offset: u64,
+    _charge: OwnedQueueBufferCharge,
+}
+impl AdmittedApi007Read {
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub fn view(&self) -> QueueResult<QueueLogRecordView<'_>> {
+        view_queue_log_record(&self.bytes)
+    }
+}
+impl<S: BoundedSequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
+    /// Reserve declared metadata before native lookup; one logical record is one
+    /// object-log batch. This API intentionally cannot read legacy command logs.
+    pub fn plan_api007_read(
+        &self,
+        namespace: &VerifiedApi007Namespace,
+        offset: u64,
+        metadata_bytes: usize,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Api007ReadPlan<S>> {
+        let shard = self.checked_api007_shard(namespace)?;
+        let address = namespace.address()?;
+        let address_size = 24usize
+            .checked_add(address.tenant.len())
+            .and_then(|n| n.checked_add(address.queue.len()))
+            .ok_or(QueueError::TooLarge)?;
+        let budget = u64::try_from(metadata_bytes).map_err(unknown)?;
+        let address_charge = u64::try_from(address_size)
+            .map_err(unknown)?
+            .checked_mul(4)
+            .ok_or(QueueError::TooLarge)?;
+        let charge = job.owned_buffer(
+            budget
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(address_charge))
+                .and_then(|n| n.checked_add(65536))
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        let encoded = encode_address(&fireweed_core::queue_contract::QueueAddress {
+            tenant: address.tenant.into(),
+            queue: address.queue.into(),
+        })?;
+        let offset_i64 = i64::try_from(offset).map_err(unknown)?;
+        let plan = self
+            .engine
+            .plan_fetch(&partition_key(shard), offset_i64, 1, metadata_bytes, 1)
+            .map_err(unknown)?;
+        if let Some(entry) = plan.entries().first()
+            && (entry.record_count != 1 || entry.base_offset != offset_i64)
+        {
+            return Err(unknown(
+                "queue batch must contain exactly one record at requested offset",
+            ));
+        }
+        Ok(Api007ReadPlan {
+            plan,
+            engine: Arc::clone(&self.engine),
+            address: Bytes::from(encoded),
+            offset,
+            _charge: charge,
+        })
+    }
+}
+impl<S: BoundedSequencer<Meta = ()> + 'static> Api007ReadPlan<S> {
+    pub fn is_eof(&self) -> bool {
+        self.plan.entries().is_empty()
+    }
+    pub fn payload_bytes(&self) -> u64 {
+        self.plan.payload_bytes()
+    }
+    /// Consume the plan. After dispatch, the bounded worker owns all resources
+    /// through exact read and physical local worker completion, even if the
+    /// awaiting caller disappears. The returned bytes keep their own charge.
+    pub async fn read(
+        self,
+        workers: &ScratchWorkers,
+        hard_bytes: u64,
+    ) -> QueueResult<Option<AdmittedApi007Read>> {
+        if self.is_eof() {
+            return Ok(None);
+        }
+        let bytes = self.payload_bytes();
+        if bytes > hard_bytes {
+            return Err(QueueError::TooLarge);
+        }
+        let charge = self._charge.child_buffer(
+            bytes
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(65536))
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        let worker = ReadWorker {
+            plan: self,
+            payload_charge: Some(charge),
+        };
+        workers.run(move || worker.execute()).await
+    }
+}
+// Capture this container as a whole. Its consuming method retains the metadata
+// guard through physical completion; Rust cannot split closure captures by field.
+struct ReadWorker<S: Sequencer> {
+    plan: Api007ReadPlan<S>,
+    payload_charge: Option<OwnedQueueBufferCharge>,
+}
+impl<S: BoundedSequencer<Meta = ()> + 'static> ReadWorker<S> {
+    fn execute(mut self) -> QueueResult<Option<AdmittedApi007Read>> {
+        crate::block_on_objectlog_future(self.execute_inner())
+    }
+    async fn execute_inner(&mut self) -> QueueResult<Option<AdmittedApi007Read>> {
+        let batch = self
+            .plan
+            .engine
+            .read_planned_batch(&self.plan.plan, 0, self.plan.payload_bytes())
+            .await
+            .map_err(unknown)?;
+        let result = AdmittedApi007Read {
+            bytes: batch.payload,
+            offset: self.plan.offset,
+            _charge: self.payload_charge.take().expect("one output charge"),
+        };
+        let record = result.view()?;
+        if record.address() != view_address(&self.plan.address)? {
+            return Err(unknown(
+                "record full address differs from namespace authority",
+            ));
+        }
+        Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fireweed_core::queue_contract::{CollectionDefinition, QueueAddress, QueueSchema};
+    use fireweed_engine::AsyncLogStore;
+    use fireweed_engine::{
+        queue_admission::QueueAdmission,
+        queue_log_record::encode_genesis,
+        queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
+    };
+    #[tokio::test]
+    async fn physical_genesis_replay_checks_address_count_bounds_and_eof() {
+        let root = super::super::tests::temp_root("api007-replay");
+        let store = ObjectLogEngineStore::open_local(
+            &root,
+            FlushConfig {
+                linger: Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let admission = QueueAdmission::new(2, 16 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let address = QueueAddress {
+            tenant: "tenant\0β".into(),
+            queue: "work/λ".into(),
+        };
+        let namespace = store.bind_api007_namespace(&address, &job).await.unwrap();
+        let shard = store.checked_api007_shard(&namespace).unwrap();
+        let epoch = store.acquire_epoch(shard.clone()).await.unwrap();
+        let schema = QueueSchema {
+            work: CollectionDefinition {
+                fields: Default::default(),
+                indexes: Default::default(),
+                unique_indexes: Default::default(),
+                additional_field_prefixes: Default::default(),
+            },
+            state: Default::default(),
+            progress_bound_nanos: 1,
+            max_attempts: 3,
+        };
+        let raw = encode_definition(&schema).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let record = encode_genesis(epoch, &address, &definition, &[7; 32], 4096, &job).unwrap();
+        let len = record.bytes().len() as u64;
+        store
+            .produce_payload_immediate(shard, epoch, || {
+                Ok((Bytes::copy_from_slice(record.bytes()), 1))
+            })
+            .await
+            .unwrap();
+        let workers = ScratchWorkers::new(1, 2).unwrap();
+        let plan = store.plan_api007_read(&namespace, 0, 65536, &job).unwrap();
+        assert_eq!(plan.payload_bytes(), len);
+        assert!(matches!(
+            plan.read(&workers, len - 1).await,
+            Err(QueueError::TooLarge)
+        ));
+        let value = store
+            .plan_api007_read(&namespace, 0, 65536, &job)
+            .unwrap()
+            .read(&workers, len)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.offset(), 0);
+        assert_eq!(value.view().unwrap().address().tenant, address.tenant);
+        let eof = store.plan_api007_read(&namespace, 1, 65536, &job).unwrap();
+        assert!(eof.is_eof());
+        assert!(eof.read(&workers, 0).await.unwrap().is_none());
+        assert!(store.plan_api007_read(&namespace, 0, 1, &job).is_err());
+        // A structurally valid record for a different full address is corruption.
+        let other = QueueAddress {
+            tenant: address.tenant.clone(),
+            queue: "other".into(),
+        };
+        let bad = encode_genesis(epoch, &other, &definition, &[7; 32], 4096, &job).unwrap();
+        store
+            .produce_payload_immediate(shard, epoch, || {
+                Ok((Bytes::copy_from_slice(bad.bytes()), 1))
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .plan_api007_read(&namespace, 1, 65536, &job)
+                .unwrap()
+                .read(&workers, 4096)
+                .await
+                .is_err()
+        );
+        store
+            .produce_payload_immediate(shard, epoch, || {
+                Ok((Bytes::copy_from_slice(record.bytes()), 2))
+            })
+            .await
+            .unwrap();
+        assert!(store.plan_api007_read(&namespace, 2, 65536, &job).is_err());
+        drop(value);
+        drop(record);
+        drop(bad);
+        drop(definition);
+        drop(namespace);
+        drop(job);
+        workers.close_and_drain().await.unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use fireweed_core::queue_contract::{CollectionDefinition, QueueAddress, QueueSchema};
+    use fireweed_engine::{
+        AsyncLogStore,
+        queue_admission::QueueAdmission,
+        queue_log_record::encode_genesis,
+        queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
+    };
+    async fn seed(
+        store: &ObjectLogEngineStore,
+    ) -> (
+        Arc<QueueAdmission>,
+        Arc<QueueReservation>,
+        VerifiedApi007Namespace,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+        let terminal = Arc::new(tokio::sync::Notify::new());
+        let notify = Arc::clone(&terminal);
+        let job = Arc::new(
+            admission
+                .reserve(0)
+                .unwrap()
+                .with_terminal_callback(move || notify.notify_one())
+                .unwrap(),
+        );
+        let address = QueueAddress {
+            tenant: "tenant".into(),
+            queue: "queue".into(),
+        };
+        let namespace = store.bind_api007_namespace(&address, &job).await.unwrap();
+        let shard = store.checked_api007_shard(&namespace).unwrap();
+        let epoch = store.acquire_epoch(shard.clone()).await.unwrap();
+        let schema = QueueSchema {
+            work: CollectionDefinition {
+                fields: Default::default(),
+                indexes: Default::default(),
+                unique_indexes: Default::default(),
+                additional_field_prefixes: Default::default(),
+            },
+            state: Default::default(),
+            progress_bound_nanos: 1,
+            max_attempts: 3,
+        };
+        let raw = encode_definition(&schema).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let record = encode_genesis(epoch, &address, &definition, &[7; 32], 4096, &job).unwrap();
+        store
+            .produce_payload_immediate(shard, epoch, || {
+                Ok((Bytes::copy_from_slice(record.bytes()), 1))
+            })
+            .await
+            .unwrap();
+        (admission, job, namespace, terminal)
+    }
+    #[test]
+    fn queued_read_keeps_all_charges_after_caller_drop() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let store = ObjectLogEngineStore::open_memory(FlushConfig {
+                linger: Duration::ZERO,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let (admission, job, namespace, terminal) = seed(&store).await;
+            let plan = store.plan_api007_read(&namespace, 0, 65536, &job).unwrap();
+            drop(namespace);
+            drop(job);
+            let metadata_charge = admission.usage().unwrap().1;
+            let workers = ScratchWorkers::new(1, 1).unwrap();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let owned_workers = workers.clone();
+            let caller = tokio::spawn(async move { plan.read(&owned_workers, 4096).await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while admission.usage().unwrap().1 <= metadata_charge {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let all_charges = admission.usage().unwrap();
+            caller.abort();
+            let _ = caller.await;
+            assert_eq!(admission.usage().unwrap(), all_charges);
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            workers.close_and_drain().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+                .await
+                .unwrap();
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+        });
+    }
+    struct PausedRange {
+        inner: MemoryBlobStore,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::watch::Sender<bool>,
+    }
+    #[async_trait::async_trait]
+    impl BlobStore for PausedRange {
+        async fn put(&self, key: &str, value: Bytes) -> Result<(), object_log::ObjectLogError> {
+            self.inner.put(key, value).await
+        }
+        async fn get(&self, key: &str) -> Result<Option<Bytes>, object_log::ObjectLogError> {
+            self.inner.get(key).await
+        }
+        async fn get_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> Result<Option<Bytes>, object_log::ObjectLogError> {
+            self.inner.get_range(key, range).await
+        }
+        async fn get_range_exact(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> Result<Option<Bytes>, object_log::ObjectLogError> {
+            let mut release = self.release.subscribe();
+            self.entered.notify_one();
+            release.wait_for(|ready| *ready).await.unwrap();
+            self.inner.get_range_exact(key, range).await
+        }
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, object_log::ObjectLogError> {
+            self.inner.list(prefix).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), object_log::ObjectLogError> {
+            self.inner.delete(key).await
+        }
+        async fn compare_and_swap(
+            &self,
+            key: &str,
+            expected: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<object_log::CasOutcome, object_log::ObjectLogError> {
+            self.inner.compare_and_swap(key, expected, value).await
+        }
+    }
+    #[tokio::test]
+    async fn running_read_keeps_all_charges_after_caller_drop() {
+        let blob = Arc::new(PausedRange {
+            inner: MemoryBlobStore::new(),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(false).0,
+        });
+        let store = ObjectLogEngineStore::open_with_blob_and_authority(
+            blob.clone(),
+            "fwlog/",
+            "fwmeta/",
+            FlushConfig {
+                linger: Duration::ZERO,
+                ..Default::default()
+            },
+            DefinitionAuthority::ProcessLocal,
+        )
+        .await
+        .unwrap();
+        let (admission, job, namespace, terminal) = seed(&store).await;
+        let plan = store.plan_api007_read(&namespace, 0, 65536, &job).unwrap();
+        drop(namespace);
+        drop(job);
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let owned_workers = workers.clone();
+        let caller = tokio::spawn(async move { plan.read(&owned_workers, 4096).await });
+        tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
+            .await
+            .unwrap();
+        let all_charges = admission.usage().unwrap();
+        assert!(all_charges.1 > 4 * 65536);
+        caller.abort();
+        let _ = caller.await;
+        assert_eq!(admission.usage().unwrap(), all_charges);
+        blob.release.send_replace(true);
+        workers.close_and_drain().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+            .await
+            .unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+}

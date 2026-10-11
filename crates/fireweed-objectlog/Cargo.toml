@@ -16,6 +16,7 @@ futures = "0.3"
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }
+fireweed-queue-spool = { path = "../fireweed-queue-spool" }
 # Vendored log implementation, including Fireweed fixes, for every consuming workspace.
 object-log = { version = "0.3.6", git = "https://github.com/7thsense/object-log.git", rev = "5f0e6ac123628646f68e6318881cfd7a359144b6", features = ["s3"] }
 # Create-only PutObject (If-None-Match: *) for queue-definition authority; object-log

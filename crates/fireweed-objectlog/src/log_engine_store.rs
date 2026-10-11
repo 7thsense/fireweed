@@ -32,7 +32,9 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::s3_create_only::S3CreateOnlyPut;
 mod namespace;
+mod queue_replay;
 pub use namespace::VerifiedApi007Namespace;
+pub use queue_replay::{AdmittedApi007Read, Api007ReadPlan};
 
 fn fresh_writer_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
