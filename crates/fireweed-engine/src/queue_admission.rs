@@ -161,6 +161,16 @@ impl QueueReservation {
         self.buffer(bytes)?.into_owned(Arc::clone(self))
     }
 }
+impl OwnedQueueBufferCharge {
+    /// Child capacity belongs to the same retained job, with no counter gap.
+    pub fn child_buffer(&self, bytes: u64) -> QueueResult<Self> {
+        self.reservation.owned_buffer(bytes)
+    }
+    /// Protected borrow cannot outlive this guard or extract its reservation Arc.
+    pub fn reservation(&self) -> &QueueReservation {
+        &self.reservation
+    }
+}
 impl Drop for OwnedQueueBufferCharge {
     fn drop(&mut self) {
         if let Ok(mut state) = self.reservation.admission.state.lock() {
@@ -186,6 +196,24 @@ impl Drop for QueueReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn child_capacity_keeps_job_after_parent_guard_and_caller_drop() {
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let job = Arc::new(admission.reserve(10).unwrap());
+        let parent = job.owned_buffer(20).unwrap();
+        let child = parent.child_buffer(30).unwrap();
+        assert_eq!(admission.usage().unwrap(), (1, 60));
+        let scoped = child.reservation().buffer(5).unwrap();
+        assert_eq!(admission.usage().unwrap(), (1, 65));
+        drop(scoped);
+        drop(parent);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (1, 40));
+        admission.close().unwrap();
+        assert!(matches!(admission.reserve(0), Err(QueueError::Busy)));
+        drop(child);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
     #[test]
     fn owned_transfer_holds_job_after_caller_drop_and_close() {
         let admission = QueueAdmission::new(1, 100).unwrap();

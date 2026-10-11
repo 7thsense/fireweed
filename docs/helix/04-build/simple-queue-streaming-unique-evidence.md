@@ -102,3 +102,44 @@ scheduler or shutdown drain. Native integration must keep completion notificatio
 and terminal ownership attached to pending workers, await their results, preserve
 the queue fence and avoid unbounded task/channel accumulation. Semantic evidence
 streaming and actual administrative publication remain pending.
+
+## Physical semantic reduction — iteration 46
+
+Frozen ScratchUniqueEvidence contains loaded initial owner-or-absence authority
+and release/claim origin. Its full tuple is the external grouping key. Evidence
+encoding and decoding use same-job child admission before raw payload and decoded
+owner/string allocation. A protected reservation borrow cannot outlive its owned
+guard or extract/release the job. Only one admitted full tuple and its first
+initial-owner header survive a tuple group; later payloads drop one row at a time.
+New tuple comparison reads windows against the retained key without duplicating it.
+
+Private FWUE1 envelopes bind producer ordinal, unambiguously framed full key and
+raw record bytes with SHA-256 for content integrity. Hashes never group tuples or
+decide uniqueness. Unknown versions, invalid UTF-8/enums/framing, trailing bytes,
+checksum errors and absent/contradictory authority fail closed. Administrative
+claims must already satisfy immutable initial-owner per-row acceptance. Reader
+ordering is strictly full key plus ordinal; duplicated valid descriptors and
+replayed record payloads cannot silently replace evidence. EOF checks file sizes.
+
+Reduction always rewinds and consumes the complete sealed evidence image, even
+if a prior caller read part of it or a previous reduction reached EOF. Provisional
+administrative/final collision flags do not skip later validation. Any semantic,
+I/O or capacity error poisons replay/completion and returns whole-owner Unknown,
+not partial flags or a semantic TooLarge receipt. No second uniqueness algorithm
+is introduced: the physical driver uses the shared domain reducer.
+
+Physical differential tests match the complete UniqueFieldEffects oracle,
+including release after claim and repeated replay. A real typed unique(a, large_b)
+fixture changes a across 48 records with 256 KiB b values: more than 24 MiB of
+old/new tuple scratch reduces within a 2 MiB admitted-operation memory budget.
+This is admission/loaded-buffer evidence, not an operating-system page-cache or
+RSS measurement. Other tests cover late checksum/serde/read failure after a
+provisional conflict, unaccepted admin claims, contradictory/missing authority,
+decoder capacity cleanup, invalid version/UTF-8, ordinal binding, duplicated
+valid descriptors, partial cursors and repeated full reductions.
+
+This proves complete evidence-spool reduction only. Original selection EOF,
+owned asynchronous scheduling/drain, resolved command streaming, logical overflow
+and receipt/result sizing, actual publication and backend parity remain pending.
+The pure complete-image planner remains the differential reference; the native
+path must not reconstruct its aggregate predecessor/probe maps at finalization.

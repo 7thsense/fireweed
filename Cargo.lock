@@ -1546,6 +1546,8 @@ version = "0.31.32"
 dependencies = [
  "fireweed-core",
  "fireweed-engine",
+ "postcard",
+ "sha2 0.11.0",
  "tempfile",
 ]
 

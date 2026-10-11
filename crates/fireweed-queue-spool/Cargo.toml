@@ -11,3 +11,5 @@ publish = false
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 tempfile = "3.27"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = "0.11"

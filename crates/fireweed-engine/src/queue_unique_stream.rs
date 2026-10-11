@@ -7,7 +7,7 @@ use fireweed_core::queue_contract::{QueueError, QueueResult};
 fn unknown(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(message.into())
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UniqueClaimOrigin {
     Administrative,
     Ordinary,
@@ -18,6 +18,38 @@ pub enum UniqueEvidenceEffect<'a> {
         owner: &'a RecordIdentity,
         origin: UniqueClaimOrigin,
     },
+}
+/// Ephemeral typed spool record; the full tuple is the physical grouping key.
+/// This is not a durable publication encoding or a public consumer DTO.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScratchUniqueEffect {
+    Release(RecordIdentity),
+    Claim {
+        owner: RecordIdentity,
+        origin: UniqueClaimOrigin,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScratchUniqueEvidence {
+    pub initial_loaded: bool,
+    pub initial_owner: Option<RecordIdentity>,
+    pub effect: ScratchUniqueEffect,
+}
+impl ScratchUniqueEvidence {
+    pub fn borrowed<'a>(&'a self, tuple: &'a UniqueIdentity) -> UniqueEvidence<'a> {
+        UniqueEvidence {
+            tuple,
+            initial_loaded: self.initial_loaded,
+            initial_owner: self.initial_owner.as_ref(),
+            effect: match &self.effect {
+                ScratchUniqueEffect::Release(owner) => UniqueEvidenceEffect::Release(owner),
+                ScratchUniqueEffect::Claim { owner, origin } => UniqueEvidenceEffect::Claim {
+                    owner,
+                    origin: *origin,
+                },
+            },
+        }
+    }
 }
 /// Evidence must come from initial fenced authority and already accepted rows.
 /// Missing probe authority is distinct from a loaded nonownership result.

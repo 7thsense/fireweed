@@ -266,6 +266,7 @@ impl QueueSpool {
             data_bytes: self.data_bytes,
             count: self.count,
             position: 0,
+            previous: None,
             poisoned: false,
             _disk: self.disk,
             _memory: self._memory,
@@ -390,6 +391,7 @@ pub struct SortedSpool {
     data_bytes: u64,
     count: u64,
     position: u64,
+    previous: Option<Descriptor>,
     poisoned: bool,
     _disk: DiskCharge,
     _memory: OwnedQueueBufferCharge,
@@ -400,6 +402,7 @@ impl SortedSpool {
             return Err(unknown("rewind poisoned reader"));
         }
         self.position = 0;
+        self.previous = None;
         Ok(())
     }
     pub fn next_entry(&mut self) -> QueueResult<Option<SpoolEntry>> {
@@ -407,10 +410,27 @@ impl SortedSpool {
             return Err(unknown("read poisoned spool"));
         }
         if self.position == self.count {
+            self.poisoned = true;
+            let expected = self
+                .count
+                .checked_mul(INDEX_BYTES)
+                .ok_or_else(|| unknown("index EOF size overflow"))?;
+            if self.index.metadata().map_err(unknown)?.len() != expected
+                || self.data.metadata().map_err(unknown)?.len() != self.data_bytes
+            {
+                return Err(unknown("scratch EOF image size mismatch"));
+            }
+            self.poisoned = false;
             return Ok(None);
         }
         self.poisoned = true;
         let row = descriptor(&mut self.index, self.position, self.data_bytes, self.count)?;
+        if let Some(previous) = self.previous
+            && compare(&mut self.data, previous, row)? != Ordering::Less
+        {
+            return Err(unknown("scratch tuple/ordinal order mismatch"));
+        }
+        self.previous = Some(row);
         self.position += 1;
         self.poisoned = false;
         Ok(Some(SpoolEntry {
@@ -802,3 +822,5 @@ mod tests {
         assert_eq!(quota.usage().unwrap(), 0);
     }
 }
+
+mod evidence;
