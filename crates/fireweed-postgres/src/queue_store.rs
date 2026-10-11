@@ -2,6 +2,7 @@
 //! retain admission and connection ownership after caller cancellation.
 use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_body::ResolvedBody;
+use fireweed_engine::queue_claim::{ClaimContext, claim_expiry, plan_claim};
 use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
@@ -1563,7 +1564,7 @@ async fn hydrate_work(
     schema: &QueueSchema,
     selected: Option<&BTreeSet<String>>,
     include_body: bool,
-    now: i64,
+    effective_at: Option<i64>,
 ) -> QueueResult<Vec<StoredWork>> {
     let ids: Vec<_> = rows.iter().map(|r| r.get::<_, i64>(0)).collect();
     let cols = rows.iter().map(|r| (r.get::<_, i64>(0), 0)).collect();
@@ -1587,7 +1588,18 @@ async fn hydrate_work(
                     vec![]
                 },
             )?;
-            if work.record.lifecycle == Lifecycle::Leased
+            work.body_loaded = include_body;
+            if selected.is_some() {
+                // Present values prove themselves. Claim metadata does not need
+                // absent-name certificates, so omitted/missing fields stay unknown
+                // without copying an uncharged requested-name set per row.
+                work.field_coverage = fireweed_engine::queue_fields::FieldCoverage::Selected {
+                    names: Default::default(),
+                    prefixes: Default::default(),
+                };
+            }
+            if let Some(now) = effective_at
+                && work.record.lifecycle == Lifecycle::Leased
                 && work
                     .record
                     .lease_expires_at
@@ -1944,7 +1956,7 @@ impl QueueStore for PostgresQueueStore {
                     let selected_fields=selected_field_numbers(&queue.schema.work,request.fields.as_ref())?;
                     payload_budget(&tx,&ids,selected_fields.as_ref(),request.include_body,request.max_bytes,&queue.schema.work).await?;
                     let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_ref()).await?)?;
-                let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,now).await?;
+                let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,None).await?;
                     let map:BTreeMap<_,_>=rows.iter().map(|row|row.get::<_,i64>(0)).zip(stored).collect();let mut out=vec![];
                     for (id,token) in replay.items {
                         let work=map.get(&id).ok_or(QueueError::ClaimExpired)?;
@@ -1972,15 +1984,14 @@ impl QueueStore for PostgresQueueStore {
                 let mut by_id:BTreeMap<i64,Row>=rows.into_iter().map(|row|(row.get(0),row)).collect();
                 let rows:Vec<Row>=fitting.iter().map(|id|by_id.remove(id).ok_or_else(||storage("missing selected record"))).collect::<QueueResult<_>>()?;
                 let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_ref()).await?)?;
-                let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,now).await?;
-                let expiry=now.checked_add(i64::try_from(request.lease_nanos).map_err(storage)?).ok_or_else(||QueueError::Invalid("lease expiry overflow".into()))?;
+                let stored=hydrate_work(&tx,&rows,&queue.schema,request.fields.as_ref(),request.include_body,None).await?;
+                let expiry=claim_expiry(now,request.lease_nanos)?;
                 let mut out=vec![];let mut replay=ClaimReplay {items:vec![]};let mut ids=vec![];let mut token_hashes=vec![];let mut versions=vec![];let mut attempts=vec![];
-                for (row,mut work) in rows.iter().zip(stored) {
+                for (row,work) in rows.iter().zip(stored) {
                     let token=fireweed_engine::generate_query_lease_token().map_err(storage)?.as_str().as_bytes().to_vec();
-                    work.record.version=work.record.version.checked_add(1).ok_or_else(||storage("version exhausted"))?;
-                    work.record.attempts=work.record.attempts.checked_add(1).ok_or_else(||storage("attempts exhausted"))?;
-                    work.record.lifecycle=Lifecycle::Leased;work.record.lease_expires_at=Some(expiry);
-                    let claimed=ClaimedWork {record:work.record,lease:LeaseCredential {token:token.clone()}};
+                    let planned=plan_claim(work,token,ClaimContext {now,eligible_at:request.eligible_at,expires_at:expiry,insertion_head:queue.next_sequence})?;
+                    let token=planned.lease.token.clone();
+                    let claimed=planned.into_claimed();
                     out.push(claimed);
                     if encoded_len(&out)?>request.max_bytes {
                         out.pop();if out.is_empty(){return Err(QueueError::TooLarge);}break;
@@ -2207,7 +2218,7 @@ impl QueueStore for PostgresQueueStore {
                 let rows:Vec<Row>=fitting.iter().map(|id|by_id.remove(id).ok_or_else(||storage("missing selected query record"))).collect::<QueueResult<_>>()?;
                 let _headers=_owned_job.buffer(materialized_headers(&tx,&fitting,None).await?)?;
                 if let Some(name)=name && (name.len() as u64).checked_mul(rows.len() as u64).is_none_or(|n|n>request.max_bytes){return Err(QueueError::TooLarge);}
-                let records:Vec<QueryRecord>=if col==0 {hydrate_work(&tx,&rows,&queue.schema,None,true,now).await?.into_iter().map(|work|QueryRecord::Work(work.record)).collect()}
+                let records:Vec<QueryRecord>=if col==0 {hydrate_work(&tx,&rows,&queue.schema,None,true,Some(now)).await?.into_iter().map(|work|QueryRecord::Work(work.record)).collect()}
                     else {let ids:Vec<i64>=rows.iter().map(|r|r.get(0)).collect();let cols=ids.iter().map(|id|(*id,col)).collect();let mut fields=load_fields(&tx,&ids,&queue.schema,&cols,None).await?;let mut bodies=load_bodies(&tx,&ids).await?;
                         rows.iter().map(|row|{let id:i64=row.get(0);Ok(QueryRecord::State(StateRecord {collection:name.ok_or_else(||storage("missing state name"))?.into(),key:key(row.get(2))?,version:version(row.get(3))?,fields:fields.remove(&id).unwrap_or_default(),value:bodies.remove(&id).ok_or_else(||storage("missing state body"))?.into()}))}).collect::<QueueResult<_>>()?};
                 let mut page=QueryPage {records,cursor:None};

@@ -1,0 +1,209 @@
+//! Shared claim transition after native filtered, ordered selection.
+//! This module does not select records or broaden filters on the client.
+use crate::{
+    queue_fields::CheckedFields,
+    queue_planner::{StoredWork, lease_hash, validate_raw_work_lease},
+};
+use fireweed_core::queue_contract::*;
+#[derive(Clone, Copy)]
+pub struct ClaimContext {
+    pub now: i64,
+    pub eligible_at: i64,
+    pub expires_at: i64,
+    pub insertion_head: u64,
+}
+pub struct ClaimTransition {
+    pub work: StoredWork,
+    pub lease: LeaseCredential,
+}
+impl ClaimTransition {
+    pub fn into_claimed(self) -> ClaimedWork {
+        ClaimedWork {
+            record: self.work.record,
+            lease: self.lease,
+        }
+    }
+}
+fn authority(message: &str) -> QueueError {
+    QueueError::OutcomeUnknown(format!("claim authority: {message}"))
+}
+pub fn claim_expiry(now: i64, duration: u64) -> QueueResult<i64> {
+    let duration = i64::try_from(duration)
+        .map_err(|_| QueueError::Invalid("lease duration overflow".into()))?;
+    if duration <= 0 {
+        return Err(QueueError::Invalid(
+            "lease duration must be positive".into(),
+        ));
+    }
+    now.checked_add(duration)
+        .ok_or_else(|| QueueError::Invalid("lease expiry overflow".into()))
+}
+/// Consumes the already-admitted projection, preserving field/body knowledge and
+/// all payload allocation ownership. Token generation and native persistence
+/// belong to the adapter; metadata transitions are identical on every backend.
+pub fn plan_claim(
+    mut work: StoredWork,
+    token: Vec<u8>,
+    context: ClaimContext,
+) -> QueueResult<ClaimTransition> {
+    validate_raw_work_lease(&work)?;
+    CheckedFields::new(&work.record.work.fields, &work.field_coverage)?;
+    let record = &mut work.record;
+    if record.version == 0
+        || record.insertion_sequence == 0
+        || record.insertion_sequence > context.insertion_head
+    {
+        return Err(authority(
+            "invalid predecessor version or insertion sequence",
+        ));
+    }
+    let pending = record.lifecycle == Lifecycle::Pending
+        || (record.lifecycle == Lifecycle::Leased
+            && record
+                .lease_expires_at
+                .is_some_and(|expiry| expiry <= context.now));
+    if !pending || record.work.available_at > context.eligible_at {
+        return Err(authority("native selection returned ineligible work"));
+    }
+    if token.is_empty() || context.expires_at <= context.now {
+        return Err(QueueError::Invalid("invalid claim lease".into()));
+    }
+    let version = record
+        .version
+        .checked_add(1)
+        .ok_or_else(|| authority("version exhausted"))?;
+    let attempts = record
+        .attempts
+        .checked_add(1)
+        .ok_or_else(|| authority("attempts exhausted"))?;
+    record.version = version;
+    record.attempts = attempts;
+    record.lifecycle = Lifecycle::Leased;
+    record.lease_expires_at = Some(context.expires_at);
+    work.lease_hash = Some(lease_hash(&token));
+    Ok(ClaimTransition {
+        work,
+        lease: LeaseCredential { token },
+    })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue_fields::FieldCoverage;
+    fn work() -> StoredWork {
+        StoredWork {
+            record: WorkRecord {
+                work: NewWork {
+                    key: "a".into(),
+                    priority: -4,
+                    available_at: 7,
+                    fields: Default::default(),
+                    body: bytes::Bytes::from_static(b"body"),
+                },
+                version: 1,
+                insertion_sequence: 1,
+                lifecycle: Lifecycle::Pending,
+                eligible_since: -9,
+                attempts: 2,
+                lease_expires_at: None,
+            },
+            lease_hash: None,
+            field_coverage: FieldCoverage::Complete,
+            body_loaded: true,
+        }
+    }
+    fn context() -> ClaimContext {
+        ClaimContext {
+            now: 10,
+            eligible_at: 7,
+            expires_at: 20,
+            insertion_head: 1,
+        }
+    }
+    #[test]
+    fn pending_and_expired_claims_share_exact_transition_without_payload_copy() {
+        for expired in [false, true] {
+            let mut before = work();
+            if expired {
+                before.record.lifecycle = Lifecycle::Leased;
+                before.record.lease_expires_at = Some(10);
+                before.lease_hash = Some([8; 32]);
+            }
+            let body = before.record.work.body.as_ptr();
+            let transition = plan_claim(before, vec![3; 32], context()).unwrap();
+            assert_eq!(transition.work.record.work.body.as_ptr(), body);
+            assert_eq!(
+                (
+                    transition.work.record.version,
+                    transition.work.record.attempts,
+                    transition.work.record.eligible_since
+                ),
+                (2, 3, -9)
+            );
+            assert_eq!(transition.work.record.lease_expires_at, Some(20));
+            assert_eq!(transition.work.lease_hash, Some(lease_hash(&[3; 32])));
+            assert_eq!(transition.work.field_coverage, FieldCoverage::Complete);
+            assert!(transition.work.body_loaded);
+        }
+    }
+    #[test]
+    fn malformed_stale_and_exhausted_claim_authority_fails_closed() {
+        for variant in 0..7 {
+            let mut before = work();
+            match variant {
+                0 => before.record.version = 0,
+                1 => before.record.insertion_sequence = 2,
+                2 => before.record.lifecycle = Lifecycle::Completed,
+                3 => before.record.work.available_at = 8,
+                4 => before.record.version = u64::MAX,
+                5 => before.record.attempts = u32::MAX,
+                _ => before.record.lease_expires_at = Some(20),
+            }
+            assert!(matches!(
+                plan_claim(before, vec![3; 32], context()),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+        }
+        let mut active = work();
+        active.record.lifecycle = Lifecycle::Leased;
+        active.record.lease_expires_at = Some(11);
+        active.lease_hash = Some([8; 32]);
+        assert!(matches!(
+            plan_claim(active, vec![3; 32], context()),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            claim_expiry(i64::MAX, 1),
+            Err(QueueError::Invalid(_))
+        ));
+        assert!(claim_expiry(0, 0).is_err());
+        assert_eq!(claim_expiry(-10, 10), Ok(0));
+    }
+    #[test]
+    fn selected_fields_and_unloaded_body_remain_unknown_after_claim() {
+        let mut before = work();
+        before
+            .record
+            .work
+            .fields
+            .insert("present".into(), FieldValue::Integer(7));
+        before.field_coverage = FieldCoverage::Selected {
+            names: Default::default(),
+            prefixes: Default::default(),
+        };
+        before.record.work.body = bytes::Bytes::new();
+        before.body_loaded = false;
+        let planned = plan_claim(before, vec![3; 32], context()).unwrap();
+        assert!(!planned.work.body_loaded);
+        let fields = CheckedFields::new(
+            &planned.work.record.work.fields,
+            &planned.work.field_coverage,
+        )
+        .unwrap();
+        assert_eq!(
+            fields.get("present").unwrap(),
+            Some(&FieldValue::Integer(7))
+        );
+        assert!(fields.get("omitted").is_err());
+    }
+}

@@ -513,10 +513,30 @@ pub async fn expiry_and_administration(
         third[0].record.insertion_sequence,
         first[0].record.insertion_sequence
     );
+    // Expired delivery can be reclaimed even beyond max_attempts: that bound
+    // classifies RetryAt commits; it is not a claim cap.
+    clock.set(third[0].record.lease_expires_at.unwrap());
+    assert_eq!(
+        store.claim(claim(&queue, "third-claim", "expiry")).await,
+        Err(QueueError::ClaimExpired)
+    );
+    let mut selective = claim(&queue, "fourth-claim", "expiry");
+    selective.fields = Some(BTreeSet::new());
+    selective.include_body = false;
+    let fourth = store.claim(selective).await.unwrap();
+    assert_eq!(fourth.len(), 1);
+    assert_eq!(fourth[0].record.attempts, 4);
+    assert_eq!(
+        fourth[0].record.insertion_sequence,
+        third[0].record.insertion_sequence
+    );
+    assert!(fourth[0].record.work.fields.is_empty());
+    assert!(fourth[0].record.work.body.is_empty());
+    assert_ne!(fourth[0].lease, third[0].lease);
     let mut operator = group("operator-complete");
     operator.work_updates.push(UnclaimedUpdate {
         key: "expiring".into(),
-        expect: StateExpect::Version(third[0].record.version),
+        expect: StateExpect::Version(fourth[0].record.version),
         change: UnclaimedChange::Administrative {
             patch: WorkPatch {
                 body: Some(third[0].record.work.body.clone()),
