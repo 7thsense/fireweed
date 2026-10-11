@@ -315,3 +315,77 @@ pub enum AdministrativeOutcome {
     Invalid,
     UniqueConflict,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AdministrativeOutcomeKind {
+    Changed,
+    Deleted,
+    NoChange,
+    NotFound,
+    Conflict,
+    Leased,
+    LeaseRequired,
+    PreconditionFailed,
+    Terminal,
+    Invalid,
+    UniqueConflict,
+}
+impl AdministrativeOutcome {
+    pub fn kind(&self) -> AdministrativeOutcomeKind {
+        match self {
+            Self::Changed { .. } => AdministrativeOutcomeKind::Changed,
+            Self::Deleted { .. } => AdministrativeOutcomeKind::Deleted,
+            Self::NoChange => AdministrativeOutcomeKind::NoChange,
+            Self::NotFound => AdministrativeOutcomeKind::NotFound,
+            Self::Conflict { .. } => AdministrativeOutcomeKind::Conflict,
+            Self::Leased => AdministrativeOutcomeKind::Leased,
+            Self::LeaseRequired => AdministrativeOutcomeKind::LeaseRequired,
+            Self::PreconditionFailed => AdministrativeOutcomeKind::PreconditionFailed,
+            Self::Terminal => AdministrativeOutcomeKind::Terminal,
+            Self::Invalid => AdministrativeOutcomeKind::Invalid,
+            Self::UniqueConflict => AdministrativeOutcomeKind::UniqueConflict,
+        }
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdministrativeHistogram {
+    /// All addressed positions count, including missing/duplicate targets.
+    pub matched: u64,
+    pub outcomes: std::collections::BTreeMap<AdministrativeOutcomeKind, u64>,
+}
+impl AdministrativeHistogram {
+    pub fn record(&mut self, outcome: &AdministrativeOutcome) -> QueueResult<()> {
+        let kind = outcome.kind();
+        let count = self
+            .outcomes
+            .get(&kind)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| QueueError::OutcomeUnknown("administrative count exhausted".into()))?;
+        let matched = self
+            .matched
+            .checked_add(1)
+            .ok_or_else(|| QueueError::OutcomeUnknown("administrative count exhausted".into()))?;
+        self.outcomes.insert(kind, count);
+        self.matched = matched;
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdministrativeItemResult {
+    pub key: String,
+    pub outcome: AdministrativeOutcome,
+    pub before: Option<AdministrativeBefore>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdministrativeClauseResult {
+    pub id: String,
+    pub histogram: AdministrativeHistogram,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdministrativeResult {
+    pub histogram: AdministrativeHistogram,
+    pub items: Vec<AdministrativeItemResult>,
+    pub clauses: Vec<AdministrativeClauseResult>,
+}

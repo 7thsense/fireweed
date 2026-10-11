@@ -40,7 +40,8 @@ rule vector are valid execution intents with stable real-execution replay.
 
 There is no selector match cap in WorkflowLiveMutationRequest or the existing
 ItemMutationRequest. The old SelectFirst planner materializes a complete queue
-image; the 1000 addressed-entry cap does not apply to selectors. Silently applying
+image; its Turso-only 1000 addressed-entry cap does not apply to selectors
+and is not a generic port limit. Silently applying
 API-007's ordinary 4096 addressed-record limit to a broad selector is not valid.
 
 Broad controls consume aggregate outcomes and per-rule attribution. Addressed
@@ -122,6 +123,19 @@ Broad selector receipts return exact outcome histograms and ordered per-clause
 matched counts. Addressed controls may request compact per-item before metadata
 and findings inputs; no full body is required. Real empty selections retain an
 immutable receipt. Rebatching preserves independent group identities.
+
+Administrative uniqueness is evaluated against the initial fenced owner image,
+not a sequential first-wins overlay. A:x→z followed by B:y→x rejects B as a
+per-row UniqueConflict (Snorri preserves its legacy Invalid classification).
+Two otherwise-valid administrative proposals claiming the same initially free
+tuple reject the containing group with UniqueConflict and zero effects. Ordinary
+disjoint updates participate in the final all-group uniqueness check, which may
+reuse a tuple released by accepted administration and preserves ordinary atomic
+swaps. Preview uses this identical final validation; it does not reproduce the
+legacy dry-run shortcut that omitted proposed commands from conflict validation.
+Native SelectFirst targets must exist once in the initial image and carry their
+actual first-matching clause index. Missing/misattributed native targets fail
+closed as authority corruption, rather than addressed NotFound results.
 
 Preview bypasses retained execution-receipt lookup as well as writes. It always
 evaluates the current covered snapshot and cannot conflict with an execution id.

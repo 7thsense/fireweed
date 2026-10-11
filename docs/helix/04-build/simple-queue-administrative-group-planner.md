@@ -1,0 +1,66 @@
+---
+ddx:
+  id: build-simple-queue-administrative-group-planner
+  depends_on:
+    - build-simple-queue-administrative-proposals
+    - build-simple-queue-consumer-integration-binding
+  status: accepted
+---
+
+# Combined administrative group planning oracle
+
+propose_group resolves an already-fenced initial record/probe image into one
+speculative administrative-plus-ordinary delta. It never mutates the source.
+Its ordinary request envelope must already be validated. This is a planning
+oracle, not an activated backend operation: the legacy ordinary receipt inside
+the delta is not a durable administrative receipt and must never be acknowledged
+as one. The separate administration result is absent on every outer rejection.
+
+Addressed results retain input order. Missing targets and duplicate positions
+are counted; later duplicates are Invalid and use initial before metadata.
+SelectFirst returns only compact total/per-clause histograms, including empty
+clauses. Native target ownership is verified: each target exists exactly once
+and names its actual first matching clause. Misattribution/missing native rows
+fail closed as authority corruption, not addressed NotFound. Empty intents and
+zero matches are valid speculative plans even with an empty ordinary group.
+
+Any administration-owned identity, including missing and precondition-rejected
+identities, overlaps explicitly claimed/updated/inserted work only by rejecting
+the containing group before effects. Disjoint state changes and new work remain
+atomic with accepted administrative proposals. A state CAS, stale claimed lease,
+ordinary precondition or final uniqueness failure discards every proposed effect
+and all speculative administrative successes. Operator evaluated_at does not
+make a claimed token valid beyond the independent ownership_now expiry boundary.
+
+Administrative unique tuples are checked against initial owner/nonowner authority.
+A:x→z and B:y→x leave B a per-row UniqueConflict; Snorri must preserve the old
+Invalid classification/counts/findings for that outcome. Two accepted proposals
+claiming the same initially free tuple reject the group. Ordinary disjoint work
+participates in the final combined uniqueness check and may reuse a tuple released
+by accepted administration. Final collisions reject every effect. Preview will
+use this identical validator, including proposal collisions, rather than legacy
+dry-run shortcuts.
+
+Target iteration borrows clause actions/ASTs without cloning an AdministrativeEntry
+for every selected row. Update proposals still copy per-target resolved patches
+and candidate replacement scratch; the caller must admit these buffers. Existing pure commit validation, transition, unique codec
+and delta coalescing are reused. No full source/unique-owner map is cloned; only
+ordinary addressed records, per-target proposals and accepted effects are copied.
+Histogram addition is checked and fail-closed on overflow.
+
+This helper currently accepts an in-memory RecordSnapshot and native target slice.
+It is an oracle for complete semantics, not a qualified streaming execution path.
+Before backend activation, split orchestration into a shared admitted accumulator
+and bounded native row/probe provider, so large no-op selections do not require a
+complete queue image. Stream/spool accepted effects within checked publication
+admission. Pure proposals, record images and results still require caller-owned
+buffer charges; this helper alone does not enforce serialized-result/publication
+bytes or produce a positional durable TooLarge receipt.
+
+Pure regressions cover atomic administration/state/new work, CAS rollback,
+positional missing/duplicates/initial before metadata, missing/skipped overlap,
+zero selections, corrupt native ownership, initial-owner and fresh-tuple conflicts,
+ordinary reuse/collision, independent clocks and compact 5001-target no-op results.
+The 5001 oracle proves no planner match cap; native indexed streaming, durability,
+preview/replay, immutable complete-result receipts, bounded decoding/admission,
+above-4096 physical publication, S3/Turso and consumer activation remain required.

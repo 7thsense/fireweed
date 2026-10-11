@@ -327,7 +327,7 @@ pub(crate) fn apply_administrative_update(
     }
     Ok(*stored != before)
 }
-fn apply_group(
+pub(crate) fn apply_group(
     group: &CommitGroup,
     snapshot: &mut RecordSnapshot,
     now: i64,
@@ -563,7 +563,7 @@ fn apply_group(
     };
     Ok(delta)
 }
-fn record_unique_keys(
+pub(crate) fn record_unique_keys(
     collection: Option<String>,
     fields: &Fields,
     definition: &CollectionDefinition,
@@ -634,7 +634,7 @@ pub fn required_unique_probes(
     }
     Ok(keys)
 }
-fn validate_uniques(
+pub(crate) fn validate_uniques(
     delta: &CommitDelta,
     original: &RecordSnapshot,
     schema: &QueueSchema,
@@ -696,7 +696,7 @@ fn validate_uniques(
     }
     Ok(Ok(additions.into_iter().collect()))
 }
-fn addressed_snapshot(group: &CommitGroup, source: &RecordSnapshot) -> RecordSnapshot {
+pub(crate) fn addressed_snapshot(group: &CommitGroup, source: &RecordSnapshot) -> RecordSnapshot {
     let mut out = RecordSnapshot {
         next_sequence: source.next_sequence,
         ..RecordSnapshot::default()
@@ -808,7 +808,7 @@ fn merge_delta(
     snapshot.next_sequence = delta.next_sequence;
     Ok(())
 }
-fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
+pub(crate) fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
     for (key, stored) in &snapshot.work {
         let id = RecordIdentity {
             collection: None,
@@ -843,7 +843,10 @@ fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
     }
     Ok(())
 }
-fn validate_group_snapshot(candidate: &RecordSnapshot, group: &CommitGroup) -> QueueResult<()> {
+pub(crate) fn validate_group_snapshot(
+    candidate: &RecordSnapshot,
+    group: &CommitGroup,
+) -> QueueResult<()> {
     validate_snapshot(candidate)?;
     for update in &group.work_updates {
         if matches!(&update.change,UnclaimedChange::Administrative {patch,..} if patch.body.is_some())

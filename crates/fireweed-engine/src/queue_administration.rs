@@ -14,12 +14,48 @@ pub struct AdministrativeProposal {
 fn unknown(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(message.into())
 }
+#[derive(Clone, Copy)]
+struct TargetRequest<'a> {
+    key: &'a str,
+    expected_version: Option<u64>,
+    precondition: &'a WorkSelector,
+    action: &'a AdministrativeAction,
+}
+impl<'a> From<&'a AdministrativeEntry> for TargetRequest<'a> {
+    fn from(entry: &'a AdministrativeEntry) -> Self {
+        Self {
+            key: &entry.key,
+            expected_version: entry.expected_version,
+            precondition: &entry.precondition,
+            action: &entry.action,
+        }
+    }
+}
 /// The caller supplies complete fenced raw authority and its durable version high
 /// water. Do not normalize expired leases before passing the administrative time.
 /// Duplicate addressed inputs must be reported positionally as Invalid by the
 /// operation planner before this per-target helper is called.
 pub fn propose_target(
     entry: &AdministrativeEntry,
+    target: Option<&StoredWork>,
+    highwater: Option<u64>,
+    evaluated_at: i64,
+    before_fields: Option<&BTreeSet<String>>,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+) -> QueueResult<AdministrativeProposal> {
+    propose_target_view(
+        entry.into(),
+        target,
+        highwater,
+        evaluated_at,
+        before_fields,
+        schema,
+        limits,
+    )
+}
+fn propose_target_view(
+    entry: TargetRequest<'_>,
     target: Option<&StoredWork>,
     highwater: Option<u64>,
     evaluated_at: i64,
@@ -168,6 +204,251 @@ pub fn propose_target(
         },
         before,
         replacement: Some(replacement),
+    })
+}
+
+/// Native selection ownership, resolved under the containing queue fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedAdministrativeTarget {
+    pub key: String,
+    pub clause: usize,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdministrativeGroupProposal {
+    pub delta: crate::queue_planner::CommitDelta,
+    /// None on outer rejection. Never acknowledge prior speculative successes.
+    pub administration: Option<AdministrativeResult>,
+}
+/// Pure combined planning only. The caller validates the ordinary wire envelope,
+/// admits all planning/publication buffers, and supplies complete native selection
+/// plus initial owner/nonowner probes under one queue fence. Neither this proposal
+/// nor its legacy ordinary receipt is an administrative durable execution receipt.
+pub fn propose_group(
+    ordinary: &CommitGroup,
+    intent: &AdministrativeIntent,
+    selected: &[SelectedAdministrativeTarget],
+    snapshot: &crate::queue_planner::RecordSnapshot,
+    ownership_now: i64,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+) -> QueueResult<AdministrativeGroupProposal> {
+    use crate::queue_planner::*;
+    use std::collections::BTreeMap;
+    intent.validate(schema, limits)?;
+    validate_snapshot(snapshot)?;
+    let rejected = |reason| AdministrativeGroupProposal {
+        delta: CommitDelta {
+            work: vec![],
+            deleted_work: vec![],
+            state: vec![],
+            deleted_state: vec![],
+            versions: vec![],
+            next_sequence: snapshot.next_sequence,
+            receipt: CommitReceipt {
+                request_id: ordinary.request_id.clone(),
+                outcome: GroupOutcome::Rejected(reason),
+            },
+        },
+        administration: None,
+    };
+    let mut result = AdministrativeResult {
+        histogram: AdministrativeHistogram::default(),
+        items: vec![],
+        clauses: vec![],
+    };
+    match &intent.operation {
+        AdministrativeOperation::Addressed(_) => {
+            if !selected.is_empty() {
+                return Err(unknown("addressed administration has selector targets"));
+            }
+        }
+        AdministrativeOperation::SelectFirst(clauses) => {
+            result.clauses = clauses
+                .iter()
+                .map(|clause| AdministrativeClauseResult {
+                    id: clause.id.clone(),
+                    histogram: AdministrativeHistogram::default(),
+                })
+                .collect();
+            let mut seen = BTreeSet::new();
+            for target in selected {
+                let row = snapshot.work.get(&target.key).ok_or_else(|| {
+                    unknown("native administrative target missing from initial image")
+                })?;
+                if !seen.insert(&target.key)
+                    || target.clause >= clauses.len()
+                    || intent.first_clause(&row.record) != Some(target.clause)
+                {
+                    return Err(unknown("native administrative target ownership mismatch"));
+                }
+            }
+        }
+    }
+    let owned: BTreeSet<&str> = match &intent.operation {
+        AdministrativeOperation::Addressed(entries) => {
+            entries.iter().map(|entry| entry.key.as_str()).collect()
+        }
+        AdministrativeOperation::SelectFirst(_) => {
+            selected.iter().map(|target| target.key.as_str()).collect()
+        }
+    };
+    if ordinary
+        .claimed_updates
+        .iter()
+        .map(|u| u.key.as_str())
+        .chain(ordinary.work_updates.iter().map(|u| u.key.as_str()))
+        .chain(ordinary.work_inserts.iter().map(|u| u.key.as_str()))
+        .any(|key| owned.contains(key))
+    {
+        return Ok(rejected(Rejection::Invalid(
+            "administrative target overlaps explicit group work".into(),
+        )));
+    }
+    let targets: Box<dyn Iterator<Item = (TargetRequest<'_>, Option<usize>)> + '_> = match &intent
+        .operation
+    {
+        AdministrativeOperation::Addressed(entries) => {
+            Box::new(entries.iter().map(|entry| (entry.into(), None)))
+        }
+        AdministrativeOperation::SelectFirst(clauses) => Box::new(selected.iter().map(|target| {
+            let clause = &clauses[target.clause];
+            (
+                TargetRequest {
+                    key: &target.key,
+                    expected_version: None,
+                    precondition: &clause.precondition,
+                    action: &clause.action,
+                },
+                Some(target.clause),
+            )
+        })),
+    };
+    let mut seen = BTreeSet::new();
+    let mut deltas = Vec::new();
+    let mut accepted_unique = BTreeMap::new();
+    for (entry, clause) in targets {
+        let target = snapshot.work.get(entry.key);
+        let id = RecordIdentity {
+            collection: None,
+            key: entry.key.to_owned(),
+        };
+        let mut proposal = if seen.insert(entry.key) {
+            propose_target_view(
+                entry,
+                target,
+                snapshot.versions.get(&id).copied(),
+                intent.evaluated_at,
+                intent.before_fields.as_ref(),
+                schema,
+                limits,
+            )?
+        } else {
+            let before = target.and_then(|target| {
+                intent
+                    .before_fields
+                    .as_ref()
+                    .map(|names| AdministrativeBefore {
+                        version: target.record.version,
+                        lifecycle: target.record.lifecycle,
+                        available_at: target.record.work.available_at,
+                        eligible_since: target.record.eligible_since,
+                        attempts: target.record.attempts,
+                        lease_expires_at: target.record.lease_expires_at,
+                        fields: names
+                            .iter()
+                            .filter_map(|name| {
+                                target
+                                    .record
+                                    .work
+                                    .fields
+                                    .get(name)
+                                    .map(|value| (name.clone(), value.clone()))
+                            })
+                            .collect(),
+                    })
+            });
+            AdministrativeProposal {
+                outcome: AdministrativeOutcome::Invalid,
+                before,
+                replacement: None,
+            }
+        };
+        if matches!(
+            proposal.outcome,
+            AdministrativeOutcome::Changed { .. } | AdministrativeOutcome::Deleted { .. }
+        ) {
+            let version = match proposal.outcome {
+                AdministrativeOutcome::Changed { version }
+                | AdministrativeOutcome::Deleted { version } => version,
+                _ => unreachable!(),
+            };
+            let delta = CommitDelta {
+                work: proposal.replacement.take().into_iter().collect(),
+                deleted_work: if matches!(proposal.outcome, AdministrativeOutcome::Deleted { .. }) {
+                    vec![entry.key.to_owned()]
+                } else {
+                    vec![]
+                },
+                state: vec![],
+                deleted_state: vec![],
+                versions: vec![RecordVersion {
+                    collection: None,
+                    key: entry.key.to_owned(),
+                    version,
+                }],
+                next_sequence: snapshot.next_sequence,
+                receipt: CommitReceipt {
+                    request_id: ordinary.request_id.clone(),
+                    outcome: GroupOutcome::Committed { versions: vec![] },
+                },
+            };
+            match validate_uniques(&delta, snapshot, schema)? {
+                Err(Rejection::UniqueConflict) => {
+                    proposal.outcome = AdministrativeOutcome::UniqueConflict
+                }
+                Err(_) => return Err(unknown("unexpected administrative unique rejection")),
+                Ok(additions) => {
+                    for (tuple, owner) in additions {
+                        if accepted_unique
+                            .insert(tuple, owner.clone())
+                            .is_some_and(|other| other != owner)
+                        {
+                            return Ok(rejected(Rejection::UniqueConflict));
+                        }
+                    }
+                    deltas.push(delta);
+                }
+            }
+        }
+        result.histogram.record(&proposal.outcome)?;
+        if let Some(clause) = clause {
+            result.clauses[clause].histogram.record(&proposal.outcome)?;
+        } else {
+            result.items.push(AdministrativeItemResult {
+                key: entry.key.to_owned(),
+                outcome: proposal.outcome,
+                before: proposal.before,
+            });
+        }
+    }
+    // Explicit addressed records are disjoint, so their state/version predicates
+    // still resolve against the initial image. Final uniqueness sees all effects.
+    let mut candidate = addressed_snapshot(ordinary, snapshot);
+    validate_group_snapshot(&candidate, ordinary)?;
+    let normal = match apply_group(ordinary, &mut candidate, ownership_now, schema) {
+        Ok(delta) => delta,
+        Err(reason) => return Ok(rejected(reason)),
+    };
+    let ordinary_receipt = normal.receipt.clone();
+    deltas.push(normal);
+    let mut combined = combine_deltas(&deltas, snapshot.next_sequence);
+    if let Err(reason) = validate_uniques(&combined, snapshot, schema)? {
+        return Ok(rejected(reason));
+    }
+    combined.receipt = ordinary_receipt;
+    Ok(AdministrativeGroupProposal {
+        delta: combined,
+        administration: Some(result),
     })
 }
 
@@ -529,5 +810,543 @@ mod tests {
             intent.validate(&schema(), &limits),
             Err(QueueError::Invalid(_))
         ));
+    }
+    fn ordinary() -> CommitGroup {
+        CommitGroup {
+            request_id: "atomic-admin".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+        }
+    }
+    fn source() -> crate::queue_planner::RecordSnapshot {
+        let mut source = crate::queue_planner::RecordSnapshot {
+            next_sequence: 1,
+            ..Default::default()
+        };
+        source.work.insert("a".into(), row());
+        source.versions.insert(
+            crate::queue_planner::RecordIdentity {
+                collection: None,
+                key: "a".into(),
+            },
+            1,
+        );
+        source
+    }
+    fn addressed(entries: Vec<AdministrativeEntry>) -> AdministrativeIntent {
+        AdministrativeIntent {
+            evaluated_at: 0,
+            operation: AdministrativeOperation::Addressed(entries),
+            before_fields: Some(BTreeSet::new()),
+        }
+    }
+    fn change_priority() -> AdministrativeEntry {
+        entry(AdministrativeAction::Update {
+            patch: WorkPatch {
+                priority: Some(7),
+                ..WorkPatch::default()
+            },
+            lifecycle: AdministrativeLifecycle::Keep,
+            lease_guard: AdministrativeLeaseGuard::RejectActive,
+            remove_field_prefixes: BTreeSet::new(),
+        })
+    }
+    fn assert_outer_rejected(plan: &AdministrativeGroupProposal) {
+        assert!(matches!(
+            plan.delta.receipt.outcome,
+            GroupOutcome::Rejected(_)
+        ));
+        assert!(plan.administration.is_none());
+        assert!(
+            plan.delta.work.is_empty()
+                && plan.delta.deleted_work.is_empty()
+                && plan.delta.state.is_empty()
+                && plan.delta.versions.is_empty()
+        );
+    }
+    #[test]
+    fn complete_group_admin_state_and_new_work_are_speculative_and_atomic() {
+        let mut schema = schema();
+        schema.state.insert(
+            "instances".into(),
+            CollectionDefinition {
+                fields: BTreeMap::new(),
+                indexes: BTreeMap::new(),
+                unique_indexes: BTreeSet::new(),
+                additional_field_prefixes: BTreeSet::new(),
+            },
+        );
+        let source = source();
+        let original = source.work.clone();
+        let mut group = ordinary();
+        group.state_updates.push(StateUpdate {
+            collection: "instances".into(),
+            key: "run".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: BTreeMap::new(),
+                value: vec![9].into(),
+            },
+        });
+        let mut next = row().record.work;
+        next.key = "next".into();
+        group.work_inserts.push(next);
+        let plan = propose_group(
+            &group,
+            &addressed(vec![change_priority()]),
+            &[],
+            &source,
+            100,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.administration.as_ref().unwrap().items[0].outcome,
+            AdministrativeOutcome::Changed { version: 2 }
+        );
+        assert_eq!(plan.delta.work.len(), 2);
+        assert_eq!(plan.delta.state[0].value.as_ref(), &[9]);
+        assert_eq!(plan.delta.next_sequence, 2);
+        assert_eq!(source.work, original);
+        group.state_updates[0].expect = StateExpect::Version(7);
+        let rejected = propose_group(
+            &group,
+            &addressed(vec![change_priority()]),
+            &[],
+            &source,
+            100,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert_outer_rejected(&rejected);
+        assert_eq!(source.work, original);
+    }
+    #[test]
+    fn addressed_duplicates_missing_and_initial_before_are_positional() {
+        let source = source();
+        let mut missing = change_priority();
+        missing.key = "missing".into();
+        let intent = addressed(vec![
+            change_priority(),
+            change_priority(),
+            missing.clone(),
+            missing,
+        ]);
+        let plan = propose_group(
+            &ordinary(),
+            &intent,
+            &[],
+            &source,
+            0,
+            &schema(),
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        let result = plan.administration.unwrap();
+        assert_eq!(result.histogram.matched, 4);
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.outcome.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                AdministrativeOutcome::Changed { version: 2 },
+                AdministrativeOutcome::Invalid,
+                AdministrativeOutcome::NotFound,
+                AdministrativeOutcome::Invalid
+            ]
+        );
+        assert_eq!(result.items[1].before.as_ref().unwrap().version, 1);
+        assert!(result.items[3].before.is_none());
+        assert_eq!(plan.delta.work.len(), 1);
+    }
+    #[test]
+    fn missing_and_skipped_targets_own_overlap_and_zero_match_is_valid() {
+        let source = source();
+        let mut group = ordinary();
+        let mut inserted = row().record.work;
+        inserted.key = "missing".into();
+        group.work_inserts.push(inserted);
+        let mut missing = change_priority();
+        missing.key = "missing".into();
+        assert_outer_rejected(
+            &propose_group(
+                &group,
+                &addressed(vec![missing]),
+                &[],
+                &source,
+                0,
+                &schema(),
+                &QueueLimits::default(),
+            )
+            .unwrap(),
+        );
+        let mut skipped = change_priority();
+        skipped.precondition = WorkSelector::Any(vec![]);
+        let mut group = ordinary();
+        group.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Patch(WorkPatch::default()),
+        });
+        assert_outer_rejected(
+            &propose_group(
+                &group,
+                &addressed(vec![skipped]),
+                &[],
+                &source,
+                0,
+                &schema(),
+                &QueueLimits::default(),
+            )
+            .unwrap(),
+        );
+        let empty = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![]),
+        };
+        let plan = propose_group(
+            &ordinary(),
+            &empty,
+            &[],
+            &source,
+            0,
+            &schema(),
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.administration.unwrap().histogram.matched, 0);
+        assert!(plan.delta.work.is_empty());
+        assert!(matches!(
+            plan.delta.receipt.outcome,
+            GroupOutcome::Committed { .. }
+        ));
+    }
+    #[test]
+    fn native_first_ownership_corruption_fails_closed() {
+        let source = source();
+        let clause = |id: &str| AdministrativeClause {
+            id: id.into(),
+            selector: WorkSelector::All(vec![]),
+            precondition: WorkSelector::Any(vec![]),
+            action: update(),
+        };
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![
+                clause("first"),
+                clause("second"),
+            ]),
+        };
+        for selected in [
+            vec![SelectedAdministrativeTarget {
+                key: "missing".into(),
+                clause: 0,
+            }],
+            vec![SelectedAdministrativeTarget {
+                key: "a".into(),
+                clause: 1,
+            }],
+            vec![SelectedAdministrativeTarget {
+                key: "a".into(),
+                clause: 99,
+            }],
+            vec![
+                SelectedAdministrativeTarget {
+                    key: "a".into(),
+                    clause: 0
+                };
+                2
+            ],
+        ] {
+            assert!(matches!(
+                propose_group(
+                    &ordinary(),
+                    &intent,
+                    &selected,
+                    &source,
+                    0,
+                    &schema(),
+                    &QueueLimits::default()
+                ),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+        }
+        let plan = propose_group(
+            &ordinary(),
+            &intent,
+            &[SelectedAdministrativeTarget {
+                key: "a".into(),
+                clause: 0,
+            }],
+            &source,
+            0,
+            &schema(),
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        let result = plan.administration.unwrap();
+        assert!(result.items.is_empty());
+        assert_eq!(result.clauses[0].histogram.matched, 1);
+        assert_eq!(result.clauses[1].histogram.matched, 0);
+        assert_eq!(
+            result.histogram.outcomes[&AdministrativeOutcomeKind::PreconditionFailed],
+            1
+        );
+    }
+    fn unique_source() -> (QueueSchema, crate::queue_planner::RecordSnapshot) {
+        use crate::queue_planner::*;
+        let mut schema = schema();
+        schema.work.fields.insert("u".into(), FieldType::Text);
+        schema.work.indexes.insert("by_u".into(), vec!["u".into()]);
+        schema.work.unique_indexes.insert("by_u".into());
+        let mut snapshot = source();
+        snapshot.next_sequence = 2;
+        snapshot
+            .work
+            .get_mut("a")
+            .unwrap()
+            .record
+            .work
+            .fields
+            .insert("u".into(), FieldValue::Text("x".into()));
+        let mut b = row();
+        b.record.work.key = "b".into();
+        b.record.insertion_sequence = 2;
+        b.record
+            .work
+            .fields
+            .insert("u".into(), FieldValue::Text("y".into()));
+        snapshot.work.insert("b".into(), b);
+        snapshot.versions.insert(
+            RecordIdentity {
+                collection: None,
+                key: "b".into(),
+            },
+            1,
+        );
+        for key in ["x", "y", "z"] {
+            for tuple in record_unique_keys(
+                None,
+                &BTreeMap::from([("u".into(), FieldValue::Text(key.into()))]),
+                &schema.work,
+            )
+            .unwrap()
+            {
+                snapshot.unique_probes_loaded.insert(tuple);
+            }
+        }
+        for (key, row) in &snapshot.work {
+            for tuple in record_unique_keys(None, &row.record.work.fields, &schema.work).unwrap() {
+                snapshot.unique_owners.insert(
+                    tuple,
+                    RecordIdentity {
+                        collection: None,
+                        key: key.clone(),
+                    },
+                );
+            }
+        }
+        (schema, snapshot)
+    }
+    fn rekey(key: &str, value: &str) -> AdministrativeEntry {
+        AdministrativeEntry {
+            key: key.into(),
+            action: AdministrativeAction::Update {
+                patch: WorkPatch {
+                    fields: BTreeMap::from([("u".into(), Some(FieldValue::Text(value.into())))]),
+                    ..WorkPatch::default()
+                },
+                lifecycle: AdministrativeLifecycle::Keep,
+                lease_guard: AdministrativeLeaseGuard::RejectActive,
+                remove_field_prefixes: BTreeSet::new(),
+            },
+            ..entry(update())
+        }
+    }
+    #[test]
+    fn administration_unique_checks_initial_owners_and_rejects_free_tuple_sibling_collision() {
+        let (schema, source) = unique_source();
+        let original = source.work.clone();
+        let plan = propose_group(
+            &ordinary(),
+            &addressed(vec![rekey("a", "z"), rekey("b", "x")]),
+            &[],
+            &source,
+            0,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.administration.unwrap().items[1].outcome,
+            AdministrativeOutcome::UniqueConflict
+        );
+        assert_eq!(plan.delta.work.len(), 1);
+        let collision = propose_group(
+            &ordinary(),
+            &addressed(vec![rekey("a", "z"), rekey("b", "z")]),
+            &[],
+            &source,
+            0,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert_outer_rejected(&collision);
+        assert_eq!(
+            collision.delta.receipt.outcome,
+            GroupOutcome::Rejected(Rejection::UniqueConflict)
+        );
+        assert_eq!(source.work, original);
+    }
+    #[test]
+    fn final_uniqueness_includes_disjoint_ordinary_work_without_admin_first_wins() {
+        let (schema, source) = unique_source();
+        let mut group = ordinary();
+        group.work_updates.push(UnclaimedUpdate {
+            key: "b".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Patch(WorkPatch {
+                fields: BTreeMap::from([("u".into(), Some(FieldValue::Text("x".into())))]),
+                ..WorkPatch::default()
+            }),
+        });
+        let plan = propose_group(
+            &group,
+            &addressed(vec![rekey("a", "z")]),
+            &[],
+            &source,
+            0,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert!(plan.administration.is_some());
+        assert_eq!(plan.delta.work.len(), 2);
+        let UnclaimedChange::Patch(patch) = &mut group.work_updates[0].change else {
+            unreachable!()
+        };
+        patch
+            .fields
+            .insert("u".into(), Some(FieldValue::Text("z".into())));
+        assert_outer_rejected(
+            &propose_group(
+                &group,
+                &addressed(vec![rekey("a", "z")]),
+                &[],
+                &source,
+                0,
+                &schema,
+                &QueueLimits::default(),
+            )
+            .unwrap(),
+        );
+    }
+    #[test]
+    fn historical_admin_time_cannot_make_an_expired_claim_valid() {
+        let (schema, mut source) = unique_source();
+        let token = b"held-token";
+        let b = source.work.get_mut("b").unwrap();
+        b.record.lifecycle = Lifecycle::Leased;
+        b.record.lease_expires_at = Some(10);
+        b.lease_hash = Some(crate::queue_planner::lease_hash(token));
+        let mut group = ordinary();
+        group.claimed_updates.push(ClaimedUpdate {
+            key: "b".into(),
+            lease: LeaseCredential {
+                token: token.to_vec(),
+            },
+            expected_version: 1,
+            patch: WorkPatch::default(),
+            disposition: Disposition::Complete,
+        });
+        let intent = addressed(vec![change_priority()]);
+        let live = propose_group(
+            &group,
+            &intent,
+            &[],
+            &source,
+            9,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert!(live.administration.is_some());
+        let expired = propose_group(
+            &group,
+            &intent,
+            &[],
+            &source,
+            10,
+            &schema,
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        assert_outer_rejected(&expired);
+        assert_eq!(
+            expired.delta.receipt.outcome,
+            GroupOutcome::Rejected(Rejection::StaleLease)
+        );
+    }
+    #[test]
+    fn complete_pure_selector_planner_accepts_5001_noop_targets_with_compact_results() {
+        use crate::queue_planner::*;
+        let mut source = RecordSnapshot {
+            next_sequence: 5001,
+            ..Default::default()
+        };
+        let mut selected = Vec::new();
+        for i in 0..5001 {
+            let key = format!("row-{i}");
+            let mut row = row();
+            row.record.work.key = key.clone();
+            row.record.insertion_sequence = i + 1;
+            source.work.insert(key.clone(), row);
+            source.versions.insert(
+                RecordIdentity {
+                    collection: None,
+                    key: key.clone(),
+                },
+                1,
+            );
+            selected.push(SelectedAdministrativeTarget { key, clause: 0 });
+        }
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                id: "all".into(),
+                selector: WorkSelector::All(vec![]),
+                precondition: WorkSelector::All(vec![]),
+                action: update(),
+            }]),
+        };
+        let plan = propose_group(
+            &ordinary(),
+            &intent,
+            &selected,
+            &source,
+            0,
+            &schema(),
+            &QueueLimits::default(),
+        )
+        .unwrap();
+        let result = plan.administration.unwrap();
+        assert_eq!(result.histogram.matched, 5001);
+        assert_eq!(
+            result.histogram.outcomes[&AdministrativeOutcomeKind::NoChange],
+            5001
+        );
+        assert!(result.items.is_empty());
+        assert_eq!(result.clauses.len(), 1);
+        assert!(plan.delta.work.is_empty() && plan.delta.versions.is_empty());
     }
 }
