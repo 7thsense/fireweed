@@ -138,7 +138,8 @@ its gate field. Unloaded target/payload values remain unknown. Planning its gate
 change succeeds, persistence rejects the partial view, and the stored version
 stays unchanged. This is guarded reader evidence, not physical selective-write or
 production performance qualification. Automatic approval review rejected combined
-read activation and guard removal; activation remains pending a concrete reviewed
+read activation and guard removal; at this checkpoint activation remained pending
+a concrete reviewed
 writer and the required approval.
 
 Reader review also requires reservation for requested-name certificates even when
@@ -150,10 +151,11 @@ bytes even when an ordinal is corrupt; the decoder still rejects corrupt schema
 references. The isolated regression covers mixed collection ordinals, two long
 absent-name certificates, and rollback-only corrupt payload sizing.
 
-## Guarded physical writer staging
+## Guarded physical writer staging (historical, superseded by iteration 26)
 
 One PostgreSQL applicator shares the existing batch encoders and insert SQL.
-Production persistence still requires complete views and hardwires Complete mode.
+At this staging checkpoint, production persistence required complete views and
+hardwired Complete mode.
 Selected mode exists only in test builds, with no runtime configuration switch.
 It consumes exact field commands: Preserve writes no field/index rows; Edit deletes
 exact record/field or record/full-name pairs and only affected record/index pairs,
@@ -179,12 +181,13 @@ sparse query-index row. Reader/certificate tests retain their separate 256 KiB
 reservation; writer planning uses an admitted 4 MiB budget. Transactions roll back;
 these are applicator checks, not acknowledged-loss or production activation tests.
 
-Production selected reads/writes and guard removal remain pending a concrete
+At this staging checkpoint, production selected reads/writes and guard removal
+remained pending a concrete
 implementation review and the required activation approval. No S3/Turso command
 codec, administrative wire activation or exceptional performance qualification is
 claimed by this staging slice.
 
-## Explicit opaque body intent
+## Explicit opaque body intent (iteration 25)
 
 CommitDelta now carries a parallel exact work_bodies map. ResolvedBody is Preserve
 or Replace(Bytes), independent of whether the read view materialized an opaque
@@ -201,5 +204,31 @@ without publishing it. Complete-versus-unknown old-body tests prove identical
 explicit write commands, and metadata/field-only operations preserve a megabyte
 opaque body without including it in their command. This is an internal precursor
 to a versioned durable envelope; no new S3/Turso frame is activated by this slice.
-The separately requested PostgreSQL field activation remains unapplied while its
-explicit approval is pending; existing Complete-only production guards remain.
+At iteration 25 the PostgreSQL field activation remained unapplied pending explicit
+approval. Iteration 26 below records approval and removal of those temporary guards.
+
+## PostgreSQL activation — iteration 26
+
+The user explicitly approved the reviewed selective activation on 2026-10-10.
+Production load_group now computes the shared required-field closure, and one
+physical writer consumes exact field/body commands; the temporary Complete-only
+guard and test-only mode are removed. Full state Put remains full. Ordinary reads
+and claim rendering still materialize the public projection requested by callers.
+Complete old-body coverage permits equal-byte physical write elision, but only
+Replace creates body write intent; Preserve never republishes loaded bodies.
+
+The production-entry regressions exercise the 256 KiB small-patch read alongside
+megabyte unrelated fields/additional attributes/bodies, affected-index keys and
+untouched physical identities, remove-only edits and exact full-name collisions.
+The shared contract/reopen/legacy scenarios, 94 kernel queue tests, process-kill
+acknowledged-group replay and four-library strict Clippy pass. The debug settled
+work smoke also passes its exact state/replay oracle: 256 source records plus 256
+next records, approximately 313 acknowledged settled items/sec; source dda7ea11
+with this uncommitted diff, pool two, one client, warmup 64. Concurrent local tests
+and debug code make this a correctness smoke, not matched release qualification.
+No S3/Turso frame, broad administrative wire or full Snorri binding is activated.
+
+Resolved publication preparation also gains DefinitionPin: SHA256 of the exact
+persisted raw definition, including original framing. Semantically equal legacy
+and modern encodings intentionally have distinct identities. Pin verification
+checks identity only; schema validation/admission remain separately mandatory.

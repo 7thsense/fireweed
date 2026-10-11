@@ -1,6 +1,7 @@
 //! Native asynchronous PostgreSQL baseline for API-007. Complete operation jobs
 //! retain admission and connection ownership after caller cancellation.
 use fireweed_core::queue_contract::*;
+use fireweed_engine::queue_body::ResolvedBody;
 use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
@@ -14,7 +15,7 @@ use fireweed_engine::{
     queue_planner::{
         CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity, combine_deltas,
         insert_unique_probes, lease_hash, load_envelope, plan_commit_group, plan_insert_vector,
-        required_unique_probes,
+        required_unique_probes, required_work_fields,
     },
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -544,8 +545,8 @@ async fn load_group<'a>(
     group: &CommitGroup,
     reservation: &'a QueueReservation,
 ) -> QueueResult<Loaded<'a>> {
-    // Production stays complete until selective read/apply activation is reviewed.
-    load_group_with_fields(tx, queue, group, reservation, None).await
+    let wanted = required_work_fields(group, &queue.schema)?;
+    load_group_with_fields(tx, queue, group, reservation, Some(&wanted)).await
 }
 async fn load_group_with_fields<'a>(
     tx: &Transaction<'_>,
@@ -876,51 +877,6 @@ async fn persist_delta(
     before: &RecordSnapshot,
     loaded: &mut Loaded<'_>,
 ) -> QueueResult<()> {
-    // Physical selective read/apply is a separately reviewed activation. Never
-    // let an internal partial view reach the existing full-regeneration SQL.
-    if delta.work.iter().any(|row| {
-        !matches!(
-            row.field_coverage,
-            fireweed_engine::queue_fields::FieldCoverage::Complete
-        )
-    }) {
-        return Err(storage(
-            "selective work view not activated in PostgreSQL persistence",
-        ));
-    }
-    persist_delta_with_mode(
-        tx,
-        queue,
-        delta,
-        before,
-        loaded,
-        FieldPersistenceMode::Complete,
-    )
-    .await
-}
-#[derive(Clone, Copy)]
-enum FieldPersistenceMode {
-    Complete,
-    #[cfg(test)]
-    Selected,
-}
-impl FieldPersistenceMode {
-    fn selected(self) -> bool {
-        match self {
-            Self::Complete => false,
-            #[cfg(test)]
-            Self::Selected => true,
-        }
-    }
-}
-async fn persist_delta_with_mode(
-    tx: &Transaction<'_>,
-    queue: &QueueRow<'_>,
-    delta: &CommitDelta,
-    before: &RecordSnapshot,
-    loaded: &mut Loaded<'_>,
-    mode: FieldPersistenceMode,
-) -> QueueResult<()> {
     fireweed_engine::queue_planner::validate_resolved_writes(delta)?;
     let work_by_key: BTreeMap<_, _> = delta
         .work
@@ -1000,50 +956,44 @@ async fn persist_delta_with_mode(
             tokens.push(work.lease_hash.map(|hash| hash.to_vec()));
             sequences.push(work.record.insertion_sequence.to_string());
             let old = before.work.get(&v.key);
-            if work.body_loaded
-                && old.is_none_or(|old| {
-                    !old.body_loaded || old.record.work.body != work.record.work.body
-                })
+            // Read coverage permits a physical no-op optimization, but never
+            // creates write intent. Explicit empty replacements remain writes.
+            if let ResolvedBody::Replace(body) = &delta.work_bodies[&v.key]
+                && old.is_none_or(|old| !old.body_loaded || old.record.work.body != *body)
             {
                 payload_ids.push(id);
-                payloads.push(work.record.work.body.to_vec());
+                payloads.push(body.to_vec());
             }
-            if mode.selected() {
-                match &delta.work_fields[&v.key] {
-                    ResolvedFields::Preserve => {}
-                    ResolvedFields::Replace(fields) => {
-                        changed_fields.insert(id, (col, fields.clone()));
-                    }
-                    ResolvedFields::Edit(edits) => {
-                        let old =
-                            old.ok_or_else(|| storage("partial field command cannot insert"))?;
-                        let view =
-                            CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
-                        exact_indexes.insert(
-                            id,
-                            fireweed_engine::queue_fields::resolve_index_effects(
-                                &view,
-                                &delta.work_fields[&v.key],
-                                &queue.schema.work,
-                            )?,
-                        );
-                        exact_edits.insert(id, edits);
-                        changed_fields.insert(
-                            id,
-                            (
-                                col,
-                                edits
-                                    .iter()
-                                    .filter_map(|(name, value)| {
-                                        value.as_ref().map(|v| (name.clone(), v.clone()))
-                                    })
-                                    .collect(),
-                            ),
-                        );
-                    }
+            match &delta.work_fields[&v.key] {
+                ResolvedFields::Preserve => {}
+                ResolvedFields::Replace(fields) => {
+                    changed_fields.insert(id, (col, fields.clone()));
                 }
-            } else if old.is_none_or(|old| old.record.work.fields != work.record.work.fields) {
-                changed_fields.insert(id, (col, work.record.work.fields.clone()));
+                ResolvedFields::Edit(edits) => {
+                    let old = old.ok_or_else(|| storage("partial field command cannot insert"))?;
+                    let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                    exact_indexes.insert(
+                        id,
+                        fireweed_engine::queue_fields::resolve_index_effects(
+                            &view,
+                            &delta.work_fields[&v.key],
+                            &queue.schema.work,
+                        )?,
+                    );
+                    exact_edits.insert(id, edits);
+                    changed_fields.insert(
+                        id,
+                        (
+                            col,
+                            edits
+                                .iter()
+                                .filter_map(|(name, value)| {
+                                    value.as_ref().map(|v| (name.clone(), v.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
             }
         } else if let Some(state) = v
             .collection
@@ -2106,12 +2056,12 @@ mod tests {
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
-    async fn staged_selective_loader_avoids_payload_and_partial_persistence_stays_blocked() {
+    async fn selective_loader_and_writer_avoid_unrelated_payload() {
         staged_selective_fixture().await;
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
-    async fn staged_selective_writer_disambiguates_colliding_names_and_values() {
+    async fn selective_writer_disambiguates_colliding_names_and_values() {
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -2271,14 +2221,12 @@ mod tests {
         let job = admission.reserve(0).unwrap();
         let row = queue_row(&tx, &queue, &job).await.unwrap();
         assert!(matches!(
-            load_group(&tx, &row, &group, &job).await,
+            load_group_with_fields(&tx, &row, &group, &job, None).await,
             Err(QueueError::OutcomeUnknown(_))
         ));
         let wanted = required_work_fields(&group, &schema).unwrap();
         assert_eq!(wanted, BTreeSet::from(["gate".into()]));
-        let mut selected = load_group_with_fields(&tx, &row, &group, &job, Some(&wanted))
-            .await
-            .unwrap();
+        let mut selected = load_group(&tx, &row, &group, &job).await.unwrap();
         assert_eq!(selected.snapshot.work["a"].record.work.fields.len(), 1);
         assert_eq!(
             selected.snapshot.state[&("state".into(), "s".into())]
@@ -2344,11 +2292,30 @@ mod tests {
         assert_eq!(selected.snapshot.unique_owners, owners);
         assert_eq!(selected.snapshot.unique_probes_loaded, probes);
         let before = selected.snapshot.clone();
+        let planning_charge = job
+            .buffer(group_expansion_budget(&group, &before, &schema).unwrap())
+            .unwrap();
         let delta = plan_commit_group(&group, &mut selected.snapshot, 0, &schema).unwrap();
-        assert!(matches!(
-            persist_delta(&tx, &row, &delta, &before, &mut selected).await,
-            Err(QueueError::OutcomeUnknown(_))
-        ));
+        let output_charge = job.buffer(encoded_len(&delta).unwrap() * 4).unwrap();
+        tx.batch_execute("SAVEPOINT selected_entry").await.unwrap();
+        persist_delta(&tx, &row, &delta, &before, &mut selected)
+            .await
+            .unwrap();
+        assert_eq!(
+            tx.query_one(
+                "SELECT version::text FROM fireweed_api007.records WHERE id=$1",
+                &[&work_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+            "2"
+        );
+        tx.batch_execute("ROLLBACK TO SAVEPOINT selected_entry")
+            .await
+            .unwrap();
+        drop(output_charge);
+        drop(planning_charge);
         assert_eq!(
             tx.query_one(
                 "SELECT version::text FROM fireweed_api007.records WHERE queue_id=$1 AND key=$2",
@@ -2439,15 +2406,10 @@ mod tests {
         let writer_admission = QueueAdmission::new(1, 4 << 20).unwrap();
         let writer_job = writer_admission.reserve(0).unwrap();
         let writer_row = queue_row(&tx, &queue, &writer_job).await.unwrap();
-        let mut writer = load_group_with_fields(
-            &tx,
-            &writer_row,
-            &writer_readset,
-            &writer_job,
-            Some(&writer_wanted),
-        )
-        .await
-        .unwrap();
+        let mut writer = load_group(&tx, &writer_row, &writer_readset, &writer_job)
+            .await
+            .unwrap();
+        assert!(writer.snapshot.work.values().all(|work| matches!(&work.field_coverage, fireweed_engine::queue_fields::FieldCoverage::Selected { names, .. } if names == &writer_wanted)));
         let writer_before = writer.snapshot.clone();
         let unchanged = tx.query("SELECT record_id,field,ctid::text FROM fireweed_api007.fields WHERE record_id=ANY($1) ORDER BY record_id,field", &[&vec![work_id, writer.ids[&RecordIdentity { collection: None, key: "b".into() }]]]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
         let unchanged_indexes = tx.query("SELECT record_id,index_no,ctid::text FROM fireweed_api007.indexes WHERE queue_id=$1 AND collection=0 ORDER BY record_id,index_no", &[&row.id]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
@@ -2496,16 +2458,9 @@ mod tests {
         let noop_output = writer_job
             .buffer(encoded_len(&noop_delta).unwrap() * 4)
             .unwrap();
-        persist_delta_with_mode(
-            &tx,
-            &writer_row,
-            &noop_delta,
-            &noop_before,
-            &mut writer,
-            FieldPersistenceMode::Selected,
-        )
-        .await
-        .unwrap();
+        persist_delta(&tx, &writer_row, &noop_delta, &noop_before, &mut writer)
+            .await
+            .unwrap();
         for (id, field, ctid) in &unchanged {
             assert_eq!(
                 &tx.query_one(
@@ -2527,16 +2482,9 @@ mod tests {
             .unwrap();
         let delta = plan_commit_group(&writer_group, &mut writer.snapshot, 0, &schema).unwrap();
         let output_charge = writer_job.buffer(encoded_len(&delta).unwrap() * 4).unwrap();
-        persist_delta_with_mode(
-            &tx,
-            &writer_row,
-            &delta,
-            &writer_before,
-            &mut writer,
-            FieldPersistenceMode::Selected,
-        )
-        .await
-        .unwrap();
+        persist_delta(&tx, &writer_row, &delta, &writer_before, &mut writer)
+            .await
+            .unwrap();
         let b_id = writer.ids[&RecordIdentity {
             collection: None,
             key: "b".into(),
@@ -2668,16 +2616,9 @@ mod tests {
         let remove_output = writer_job
             .buffer(encoded_len(&remove_delta).unwrap() * 4)
             .unwrap();
-        persist_delta_with_mode(
-            &tx,
-            &writer_row,
-            &remove_delta,
-            &remove_before,
-            &mut writer,
-            FieldPersistenceMode::Selected,
-        )
-        .await
-        .unwrap();
+        persist_delta(&tx, &writer_row, &remove_delta, &remove_before, &mut writer)
+            .await
+            .unwrap();
         assert_eq!(tx.query_one("SELECT count(*) FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,i64>(0), 0);
         assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0β".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(20));
         assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&b_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(10));
@@ -2711,16 +2652,9 @@ mod tests {
         let packed_charge = writer_job
             .buffer(encoded_len(&packed).unwrap() * 4)
             .unwrap();
-        persist_delta_with_mode(
-            &tx,
-            &writer_row,
-            &packed,
-            &physical_before,
-            &mut writer,
-            FieldPersistenceMode::Selected,
-        )
-        .await
-        .unwrap();
+        persist_delta(&tx, &writer_row, &packed, &physical_before, &mut writer)
+            .await
+            .unwrap();
         assert!(
             !tx.query_one(
                 "SELECT active FROM fireweed_api007.records WHERE id=$1",
@@ -2782,6 +2716,93 @@ mod tests {
         );
         assert!(writer_admission.usage().unwrap().1 < 4 << 20);
         drop(packed_charge);
+        // Existing nonempty opaque bytes must become explicitly empty, then a
+        // metadata-only patch must preserve the stored empty body's identity.
+        assert_eq!(
+            tx.query_one(
+                "SELECT octet_length(value) FROM fireweed_api007.bodies WHERE record_id=$1",
+                &[&work_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, i32>(0),
+            1 << 20
+        );
+        let mut body_group = CommitGroup {
+            request_id: "empty-body".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(writer.snapshot.work["a"].record.version),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    body: Some(Default::default()),
+                    ..WorkPatch::default()
+                }),
+            }],
+        };
+        let body_before = writer.snapshot.clone();
+        load_unique_probes(&tx, &writer_row, &mut writer, &body_group, 0, &writer_job)
+            .await
+            .unwrap();
+        let empty_delta = plan_commit_group(&body_group, &mut writer.snapshot, 0, &schema).unwrap();
+        assert!(
+            matches!(&empty_delta.work_bodies["a"], ResolvedBody::Replace(bytes) if bytes.is_empty())
+        );
+        let empty_charge = writer_job
+            .buffer(encoded_len(&empty_delta).unwrap() * 4)
+            .unwrap();
+        persist_delta(&tx, &writer_row, &empty_delta, &body_before, &mut writer)
+            .await
+            .unwrap();
+        let body_row = tx
+            .query_one(
+                "SELECT value,ctid::text FROM fireweed_api007.bodies WHERE record_id=$1",
+                &[&work_id],
+            )
+            .await
+            .unwrap();
+        assert!(body_row.get::<_, Vec<u8>>(0).is_empty());
+        let empty_ctid = body_row.get::<_, String>(1);
+        drop(empty_charge);
+        body_group.request_id = "empty-body-preserved".into();
+        body_group.work_updates[0].expect =
+            StateExpect::Version(writer.snapshot.work["a"].record.version);
+        body_group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+            priority: Some(77),
+            ..WorkPatch::default()
+        });
+        let metadata_before = writer.snapshot.clone();
+        load_unique_probes(&tx, &writer_row, &mut writer, &body_group, 0, &writer_job)
+            .await
+            .unwrap();
+        let metadata_delta =
+            plan_commit_group(&body_group, &mut writer.snapshot, 0, &schema).unwrap();
+        assert_eq!(metadata_delta.work_bodies["a"], ResolvedBody::Preserve);
+        let metadata_charge = writer_job
+            .buffer(encoded_len(&metadata_delta).unwrap() * 4)
+            .unwrap();
+        persist_delta(
+            &tx,
+            &writer_row,
+            &metadata_delta,
+            &metadata_before,
+            &mut writer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tx.query_one(
+                "SELECT ctid::text FROM fireweed_api007.bodies WHERE record_id=$1",
+                &[&work_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+            empty_ctid
+        );
+        drop(metadata_charge);
         drop(writer);
         drop(writer_row);
         // Rollback-scoped corruption: invalid ordinal must not hide payload bytes
@@ -2802,7 +2823,7 @@ mod tests {
             priority: Some(1),
             ..WorkPatch::default()
         });
-        let error = load_group(&tx, &row, &corrupt_group, &job)
+        let error = load_group_with_fields(&tx, &row, &corrupt_group, &job, None)
             .await
             .err()
             .unwrap();

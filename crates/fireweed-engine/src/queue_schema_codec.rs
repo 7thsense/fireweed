@@ -2,6 +2,7 @@
 //! their strict fields/index ordinals; namespace support is an explicit new frame.
 use fireweed_core::queue_contract::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 // Ten continuation bytes cannot begin a valid postcard usize/u64 collection
 // length, so this marker cannot be mistaken for a valid legacy definition.
@@ -40,6 +41,25 @@ struct LegacySchema {
     progress_bound_nanos: u64,
     max_attempts: u32,
 }
+/// Exact persisted-definition identity for resolved publications. Hash the
+/// authority's original bytes, including framing; decoding and re-encoding an
+/// equivalent legacy schema would bind a different physical definition.
+/// This is an identity check, not schema validation or allocation admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefinitionPin([u8; 32]);
+impl DefinitionPin {
+    pub fn from_persisted_bytes(raw: &[u8]) -> Self {
+        Self(Sha256::digest(raw).into())
+    }
+    pub fn verify(self, raw: &[u8]) -> QueueResult<()> {
+        if self == Self::from_persisted_bytes(raw) {
+            Ok(())
+        } else {
+            Err(unknown("resolved publication definition pin mismatch"))
+        }
+    }
+}
+
 /// Returns only borrowed framing information; measure allocation headers before
 /// calling decode_definition on either version.
 pub fn definition_payload(raw: &[u8]) -> QueueResult<(bool, &[u8])> {
@@ -110,6 +130,16 @@ mod tests {
         );
         let encoded = encode_definition(&schema).unwrap();
         assert_eq!(decode_definition(&encoded).unwrap(), schema);
+        let legacy_pin = DefinitionPin::from_persisted_bytes(&raw);
+        let modern_pin = DefinitionPin::from_persisted_bytes(&encoded);
+        assert_ne!(legacy_pin, modern_pin);
+        legacy_pin.verify(&raw).unwrap();
+        modern_pin.verify(&encoded).unwrap();
+        assert!(legacy_pin.verify(&encoded).is_err());
+        assert!(modern_pin.verify(&raw).is_err());
+        let wire_pin = postcard::to_allocvec(&legacy_pin).unwrap();
+        assert_eq!(wire_pin.len(), 32);
+        assert_eq!(take::<DefinitionPin>(&wire_pin).unwrap(), legacy_pin);
         assert!(definition_payload(&encoded).unwrap().0);
         let mut extra = schema;
         extra
