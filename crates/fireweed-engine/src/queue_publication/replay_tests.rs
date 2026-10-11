@@ -118,12 +118,11 @@ fn apply_reference(
             EffectRef::WorkPut {
                 metadata, fields, ..
             } => {
-                if let Some(old) = image.snapshot.work.get(c.identity.key) {
-                    if metadata.insertion_sequence != old.record.insertion_sequence
-                        && metadata.insertion_sequence <= summary.initial_sequence
-                    {
-                        return invalid("replay work identity/sequence mismatch");
-                    }
+                if let Some(old) = image.snapshot.work.get(c.identity.key)
+                    && metadata.insertion_sequence != old.record.insertion_sequence
+                    && metadata.insertion_sequence <= summary.initial_sequence
+                {
+                    return invalid("replay work identity/sequence mismatch");
                 }
                 if let FieldsCommandRef::Replace(f) | FieldsCommandRef::Edit(f) = fields {
                     admit_fields(f, definition)?;
@@ -135,10 +134,9 @@ fn apply_reference(
                     .snapshot
                     .state
                     .get(&(collection.into(), c.identity.key.into()))
+                    && (old.collection != collection || old.key != c.identity.key)
                 {
-                    if old.collection != collection || old.key != c.identity.key {
-                        return invalid("replay state identity mismatch");
-                    }
+                    return invalid("replay state identity mismatch");
                 }
                 admit_fields(fields, definition)?;
             }
@@ -150,10 +148,10 @@ fn apply_reference(
         let (prior, final_version) = if let Some(bounds) = bounds.get(&key) {
             *bounds
         } else {
-            if let Some(collection) = i.collection {
-                if !schema.state.contains_key(collection) {
-                    return invalid("unknown omitted state collection");
-                }
+            if let Some(collection) = i.collection
+                && !schema.state.contains_key(collection)
+            {
+                return invalid("unknown omitted state collection");
             }
             let (current, hwm) = checked_current(&image.snapshot, i)?;
             if current.is_none() {

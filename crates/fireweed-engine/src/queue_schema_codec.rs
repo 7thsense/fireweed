@@ -109,6 +109,50 @@ pub fn definition_headers(raw: &[u8]) -> QueueResult<u64> {
         crate::queue_memory::persisted_legacy_schema_headers(bytes)
     }
 }
+/// Complete semantic validation of exact persisted bytes under an owned job.
+/// Never reconstruct the pin from an equivalent decoded/re-encoded schema.
+pub struct AdmittedQueueDefinition {
+    raw: bytes::Bytes,
+    schema: QueueSchema,
+    pin: DefinitionPin,
+    _charge: crate::queue_admission::OwnedQueueBufferCharge,
+}
+impl AdmittedQueueDefinition {
+    pub fn from_raw(
+        raw: &[u8],
+        job: &std::sync::Arc<crate::queue_admission::QueueReservation>,
+    ) -> QueueResult<Self> {
+        let headers = definition_headers(raw)?;
+        let charge = job.owned_buffer(
+            (raw.len() as u64)
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(headers.checked_mul(4)?))
+                .and_then(|n| n.checked_add(1024))
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        let schema = decode_definition(raw)?;
+        let pin = DefinitionPin::from_persisted_bytes(raw);
+        Ok(Self {
+            raw: bytes::Bytes::copy_from_slice(raw),
+            schema,
+            pin,
+            _charge: charge,
+        })
+    }
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+    pub fn schema(&self) -> &QueueSchema {
+        &self.schema
+    }
+    pub fn pin(&self) -> DefinitionPin {
+        self.pin
+    }
+    pub fn belongs_to(&self, job: &crate::queue_admission::QueueReservation) -> bool {
+        std::ptr::eq(self._charge.reservation(), job)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,49 +216,5 @@ mod tests {
         let mut unsupported = MAGIC.to_vec();
         unsupported[14] = b'5';
         assert!(decode_definition(&unsupported).is_err());
-    }
-}
-
-/// Complete semantic validation of exact persisted bytes under an owned job.
-/// Never reconstruct the pin from an equivalent decoded/re-encoded schema.
-pub struct AdmittedQueueDefinition {
-    raw: bytes::Bytes,
-    schema: QueueSchema,
-    pin: DefinitionPin,
-    _charge: crate::queue_admission::OwnedQueueBufferCharge,
-}
-impl AdmittedQueueDefinition {
-    pub fn from_raw(
-        raw: &[u8],
-        job: &std::sync::Arc<crate::queue_admission::QueueReservation>,
-    ) -> QueueResult<Self> {
-        let headers = definition_headers(raw)?;
-        let charge = job.owned_buffer(
-            (raw.len() as u64)
-                .checked_mul(4)
-                .and_then(|n| n.checked_add(headers.checked_mul(4)?))
-                .and_then(|n| n.checked_add(1024))
-                .ok_or(QueueError::TooLarge)?,
-        )?;
-        let schema = decode_definition(raw)?;
-        let pin = DefinitionPin::from_persisted_bytes(raw);
-        Ok(Self {
-            raw: bytes::Bytes::copy_from_slice(raw),
-            schema,
-            pin,
-            _charge: charge,
-        })
-    }
-    pub fn raw(&self) -> &[u8] {
-        &self.raw
-    }
-    pub fn schema(&self) -> &QueueSchema {
-        &self.schema
-    }
-    pub fn pin(&self) -> DefinitionPin {
-        self.pin
-    }
-    pub fn belongs_to(&self, job: &crate::queue_admission::QueueReservation) -> bool {
-        std::ptr::eq(self._charge.reservation(), job)
     }
 }

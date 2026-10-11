@@ -491,7 +491,9 @@ mod tests {
     fn golden() -> Vec<u8> {
         GOLDEN
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
@@ -575,7 +577,7 @@ mod tests {
             &job,
         )
         .unwrap();
-        for version in [b'1', b'2'] {
+        for version in *b"12" {
             let mut inner = frame.as_bytes().to_vec();
             inner[4] = version;
             let n = inner.len() as u64 + 54;
@@ -776,7 +778,7 @@ mod tests {
             &job,
         )
         .unwrap();
-        for version in [b'1', b'2'] {
+        for version in *b"12" {
             let mut raw = frame.as_bytes().to_vec();
             raw[4] = version;
             let encoded = encode_publication_record(9, &raw, 4096, &job).unwrap();

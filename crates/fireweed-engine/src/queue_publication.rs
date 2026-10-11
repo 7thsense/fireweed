@@ -1294,8 +1294,10 @@ mod tests {
         aged_delta.next_sequence = 10;
         aged_delta.work[0].record.insertion_sequence = 2;
         assert!(validate_delta(&aged_before, &aged_delta).is_err());
-        let mut absent_before = RecordSnapshot::default();
-        absent_before.next_sequence = 10;
+        let absent_before = RecordSnapshot {
+            next_sequence: 10,
+            ..Default::default()
+        };
         let mut new_snapshot = absent_before.clone();
         let new_delta = plan_commit_group(&create, &mut new_snapshot, 0, &schema).unwrap();
         let mut reused = combine_deltas(&[new_delta], 10).unwrap();
