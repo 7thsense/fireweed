@@ -48,6 +48,9 @@ struct LegacySchema {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionPin([u8; 32]);
 impl DefinitionPin {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
     pub fn from_persisted_bytes(raw: &[u8]) -> Self {
         Self(Sha256::digest(raw).into())
     }

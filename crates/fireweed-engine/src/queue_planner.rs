@@ -859,6 +859,54 @@ pub fn validate_resolved_writes(delta: &CommitDelta) -> QueueResult<()> {
     }
     Ok(())
 }
+/// Exact command-vs-view validation shared by planning and durable compilation.
+/// Read knowledge never becomes write intent; no bags are cloned for validation.
+pub fn validate_work_write_view(
+    old: Option<&StoredWork>,
+    row: &StoredWork,
+    fields_change: &ResolvedFields,
+    body_change: &ResolvedBody,
+) -> QueueResult<()> {
+    let error = || QueueError::OutcomeUnknown("resolved command/view mismatch".into());
+    match (old, body_change) {
+        (_, ResolvedBody::Replace(body)) if row.body_loaded && body == &row.record.work.body => {}
+        (Some(old), ResolvedBody::Preserve)
+            if old.body_loaded == row.body_loaded
+                && old.record.work.body == row.record.work.body => {}
+        _ => return Err(error()),
+    }
+    let fields = &row.record.work.fields;
+    match (old, fields_change) {
+        (_, ResolvedFields::Replace(replacement)) if replacement == fields => {}
+        (Some(old), ResolvedFields::Preserve) if &old.record.work.fields == fields => {}
+        (Some(old), ResolvedFields::Edit(edits)) => {
+            let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+            let mut expected_len = old.record.work.fields.len();
+            for (name, value) in edits {
+                let previous = view.get(name)?;
+                if previous.is_none() && value.is_some() {
+                    expected_len = expected_len.checked_add(1).ok_or_else(error)?;
+                }
+                if previous.is_some() && value.is_none() {
+                    expected_len = expected_len.checked_sub(1).ok_or_else(error)?;
+                }
+                if fields.get(name) != value.as_ref() {
+                    return Err(error());
+                }
+            }
+            if expected_len != fields.len()
+                || old.record.work.fields.iter().any(|(name, value)| {
+                    !edits.contains_key(name) && fields.get(name) != Some(value)
+                })
+            {
+                return Err(error());
+            }
+        }
+        _ => return Err(error()),
+    }
+    Ok(())
+}
+
 /// Exact initial-to-final ownership effects from certified affected components.
 /// Version changes alone never release ownership; sparse tuples own nothing.
 fn unique_effects(
@@ -890,56 +938,13 @@ fn unique_effects(
         if owner.collection.is_none() {
             let old = original.work.get(&version.key);
             let new = work.get(version.key.as_str()).copied();
-            if let Some(fields) = new {
-                if let Some(old) = old {
-                    let row = work_rows[version.key.as_str()];
-                    if matches!(delta.work_bodies[&version.key], ResolvedBody::Preserve)
-                        && (old.body_loaded != row.body_loaded
-                            || old.record.work.body != row.record.work.body)
-                    {
-                        return Err(QueueError::OutcomeUnknown(
-                            "preserved body/view mismatch".into(),
-                        ));
-                    }
-                }
-                let change = &delta.work_fields[&version.key];
-                match (old, change) {
-                    (_, ResolvedFields::Replace(replacement)) if replacement == fields => {}
-                    (Some(old), ResolvedFields::Preserve) if &old.record.work.fields == fields => {}
-                    (Some(old), ResolvedFields::Edit(edits)) => {
-                        let view =
-                            CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
-                        let mut expected_len = old.record.work.fields.len();
-                        for (name, value) in edits {
-                            let previous = view.get(name)?;
-                            if previous.is_none() && value.is_some() {
-                                expected_len += 1;
-                            }
-                            if previous.is_some() && value.is_none() {
-                                expected_len -= 1;
-                            }
-                            if fields.get(name) != value.as_ref() {
-                                return Err(QueueError::OutcomeUnknown(
-                                    "resolved field edit/view mismatch".into(),
-                                ));
-                            }
-                        }
-                        if expected_len != fields.len()
-                            || old.record.work.fields.iter().any(|(name, value)| {
-                                !edits.contains_key(name) && fields.get(name) != Some(value)
-                            })
-                        {
-                            return Err(QueueError::OutcomeUnknown(
-                                "resolved field edit/view mismatch".into(),
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(QueueError::OutcomeUnknown(
-                            "resolved field command/view mismatch".into(),
-                        ));
-                    }
-                }
+            if new.is_some() {
+                validate_work_write_view(
+                    old,
+                    work_rows[version.key.as_str()],
+                    &delta.work_fields[&version.key],
+                    &delta.work_bodies[&version.key],
+                )?;
             }
             if let Some(old) = old {
                 let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;

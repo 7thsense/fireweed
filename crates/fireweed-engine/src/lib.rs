@@ -347,3 +347,6 @@ pub mod queue_memory;
 
 /// Versioned persisted queue definitions with strict legacy decoding.
 pub mod queue_schema_codec;
+
+/// Versioned resolved mutation framing and bounded structural scan.
+pub mod queue_publication;
