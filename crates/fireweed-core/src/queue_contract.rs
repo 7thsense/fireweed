@@ -1026,7 +1026,8 @@ fn expect(value: &StateExpect) -> QueueResult<()> {
     }
     Ok(())
 }
-fn lease_duration(value: u64) -> QueueResult<()> {
+#[doc(hidden)]
+pub fn lease_duration(value: u64) -> QueueResult<()> {
     if !(1_000_000..=3_600_000_000_000).contains(&value) {
         return Err(invalid("lease outside 1ms to 1h"));
     }
