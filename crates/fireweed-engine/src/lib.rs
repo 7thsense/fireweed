@@ -52,6 +52,7 @@ pub mod queue_index;
 pub mod queue_log_record;
 pub mod queue_namespace;
 pub mod queue_planner;
+pub mod queue_recovery;
 pub mod queue_unique_stream;
 pub mod schema_validation;
 pub mod sequenced_metadata;
