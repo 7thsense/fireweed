@@ -289,7 +289,9 @@ fn propose_target_view(
     })
 }
 
+mod addressed;
 mod ordinary;
+pub use addressed::*;
 mod stream;
 pub use ordinary::*;
 pub use stream::{

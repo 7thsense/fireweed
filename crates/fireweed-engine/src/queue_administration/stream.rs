@@ -69,10 +69,10 @@ pub(super) fn scale(a: u64, b: u64) -> QueueResult<u64> {
     a.checked_mul(b)
         .ok_or_else(|| unknown("administrative allocation bound exhausted"))
 }
-fn wire<T: serde::Serialize>(value: &T) -> QueueResult<u64> {
+pub(super) fn wire<T: serde::Serialize>(value: &T) -> QueueResult<u64> {
     encoded_len(value).map_err(|_| unknown("administrative allocation measurement failed"))
 }
-fn row_bound(row: &StoredWork) -> QueueResult<u64> {
+pub(super) fn row_bound(row: &StoredWork) -> QueueResult<u64> {
     let certificates = match &row.field_coverage {
         crate::queue_fields::FieldCoverage::Complete => 0,
         crate::queue_fields::FieldCoverage::Selected { names, prefixes } => {
@@ -162,7 +162,7 @@ fn empty_delta(id: &str, next_sequence: u64) -> CommitDelta {
         },
     }
 }
-fn work_keys(group: &CommitGroup) -> impl Iterator<Item = &str> {
+pub(super) fn work_keys(group: &CommitGroup) -> impl Iterator<Item = &str> {
     group
         .claimed_updates
         .iter()
@@ -197,7 +197,7 @@ pub(super) fn ordinary_bound(group: &CommitGroup, image: &RecordSnapshot) -> Que
     }
     Ok(bytes)
 }
-fn intent_headers(intent: &AdministrativeIntent) -> QueueResult<u64> {
+pub(super) fn intent_headers(intent: &AdministrativeIntent) -> QueueResult<u64> {
     fn action(action: &AdministrativeAction) -> QueueResult<u64> {
         match action {
             AdministrativeAction::Update {
@@ -556,7 +556,7 @@ fn selected_clause<'a>(
     Ok(&clauses[clause])
 }
 
-fn selected_row<'s>(
+pub(super) fn selected_row<'s>(
     key: &str,
     image: &'s RecordSnapshot,
     next_sequence: u64,
@@ -585,14 +585,14 @@ fn selected_row<'s>(
 /// One row's already resolved mutation and exact initial unique authority.
 /// Payloads are dropped before their admission guard. This ephemeral candidate
 /// grants neither selected-source completeness nor publication authority.
-struct AcceptedCandidate<'r> {
-    accepted: bool,
-    before: RecordSnapshot,
-    delta: CommitDelta,
-    effects: crate::queue_fields::UniqueFieldEffects,
-    _charge: QueueBufferCharge<'r>,
+pub(super) struct AcceptedCandidate<'r> {
+    pub(super) accepted: bool,
+    pub(super) before: RecordSnapshot,
+    pub(super) delta: CommitDelta,
+    pub(super) effects: crate::queue_fields::UniqueFieldEffects,
+    pub(super) _charge: QueueBufferCharge<'r>,
 }
-fn resolve_candidate<'r>(
+pub(super) fn resolve_candidate<'r>(
     key: &str,
     row: &StoredWork,
     image: &RecordSnapshot,
@@ -2235,7 +2235,7 @@ mod tests {
 
 /// Opaque identity of one completed or in-progress selected-source scan.
 #[derive(Clone)]
-pub struct AdministrativeScanIdentity(std::sync::Arc<()>);
+pub struct AdministrativeScanIdentity(pub(super) std::sync::Arc<()>);
 impl PartialEq for AdministrativeScanIdentity {
     fn eq(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
@@ -2250,15 +2250,15 @@ impl Eq for AdministrativeScanIdentity {}
 /// separately from accepted effects and later validate complete evidence EOF.
 /// Copying an accessor's payload requires separate admission.
 pub struct ResolvedAdministrativeRow {
-    scan: AdministrativeScanIdentity,
-    ordinal: u64,
-    outcome: AdministrativeOutcome,
-    clause: usize,
-    before: RecordSnapshot,
-    delta: CommitDelta,
-    effects: crate::queue_fields::UniqueFieldEffects,
-    accepted: bool,
-    _charge: crate::queue_admission::OwnedQueueBufferCharge,
+    pub(super) scan: AdministrativeScanIdentity,
+    pub(super) ordinal: u64,
+    pub(super) outcome: AdministrativeOutcome,
+    pub(super) clause: usize,
+    pub(super) before: RecordSnapshot,
+    pub(super) delta: CommitDelta,
+    pub(super) effects: crate::queue_fields::UniqueFieldEffects,
+    pub(super) accepted: bool,
+    pub(super) _charge: crate::queue_admission::OwnedQueueBufferCharge,
 }
 impl ResolvedAdministrativeRow {
     pub fn ordinal(&self) -> u64 {
@@ -2273,6 +2273,8 @@ impl ResolvedAdministrativeRow {
     pub fn outcome(&self) -> &AdministrativeOutcome {
         &self.outcome
     }
+    /// First-clause ordinal for SelectFirst; request entry position for Addressed.
+    /// This is independent of the consecutive emitted-packet ordinal.
     pub fn clause(&self) -> usize {
         self.clause
     }
@@ -2290,12 +2292,12 @@ impl ResolvedAdministrativeRow {
 /// complete uniqueness reduction, ordinary CAS/lease checks or publication.
 /// The backend keeps its fence until all those checks and atomic storage finish.
 pub struct AdmittedAdministrativeScan {
-    scan: AdministrativeScanIdentity,
-    initial_sequence: u64,
-    packet_count: u64,
-    result: AdministrativeResult,
-    overlap: bool,
-    _charge: crate::queue_admission::OwnedQueueBufferCharge,
+    pub(super) scan: AdministrativeScanIdentity,
+    pub(super) initial_sequence: u64,
+    pub(super) packet_count: u64,
+    pub(super) result: AdministrativeResult,
+    pub(super) overlap: bool,
+    pub(super) _charge: crate::queue_admission::OwnedQueueBufferCharge,
 }
 impl AdmittedAdministrativeScan {
     pub fn packet_count(&self) -> u64 {

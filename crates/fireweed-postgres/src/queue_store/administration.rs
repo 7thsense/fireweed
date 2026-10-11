@@ -270,101 +270,23 @@ async fn native_broad_source<'s, 'r: 's>(
             return Err(storage("native administrative key length changed"));
         }
         let highwater = version(row.get(1))?;
-        let mut group = CommitGroup {
-            request_id: String::new(),
-            claimed_updates: vec![],
-            state_updates: vec![],
-            work_inserts: vec![],
-            work_updates: vec![UnclaimedUpdate {
+        let loaded = hydrate_administrative_row(
+            tx,
+            queue,
+            &record_key,
+            action,
+            intent.evaluated_at,
+            false,
+            reservation,
+        )
+        .await?;
+        if loaded.snapshot.work[&record_key].record.version != highwater
+            || loaded.ids.get(&RecordIdentity {
+                collection: None,
                 key: record_key.clone(),
-                expect: StateExpect::Version(highwater),
-                change: match action {
-                    fireweed_core::queue_administration::AdministrativeAction::Delete {
-                        ..
-                    } => UnclaimedChange::Delete,
-                    fireweed_core::queue_administration::AdministrativeAction::Update {
-                        patch,
-                        lifecycle,
-                        lease_guard,
-                        ..
-                    } => UnclaimedChange::Administrative {
-                        patch: patch.clone(),
-                        lifecycle: *lifecycle,
-                        lease_guard: *lease_guard,
-                    },
-                },
-            }],
-        };
-        // Full field authority for ONE server-selected row; opaque bodies are
-        // loaded only for an explicit comparison. Selective field hydration is
-        // a later performance gate, not a whole-queue/client filtering fallback.
-        let mut loaded = load_group_with_fields(tx, queue, &group, reservation, None).await?;
-        if loaded.snapshot.work.len() != 1 || loaded.snapshot.versions.len() != 1 {
-            return Err(storage("native selected row disappeared"));
-        }
-        if let fireweed_core::queue_administration::AdministrativeAction::Update {
-            patch,
-            remove_field_prefixes,
-            ..
-        } = action
+            }) != Some(&id)
         {
-            let target = &loaded.snapshot.work[&record_key];
-            let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
-            let resolved = fireweed_engine::queue_fields::resolve_edits(
-                &view,
-                &patch.fields,
-                remove_field_prefixes,
-                &queue.schema.work,
-            )?;
-            let UnclaimedChange::Administrative { patch, .. } = &mut group.work_updates[0].change
-            else {
-                unreachable!("update proxy")
-            };
-            patch.fields = match resolved {
-                ResolvedFields::Preserve => Default::default(),
-                ResolvedFields::Edit(edits) => edits,
-                ResolvedFields::Replace(_) => {
-                    return Err(storage(
-                        "administrative prefix unexpectedly replaced fields",
-                    ));
-                }
-            };
-            // The shared probe planner clones before/after identities across
-            // indexes. Admit that transient amplification before generating any
-            // tuples; retained owner coverage is charged by the native loader.
-            let _planning = reservation.buffer(
-                group_expansion_budget(&group, &loaded.snapshot, &queue.schema)?
-                    .checked_mul(8)
-                    .ok_or(QueueError::TooLarge)?,
-            )?;
-            load_unique_probes(
-                tx,
-                queue,
-                &mut loaded,
-                &group,
-                intent.evaluated_at,
-                reservation,
-            )
-            .await?;
-        } else {
-            // Deletion may invalidate an active lease, so tuple discovery must
-            // not reuse ordinary delete's lease rejection. The common complete
-            // record codec supplies exactly the existing eligible unique tuples.
-            let tuple_charge = reservation.buffer(
-                group_expansion_budget(&group, &loaded.snapshot, &queue.schema)?
-                    .checked_mul(8)
-                    .ok_or(QueueError::TooLarge)?,
-            )?;
-            loaded._probe_charges.push(tuple_charge);
-            let target = &loaded.snapshot.work[&record_key];
-            let probes = insert_unique_probes(
-                std::slice::from_ref(&target.record.work),
-                &loaded.snapshot,
-                &queue.schema,
-            )?
-            .into_iter()
-            .collect();
-            load_unique_authority(tx, queue, &mut loaded, probes, reservation).await?;
+            return Err(storage("native selected physical identity changed"));
         }
         let Loaded {
             _charge,
@@ -418,6 +340,189 @@ async fn native_broad_source<'s, 'r: 's>(
     Ok(source)
 }
 
+/// Shared exact-key hydration and prospective authority for broad and addressed
+/// controls. Incoming action/key clones are admitted independently of SQL scan
+/// preparation. Absence/tombstone is valid only for an addressed point lookup.
+#[allow(clippy::too_many_arguments)]
+async fn hydrate_administrative_row<'r>(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    record_key: &str,
+    action: &fireweed_core::queue_administration::AdministrativeAction,
+    evaluated_at: i64,
+    allow_absent: bool,
+    reservation: &'r QueueReservation,
+) -> QueueResult<Loaded<'r>> {
+    let input_bytes = encoded_len(action)?
+        .checked_mul(12)
+        .and_then(|n| n.checked_add((record_key.len() as u64).checked_mul(32)?))
+        .and_then(|n| n.checked_add(65536))
+        .ok_or_else(|| storage("administrative hydration input bound"))?;
+    let input_charge = reservation.buffer(input_bytes)?;
+    let mut group = CommitGroup {
+        request_id: String::new(),
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![],
+        work_updates: vec![UnclaimedUpdate {
+            key: record_key.to_owned(),
+            expect: StateExpect::Version(1),
+            change: match action {
+                fireweed_core::queue_administration::AdministrativeAction::Delete { .. } => {
+                    UnclaimedChange::Delete
+                }
+                fireweed_core::queue_administration::AdministrativeAction::Update {
+                    patch,
+                    lifecycle,
+                    lease_guard,
+                    ..
+                } => UnclaimedChange::Administrative {
+                    patch: patch.clone(),
+                    lifecycle: *lifecycle,
+                    lease_guard: *lease_guard,
+                },
+            },
+        }],
+    };
+    // Full field authority for ONE server-selected row; opaque bodies are
+    // loaded only for an explicit comparison. Selective field hydration is
+    // a later performance gate, not a whole-queue/client filtering fallback.
+    let mut loaded = load_group_with_fields(tx, queue, &group, reservation, None).await?;
+    if loaded.snapshot.work.is_empty() {
+        if !allow_absent {
+            return Err(storage("native selected row disappeared"));
+        }
+        loaded._probe_charges.push(input_charge);
+        return Ok(loaded);
+    }
+    if loaded.snapshot.work.len() != 1 || loaded.snapshot.versions.len() != 1 {
+        return Err(storage("native hydration is not one row"));
+    }
+    group.work_updates[0].expect =
+        StateExpect::Version(loaded.snapshot.work[record_key].record.version);
+    if let fireweed_core::queue_administration::AdministrativeAction::Update {
+        patch,
+        remove_field_prefixes,
+        ..
+    } = action
+    {
+        let target = &loaded.snapshot.work[record_key];
+        let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
+        let resolved = fireweed_engine::queue_fields::resolve_edits(
+            &view,
+            &patch.fields,
+            remove_field_prefixes,
+            &queue.schema.work,
+        )?;
+        let UnclaimedChange::Administrative { patch, .. } = &mut group.work_updates[0].change
+        else {
+            unreachable!("update proxy")
+        };
+        patch.fields = match resolved {
+            ResolvedFields::Preserve => Default::default(),
+            ResolvedFields::Edit(edits) => edits,
+            ResolvedFields::Replace(_) => {
+                return Err(storage(
+                    "administrative prefix unexpectedly replaced fields",
+                ));
+            }
+        };
+        // The shared probe planner clones before/after identities across
+        // indexes. Admit that transient amplification before generating any
+        // tuples; retained owner coverage is charged by the native loader.
+        let _planning = reservation.buffer(
+            group_expansion_budget(&group, &loaded.snapshot, &queue.schema)?
+                .checked_mul(8)
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        load_unique_probes(tx, queue, &mut loaded, &group, evaluated_at, reservation).await?;
+    } else {
+        // Deletion may invalidate an active lease, so tuple discovery must
+        // not reuse ordinary delete's lease rejection. The common complete
+        // record codec supplies exactly the existing eligible unique tuples.
+        let tuple_charge = reservation.buffer(
+            group_expansion_budget(&group, &loaded.snapshot, &queue.schema)?
+                .checked_mul(8)
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        loaded._probe_charges.push(tuple_charge);
+        let target = &loaded.snapshot.work[record_key];
+        let probes = insert_unique_probes(
+            std::slice::from_ref(&target.record.work),
+            &loaded.snapshot,
+            &queue.schema,
+        )?
+        .into_iter()
+        .collect();
+        load_unique_authority(tx, queue, &mut loaded, probes, reservation).await?;
+    }
+    loaded._probe_charges.push(input_charge);
+    Ok(loaded)
+}
+
+fn native_addressed_source<'s, 'r>(
+    tx: &'s Transaction<'_>,
+    queue: &'s QueueRow<'_>,
+    intent: &'s fireweed_core::queue_administration::AdministrativeIntent,
+    limits: &QueueLimits,
+    reservation: &'r QueueReservation,
+) -> QueueResult<
+    impl futures::Stream<
+        Item = QueueResult<
+            fireweed_engine::queue_administration::AddressedAdministrativeInput<'s, 'r>,
+        >,
+    > + 's,
+>
+where
+    'r: 's,
+{
+    use fireweed_core::queue_administration::AdministrativeOperation;
+    intent.validate(&queue.schema, limits)?;
+    let AdministrativeOperation::Addressed(entries) = &intent.operation else {
+        return Err(storage("addressed source lacks addressed intent"));
+    };
+    Ok(futures::stream::try_unfold(
+        0usize,
+        move |position| async move {
+            let Some(entry) = entries.get(position) else {
+                return Ok(None);
+            };
+            let loaded = hydrate_administrative_row(
+                tx,
+                queue,
+                &entry.key,
+                &entry.action,
+                intent.evaluated_at,
+                true,
+                reservation,
+            )
+            .await?;
+            let Loaded {
+                snapshot,
+                ids,
+                _charge,
+                _selection_charge,
+                _probe_charges,
+            } = loaded;
+            drop(ids);
+            let mut hydration = _charge;
+            if let Some(charge) = _selection_charge {
+                hydration = hydration.merge(charge)?;
+            }
+            for charge in _probe_charges {
+                hydration = hydration.merge(charge)?;
+            }
+            let input =
+                fireweed_engine::queue_administration::AddressedAdministrativeInput::OwnedOneRow {
+                    position,
+                    key: entry.key.clone(),
+                    image: snapshot,
+                    hydration,
+                };
+            Ok(Some((input, position + 1)))
+        },
+    ))
+}
 #[cfg_attr(
     not(test),
     expect(
@@ -500,22 +605,44 @@ async fn prepare_native_scratch<'r>(
         queue.next_sequence,
     )
     .await?;
-    let source = native_broad_source(tx, queue, intent, limits, reservation).await?;
-    let delivery = sink.clone();
-    let summary = fireweed_engine::queue_administration::scan_broad_group_to_sink(
-        ordinary,
-        intent,
-        source,
-        &ordinary_loaded.snapshot,
-        &queue.schema,
-        limits,
-        Arc::clone(reservation),
-        move |packet| {
-            let sink = delivery.clone();
-            async move { sink.append(packet).await }
-        },
-    )
-    .await?;
+    let summary = match &intent.operation {
+        fireweed_core::queue_administration::AdministrativeOperation::SelectFirst(_) => {
+            let source = native_broad_source(tx, queue, intent, limits, reservation).await?;
+            let delivery = sink.clone();
+            fireweed_engine::queue_administration::scan_broad_group_to_sink(
+                ordinary,
+                intent,
+                source,
+                &ordinary_loaded.snapshot,
+                &queue.schema,
+                limits,
+                Arc::clone(reservation),
+                move |packet| {
+                    let sink = delivery.clone();
+                    async move { sink.append(packet).await }
+                },
+            )
+            .await?
+        }
+        fireweed_core::queue_administration::AdministrativeOperation::Addressed(_) => {
+            let source = native_addressed_source(tx, queue, intent, limits, reservation)?;
+            let delivery = sink.clone();
+            fireweed_engine::queue_administration::scan_addressed_group_to_sink(
+                ordinary,
+                intent,
+                source,
+                &ordinary_loaded.snapshot,
+                &queue.schema,
+                limits,
+                Arc::clone(reservation),
+                move |packet| {
+                    let sink = delivery.clone();
+                    async move { sink.append(packet).await }
+                },
+            )
+            .await?
+        }
+    };
     let (scratch, summary) = sink.seal(summary).await?;
     Ok(NativeAdministrativePreparation {
         scratch,
@@ -1275,6 +1402,38 @@ mod tests {
             })
             .await
             .unwrap();
+        store
+            .insert(InsertRequest {
+                queue: address.clone(),
+                request_id: "seed-tombstone".into(),
+                mode: InsertMode::InsertOnly,
+                items: vec![NewWork {
+                    key: "dead".into(),
+                    priority: 0,
+                    available_at: 0,
+                    fields: Default::default(),
+                    body: Default::default(),
+                }],
+            })
+            .await
+            .unwrap();
+        store
+            .commit(CommitBatch {
+                queue: address.clone(),
+                groups: vec![CommitGroup {
+                    request_id: "delete-tombstone".into(),
+                    claimed_updates: vec![],
+                    state_updates: vec![],
+                    work_inserts: vec![],
+                    work_updates: vec![UnclaimedUpdate {
+                        key: "dead".into(),
+                        expect: StateExpect::Version(1),
+                        change: UnclaimedChange::Delete,
+                    }],
+                }],
+            })
+            .await
+            .unwrap();
         let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
             .unwrap();
@@ -1434,7 +1593,7 @@ mod tests {
                         assert_eq!(count, 0);
                     }
                     let tombstones:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND NOT active AND version=2",&[&queue.id]).await.unwrap().get(0);
-                    assert_eq!(tombstones, 3);
+                    assert_eq!(tombstones, 4); // three new deletions plus the original tombstone
                 }
             }
             drop(summary);
@@ -1445,6 +1604,158 @@ mod tests {
             let original:i64=client.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=1 AND priority=0",&[&queue_id]).await.unwrap().get(0);
             assert_eq!(original, 3);
             assert_eq!(quota.usage().unwrap(), 0);
+        }
+        // The addressed route shares this exact physical pipeline and retains
+        // initial before data for duplicate positions, never a speculative row.
+        for overlap in [false, true] {
+            let tx = client.transaction().await.unwrap();
+            let queue = queue_row(&tx, &address, &job).await.unwrap();
+            let addressed = AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: Some(BTreeSet::from(["opaque".into()])),
+                operation: AdministrativeOperation::Addressed(
+                    [
+                        "key-0", "key-0", "missing", "missing", "dead", "dead", "key-1",
+                    ]
+                    .into_iter()
+                    .map(|key| AdministrativeEntry {
+                        key: key.into(),
+                        expected_version: None,
+                        precondition: WorkSelector::all(vec![]),
+                        action: update.clone(),
+                    })
+                    .collect(),
+                ),
+            };
+            let mut ordinary = group.clone();
+            ordinary.state_updates.push(StateUpdate {
+                collection: "instances".into(),
+                key: "workflow".into(),
+                expect: StateExpect::Absent,
+                change: StateChange::Put {
+                    fields: Default::default(),
+                    value: vec![1].into(),
+                },
+            });
+            ordinary.work_inserts.push(NewWork {
+                key: if overlap { "missing" } else { "next" }.into(),
+                priority: 0,
+                available_at: 0,
+                fields: Default::default(),
+                body: Default::default(),
+            });
+            let prepared = prepare_native_scratch(
+                &tx,
+                &address,
+                &queue,
+                &ordinary,
+                &addressed,
+                &QueueLimits::default(),
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            let items = &prepared.summary.result().items;
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|item| item.outcome.clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    AdministrativeOutcome::Changed { version: 2 },
+                    AdministrativeOutcome::Invalid,
+                    AdministrativeOutcome::NotFound,
+                    AdministrativeOutcome::Invalid,
+                    AdministrativeOutcome::NotFound,
+                    AdministrativeOutcome::Invalid,
+                    AdministrativeOutcome::Changed { version: 2 }
+                ]
+            );
+            assert_eq!(items[0].before.as_ref().unwrap().version, 1);
+            assert_eq!(items[1].before.as_ref().unwrap().version, 1);
+            assert_eq!(
+                items[0].before.as_ref().unwrap().fields["opaque"],
+                items[1].before.as_ref().unwrap().fields["opaque"]
+            );
+            let clocks = std::cell::Cell::new(0);
+            let finalized = finalize_native_semantics(
+                prepared,
+                &address,
+                &ordinary,
+                &queue,
+                || {
+                    clocks.set(clocks.get() + 1);
+                    Ok(0)
+                },
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            if overlap {
+                assert!(matches!(finalized, Err(Rejection::Invalid(_))));
+                assert_eq!(clocks.get(), 0);
+            } else {
+                let finalized = finalized.unwrap_or_else(|reason| panic!("unexpected {reason:?}"));
+                assert_eq!(clocks.get(), 1);
+                let NativeProvisionalGroup {
+                    scratch,
+                    summary,
+                    ordinary,
+                    initial,
+                } = finalized;
+                let scratch = apply_resolved_administrative_commands(
+                    &tx, &address, &queue, scratch, &job, &workers,
+                )
+                .await
+                .unwrap();
+                drop(scratch);
+                let mut ids = load_delta_ids(
+                    &tx,
+                    &queue,
+                    ordinary.delta(),
+                    ordinary.initial_authority(),
+                    &job,
+                )
+                .await
+                .unwrap();
+                persist_delta(
+                    &tx,
+                    &queue,
+                    ordinary.delta(),
+                    ordinary.initial_authority(),
+                    &mut ids,
+                )
+                .await
+                .unwrap();
+                drop(ids);
+                let changed:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=2 AND priority=19",&[&queue.id]).await.unwrap().get(0);
+                assert_eq!(changed, 2);
+                let logical: String = tx
+                    .query_one(
+                        "SELECT next_sequence::text FROM fireweed_api007.queues WHERE id=$1",
+                        &[&queue.id],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+                assert_eq!(logical, "5");
+                let added:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND key=ANY($2::bytea[])",&[&queue.id,&vec![b"workflow".to_vec(),b"next".to_vec()]]).await.unwrap().get(0);
+                assert_eq!(added, 2);
+                drop(summary);
+                drop(ordinary);
+                drop(initial);
+            }
+            drop(queue);
+            tx.rollback().await.unwrap();
+            assert_eq!(quota.usage().unwrap(), 0);
+            let original:i64=client.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=1 AND priority=0",&[&queue_id]).await.unwrap().get(0);
+            assert_eq!(original, 3);
         }
         assert_ne!(queue_id, 0);
         drop(job);
