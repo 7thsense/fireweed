@@ -48,6 +48,9 @@ use std::sync::{Arc, Mutex};
 
 /// Small backend-neutral claim/commit queue interface (API-007).
 pub mod queue;
+#[doc(hidden)]
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+pub mod queue_recovery_pipeline;
 
 mod facade;
 mod operator;

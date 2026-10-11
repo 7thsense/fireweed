@@ -51,6 +51,9 @@ impl ColdQueueHistory {
     pub fn next_offset(&self) -> u64 {
         self.next_offset
     }
+    pub fn historical_epoch(&self) -> u64 {
+        self.epoch
+    }
     pub fn insertion_sequence(&self) -> u64 {
         self.insertion_sequence
     }

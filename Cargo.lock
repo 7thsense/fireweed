@@ -1407,6 +1407,7 @@ dependencies = [
  "fireweed-objectlog",
  "fireweed-postgres",
  "fireweed-projection",
+ "fireweed-queue-spool",
  "fireweed-release",
  "fireweed-turso",
  "futures",
