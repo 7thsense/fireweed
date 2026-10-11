@@ -764,7 +764,7 @@ pub(crate) fn resolve_group_fields(
     }
     validate_field_commands(delta)
 }
-fn validate_field_commands(delta: &CommitDelta) -> QueueResult<()> {
+pub fn validate_field_commands(delta: &CommitDelta) -> QueueResult<()> {
     let keys: BTreeSet<_> = delta
         .work
         .iter()

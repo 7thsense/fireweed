@@ -1,6 +1,7 @@
 //! Native asynchronous PostgreSQL baseline for API-007. Complete operation jobs
 //! retain admission and connection ownership after caller cancellation.
 use fireweed_core::queue_contract::*;
+use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
     decode_definition, definition_headers, encode_definition,
@@ -804,6 +805,18 @@ async fn load_unique_authority<'a>(
     if probes.is_empty() {
         return Ok(());
     }
+    let mut fresh = BTreeSet::new();
+    if probes.iter().any(|probe| {
+        loaded.snapshot.unique_probes_loaded.contains(probe)
+            || loaded.snapshot.unique_owners.contains_key(probe)
+            || !fresh.insert(probe)
+    }) {
+        return Err(storage(
+            "unique authority load requires fresh distinct tuples",
+        ));
+    }
+    // All accepted releases/claims require retained probe coverage. Therefore a
+    // fresh tuple cannot have changed in a prior accepted speculative group.
     let mut columns = vec![];
     let mut numbers = vec![];
     let mut hashes = vec![];
@@ -850,34 +863,7 @@ async fn load_unique_authority<'a>(
                 .ok_or_else(|| storage("missing unique owner"))?
                 .clone(),
         };
-        let prospective = match &owner.collection {
-            None => loaded
-                .snapshot
-                .work
-                .get(&owner.key)
-                .map(|w| &w.record.work.fields),
-            Some(col) => loaded
-                .snapshot
-                .state
-                .get(&(col.clone(), owner.key.clone()))
-                .map(|s| &s.fields),
-        };
-        let retained = if let Some(fields) = prospective {
-            let col = collection(&queue.schema, probe.collection.as_deref())?;
-            let def = definition(&queue.schema, col)?;
-            let columns = &def.indexes[&probe.index];
-            ordered_key(
-                &columns
-                    .iter()
-                    .map(|key| fields.get(key))
-                    .collect::<Vec<_>>(),
-            )? == probe.full_sort_key
-        } else {
-            !loaded.ids.contains_key(&owner)
-        };
-        if retained {
-            loaded.snapshot.unique_owners.insert(probe.clone(), owner);
-        }
+        loaded.snapshot.unique_owners.insert(probe.clone(), owner);
     }
     loaded.snapshot.unique_probes_loaded.extend(probes);
     Ok(())
@@ -902,6 +888,40 @@ async fn persist_delta(
             "selective work view not activated in PostgreSQL persistence",
         ));
     }
+    persist_delta_with_mode(
+        tx,
+        queue,
+        delta,
+        before,
+        loaded,
+        FieldPersistenceMode::Complete,
+    )
+    .await
+}
+#[derive(Clone, Copy)]
+enum FieldPersistenceMode {
+    Complete,
+    #[cfg(test)]
+    Selected,
+}
+impl FieldPersistenceMode {
+    fn selected(self) -> bool {
+        match self {
+            Self::Complete => false,
+            #[cfg(test)]
+            Self::Selected => true,
+        }
+    }
+}
+async fn persist_delta_with_mode(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    delta: &CommitDelta,
+    before: &RecordSnapshot,
+    loaded: &mut Loaded<'_>,
+    mode: FieldPersistenceMode,
+) -> QueueResult<()> {
+    fireweed_engine::queue_planner::validate_field_commands(delta)?;
     let work_by_key: BTreeMap<_, _> = delta
         .work
         .iter()
@@ -951,6 +971,8 @@ async fn persist_delta(
     let mut payload_ids = vec![];
     let mut payloads = vec![];
     let mut changed_fields: BTreeMap<i64, (i32, Fields)> = BTreeMap::new();
+    let mut exact_edits: BTreeMap<i64, &FieldEdits> = BTreeMap::new();
+    let mut exact_indexes: BTreeMap<i64, Vec<IndexEffect>> = BTreeMap::new();
     for v in &delta.versions {
         let identity = RecordIdentity {
             collection: v.collection.clone(),
@@ -986,7 +1008,41 @@ async fn persist_delta(
                 payload_ids.push(id);
                 payloads.push(work.record.work.body.to_vec());
             }
-            if old.is_none_or(|old| old.record.work.fields != work.record.work.fields) {
+            if mode.selected() {
+                match &delta.work_fields[&v.key] {
+                    ResolvedFields::Preserve => {}
+                    ResolvedFields::Replace(fields) => {
+                        changed_fields.insert(id, (col, fields.clone()));
+                    }
+                    ResolvedFields::Edit(edits) => {
+                        let old =
+                            old.ok_or_else(|| storage("partial field command cannot insert"))?;
+                        let view =
+                            CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                        exact_indexes.insert(
+                            id,
+                            fireweed_engine::queue_fields::resolve_index_effects(
+                                &view,
+                                &delta.work_fields[&v.key],
+                                &queue.schema.work,
+                            )?,
+                        );
+                        exact_edits.insert(id, edits);
+                        changed_fields.insert(
+                            id,
+                            (
+                                col,
+                                edits
+                                    .iter()
+                                    .filter_map(|(name, value)| {
+                                        value.as_ref().map(|v| (name.clone(), v.clone()))
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                    }
+                }
+            } else if old.is_none_or(|old| old.record.work.fields != work.record.work.fields) {
                 changed_fields.insert(id, (col, work.record.work.fields.clone()));
             }
         } else if let Some(state) = v
@@ -1052,7 +1108,11 @@ async fn persist_delta(
         .map_err(storage)?;
     }
     if !changed_fields.is_empty() {
-        let changed: Vec<_> = changed_fields.keys().copied().collect();
+        let changed: Vec<_> = changed_fields
+            .keys()
+            .filter(|id| !exact_edits.contains_key(id))
+            .copied()
+            .collect();
         tx.execute(
             "DELETE FROM fireweed_api007.fields WHERE record_id=ANY($1)",
             &[&changed],
@@ -1071,6 +1131,41 @@ async fn persist_delta(
         )
         .await
         .map_err(storage)?;
+        let mut edited_records = vec![];
+        let mut edited_numbers = vec![];
+        let mut edited_extra_records = vec![];
+        let mut edited_names = vec![];
+        let mut edited_name_hashes = vec![];
+        let mut edited_index_records = vec![];
+        let mut edited_index_numbers = vec![];
+        for (id, edits) in &exact_edits {
+            let (col, _) = &changed_fields[id];
+            let def = definition(&queue.schema, *col)?;
+            for name in edits.keys() {
+                let no = field_no(def, name)?;
+                if no >= 0 {
+                    edited_records.push(*id);
+                    edited_numbers.push(no);
+                } else {
+                    edited_extra_records.push(*id);
+                    edited_names.push(name.as_bytes().to_vec());
+                    edited_name_hashes.push(probe_hash(name.as_bytes()));
+                }
+            }
+            for effect in &exact_indexes[id] {
+                edited_index_records.push(*id);
+                edited_index_numbers.push(index_no(def, &effect.index)?);
+            }
+        }
+        if !edited_records.is_empty() {
+            tx.execute("DELETE FROM fireweed_api007.fields f USING UNNEST($1::bigint[],$2::int[]) AS x(id,no) WHERE f.record_id=x.id AND f.field=x.no", &[&edited_records,&edited_numbers]).await.map_err(storage)?;
+        }
+        if !edited_extra_records.is_empty() {
+            tx.execute("DELETE FROM fireweed_api007.additional_fields f USING UNNEST($1::bigint[],$2::bytea[],$3::bytea[]) AS x(id,hash,name) WHERE f.record_id=x.id AND f.name_hash=x.hash AND f.name=x.name", &[&edited_extra_records,&edited_name_hashes,&edited_names]).await.map_err(storage)?;
+        }
+        if !edited_index_records.is_empty() {
+            tx.execute("DELETE FROM fireweed_api007.indexes i USING UNNEST($1::bigint[],$2::int[]) AS x(id,no) WHERE i.record_id=x.id AND i.index_no=x.no", &[&edited_index_records,&edited_index_numbers]).await.map_err(storage)?;
+        }
         let mut extra_records = vec![];
         let mut extra_cols = vec![];
         let mut extra_names = vec![];
@@ -1120,20 +1215,36 @@ async fn persist_delta(
                     extra_values.push(encode(value)?);
                 }
             }
-            for (no, (name, columns)) in def.indexes.iter().enumerate() {
-                let sort = ordered_key(
-                    &columns
-                        .iter()
-                        .map(|key| fields.get(key))
-                        .collect::<Vec<_>>(),
-                )?;
-                ix_records.push(*id);
-                ix_cols.push(*col);
-                ix_numbers.push(no as i32);
-                ix_prefixes.push(prefix(&sort));
-                ix_hashes.push(probe_hash(&sort));
-                ix_full.push(sort);
-                uniques.push(def.unique_indexes.contains(name));
+            if let Some(effects) = exact_indexes.get(id) {
+                for effect in effects {
+                    let sort = effect
+                        .after
+                        .as_ref()
+                        .ok_or_else(|| storage("existing edited index lacks physical after key"))?;
+                    ix_records.push(*id);
+                    ix_cols.push(*col);
+                    ix_numbers.push(index_no(def, &effect.index)?);
+                    ix_prefixes.push(prefix(sort));
+                    ix_hashes.push(probe_hash(sort));
+                    ix_full.push(sort.clone());
+                    uniques.push(effect.unique);
+                }
+            } else {
+                for (no, (name, columns)) in def.indexes.iter().enumerate() {
+                    let sort = ordered_key(
+                        &columns
+                            .iter()
+                            .map(|key| fields.get(key))
+                            .collect::<Vec<_>>(),
+                    )?;
+                    ix_records.push(*id);
+                    ix_cols.push(*col);
+                    ix_numbers.push(no as i32);
+                    ix_prefixes.push(prefix(&sort));
+                    ix_hashes.push(probe_hash(&sort));
+                    ix_full.push(sort);
+                    uniques.push(def.unique_indexes.contains(name));
+                }
             }
         }
         if !record_ids.is_empty() {
@@ -1996,6 +2107,22 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn staged_selective_loader_avoids_payload_and_partial_persistence_stays_blocked() {
+        staged_selective_fixture().await;
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn staged_selective_writer_disambiguates_colliding_names_and_values() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COLLIDING_PROBES.set(false);
+            }
+        }
+        COLLIDING_PROBES.set(true);
+        let _reset = Reset;
+        staged_selective_fixture().await;
+    }
+    async fn staged_selective_fixture() {
         use fireweed_engine::{queue_fields::CheckedFields, queue_planner::required_work_fields};
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let store = PostgresQueueStore::connect(
@@ -2059,12 +2186,14 @@ mod tests {
             key: "a".into(),
             priority: 0,
             available_at: 0,
-            body: Default::default(),
+            body: vec![9; 1 << 20].into(),
             fields: BTreeMap::from([
                 ("gate".into(), FieldValue::Boolean(false)),
                 ("target".into(), FieldValue::Text("owned".into())),
                 ("/payload/blob".into(), FieldValue::Bytes(vec![7; 1 << 20])),
                 ("unrelated".into(), FieldValue::Bytes(vec![8; 1 << 20])),
+                ("/payload/control\0α".into(), FieldValue::Integer(10)),
+                ("/payload/control\0β".into(), FieldValue::Integer(20)),
             ]),
         };
         let mut other = item.clone();
@@ -2180,6 +2309,40 @@ mod tests {
         assert_eq!(view.get("gate").unwrap(), Some(&FieldValue::Boolean(false)));
         assert!(view.get("target").is_err());
         assert!(view.get("/payload/blob").is_err());
+        let owned_tuple = UniqueIdentity {
+            collection: None,
+            index: "by_target".into(),
+            full_sort_key: ordered_key(&[Some(&FieldValue::Text("owned".into()))]).unwrap(),
+        };
+        load_unique_authority(&tx, &row, &mut selected, vec![owned_tuple.clone()], &job)
+            .await
+            .unwrap();
+        assert_eq!(selected.snapshot.unique_owners[&owned_tuple].key, "a");
+        let owners = selected.snapshot.unique_owners.clone();
+        let probes = selected.snapshot.unique_probes_loaded.clone();
+        assert!(
+            load_unique_authority(&tx, &row, &mut selected, vec![owned_tuple], &job)
+                .await
+                .is_err()
+        );
+        let missing = UniqueIdentity {
+            collection: None,
+            index: "by_target".into(),
+            full_sort_key: ordered_key(&[Some(&FieldValue::Text("absent".into()))]).unwrap(),
+        };
+        assert!(
+            load_unique_authority(
+                &tx,
+                &row,
+                &mut selected,
+                vec![missing.clone(), missing],
+                &job
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(selected.snapshot.unique_owners, owners);
+        assert_eq!(selected.snapshot.unique_probes_loaded, probes);
         let before = selected.snapshot.clone();
         let delta = plan_commit_group(&group, &mut selected.snapshot, 0, &schema).unwrap();
         assert!(matches!(
@@ -2209,6 +2372,356 @@ mod tests {
             Err(QueueError::OutcomeUnknown(_))
         ));
         assert_eq!(admission.usage().unwrap(), before_usage);
+        let mut writer_group = group.clone();
+        writer_group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+            fields: BTreeMap::from([
+                ("gate".into(), Some(FieldValue::Boolean(true))),
+                ("/payload/control\0α".into(), Some(FieldValue::Integer(1))),
+            ]),
+            ..WorkPatch::default()
+        });
+        writer_group.work_updates.push(UnclaimedUpdate {
+            key: "b".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Patch(WorkPatch {
+                fields: BTreeMap::from([
+                    ("target".into(), Some(FieldValue::Text("new-owner".into()))),
+                    ("/payload/control\0β".into(), Some(FieldValue::Integer(2))),
+                ]),
+                ..WorkPatch::default()
+            }),
+        });
+        let update_target = |id: &str, key: &str, version, target: &str| CommitGroup {
+            request_id: id.into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: key.into(),
+                expect: StateExpect::Version(version),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    fields: BTreeMap::from([(
+                        "target".into(),
+                        Some(FieldValue::Text(target.into())),
+                    )]),
+                    ..WorkPatch::default()
+                }),
+            }],
+        };
+        let rejected_rekey = update_target("rejected-rekey", "a", 2, "new-owner");
+        let free_and_create = CommitGroup {
+            request_id: "free-create".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "b".into(),
+                expect: StateExpect::Version(2),
+                change: UnclaimedChange::Delete,
+            }],
+            work_inserts: vec![NewWork {
+                key: "d".into(),
+                priority: 0,
+                available_at: 0,
+                body: Default::default(),
+                fields: BTreeMap::from([("target".into(), FieldValue::Text("new-owner".into()))]),
+            }],
+        };
+        let rekey_created = update_target("rekey-created", "d", 1, "final-owner");
+        let reuse = update_target("reuse", "a", 2, "new-owner");
+        let writer_readset = load_envelope(&[
+            writer_group.clone(),
+            rejected_rekey.clone(),
+            free_and_create.clone(),
+            rekey_created.clone(),
+            reuse.clone(),
+        ]);
+        let writer_wanted = required_work_fields(&writer_readset, &schema).unwrap();
+        let writer_admission = QueueAdmission::new(1, 4 << 20).unwrap();
+        let writer_job = writer_admission.reserve(0).unwrap();
+        let writer_row = queue_row(&tx, &queue, &writer_job).await.unwrap();
+        let mut writer = load_group_with_fields(
+            &tx,
+            &writer_row,
+            &writer_readset,
+            &writer_job,
+            Some(&writer_wanted),
+        )
+        .await
+        .unwrap();
+        let writer_before = writer.snapshot.clone();
+        let unchanged = tx.query("SELECT record_id,field,ctid::text FROM fireweed_api007.fields WHERE record_id=ANY($1) ORDER BY record_id,field", &[&vec![work_id, writer.ids[&RecordIdentity { collection: None, key: "b".into() }]]]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
+        let unchanged_indexes = tx.query("SELECT record_id,index_no,ctid::text FROM fireweed_api007.indexes WHERE queue_id=$1 AND collection=0 ORDER BY record_id,index_no", &[&row.id]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
+        let unchanged_extras = tx.query("SELECT id,record_id,name,ctid::text FROM fireweed_api007.additional_fields WHERE queue_id=$1 ORDER BY id", &[&row.id]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i64>(1), r.get::<_,Vec<u8>>(2), r.get::<_,String>(3))).collect::<Vec<_>>();
+        let unchanged_bodies = tx
+            .query(
+                "SELECT record_id,ctid::text FROM fireweed_api007.bodies WHERE record_id=ANY($1)",
+                &[&vec![
+                    work_id,
+                    writer.ids[&RecordIdentity {
+                        collection: None,
+                        key: "b".into(),
+                    }],
+                ]],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.get::<_, i64>(0), r.get::<_, String>(1)))
+            .collect::<Vec<_>>();
+        let noop = CommitGroup {
+            request_id: "noop".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(1),
+                change: UnclaimedChange::Administrative {
+                    patch: WorkPatch {
+                        fields: BTreeMap::from([("gate".into(), Some(FieldValue::Boolean(false)))]),
+                        ..WorkPatch::default()
+                    },
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                },
+            }],
+        };
+        load_unique_probes(&tx, &writer_row, &mut writer, &noop, 0, &writer_job)
+            .await
+            .unwrap();
+        let noop_before = writer.snapshot.clone();
+        let noop_delta = plan_commit_group(&noop, &mut writer.snapshot, 0, &schema).unwrap();
+        assert_eq!(noop_delta.work[0].record.version, 1);
+        assert_eq!(noop_delta.work_fields["a"], ResolvedFields::Preserve);
+        let noop_output = writer_job
+            .buffer(encoded_len(&noop_delta).unwrap() * 4)
+            .unwrap();
+        persist_delta_with_mode(
+            &tx,
+            &writer_row,
+            &noop_delta,
+            &noop_before,
+            &mut writer,
+            FieldPersistenceMode::Selected,
+        )
+        .await
+        .unwrap();
+        for (id, field, ctid) in &unchanged {
+            assert_eq!(
+                &tx.query_one(
+                    "SELECT ctid::text FROM fireweed_api007.fields WHERE record_id=$1 AND field=$2",
+                    &[id, field]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+                ctid
+            );
+        }
+        for (id, index, ctid) in &unchanged_indexes {
+            assert_eq!(&tx.query_one("SELECT ctid::text FROM fireweed_api007.indexes WHERE record_id=$1 AND index_no=$2", &[id,index]).await.unwrap().get::<_,String>(0), ctid);
+        }
+        drop(noop_output);
+        load_unique_probes(&tx, &writer_row, &mut writer, &writer_group, 0, &writer_job)
+            .await
+            .unwrap();
+        let delta = plan_commit_group(&writer_group, &mut writer.snapshot, 0, &schema).unwrap();
+        let output_charge = writer_job.buffer(encoded_len(&delta).unwrap() * 4).unwrap();
+        persist_delta_with_mode(
+            &tx,
+            &writer_row,
+            &delta,
+            &writer_before,
+            &mut writer,
+            FieldPersistenceMode::Selected,
+        )
+        .await
+        .unwrap();
+        let b_id = writer.ids[&RecordIdentity {
+            collection: None,
+            key: "b".into(),
+        }];
+        for (id, field, ctid) in unchanged {
+            if (id == work_id && field == 0) || (id == b_id && field == 1) {
+                continue;
+            }
+            assert_eq!(
+                tx.query_one(
+                    "SELECT ctid::text FROM fireweed_api007.fields WHERE record_id=$1 AND field=$2",
+                    &[&id, &field]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+                ctid
+            );
+        }
+        for (id, index, ctid) in unchanged_indexes {
+            if (id == work_id && index == 0) || (id == b_id && index == 1) {
+                continue;
+            }
+            assert_eq!(tx.query_one("SELECT ctid::text FROM fireweed_api007.indexes WHERE record_id=$1 AND index_no=$2", &[&id,&index]).await.unwrap().get::<_,String>(0), ctid);
+        }
+        for (id, record, name, ctid) in unchanged_extras {
+            if (record == work_id && name == "/payload/control\0α".as_bytes())
+                || (record == b_id && name == "/payload/control\0β".as_bytes())
+            {
+                continue;
+            }
+            assert_eq!(
+                tx.query_one(
+                    "SELECT ctid::text FROM fireweed_api007.additional_fields WHERE id=$1",
+                    &[&id]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+                ctid
+            );
+        }
+        assert_eq!(
+            decode::<FieldValue>(
+                &tx.query_one(
+                    "SELECT value FROM fireweed_api007.fields WHERE record_id=$1 AND field=0",
+                    &[&work_id]
+                )
+                .await
+                .unwrap()
+                .get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            FieldValue::Boolean(true)
+        );
+        assert_eq!(
+            decode::<FieldValue>(
+                &tx.query_one(
+                    "SELECT value FROM fireweed_api007.fields WHERE record_id=$1 AND field=1",
+                    &[&b_id]
+                )
+                .await
+                .unwrap()
+                .get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            FieldValue::Text("new-owner".into())
+        );
+        for (id, ctid) in unchanged_bodies {
+            assert_eq!(
+                tx.query_one(
+                    "SELECT ctid::text FROM fireweed_api007.bodies WHERE record_id=$1",
+                    &[&id]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+                ctid
+            );
+        }
+        assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&b_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(10));
+        assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0β".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(20));
+        drop(output_charge);
+        let physical_before = writer.snapshot.clone();
+        let mut deltas = vec![];
+        for (index, operation) in [rejected_rekey, free_and_create, rekey_created, reuse]
+            .iter()
+            .enumerate()
+        {
+            load_unique_probes(&tx, &writer_row, &mut writer, operation, 0, &writer_job)
+                .await
+                .unwrap();
+            let owners = writer.snapshot.unique_owners.clone();
+            let planned = plan_commit_group(operation, &mut writer.snapshot, 0, &schema).unwrap();
+            if index == 0 {
+                assert_eq!(
+                    planned.receipt.outcome,
+                    GroupOutcome::Rejected(Rejection::UniqueConflict)
+                );
+                assert_eq!(writer.snapshot.unique_owners, owners);
+            } else {
+                assert!(matches!(
+                    planned.receipt.outcome,
+                    GroupOutcome::Committed { .. }
+                ));
+            }
+            deltas.push(planned);
+        }
+        let packed = combine_deltas(&deltas, physical_before.next_sequence).unwrap();
+        let packed_charge = writer_job
+            .buffer(encoded_len(&packed).unwrap() * 4)
+            .unwrap();
+        persist_delta_with_mode(
+            &tx,
+            &writer_row,
+            &packed,
+            &physical_before,
+            &mut writer,
+            FieldPersistenceMode::Selected,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !tx.query_one(
+                "SELECT active FROM fireweed_api007.records WHERE id=$1",
+                &[&b_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, bool>(0)
+        );
+        let d_id = writer.ids[&RecordIdentity {
+            collection: None,
+            key: "d".into(),
+        }];
+        assert_eq!(
+            tx.query_one(
+                "SELECT count(*) FROM fireweed_api007.indexes WHERE record_id=$1",
+                &[&d_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+            2
+        );
+        assert_eq!(
+            tx.query_one(
+                "SELECT full_key FROM fireweed_api007.indexes WHERE record_id=$1 AND index_no=0",
+                &[&d_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, Vec<u8>>(0),
+            ordered_key(&[None]).unwrap()
+        );
+        assert_eq!(
+            decode::<FieldValue>(
+                &tx.query_one(
+                    "SELECT value FROM fireweed_api007.fields WHERE record_id=$1 AND field=1",
+                    &[&d_id]
+                )
+                .await
+                .unwrap()
+                .get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            FieldValue::Text("final-owner".into())
+        );
+        assert_eq!(
+            decode::<FieldValue>(
+                &tx.query_one(
+                    "SELECT value FROM fireweed_api007.fields WHERE record_id=$1 AND field=1",
+                    &[&work_id]
+                )
+                .await
+                .unwrap()
+                .get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            FieldValue::Text("new-owner".into())
+        );
+        assert!(writer_admission.usage().unwrap().1 < 4 << 20);
+        drop(packed_charge);
+        drop(writer);
+        drop(writer_row);
         // Rollback-scoped corruption: invalid ordinal must not hide payload bytes
         // from complete production-reader preflight.
         let corrupt_id: i64 = tx

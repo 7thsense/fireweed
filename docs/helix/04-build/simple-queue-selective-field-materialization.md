@@ -149,3 +149,37 @@ collection's ordinal cannot widen a work read. The size expression counts payloa
 bytes even when an ordinal is corrupt; the decoder still rejects corrupt schema
 references. The isolated regression covers mixed collection ordinals, two long
 absent-name certificates, and rollback-only corrupt payload sizing.
+
+## Guarded physical writer staging
+
+One PostgreSQL applicator shares the existing batch encoders and insert SQL.
+Production persistence still requires complete views and hardwires Complete mode.
+Selected mode exists only in test builds, with no runtime configuration switch.
+It consumes exact field commands: Preserve writes no field/index rows; Edit deletes
+exact record/field or record/full-name pairs and only affected record/index pairs,
+then encodes Set values and resolved physical after keys; Replace/Delete regenerate
+or remove full field/index rows. Index edits use the initial physical snapshot and
+final composed command, including sparse physical query keys. State Put remains
+full and opaque work bodies retain their existing Preserve behavior.
+
+Authority loads now assert fresh distinct tuples. Accepted releases and claims
+require loaded probes, retained throughout the fenced operation; speculative
+ownership changes occur only on accepted groups. Thus an unprobed tuple cannot
+have changed earlier, and its exact physical owner is authoritative. The former
+full-map reconciliation is removed. Unloaded unique components cannot masquerade
+as absence when another row probes the owner.
+
+Isolated test-only application uses the normal shared planning and output charges.
+Two rows edit different declared/additional fields and indexes; untouched fields,
+full-name additional rows, indexes and megabyte opaque bodies retain their ctids.
+A no-op preserves field/index identities and version. Tests repeat with all discovery
+hashes forced to collide. Ordered cases cover rejected rekey isolation, atomic
+owner deletion/new insertion, create then rekey, tuple reuse, and creation of a
+sparse query-index row. Reader/certificate tests retain their separate 256 KiB
+reservation; writer planning uses an admitted 4 MiB budget. Transactions roll back;
+these are applicator checks, not acknowledged-loss or production activation tests.
+
+Production selected reads/writes and guard removal remain pending a concrete
+implementation review and the required activation approval. No S3/Turso command
+codec, administrative wire activation or exceptional performance qualification is
+claimed by this staging slice.
