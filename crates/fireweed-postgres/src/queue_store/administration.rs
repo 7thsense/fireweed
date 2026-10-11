@@ -569,6 +569,9 @@ struct NativeAdministrativePreparation<'r> {
     scratch: fireweed_queue_spool::SealedAdministrativeScratch,
     summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
     ordinary: Loaded<'r>,
+    request_fingerprint: [u8; 32],
+    max_result_bytes: u64,
+    max_publication_bytes: u64,
 }
 /// Preparation retains explicit ordinary authority and returns only bounded
 /// scratch plus compact results. No ordinary ownership clock or SQL write occurs.
@@ -601,6 +604,7 @@ async fn prepare_native_scratch<'r>(
         intent,
         limits,
         u64::MAX,
+        u64::MAX,
         reservation,
         workers,
         directory,
@@ -624,14 +628,39 @@ async fn prepare_native_scratch_bounded<'r>(
     intent: &fireweed_core::queue_administration::AdministrativeIntent,
     limits: &QueueLimits,
     max_result_bytes: u64,
+    max_publication_bytes: u64,
     reservation: &'r Arc<QueueReservation>,
     workers: &fireweed_queue_spool::ScratchWorkers,
     directory: &std::path::Path,
     quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
 ) -> QueueResult<NativeAdministrativePreparation<'r>> {
+    use fireweed_engine::queue_publication::{
+        measure_administrative_publication_fallbacks, measure_administrative_receipt_fallbacks,
+        measure_administrative_success_floor,
+    };
+    if measure_administrative_receipt_fallbacks(&ordinary.request_id)
+        .map_err(|_| storage("result fallback measurement failed"))?
+        > max_result_bytes
+        || measure_administrative_publication_fallbacks(
+            address,
+            queue.definition_pin,
+            &ordinary.request_id,
+        )
+        .map_err(|_| storage("publication fallback measurement failed"))?
+            > max_publication_bytes
+    {
+        return Err(QueueError::Invalid(
+            "administrative limits cannot fit zero-effect fallbacks".into(),
+        ));
+    }
+    let request_fingerprint =
+        ordinary.administrative_fingerprint(address, intent, max_result_bytes)?;
+    let floor = measure_administrative_success_floor(address, queue.definition_pin, ordinary)
+        .map_err(|_| storage("publication floor measurement failed"))?;
+    let command_allowance = max_publication_bytes.saturating_sub(floor);
     let mut ordinary_loaded = load_group(tx, queue, ordinary, reservation).await?;
     load_prospective_unique_probes(tx, queue, &mut ordinary_loaded, ordinary, reservation).await?;
-    let sink = fireweed_queue_spool::OwnedAdministrativeSink::new(
+    let sink = fireweed_queue_spool::OwnedAdministrativeSink::new_with_command_limit(
         workers.clone(),
         directory,
         quota,
@@ -639,6 +668,7 @@ async fn prepare_native_scratch_bounded<'r>(
         address,
         queue.definition_pin,
         queue.next_sequence,
+        command_allowance,
     )
     .await?;
     let summary = match &intent.operation {
@@ -685,6 +715,9 @@ async fn prepare_native_scratch_bounded<'r>(
         scratch,
         summary,
         ordinary: ordinary_loaded,
+        request_fingerprint,
+        max_result_bytes,
+        max_publication_bytes,
     })
 }
 
@@ -711,8 +744,111 @@ struct NativeProvisionalGroup {
     summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
     ordinary: fireweed_engine::queue_administration::ProvisionalOrdinaryCandidate,
     initial: OwnedLoaded,
+    request_fingerprint: [u8; 32],
+    max_result_bytes: u64,
+    max_publication_bytes: u64,
+}
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "native publication qualification precedes public activation"
+    )
+)]
+enum NativePublicationDecision {
+    Fits { bytes: u64, commands: u64 },
+    TooLarge,
 }
 impl NativeProvisionalGroup {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "native publication qualification precedes public activation"
+        )
+    )]
+    fn assess_publication_limit(
+        &self,
+        address: &QueueAddress,
+        queue: &QueueRow<'_>,
+        group: &CommitGroup,
+        intent: &fireweed_core::queue_administration::AdministrativeIntent,
+        reservation: &Arc<QueueReservation>,
+    ) -> QueueResult<NativePublicationDecision> {
+        use fireweed_engine::queue_publication::*;
+        self.scratch.validate_publication_context(
+            address,
+            queue.definition_pin,
+            queue.next_sequence,
+            reservation,
+        )?;
+        if group.administrative_fingerprint(address, intent, self.max_result_bytes)?
+            != self.request_fingerprint
+        {
+            return Err(storage(
+                "publication decision belongs to a different request",
+            ));
+        }
+        let floor = measure_administrative_success_floor(address, queue.definition_pin, group)
+            .map_err(|_| storage("publication floor measurement failed"))?;
+        if self.scratch.command_limit() != self.max_publication_bytes.saturating_sub(floor) {
+            return Err(storage("publication command allowance context mismatch"));
+        }
+        let ordinary =
+            measure_resolved_commands(self.ordinary.initial_authority(), self.ordinary.delta())
+                .map_err(|_| storage("ordinary command measurement failed"))?;
+        if matches!(
+            self.assess_result_limit(group, self.max_result_bytes)?,
+            AdministrativeResultLimit::TooLarge
+        ) || self.scratch.publication_overflowed()
+        {
+            return Ok(NativePublicationDecision::TooLarge);
+        }
+        let GroupOutcome::Committed { versions } = &self.ordinary.delta().receipt.outcome else {
+            return Err(storage("provisional ordinary result is not committed"));
+        };
+        let administration = self
+            .summary
+            .result()
+            .ok_or_else(|| storage("complete publication lacks complete result"))?;
+        let outcome = AdministrativeReceiptOutcome::Committed {
+            versions,
+            administration,
+        };
+        let receipt = AdministrativePublicationReceipt::new(
+            address,
+            group,
+            intent,
+            self.max_result_bytes,
+            &outcome,
+            reservation,
+        )
+        .map_err(|_| storage("publication receipt binding failed"))?;
+        let command_bytes = self
+            .scratch
+            .command_bytes()
+            .checked_add(ordinary.bytes)
+            .ok_or_else(|| storage("publication command bytes overflow"))?;
+        let commands = self
+            .scratch
+            .command_count()
+            .checked_add(ordinary.count)
+            .ok_or_else(|| storage("publication command count overflow"))?;
+        let bytes = measure_administrative_publication(
+            address,
+            queue.definition_pin,
+            command_bytes,
+            &receipt,
+        )
+        .map_err(|_| storage("complete publication measurement failed"))?;
+        Ok(if bytes > self.max_publication_bytes {
+            NativePublicationDecision::TooLarge
+        } else {
+            NativePublicationDecision::Fits { bytes, commands }
+        })
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -749,6 +885,7 @@ async fn finalize_native_semantics(
     prepared: NativeAdministrativePreparation<'_>,
     address: &QueueAddress,
     group: &CommitGroup,
+    intent: &fireweed_core::queue_administration::AdministrativeIntent,
     queue: &QueueRow<'_>,
     ownership_now: impl FnOnce() -> QueueResult<i64>,
     reservation: &Arc<QueueReservation>,
@@ -763,7 +900,13 @@ async fn finalize_native_semantics(
         mut scratch,
         summary,
         ordinary,
+        request_fingerprint,
+        max_result_bytes,
+        max_publication_bytes,
     } = prepared;
+    if group.administrative_fingerprint(address, intent, max_result_bytes)? != request_fingerprint {
+        return Err(storage("native preparation belongs to a different request"));
+    }
     scratch.verify_context(address, queue.definition_pin, queue.next_sequence)?;
     validate_ordinary_prospective_authority(group, &ordinary.snapshot, &queue.schema, reservation)?;
     let ordinary = ordinary.into_owned(reservation)?;
@@ -810,7 +953,7 @@ async fn finalize_native_semantics(
         Err(reason) => return Ok(Err(reason)),
     };
     let run_job = Arc::clone(reservation);
-    let (scratch, proposal, decision) = workers
+    let (scratch, mut proposal, decision) = workers
         .run(move || {
             let decision = scratch.reduce_with_ordinary_effects(
                 proposal.initial_authority(),
@@ -827,11 +970,15 @@ async fn finalize_native_semantics(
     if decision.final_collision {
         return Ok(Err(Rejection::UniqueConflict));
     }
+    proposal.sort_commands_for_publication();
     Ok(Ok(NativeProvisionalGroup {
         scratch,
         summary,
         ordinary: proposal,
         initial: ordinary,
+        request_fingerprint,
+        max_result_bytes,
+        max_publication_bytes,
     }))
 }
 
@@ -1188,6 +1335,7 @@ mod tests {
                 mut scratch,
                 summary,
                 ordinary,
+                ..
             } = prepared;
             assert_eq!(summary.packet_count(), 5001);
             assert_eq!(summary.result().unwrap().histogram.matched, 5001);
@@ -1241,6 +1389,7 @@ mod tests {
                 prepared,
                 &address,
                 &group,
+                &intent,
                 &fenced,
                 || {
                     clocks.set(clocks.get() + 1);
@@ -1266,6 +1415,7 @@ mod tests {
                 summary,
                 ordinary,
                 initial,
+                ..
             } = finalized;
             let application_bytes = std::rc::Rc::new(std::cell::Cell::new(None));
             let observed_bytes = application_bytes.clone();
@@ -1575,6 +1725,7 @@ mod tests {
                 prepared,
                 &address,
                 &group,
+                &intent,
                 &queue,
                 || Ok(0),
                 &job,
@@ -1590,6 +1741,7 @@ mod tests {
                 summary,
                 ordinary,
                 initial,
+                ..
             } = finalized;
             if (2..5).contains(&scenario) {
                 tx.execute(
@@ -1706,6 +1858,178 @@ mod tests {
                 fields: Default::default(),
                 body: Default::default(),
             });
+            let result_floor =
+                fireweed_engine::queue_publication::measure_administrative_receipt_fallbacks(
+                    &ordinary.request_id,
+                )
+                .unwrap();
+            let publication_floor =
+                fireweed_engine::queue_publication::measure_administrative_publication_fallbacks(
+                    &address,
+                    queue.definition_pin,
+                    &ordinary.request_id,
+                )
+                .unwrap();
+            let usage_before_preflight = admission.usage().unwrap();
+            for (result_limit, publication_limit) in [
+                (result_floor - 1, u64::MAX),
+                (u64::MAX, publication_floor - 1),
+            ] {
+                assert!(matches!(
+                    prepare_native_scratch_bounded(
+                        &tx,
+                        &address,
+                        &queue,
+                        &ordinary,
+                        &addressed,
+                        &QueueLimits::default(),
+                        result_limit,
+                        publication_limit,
+                        &job,
+                        &workers,
+                        directory.path(),
+                        Arc::clone(&quota)
+                    )
+                    .await,
+                    Err(QueueError::Invalid(_))
+                ));
+                assert_eq!(admission.usage().unwrap(), usage_before_preflight);
+            }
+            if !overlap {
+                tx.batch_execute("SAVEPOINT ordinary_corruption")
+                    .await
+                    .unwrap();
+                tx.execute(
+                    "UPDATE fireweed_api007.records SET lease_hash=$2 WHERE queue_id=$1 AND key=$3",
+                    &[&queue.id, &vec![0u8; 32], &b"key-2".as_slice()],
+                )
+                .await
+                .unwrap();
+                let mut corrupt_group = ordinary.clone();
+                corrupt_group.work_updates.push(UnclaimedUpdate {
+                    key: "key-2".into(),
+                    expect: StateExpect::Version(1),
+                    change: UnclaimedChange::Patch(WorkPatch {
+                        priority: Some(23),
+                        ..Default::default()
+                    }),
+                });
+                let corrupt = prepare_native_scratch_bounded(
+                    &tx,
+                    &address,
+                    &queue,
+                    &corrupt_group,
+                    &addressed,
+                    &QueueLimits::default(),
+                    1024,
+                    publication_floor,
+                    &job,
+                    &workers,
+                    directory.path(),
+                    Arc::clone(&quota),
+                )
+                .await
+                .unwrap();
+                assert!(corrupt.summary.result_overflowed());
+                let corrupt = finalize_native_semantics(
+                    corrupt,
+                    &address,
+                    &corrupt_group,
+                    &addressed,
+                    &queue,
+                    || Ok(0),
+                    &job,
+                    &workers,
+                    directory.path(),
+                    Arc::clone(&quota),
+                )
+                .await
+                .unwrap()
+                .unwrap_or_else(|reason| {
+                    panic!("unexpected corrupt business rejection {reason:?}")
+                });
+                assert!(
+                    matches!(corrupt.assess_publication_limit(&address, &queue, &corrupt_group, &addressed, &job), Err(QueueError::OutcomeUnknown(ref message)) if message.contains("ordinary command measurement"))
+                );
+                drop(corrupt);
+                tx.batch_execute("ROLLBACK TO SAVEPOINT ordinary_corruption; RELEASE SAVEPOINT ordinary_corruption").await.unwrap();
+            }
+            if !overlap {
+                let mut bad_cas = ordinary.clone();
+                bad_cas.state_updates[0].expect = StateExpect::Version(99);
+                let bad = prepare_native_scratch_bounded(
+                    &tx,
+                    &address,
+                    &queue,
+                    &bad_cas,
+                    &addressed,
+                    &QueueLimits::default(),
+                    1024,
+                    publication_floor,
+                    &job,
+                    &workers,
+                    directory.path(),
+                    Arc::clone(&quota),
+                )
+                .await
+                .unwrap();
+                assert!(bad.summary.result_overflowed());
+                let bad = finalize_native_semantics(
+                    bad,
+                    &address,
+                    &bad_cas,
+                    &addressed,
+                    &queue,
+                    || Ok(0),
+                    &job,
+                    &workers,
+                    directory.path(),
+                    Arc::clone(&quota),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(bad, Err(Rejection::NotFound))); // CAS failure precedes both size overflows.
+            }
+            let mismatched = prepare_native_scratch_bounded(
+                &tx,
+                &address,
+                &queue,
+                &ordinary,
+                &addressed,
+                &QueueLimits::default(),
+                1024,
+                u64::MAX,
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            let mut changed_request = ordinary.clone();
+            changed_request.request_id.push_str("changed");
+            changed_request.work_inserts[0].key = "different-unselected-key".into();
+            let mismatch_clock = std::cell::Cell::new(0);
+            let mismatch = finalize_native_semantics(
+                mismatched,
+                &address,
+                &changed_request,
+                &addressed,
+                &queue,
+                || {
+                    mismatch_clock.set(mismatch_clock.get() + 1);
+                    Ok(0)
+                },
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await;
+            assert!(
+                matches!(mismatch, Err(QueueError::OutcomeUnknown(ref message)) if message.contains("different request"))
+            );
+            assert_eq!(mismatch_clock.get(), 0);
             let bounded = prepare_native_scratch_bounded(
                 &tx,
                 &address,
@@ -1714,6 +2038,7 @@ mod tests {
                 &addressed,
                 &QueueLimits::default(),
                 1024,
+                u64::MAX,
                 &job,
                 &workers,
                 directory.path(),
@@ -1727,6 +2052,7 @@ mod tests {
                 bounded,
                 &address,
                 &ordinary,
+                &addressed,
                 &queue,
                 || {
                     bounded_clock.set(bounded_clock.get() + 1);
@@ -1795,6 +2121,7 @@ mod tests {
                 prepared,
                 &address,
                 &ordinary,
+                &addressed,
                 &queue,
                 || {
                     clocks.set(clocks.get() + 1);
@@ -1833,11 +2160,80 @@ mod tests {
                         .unwrap(),
                     fireweed_engine::queue_publication::AdministrativeResultLimit::TooLarge
                 );
+                let NativePublicationDecision::Fits {
+                    bytes: publication_bytes,
+                    commands,
+                } = finalized
+                    .assess_publication_limit(&address, &queue, &ordinary, &addressed, &job)
+                    .unwrap()
+                else {
+                    panic!("unbounded publication")
+                };
+                assert_eq!(commands, 4); // two administrative rows + state and next work
+                let fallback = fireweed_engine::queue_publication::measure_administrative_publication_fallbacks(&address, queue.definition_pin, &ordinary.request_id).unwrap();
+                for publication_limit in [publication_bytes, publication_bytes - 1, fallback] {
+                    let prepared = prepare_native_scratch_bounded(
+                        &tx,
+                        &address,
+                        &queue,
+                        &ordinary,
+                        &addressed,
+                        &QueueLimits::default(),
+                        u64::MAX,
+                        publication_limit,
+                        &job,
+                        &workers,
+                        directory.path(),
+                        Arc::clone(&quota),
+                    )
+                    .await
+                    .unwrap();
+                    let prepared = finalize_native_semantics(
+                        prepared,
+                        &address,
+                        &ordinary,
+                        &addressed,
+                        &queue,
+                        || Ok(0),
+                        &job,
+                        &workers,
+                        directory.path(),
+                        Arc::clone(&quota),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|reason| panic!("publication trial {reason:?}"));
+                    if publication_limit == fallback {
+                        assert!(prepared.scratch.publication_overflowed());
+                    }
+                    let decision = prepared
+                        .assess_publication_limit(&address, &queue, &ordinary, &addressed, &job)
+                        .unwrap();
+                    if publication_limit == publication_bytes {
+                        assert_eq!(
+                            decision,
+                            NativePublicationDecision::Fits {
+                                bytes: publication_bytes,
+                                commands
+                            }
+                        );
+                    } else {
+                        assert_eq!(decision, NativePublicationDecision::TooLarge);
+                    }
+                    let mut changed = ordinary.clone();
+                    changed.request_id.push_str("changed");
+                    assert!(
+                        prepared
+                            .assess_publication_limit(&address, &queue, &changed, &addressed, &job)
+                            .is_err()
+                    );
+                }
                 let NativeProvisionalGroup {
                     scratch,
                     summary,
                     ordinary,
                     initial,
+                    ..
                 } = finalized;
                 let scratch = apply_resolved_administrative_commands(
                     &tx, &address, &queue, scratch, &job, &workers,

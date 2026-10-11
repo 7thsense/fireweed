@@ -199,6 +199,103 @@ pub fn measure_administrative_publication_receipt(
     };
     Ok(bytes)
 }
+/// Full zero-effect fallback floor with the maximum admitted Invalid diagnostic.
+pub fn measure_administrative_publication_fallbacks(
+    queue: &QueueAddress,
+    pin: DefinitionPin,
+    request_id: &str,
+) -> PublicationResult<u64> {
+    let mut sink = Sink::Count(0);
+    write_frame_header_as(&mut sink, queue, pin, 0, 0, 0, MAGIC_V2)?;
+    sink.n(1)?;
+    write_receipt_header(&mut sink, 2, request_id, 4, &[0; 32])?;
+    sink.tag(1)?;
+    sink.tag(5)?;
+    sink.text(std::str::from_utf8(&[b'x'; 256]).expect("ASCII"))?;
+    let Sink::Count(bytes) = sink else {
+        unreachable!()
+    };
+    Ok(bytes)
+}
+/// Lower bound for a successful FWQP2 frame excluding commands. Full ordinary
+/// identities and fixed output versions are counted; every FWAR1 result is at
+/// least its 37-byte empty form. This never certifies a completed publication.
+pub fn measure_administrative_success_floor(
+    queue: &QueueAddress,
+    pin: DefinitionPin,
+    group: &CommitGroup,
+) -> PublicationResult<u64> {
+    let count = group
+        .claimed_updates
+        .len()
+        .checked_add(group.state_updates.len())
+        .and_then(|n| n.checked_add(group.work_updates.len()))
+        .and_then(|n| n.checked_add(group.work_inserts.len()))
+        .ok_or(PublicationError::Overflow)?;
+    let mut sink = Sink::Count(0);
+    write_frame_header_as(&mut sink, queue, pin, 0, 0, 0, MAGIC_V2)?;
+    sink.n(1)?;
+    write_receipt_header(&mut sink, 2, &group.request_id, 4, &[0; 32])?;
+    sink.tag(4)?;
+    sink.n(count as u64)?;
+    for (collection, key) in group
+        .claimed_updates
+        .iter()
+        .map(|item| (None, item.key.as_str()))
+        .chain(
+            group
+                .state_updates
+                .iter()
+                .map(|item| (Some(item.collection.as_str()), item.key.as_str())),
+        )
+        .chain(
+            group
+                .work_updates
+                .iter()
+                .map(|item| (None, item.key.as_str())),
+        )
+        .chain(
+            group
+                .work_inserts
+                .iter()
+                .map(|item| (None, item.key.as_str())),
+        )
+    {
+        identity(&mut sink, collection, key)?;
+        sink.n(1)?;
+    }
+    sink.n(37)?;
+    sink.raw(&[0; 37])?;
+    let Sink::Count(bytes) = sink else {
+        unreachable!()
+    };
+    Ok(bytes)
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedCommandMeasure {
+    pub count: u64,
+    pub bytes: u64,
+}
+pub fn measure_resolved_commands(
+    before: &RecordSnapshot,
+    delta: &CommitDelta,
+) -> PublicationResult<ResolvedCommandMeasure> {
+    validate_delta(before, delta)?;
+    let mut authority = InitialAuthority::new(before);
+    let mut sink = Sink::Count(0);
+    let mut count = 0u64;
+    for version in &delta.versions {
+        let prior = authority.next(version.collection.as_deref(), &version.key);
+        if version.version > prior.highwater {
+            write_delta_mutation(&mut sink, version, &prior, delta)?;
+            count = count.checked_add(1).ok_or(PublicationError::Overflow)?;
+        }
+    }
+    let Sink::Count(bytes) = sink else {
+        unreachable!()
+    };
+    Ok(ResolvedCommandMeasure { count, bytes })
+}
 /// Counts remain per logical group. This does not execute the required overflow
 /// path; callers still exhaust source/evidence/business checks before TooLarge.
 pub fn measure_administrative_publication(
@@ -706,6 +803,76 @@ mod tests {
             admin,
             result,
         }
+    }
+    #[test]
+    fn publication_floors_and_command_counts_match_canonical_writers() {
+        let f = fixture();
+        let admission = QueueAdmission::new(1, 4 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let pin = DefinitionPin::from_persisted_bytes(&f.raw_definition);
+        let mut group = group("empty");
+        group.request_id = "α\0".repeat(10000);
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![]),
+        };
+        let result = AdministrativeResult {
+            histogram: Default::default(),
+            items: vec![],
+            clauses: vec![],
+        };
+        let outcome = AdministrativeReceiptOutcome::Committed {
+            versions: &[],
+            administration: &result,
+        };
+        let receipt = AdministrativePublicationReceipt::new(
+            &f.queue,
+            &group,
+            &intent,
+            1 << 20,
+            &outcome,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(
+            measure_administrative_success_floor(&f.queue, pin, &group).unwrap(),
+            measure_administrative_publication(&f.queue, pin, 0, &receipt).unwrap()
+        );
+        let invalid = Rejection::Invalid("x".repeat(256));
+        let rejected = AdministrativeReceiptOutcome::Rejected(&invalid);
+        let receipt = AdministrativePublicationReceipt::new(
+            &f.queue,
+            &group,
+            &intent,
+            1 << 20,
+            &rejected,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(
+            measure_administrative_publication_fallbacks(&f.queue, pin, &group.request_id).unwrap(),
+            measure_administrative_publication(&f.queue, pin, 0, &receipt).unwrap()
+        );
+        let ordinary = encode_publication(
+            &f.queue,
+            &f.raw_definition,
+            &f.before,
+            &f.ordinary,
+            &[],
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        let view = view_publication(ordinary.as_bytes()).unwrap();
+        let measured = measure_resolved_commands(&f.before, &f.ordinary).unwrap();
+        assert_eq!(measured.count, 3);
+        assert_eq!(
+            measured.bytes,
+            view.command_fragments()
+                .map(|command| command.unwrap().as_bytes().len() as u64)
+                .sum::<u64>()
+        );
     }
     #[test]
     fn broad_effect_kinds_and_ordinary_noops_cannot_be_misbound() {

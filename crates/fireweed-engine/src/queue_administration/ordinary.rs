@@ -89,6 +89,22 @@ impl ProvisionalOrdinaryCandidate {
     pub fn delta(&self) -> &CommitDelta {
         &self.delta
     }
+    /// Canonicalize command vectors in place; the durable receipt retains its
+    /// ordinary producer order. No payload clone or extra scratch is required.
+    pub fn sort_commands_for_publication(&mut self) {
+        let delta = &mut self.delta;
+        delta
+            .work
+            .sort_unstable_by(|a, b| a.record.work.key.cmp(&b.record.work.key));
+        delta.deleted_work.sort_unstable();
+        delta
+            .state
+            .sort_unstable_by(|a, b| (&a.collection, &a.key).cmp(&(&b.collection, &b.key)));
+        delta.deleted_state.sort_unstable();
+        delta
+            .versions
+            .sort_unstable_by(|a, b| (&a.collection, &a.key).cmp(&(&b.collection, &b.key)));
+    }
     pub fn unique_effects(&self) -> &UniqueFieldEffects {
         &self.effects
     }

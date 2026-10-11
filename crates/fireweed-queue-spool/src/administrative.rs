@@ -279,8 +279,26 @@ pub struct SealedAdministrativeScratch {
     context: Context,
 }
 impl SealedAdministrativeScratch {
+    pub fn validate_publication_context(
+        &self,
+        queue: &QueueAddress,
+        pin: DefinitionPin,
+        initial: u64,
+        reservation: &QueueReservation,
+    ) -> QueueResult<()> {
+        if self.poisoned
+            || !self.predecision_validated
+            || !std::ptr::eq(reservation, self.context._charge.reservation())
+        {
+            return Err(unknown("publication lacks validated scratch/job authority"));
+        }
+        self.context.verify(queue, pin, initial)
+    }
     pub fn publication_overflowed(&self) -> bool {
         self.context.publication_overflow
+    }
+    pub fn command_limit(&self) -> u64 {
+        self.context.max_command_bytes
     }
     pub fn command_bytes(&self) -> u64 {
         self.context.command_bytes
