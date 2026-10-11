@@ -49,6 +49,7 @@ pub mod queue_body;
 pub mod queue_contract;
 pub mod queue_fields;
 pub mod queue_index;
+pub mod queue_log_record;
 pub mod queue_namespace;
 pub mod queue_planner;
 pub mod queue_unique_stream;

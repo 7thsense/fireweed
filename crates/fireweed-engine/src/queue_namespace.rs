@@ -15,6 +15,19 @@ pub struct AddressRef<'a> {
     pub queue: &'a str,
 }
 
+impl AddressRef<'_> {
+    /// Borrowed equivalent of QueueAddress's existing identifier policy.
+    pub fn validate(self) -> QueueResult<()> {
+        if self.tenant.trim().is_empty() || self.queue.trim().is_empty() {
+            Err(QueueError::OutcomeUnknown(
+                "invalid API-007 address identifiers".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub fn framed_address_len(address: &QueueAddress) -> QueueResult<usize> {
     24usize
         .checked_add(address.tenant.len())
@@ -60,13 +73,12 @@ pub fn view_address(mut bytes: &[u8]) -> QueueResult<AddressRef<'_>> {
     bytes = &bytes[MAGIC.len()..];
     let tenant = name(&mut bytes)?;
     let queue = name(&mut bytes)?;
-    if tenant.trim().is_empty() || queue.trim().is_empty() {
-        return Err(invalid());
-    }
     if !bytes.is_empty() {
         return Err(invalid());
     }
-    Ok(AddressRef { tenant, queue })
+    let address = AddressRef { tenant, queue };
+    address.validate()?;
+    Ok(address)
 }
 
 /// One ASCII component suitable for the existing log transport. Full framing
