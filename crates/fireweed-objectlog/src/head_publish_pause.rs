@@ -80,6 +80,13 @@ impl BlobStore for PausingBlobStore {
     ) -> Result<Option<Bytes>, ObjectLogError> {
         self.inner.get_range(key, range).await
     }
+    async fn get_range_exact(
+        &self,
+        key: &str,
+        range: Range<u64>,
+    ) -> Result<Option<Bytes>, ObjectLogError> {
+        self.inner.get_range_exact(key, range).await
+    }
     async fn list(&self, prefix: &str) -> Result<Vec<String>, ObjectLogError> {
         self.inner.list(prefix).await
     }
