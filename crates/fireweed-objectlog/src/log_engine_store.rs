@@ -36,7 +36,7 @@ mod queue_append;
 mod queue_replay;
 pub use namespace::VerifiedApi007Namespace;
 pub use queue_append::AdmittedApi007Append;
-pub use queue_replay::{AdmittedApi007Read, Api007ReadPlan};
+pub use queue_replay::{AdmittedApi007Read, AdmittedApi007State, Api007ReadPlan};
 
 fn fresh_writer_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);

@@ -12,6 +12,89 @@ use object_log::{BoundedSequencer, FetchPlan};
 fn unknown(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(format!("API-007 replay: {error}"))
 }
+/// Operation-owned point-in-time authority. The manifest's resident index is
+/// not covered by this wrapper charge and remains a backend qualification gate.
+pub struct AdmittedApi007State {
+    state: object_log::AuthoritativePartitionState,
+    namespace: VerifiedApi007Namespace,
+    _charge: OwnedQueueBufferCharge,
+}
+impl AdmittedApi007State {
+    pub fn namespace(&self) -> &VerifiedApi007Namespace {
+        &self.namespace
+    }
+    pub fn state(&self) -> object_log::AuthoritativePartitionState {
+        self.state
+    }
+}
+struct StateWorker<S: Sequencer> {
+    store: Arc<ObjectLogEngineStore<S>>,
+    namespace: VerifiedApi007Namespace,
+    charge: Option<OwnedQueueBufferCharge>,
+}
+impl<S: Sequencer<Meta = ()> + 'static> StateWorker<S> {
+    fn execute(mut self) -> QueueResult<AdmittedApi007State> {
+        let shard = self.store.checked_api007_shard(&self.namespace)?;
+        let state = self
+            .store
+            .engine
+            .sequencer()
+            .authoritative_partition_state(&partition_key(shard))
+            .map_err(unknown)?;
+        Ok(AdmittedApi007State {
+            state,
+            namespace: self.namespace,
+            _charge: self.charge.take().expect("one result charge"),
+        })
+    }
+}
+impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
+    /// Native fresh authority only. No cached epoch document or legacy refresh
+    /// fallback. This result does not grant writer exclusivity or a pinned view.
+    pub async fn read_api007_state(
+        self: &Arc<Self>,
+        namespace: VerifiedApi007Namespace,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedApi007State> {
+        if !self.raw_io_qualified {
+            return Err(unknown(
+                "native state requires qualified local or S3 authority",
+            ));
+        }
+        self.validate_api007_namespace(&namespace)?;
+        if !namespace.belongs_to(job) {
+            return Err(unknown("state namespace belongs to another operation"));
+        }
+        let address = namespace.address()?;
+        let root_bytes = match &self.definition_authority {
+            DefinitionAuthority::Local { root } => root.as_os_str().as_encoded_bytes().len(),
+            _ => 0,
+        };
+        let capacity = [
+            address.tenant.len(),
+            address.queue.len(),
+            self.meta_prefix.len(),
+            self.store_tag.len(),
+            self.engine.data_prefix().len(),
+            root_bytes,
+        ]
+        .into_iter()
+        .try_fold(65536u64, |n, bytes| {
+            n.checked_add(u64::try_from(bytes).map_err(unknown)?)
+                .ok_or(QueueError::TooLarge)
+        })?
+        .checked_mul(16)
+        .ok_or(QueueError::TooLarge)?;
+        let worker = StateWorker {
+            store: Arc::clone(self),
+            namespace,
+            charge: Some(job.owned_buffer(capacity)?),
+        };
+        workers.run(move || worker.execute()).await
+    }
+}
+
 /// Empty means installed sequencer snapshot EOF, never budget truncation.
 /// Recovery owners must refresh/acquire the durable fence before trusting coverage.
 pub struct Api007ReadPlan<S: Sequencer> {
@@ -165,6 +248,135 @@ mod tests {
         queue_log_record::encode_genesis,
         queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
     };
+    async fn independent_local(root: &Path) -> Arc<ObjectLogEngineStore> {
+        let mut store = ObjectLogEngineStore::open_with_blob_and_authority(
+            Arc::new(LocalBlobStore::new(root)),
+            "fwlog/",
+            "fwmeta/",
+            FlushConfig {
+                linger: Duration::ZERO,
+                ..Default::default()
+            },
+            DefinitionAuthority::Local {
+                root: root.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        // Test-only qualification of an exact native local delegate.
+        store.raw_io_qualified = true;
+        Arc::new(store)
+    }
+    #[tokio::test]
+    async fn native_state_refreshes_independent_handle_and_retains_binding() {
+        let root = super::super::tests::temp_root("api007-state");
+        std::fs::create_dir_all(&root).unwrap();
+        let first = independent_local(&root).await;
+        let second = independent_local(&root).await;
+        assert!(!Arc::ptr_eq(&first.engine, &second.engine));
+        let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let address = QueueAddress {
+            tenant: "t".into(),
+            queue: "q".into(),
+        };
+        let ns = first.bind_api007_namespace(&address, &job).await.unwrap();
+        let shard = first.checked_api007_shard(&ns).unwrap().clone();
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let second_ns = second.bind_api007_namespace(&address, &job).await.unwrap();
+        let initial = second
+            .read_api007_state(second_ns, &job, &workers)
+            .await
+            .unwrap();
+        assert_eq!(initial.state().next_offset, 0);
+        assert_eq!(initial.state().epoch, 0);
+        drop(initial);
+        drop(ns);
+        let epoch = first.acquire_epoch(shard).await.unwrap();
+        let ns = second.bind_api007_namespace(&address, &job).await.unwrap();
+        let state = second.read_api007_state(ns, &job, &workers).await.unwrap();
+        assert_eq!(state.state().epoch, epoch);
+        second.validate_api007_namespace(state.namespace()).unwrap();
+        assert_eq!(state.namespace().address().unwrap().queue, "q");
+        drop(job);
+        assert_eq!(admission.usage().unwrap().0, 1);
+        drop(state);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
+        drop(first);
+        drop(second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn queued_native_state_keeps_reservation_after_caller_drop() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = super::super::tests::temp_root("api007-state-cancel");
+            std::fs::create_dir_all(&root).unwrap();
+            let store = independent_local(&root).await;
+            let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+            let terminal = Arc::new(tokio::sync::Notify::new());
+            let notify = terminal.clone();
+            let job = Arc::new(
+                admission
+                    .reserve(0)
+                    .unwrap()
+                    .with_terminal_callback(move || notify.notify_one())
+                    .unwrap(),
+            );
+            let address = QueueAddress {
+                tenant: "t".into(),
+                queue: "q".into(),
+            };
+            let namespace = store.bind_api007_namespace(&address, &job).await.unwrap();
+            let baseline = admission.usage().unwrap();
+            let workers = ScratchWorkers::new(1, 1).unwrap();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let reader = store.clone();
+            let owned_workers = workers.clone();
+            let caller = tokio::spawn(async move {
+                reader
+                    .read_api007_state(namespace, &job, &owned_workers)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while admission.usage().unwrap().1 <= baseline.1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let held = admission.usage().unwrap();
+            caller.abort();
+            match caller.await {
+                Err(error) => assert!(error.is_cancelled()),
+                Ok(_) => panic!("caller survived cancellation"),
+            }
+            assert_eq!(admission.usage().unwrap(), held);
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            workers.close_and_drain().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+                .await
+                .unwrap();
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        });
+    }
+
     #[tokio::test]
     async fn physical_genesis_replay_checks_address_count_bounds_and_eof() {
         let root = super::super::tests::temp_root("api007-replay");
