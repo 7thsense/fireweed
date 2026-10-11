@@ -26,11 +26,16 @@ impl Comparison {
         )
     }
 }
+/// An unshared postfix tree. Ownership, serialization and destruction are flat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum WorkSelector {
-    All(Vec<WorkSelector>),
-    Any(Vec<WorkSelector>),
-    Not(Box<WorkSelector>),
+pub struct WorkSelector {
+    pub nodes: Vec<SelectorNode>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SelectorNode {
+    All(u32),
+    Any(u32),
+    Not,
     Field { name: String, predicate: Predicate },
     Present { name: String, present: bool },
     Keys(BTreeSet<String>),
@@ -41,33 +46,139 @@ pub enum WorkSelector {
     LeaseActive(bool),
 }
 impl WorkSelector {
-    /// Iterative depth validation must precede recursive wire serialization.
-    pub fn validate(&self, definition: &CollectionDefinition) -> QueueResult<()> {
-        let mut pending = vec![(std::slice::from_ref(self).iter(), 1usize)];
-        while let Some((nodes, depth)) = pending.last_mut() {
-            let depth = *depth;
-            let Some(node) = nodes.next() else {
-                pending.pop();
-                continue;
+    pub fn leaf(node: SelectorNode) -> Self {
+        Self { nodes: vec![node] }
+    }
+    pub fn all(children: Vec<Self>) -> Self {
+        Self::fold(children, true)
+    }
+    pub fn any(children: Vec<Self>) -> Self {
+        Self::fold(children, false)
+    }
+    pub fn negate(mut child: Self) -> Self {
+        child.nodes.push(SelectorNode::Not);
+        child
+    }
+    fn fold(children: Vec<Self>, all: bool) -> Self {
+        let arity = u32::try_from(children.len()).expect("selector arity exceeds u32");
+        let mut nodes = Vec::new();
+        for child in children {
+            nodes.extend(child.nodes);
+        }
+        nodes.push(if all {
+            SelectorNode::All(arity)
+        } else {
+            SelectorNode::Any(arity)
+        });
+        Self { nodes }
+    }
+    fn evaluate(&self, mut leaf: impl FnMut(&SelectorNode) -> bool) -> QueueResult<bool> {
+        // Scalar postfix admission catches underflow and disconnected roots.
+        let mut operands = 0usize;
+        for node in &self.nodes {
+            let arity = match node {
+                SelectorNode::All(n) | SelectorNode::Any(n) => *n as usize,
+                SelectorNode::Not => 1,
+                _ => 0,
             };
-            if depth > MAX_SELECTOR_DEPTH {
+            operands = operands
+                .checked_sub(arity)
+                .and_then(|n| n.checked_add(1))
+                .ok_or_else(|| invalid("invalid selector operand arity"))?;
+        }
+        if operands != 1 {
+            return Err(invalid("selector must have exactly one root"));
+        }
+        #[derive(Clone, Copy)]
+        struct Frame {
+            remaining: u32,
+            all: bool,
+            negate: bool,
+            value: bool,
+        }
+        // Reverse postfix is prefix with reversed children. Boolean folds are
+        // commutative; no leaf is skipped. Scratch depends on depth, not width.
+        let mut frames: [Option<Frame>; MAX_SELECTOR_DEPTH] = [None; MAX_SELECTOR_DEPTH];
+        let mut depth = 0usize;
+        let mut result = false;
+        for node in self.nodes.iter().rev() {
+            if depth >= MAX_SELECTOR_DEPTH {
                 return Err(invalid("selector nesting exceeds common limit"));
             }
-            match node {
-                Self::All(nodes) | Self::Any(nodes) => pending.push((nodes.iter(), depth + 1)),
-                Self::Not(node) => {
-                    pending.push((std::slice::from_ref(node.as_ref()).iter(), depth + 1))
+            let operator = match node {
+                SelectorNode::All(n) => Some(Frame {
+                    remaining: *n,
+                    all: true,
+                    negate: false,
+                    value: true,
+                }),
+                SelectorNode::Any(n) => Some(Frame {
+                    remaining: *n,
+                    all: false,
+                    negate: false,
+                    value: false,
+                }),
+                SelectorNode::Not => Some(Frame {
+                    remaining: 1,
+                    all: true,
+                    negate: true,
+                    value: true,
+                }),
+                _ => None,
+            };
+            let mut value = if let Some(frame) = operator {
+                if frame.remaining != 0 {
+                    frames[depth] = Some(frame);
+                    depth += 1;
+                    continue;
                 }
-                Self::Field { name, predicate } => {
+                frame.value
+            } else {
+                leaf(node)
+            };
+            loop {
+                if depth == 0 {
+                    result = value;
+                    break;
+                }
+                let frame = frames[depth - 1].as_mut().expect("occupied selector frame");
+                frame.value = if frame.all {
+                    frame.value & value
+                } else {
+                    frame.value | value
+                };
+                frame.remaining -= 1;
+                if frame.remaining != 0 {
+                    break;
+                }
+                value = if frame.negate {
+                    !frame.value
+                } else {
+                    frame.value
+                };
+                frames[depth - 1] = None;
+                depth -= 1;
+            }
+        }
+        if depth != 0 {
+            return Err(invalid("incomplete selector tree"));
+        }
+        Ok(result)
+    }
+    pub fn validate(&self, definition: &CollectionDefinition) -> QueueResult<()> {
+        self.evaluate(|_| false)?;
+        for node in &self.nodes {
+            match node {
+                SelectorNode::Field { name, predicate } => {
                     validate_field_predicate(definition, name, predicate)?
                 }
-                Self::Present { name: field, .. } => {
+                SelectorNode::Present { name: field, .. } => {
                     name(field)?;
                     if !definition.admits_field(field) {
                         return Err(invalid("undeclared selector field"));
                     }
                 }
-                Self::Keys(keys) => {
+                SelectorNode::Keys(keys) => {
                     for key in keys {
                         name(key)?;
                     }
@@ -77,89 +188,33 @@ impl WorkSelector {
         }
         Ok(())
     }
-    /// Reference oracle only: physical stores select natively, never hydrate a
-    /// whole queue or claim broadly to evaluate this on the client.
+    /// Reference oracle only: physical stores select natively, never claim
+    /// broadly and filter on the client. Malformed programs fail closed.
     pub fn matches(&self, record: &WorkRecord, evaluated_at: i64) -> bool {
-        enum Frame<'a> {
-            Node(&'a WorkSelector),
-            Not,
-            Fold {
-                nodes: std::slice::Iter<'a, WorkSelector>,
-                all: bool,
-                value: bool,
-            },
-            After {
-                nodes: std::slice::Iter<'a, WorkSelector>,
-                all: bool,
-                value: bool,
-            },
-        }
-        let mut frames = vec![Frame::Node(self)];
-        let mut last = false;
-        while let Some(frame) = frames.pop() {
-            match frame {
-                Frame::Not => last = !last,
-                Frame::Fold {
-                    mut nodes,
-                    all,
-                    value,
-                } => {
-                    if let Some(node) = nodes.next() {
-                        frames.push(Frame::After { nodes, all, value });
-                        frames.push(Frame::Node(node));
-                    } else {
-                        last = value;
-                    }
-                }
-                Frame::After { nodes, all, value } => {
-                    let value = if all { value && last } else { value || last };
-                    if value != all {
-                        last = value;
-                    } else {
-                        frames.push(Frame::Fold { nodes, all, value });
-                    }
-                }
-                Frame::Node(node) => {
-                    last = match node {
-                        Self::All(nodes) | Self::Any(nodes) => {
-                            let all = matches!(node, Self::All(_));
-                            frames.push(Frame::Fold {
-                                nodes: nodes.iter(),
-                                all,
-                                value: all,
-                            });
-                            continue;
-                        }
-                        Self::Not(node) => {
-                            frames.push(Frame::Not);
-                            frames.push(Frame::Node(node));
-                            continue;
-                        }
-                        Self::Field { name, predicate } => {
-                            predicate.matches(record.work.fields.get(name))
-                        }
-                        Self::Present { name, present } => {
-                            record.work.fields.contains_key(name) == *present
-                        }
-                        Self::Keys(keys) => keys.contains(&record.work.key),
-                        Self::StoredLifecycleIn(states) => states.contains(&record.lifecycle),
-                        Self::EffectiveLifecycleIn(states) => {
-                            states.contains(&effective_lifecycle(record, evaluated_at))
-                        }
-                        Self::Attempts { comparison, value } => {
-                            comparison.matches(record.attempts, *value)
-                        }
-                        Self::AvailableAt { comparison, value } => {
-                            comparison.matches(record.work.available_at, *value)
-                        }
-                        Self::LeaseActive(expected) => {
-                            lease_active(record, evaluated_at) == *expected
-                        }
-                    };
-                }
+        self.evaluate(|node| match node {
+            SelectorNode::Field { name, predicate } => {
+                predicate.matches(record.work.fields.get(name))
             }
-        }
-        last
+            SelectorNode::Present { name, present } => {
+                record.work.fields.contains_key(name) == *present
+            }
+            SelectorNode::Keys(keys) => keys.contains(&record.work.key),
+            SelectorNode::StoredLifecycleIn(states) => states.contains(&record.lifecycle),
+            SelectorNode::EffectiveLifecycleIn(states) => {
+                states.contains(&effective_lifecycle(record, evaluated_at))
+            }
+            SelectorNode::Attempts { comparison, value } => {
+                comparison.matches(record.attempts, *value)
+            }
+            SelectorNode::AvailableAt { comparison, value } => {
+                comparison.matches(record.work.available_at, *value)
+            }
+            SelectorNode::LeaseActive(expected) => lease_active(record, evaluated_at) == *expected,
+            SelectorNode::All(_) | SelectorNode::Any(_) | SelectorNode::Not => {
+                unreachable!("operators handled by evaluator")
+            }
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -244,7 +299,7 @@ pub struct AdministrativeIntent {
 impl AdministrativeIntent {
     /// Structural/count/type/body validation only. The containing operation must
     /// additionally admit serialized and resolved-publication bytes; decoding
-    /// must be bounded before this validator receives an owned recursive AST.
+    /// must be bounded before this validator receives an owned flat program.
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
         schema.validate()?;
         limits.validate()?;

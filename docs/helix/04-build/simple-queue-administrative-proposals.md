@@ -48,13 +48,20 @@ credentials and does not change ordinary claim/token/renewal ownership clocks.
 Candidates are not uniqueness-qualified or durably committed; final operation
 planning must still reject or attribute unique conflicts before publication.
 
-Validation and reference evaluation use child-iterator stacks with O(depth)
-scratch. An explicit common maximum selector depth of 64 must be checked before
-recursive serialization/fingerprinting; this is a new expression bound, not a
-match cap. The owned AST still has recursive derived clone/drop/deserialization.
-No wire decoder or receipt persistence is activated here. The eventual transport
-must bound decoding/ownership before exposing these types to untrusted input;
-merely calling validation after an unbounded decode is insufficient.
+Selectors now own a flat unshared postfix program. All/Any carry explicit child
+counts; Not has one child. Checked scalar operand accounting rejects underflow,
+empty programs and disconnected roots. Reverse traversal uses a fixed 64-frame
+parent stack, independent of expression width, and evaluates every leaf. The
+maximum depth counts leaves and empty operators: 63 Not operators plus one leaf
+is valid; 64 Not operators plus one leaf is invalid. Every field predicate is
+validated independently of boolean truth.
+
+Clone, drop and derived serialization/deserialization no longer recurse through
+selector ownership. This does not make unbounded decoding safe: byte admission
+must precede owned decoding and account for flat node/value allocation. No live
+CommitGroup, fingerprint, receipt or transport format changes in this prerequisite.
+Native indexed selection, selective field coverage and durable controls remain
+separate gates; the reference evaluator is never a client-side claim filter.
 
 Pure regressions cover first-match failed preconditions over 5001 targets, wide
 selector traversal, exact expiry boundaries, raw/effective lifecycle distinction,

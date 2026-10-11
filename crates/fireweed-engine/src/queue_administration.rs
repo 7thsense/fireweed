@@ -551,7 +551,7 @@ mod tests {
         AdministrativeEntry {
             key: "a".into(),
             expected_version: None,
-            precondition: WorkSelector::All(vec![]),
+            precondition: WorkSelector::all(vec![]),
             action,
         }
     }
@@ -572,42 +572,48 @@ mod tests {
         let mut record = row().record;
         record.lifecycle = Lifecycle::Leased;
         record.lease_expires_at = Some(10);
-        assert!(WorkSelector::All(vec![]).matches(&record, 10));
-        assert!(!WorkSelector::Any(vec![]).matches(&record, 10));
-        assert!(WorkSelector::StoredLifecycleIn(vec![Lifecycle::Leased]).matches(&record, 10));
-        assert!(WorkSelector::EffectiveLifecycleIn(vec![Lifecycle::Pending]).matches(&record, 10));
-        assert!(WorkSelector::LeaseActive(true).matches(&record, 9));
-        assert!(!WorkSelector::LeaseActive(true).matches(&record, 10));
+        assert!(WorkSelector::all(vec![]).matches(&record, 10));
+        assert!(!WorkSelector::any(vec![]).matches(&record, 10));
         assert!(
-            WorkSelector::All(vec![
-                WorkSelector::Present {
+            WorkSelector::leaf(SelectorNode::StoredLifecycleIn(vec![Lifecycle::Leased]))
+                .matches(&record, 10)
+        );
+        assert!(
+            WorkSelector::leaf(SelectorNode::EffectiveLifecycleIn(vec![Lifecycle::Pending]))
+                .matches(&record, 10)
+        );
+        assert!(WorkSelector::leaf(SelectorNode::LeaseActive(true)).matches(&record, 9));
+        assert!(!WorkSelector::leaf(SelectorNode::LeaseActive(true)).matches(&record, 10));
+        assert!(
+            WorkSelector::all(vec![
+                WorkSelector::leaf(SelectorNode::Present {
                     name: "/payload/null".into(),
                     present: true
-                },
-                WorkSelector::Present {
+                }),
+                WorkSelector::leaf(SelectorNode::Present {
                     name: "/payload/absent".into(),
                     present: false
-                },
-                WorkSelector::Field {
+                }),
+                WorkSelector::leaf(SelectorNode::Field {
                     name: "/payload/null".into(),
                     predicate: Predicate::Equal(FieldValue::Bytes(vec![0]))
-                },
-                WorkSelector::AvailableAt {
+                }),
+                WorkSelector::leaf(SelectorNode::AvailableAt {
                     comparison: Comparison::Equal,
                     value: -1
-                },
-                WorkSelector::Attempts {
+                }),
+                WorkSelector::leaf(SelectorNode::Attempts {
                     comparison: Comparison::Equal,
                     value: 0
-                }
+                })
             ])
             .matches(&record, 10)
         );
         assert!(
-            !WorkSelector::Field {
+            !WorkSelector::leaf(SelectorNode::Field {
                 name: "/payload/null".into(),
                 predicate: Predicate::Equal(FieldValue::Integer(0))
-            }
+            })
             .matches(&record, 10)
         );
     }
@@ -619,14 +625,14 @@ mod tests {
             operation: AdministrativeOperation::SelectFirst(vec![
                 AdministrativeClause {
                     id: "first".into(),
-                    selector: WorkSelector::All(vec![]),
-                    precondition: WorkSelector::Any(vec![]),
+                    selector: WorkSelector::all(vec![]),
+                    precondition: WorkSelector::any(vec![]),
                     action: update(),
                 },
                 AdministrativeClause {
                     id: "second".into(),
-                    selector: WorkSelector::All(vec![]),
-                    precondition: WorkSelector::All(vec![]),
+                    selector: WorkSelector::all(vec![]),
+                    precondition: WorkSelector::all(vec![]),
                     action: update(),
                 },
             ]),
@@ -813,17 +819,17 @@ mod tests {
     }
     #[test]
     fn selector_depth_validation_and_wide_traversal_are_iterative() {
-        let mut selector = WorkSelector::All(vec![]);
+        let mut selector = WorkSelector::all(vec![]);
         for _ in 1..MAX_SELECTOR_DEPTH {
-            selector = WorkSelector::Not(Box::new(selector));
+            selector = WorkSelector::negate(selector);
         }
         selector.validate(&schema().work).unwrap();
-        let too_deep = WorkSelector::Not(Box::new(selector));
+        let too_deep = WorkSelector::negate(selector);
         assert!(matches!(
             too_deep.validate(&schema().work),
             Err(QueueError::Invalid(_))
         ));
-        let wide = WorkSelector::All((0..10_000).map(|_| WorkSelector::All(vec![])).collect());
+        let wide = WorkSelector::all((0..10_000).map(|_| WorkSelector::all(vec![])).collect());
         wide.validate(&schema().work).unwrap();
         assert!(wide.matches(&row().record, 0));
         let duplicate = AdministrativeIntent {
@@ -834,6 +840,73 @@ mod tests {
         duplicate
             .validate(&schema(), &QueueLimits::default())
             .unwrap();
+    }
+    #[test]
+    fn flat_selector_rejects_malformed_programs_and_checks_every_leaf() {
+        for nodes in [
+            vec![],
+            vec![SelectorNode::Not],
+            vec![SelectorNode::All(2)],
+            vec![SelectorNode::All(0), SelectorNode::Any(0)],
+            vec![SelectorNode::All(0), SelectorNode::Any(u32::MAX)],
+        ] {
+            let selector = WorkSelector { nodes };
+            assert!(matches!(
+                selector.validate(&schema().work),
+                Err(QueueError::Invalid(_))
+            ));
+            assert!(!selector.matches(&row().record, 0));
+        }
+        let invalid_leaf = WorkSelector::leaf(SelectorNode::Present {
+            name: "undeclared".into(),
+            present: true,
+        });
+        // A true sibling must never conceal an invalid predicate.
+        let selector = WorkSelector::any(vec![invalid_leaf, WorkSelector::all(vec![])]);
+        assert!(matches!(
+            selector.validate(&schema().work),
+            Err(QueueError::Invalid(_))
+        ));
+    }
+    #[test]
+    fn flat_selector_nested_empty_folds_and_flat_wire_round_trip() {
+        let yes = || WorkSelector::all(vec![]);
+        let no = || WorkSelector::any(vec![]);
+        for (selector, expected) in [
+            (
+                WorkSelector::all(vec![yes(), WorkSelector::negate(no())]),
+                true,
+            ),
+            (
+                WorkSelector::any(vec![no(), WorkSelector::negate(yes())]),
+                false,
+            ),
+            (
+                WorkSelector::negate(WorkSelector::all(vec![yes(), no()])),
+                true,
+            ),
+            (
+                WorkSelector::all(vec![WorkSelector::any(vec![no(), yes()]), yes()]),
+                true,
+            ),
+        ] {
+            selector.validate(&schema().work).unwrap();
+            assert_eq!(selector.matches(&row().record, 0), expected);
+            let bytes = postcard::to_allocvec(&selector).unwrap();
+            let decoded: WorkSelector = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded, selector);
+            assert_eq!(decoded.matches(&row().record, 0), expected);
+        }
+        // Invalid depth is still safe to serialize, clone and drop: ownership
+        // is flat even before structural admission. Decode admission is separate.
+        let mut deep = yes();
+        for _ in 0..100_000 {
+            deep = WorkSelector::negate(deep);
+        }
+        let bytes = postcard::to_allocvec(&deep).unwrap();
+        let decoded: WorkSelector = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.clone(), deep);
+        assert!(decoded.validate(&schema().work).is_err());
     }
     #[test]
     fn addressed_admin_uses_common_count_limit_not_a_backend_only_1000_cap() {
@@ -1034,7 +1107,7 @@ mod tests {
             .unwrap(),
         );
         let mut skipped = change_priority();
-        skipped.precondition = WorkSelector::Any(vec![]);
+        skipped.precondition = WorkSelector::any(vec![]);
         let mut group = ordinary();
         group.work_updates.push(UnclaimedUpdate {
             key: "a".into(),
@@ -1080,8 +1153,8 @@ mod tests {
         let source = source();
         let clause = |id: &str| AdministrativeClause {
             id: id.into(),
-            selector: WorkSelector::All(vec![]),
-            precondition: WorkSelector::Any(vec![]),
+            selector: WorkSelector::all(vec![]),
+            precondition: WorkSelector::any(vec![]),
             action: update(),
         };
         let intent = AdministrativeIntent {
@@ -1371,8 +1444,8 @@ mod tests {
             before_fields: None,
             operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
                 id: "all".into(),
-                selector: WorkSelector::All(vec![]),
-                precondition: WorkSelector::All(vec![]),
+                selector: WorkSelector::all(vec![]),
+                precondition: WorkSelector::all(vec![]),
                 action: update(),
             }]),
         };
