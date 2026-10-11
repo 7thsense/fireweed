@@ -61,11 +61,11 @@ impl AdmittedAdministrativeGroupProposal<'_> {
         &self.initial
     }
 }
-fn add(a: u64, b: u64) -> QueueResult<u64> {
+pub(super) fn add(a: u64, b: u64) -> QueueResult<u64> {
     a.checked_add(b)
         .ok_or_else(|| unknown("administrative allocation bound exhausted"))
 }
-fn scale(a: u64, b: u64) -> QueueResult<u64> {
+pub(super) fn scale(a: u64, b: u64) -> QueueResult<u64> {
     a.checked_mul(b)
         .ok_or_else(|| unknown("administrative allocation bound exhausted"))
 }
@@ -87,7 +87,10 @@ fn row_bound(row: &StoredWork) -> QueueResult<u64> {
         )?,
     )
 }
-fn tuple_bound(tuple: &UniqueIdentity, owner: Option<&RecordIdentity>) -> QueueResult<u64> {
+pub(super) fn tuple_bound(
+    tuple: &UniqueIdentity,
+    owner: Option<&RecordIdentity>,
+) -> QueueResult<u64> {
     let mut bytes = add(tuple.index.len() as u64, tuple.full_sort_key.len() as u64)?;
     bytes = add(
         bytes,
@@ -130,7 +133,7 @@ fn snapshot_bound(image: &RecordSnapshot) -> QueueResult<u64> {
     }
     Ok(bytes)
 }
-fn delta_bound(delta: &CommitDelta) -> QueueResult<u64> {
+pub(super) fn delta_bound(delta: &CommitDelta) -> QueueResult<u64> {
     let count = delta.work.len()
         + delta.state.len()
         + delta.versions.len()
@@ -167,7 +170,7 @@ fn work_keys(group: &CommitGroup) -> impl Iterator<Item = &str> {
         .chain(group.work_updates.iter().map(|u| u.key.as_str()))
         .chain(group.work_inserts.iter().map(|u| u.key.as_str()))
 }
-fn ordinary_bound(group: &CommitGroup, image: &RecordSnapshot) -> QueueResult<u64> {
+pub(super) fn ordinary_bound(group: &CommitGroup, image: &RecordSnapshot) -> QueueResult<u64> {
     let headers = crate::queue_memory::incoming_headers(group)
         .map_err(|_| unknown("ordinary container bound exhausted"))?;
     let mut bytes = add(add(scale(wire(group)?, 12)?, scale(headers, 3)?)?, 2048)?;
@@ -232,7 +235,7 @@ fn intent_headers(intent: &AdministrativeIntent) -> QueueResult<u64> {
     }
     Ok(bytes)
 }
-fn tuple_identity_bound(delta: &CommitDelta, schema: &QueueSchema) -> QueueResult<u64> {
+pub(super) fn tuple_identity_bound(delta: &CommitDelta, schema: &QueueSchema) -> QueueResult<u64> {
     delta.versions.iter().try_fold(0, |bytes, version| {
         let def = match &version.collection {
             None => &schema.work,
@@ -500,7 +503,7 @@ fn prune(row: &StoredWork, names: &BTreeSet<String>, body: Option<&ResolvedBody>
         },
     }
 }
-fn required_tuples(
+pub(super) fn required_tuples(
     effects: &crate::queue_fields::UniqueFieldEffects,
 ) -> impl Iterator<Item = &UniqueIdentity> {
     effects
@@ -508,7 +511,7 @@ fn required_tuples(
         .keys()
         .chain(effects.claims.iter().map(|(tuple, _)| tuple))
 }
-fn copy_probe(
+pub(super) fn copy_probe(
     target: &mut RecordSnapshot,
     source: &RecordSnapshot,
     tuple: &UniqueIdentity,

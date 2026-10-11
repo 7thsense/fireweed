@@ -545,6 +545,56 @@ struct Loaded<'a> {
     _selection_charge: Option<QueueBufferCharge<'a>>,
     _probe_charges: Vec<QueueBufferCharge<'a>>,
 }
+/// Transfer addressed authority to owned scratch work without copying any payload
+/// or releasing/reacquiring its admitted bytes. It remains input-bounded.
+struct OwnedLoaded {
+    snapshot: RecordSnapshot,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "physical IDs retained for forthcoming resolved application"
+        )
+    )]
+    ids: BTreeMap<RecordIdentity, i64>,
+    _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
+}
+impl Loaded<'_> {
+    fn into_owned(self, reservation: &Arc<QueueReservation>) -> QueueResult<OwnedLoaded> {
+        if !self._charge.belongs_to(reservation)
+            || self
+                ._selection_charge
+                .as_ref()
+                .is_some_and(|c| !c.belongs_to(reservation))
+            || self
+                ._probe_charges
+                .iter()
+                .any(|c| !c.belongs_to(reservation))
+        {
+            return Err(storage("cannot transfer loaded authority to another job"));
+        }
+        // Same-job charges are disjoint portions of the admitted u64 total;
+        // their sum cannot overflow. Transfer preserves payload-before-guard Drop.
+        let Self {
+            snapshot,
+            ids,
+            mut _charge,
+            _selection_charge,
+            _probe_charges,
+        } = self;
+        if let Some(charge) = _selection_charge {
+            _charge = _charge.merge(charge)?;
+        }
+        for charge in _probe_charges {
+            _charge = _charge.merge(charge)?;
+        }
+        Ok(OwnedLoaded {
+            snapshot,
+            ids,
+            _charge: _charge.into_owned(Arc::clone(reservation))?,
+        })
+    }
+}
 async fn load_group<'a>(
     tx: &Transaction<'_>,
     queue: &QueueRow<'_>,

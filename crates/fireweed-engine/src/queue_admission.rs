@@ -125,6 +125,11 @@ pub struct QueueBufferCharge<'a> {
     bytes: u64,
 }
 impl<'a> QueueBufferCharge<'a> {
+    /// Check transfer identity without consuming payload admission.
+    pub fn belongs_to(&self, reservation: &QueueReservation) -> bool {
+        std::ptr::eq(self.reservation, reservation)
+    }
+
     /// Transfer two charges from the identical job into one guard without a
     /// release/reacquire interval. This does not increase admitted capacity.
     pub fn merge(mut self, mut other: Self) -> QueueResult<Self> {

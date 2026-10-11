@@ -289,7 +289,9 @@ fn propose_target_view(
     })
 }
 
+mod ordinary;
 mod stream;
+pub use ordinary::*;
 pub use stream::{
     AdministrativeScanIdentity, AdmittedAdministrativeGroupProposal, AdmittedAdministrativeScan,
     ResolvedAdministrativeRow, SelectedAdministrativeInput, plan_broad_group,

@@ -282,6 +282,119 @@ impl SortedSpool {
     }
 }
 
+/// One fixed descriptor per input; equal tuples deterministically consume the
+/// left source first. Each source independently validates its producer ordinals.
+struct EvidenceUnion<'a> {
+    left: &'a mut SortedSpool,
+    right: &'a mut SortedSpool,
+    left_head: Option<SpoolEntry>,
+    right_head: Option<SpoolEntry>,
+    left_done: bool,
+    right_done: bool,
+}
+impl EvidenceUnion<'_> {
+    fn next(&mut self) -> QueueResult<Option<(bool, SpoolEntry)>> {
+        if self.left_head.is_none() && !self.left_done {
+            self.left_head = self.left.next_entry()?;
+            self.left_done = self.left_head.is_none();
+        }
+        if self.right_head.is_none() && !self.right_done {
+            self.right_head = self.right.next_entry()?;
+            self.right_done = self.right_head.is_none();
+        }
+        let left = match (&self.left_head, &self.right_head) {
+            (None, None) => return Ok(None),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(a), Some(b)) => {
+                compare_keys_across(
+                    &mut self.left.data,
+                    a.descriptor,
+                    &mut self.right.data,
+                    b.descriptor,
+                )? != Ordering::Greater
+            }
+        };
+        Ok(Some((
+            left,
+            if left {
+                self.left_head.take().unwrap()
+            } else {
+                self.right_head.take().unwrap()
+            },
+        )))
+    }
+    fn spool(&mut self, left: bool) -> &mut SortedSpool {
+        if left { self.left } else { self.right }
+    }
+}
+impl SortedSpool {
+    /// Only the joint administrative owner exposes this operation. Both inputs
+    /// must share its exact operation binding and admitted job; no foreign source
+    /// can be mixed in. Any error permanently poisons BOTH streams.
+    pub(super) fn reduce_evidence_union(
+        &mut self,
+        other: &mut Self,
+    ) -> QueueResult<UniqueTupleDecision> {
+        if self.poisoned || other.poisoned {
+            return Err(unknown("union of poisoned evidence"));
+        }
+        let result = self.reduce_union_checked(other);
+        if result.is_err() {
+            self.poisoned = true;
+            other.poisoned = true;
+        }
+        result
+    }
+    fn reduce_union_checked(&mut self, other: &mut Self) -> QueueResult<UniqueTupleDecision> {
+        if self.binding != other.binding
+            || !std::ptr::eq(self._memory.reservation(), other._memory.reservation())
+        {
+            return Err(unknown("foreign evidence union operation"));
+        }
+        self.rewind()?;
+        other.rewind()?;
+        let driver = self._memory.child_buffer((2 * WINDOW + 4096) as u64)?;
+        let mut inputs = EvidenceUnion {
+            left: self,
+            right: other,
+            left_head: None,
+            right_head: None,
+            left_done: false,
+            right_done: false,
+        };
+        let mut pending = inputs.next()?;
+        let mut overall = UniqueTupleDecision {
+            administrative_collision: false,
+            final_collision: false,
+        };
+        while let Some((side, first)) = pending.take() {
+            let key = inputs.spool(side).hydrate_key(&first)?;
+            let header = inputs.spool(side).hydrate_record(&first, &key.key)?;
+            drop(first);
+            let mut reducer = UniqueTupleReducer::new(
+                &key.key,
+                header.record.initial_loaded,
+                header.record.initial_owner.as_ref(),
+                driver.reservation(),
+            )?;
+            reducer.observe(header.record.borrowed(&key.key))?;
+            while let Some((side, entry)) = inputs.next()? {
+                if !inputs.spool(side).entry_matches(&entry, &key.key)? {
+                    pending = Some((side, entry));
+                    break;
+                }
+                let row = inputs.spool(side).hydrate_record(&entry, &key.key)?;
+                reducer.observe(row.record.borrowed(&key.key))?;
+            }
+            let decision = reducer.finish()?;
+            overall.administrative_collision |= decision.administrative_collision;
+            overall.final_collision |= decision.final_collision;
+        }
+        Ok(overall)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

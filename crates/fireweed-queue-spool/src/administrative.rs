@@ -188,6 +188,7 @@ impl AdministrativeScratch {
             commands: self.commands.seal()?,
             evidence: self.evidence.seal()?,
             poisoned: false,
+            predecision_validated: false,
             context: self.context,
         })
     }
@@ -221,9 +222,109 @@ pub struct SealedAdministrativeScratch {
     commands: SortedSpool,
     evidence: SortedSpool,
     poisoned: bool,
+    predecision_validated: bool,
     context: Context,
 }
 impl SealedAdministrativeScratch {
+    /// Exhaust command integrity and the administrative/ordinary-authority union
+    /// BEFORE overlap, sibling collision or ordinary CAS/lease decisions. Caller
+    /// first verifies complete expected prospective ordinary probes under fence.
+    pub fn validate_before_business(
+        &mut self,
+        ordinary: &fireweed_engine::queue_planner::RecordSnapshot,
+        directory: &Path,
+        quota: Arc<ScratchDiskQuota>,
+        reservation: &Arc<QueueReservation>,
+    ) -> QueueResult<UniqueTupleDecision> {
+        if self.poisoned {
+            return Err(unknown("predecision on poisoned scratch"));
+        }
+        let result = (|| {
+            self.rewind_commands()?;
+            while let Some(command) = self.next_command()? {
+                drop(command);
+            }
+            self.rewind_commands()?;
+            self.reduce_bound_ordinary(ordinary, None, directory, quota, reservation)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        } else {
+            self.predecision_validated = true;
+        }
+        result
+    }
+    /// Ordinary success remains provisional: this final union includes releases
+    /// and claims without reselecting rows or prematurely checking initial owners.
+    pub fn reduce_with_ordinary_effects(
+        &mut self,
+        ordinary: &fireweed_engine::queue_planner::RecordSnapshot,
+        effects: &fireweed_engine::queue_fields::UniqueFieldEffects,
+        directory: &Path,
+        quota: Arc<ScratchDiskQuota>,
+        reservation: &Arc<QueueReservation>,
+    ) -> QueueResult<UniqueTupleDecision> {
+        if self.poisoned || !self.predecision_validated {
+            self.poisoned = true;
+            return Err(unknown("final union lacks complete predecision validation"));
+        }
+        let result =
+            self.reduce_bound_ordinary(ordinary, Some(effects), directory, quota, reservation);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+    fn reduce_bound_ordinary(
+        &mut self,
+        ordinary: &fireweed_engine::queue_planner::RecordSnapshot,
+        effects: Option<&fireweed_engine::queue_fields::UniqueFieldEffects>,
+        directory: &Path,
+        quota: Arc<ScratchDiskQuota>,
+        reservation: &Arc<QueueReservation>,
+    ) -> QueueResult<UniqueTupleDecision> {
+        if ordinary.next_sequence != self.context.initial
+            || !std::ptr::eq(reservation.as_ref(), self.context._charge.reservation())
+        {
+            return Err(unknown("foreign ordinary evidence context"));
+        }
+        let mut spool = QueueSpool::new(directory, quota, reservation)?;
+        spool.binding = self.context.binding;
+        for tuple in &ordinary.unique_probes_loaded {
+            spool.append_borrowed_evidence(
+                tuple,
+                ordinary.unique_owners.get(tuple),
+                BorrowedScratchEffect::Observe,
+            )?;
+        }
+        if let Some(effects) = effects {
+            for (tuple, owner) in &effects.releases {
+                if !ordinary.unique_probes_loaded.contains(tuple) {
+                    return Err(unknown("ordinary release authority missing"));
+                }
+                spool.append_borrowed_evidence(
+                    tuple,
+                    ordinary.unique_owners.get(tuple),
+                    BorrowedScratchEffect::Release(owner),
+                )?;
+            }
+            for (tuple, owner) in &effects.claims {
+                if !ordinary.unique_probes_loaded.contains(tuple) {
+                    return Err(unknown("ordinary claim authority missing"));
+                }
+                spool.append_borrowed_evidence(
+                    tuple,
+                    ordinary.unique_owners.get(tuple),
+                    BorrowedScratchEffect::Claim {
+                        owner,
+                        origin: UniqueClaimOrigin::Ordinary,
+                    },
+                )?;
+            }
+        }
+        let mut ordinary = spool.seal()?;
+        self.evidence.reduce_evidence_union(&mut ordinary)
+    }
     pub fn verify_context(
         &mut self,
         queue: &QueueAddress,
@@ -1036,6 +1137,186 @@ pub(super) mod tests {
             drop(summary);
             assert_eq!(quota.usage().unwrap(), 0);
             assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
+    }
+    fn initial_tuple(a: i64) -> UniqueIdentity {
+        UniqueIdentity {
+            collection: None,
+            index: "ab".into(),
+            full_sort_key: fireweed_engine::queue_index::ordered_key(&[
+                Some(&FieldValue::Integer(a)),
+                Some(&FieldValue::Bytes(vec![])),
+            ])
+            .unwrap(),
+        }
+    }
+    #[test]
+    fn bound_union_allows_ordinary_reuse_of_admin_release_and_local_equal_ordinals() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 2 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let quota = ScratchDiskQuota::new(2 << 20).unwrap();
+        let mut scratch = AdministrativeScratch::new(
+            directory.path(),
+            Arc::clone(&quota),
+            &job,
+            &queue(),
+            pin(),
+            1,
+        )
+        .unwrap();
+        let summary = run_scan(1, 0, true, &job, |packet| scratch.append(packet)).unwrap();
+        let mut scratch = scratch.seal(&summary).unwrap();
+        let old = initial_tuple(0);
+        let initial = RecordSnapshot {
+            next_sequence: 1,
+            unique_probes_loaded: BTreeSet::from([old.clone()]),
+            unique_owners: BTreeMap::from([(
+                old.clone(),
+                RecordIdentity {
+                    collection: None,
+                    key: "row-00000".into(),
+                },
+            )]),
+            ..Default::default()
+        };
+        // Each spool's first record has ordinal zero. Cross-source ties are legal.
+        let first = scratch
+            .validate_before_business(&initial, directory.path(), Arc::clone(&quota), &job)
+            .unwrap();
+        assert!(!first.administrative_collision && !first.final_collision);
+        let effects = fireweed_engine::queue_fields::UniqueFieldEffects {
+            releases: BTreeMap::new(),
+            claims: vec![(
+                old,
+                RecordIdentity {
+                    collection: None,
+                    key: "next".into(),
+                },
+            )],
+        };
+        assert_eq!(
+            effects.validate(&initial).unwrap(),
+            Err(Rejection::UniqueConflict)
+        );
+        let final_decision = scratch
+            .reduce_with_ordinary_effects(
+                &initial,
+                &effects,
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+            )
+            .unwrap();
+        assert!(!final_decision.final_collision);
+        assert!(scratch.next_command().unwrap().is_some()); // predecision validation rewound
+        drop(scratch);
+        drop(summary);
+        assert_eq!(quota.usage().unwrap(), 0);
+        assert_eq!(admission.usage().unwrap(), (1, 0));
+    }
+    #[test]
+    fn predecision_validates_commands_and_cross_source_authority_before_business() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 2 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let quota = ScratchDiskQuota::new(2 << 20).unwrap();
+        for corrupt_command in [false, true] {
+            let mut scratch = AdministrativeScratch::new(
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+                &queue(),
+                pin(),
+                1,
+            )
+            .unwrap();
+            let summary = run_scan(1, 0, true, &job, |packet| scratch.append(packet)).unwrap();
+            let mut scratch = scratch.seal(&summary).unwrap();
+            let mut ordinary = RecordSnapshot {
+                next_sequence: 1,
+                ..Default::default()
+            };
+            if corrupt_command {
+                let descriptor = descriptor(
+                    &mut scratch.commands.index,
+                    0,
+                    scratch.commands.data_bytes,
+                    scratch.commands.count,
+                )
+                .unwrap();
+                scratch
+                    .commands
+                    .data
+                    .seek(SeekFrom::Start(descriptor.0[7]))
+                    .unwrap();
+                scratch.commands.data.write_all(b"BAD!!").unwrap();
+            } else {
+                // Admin has initial ownership of a=0; missing ownership from the
+                // earlier ordinary load is an integrity failure, never CAS error.
+                ordinary.unique_probes_loaded.insert(initial_tuple(0));
+            }
+            assert!(matches!(
+                scratch.validate_before_business(
+                    &ordinary,
+                    directory.path(),
+                    Arc::clone(&quota),
+                    &job
+                ),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            assert!(scratch.next_command().is_err());
+            drop(scratch);
+            drop(summary);
+            assert_eq!(quota.usage().unwrap(), 0);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
+    }
+    #[test]
+    fn final_union_requires_predecision_and_same_operation_job_and_sequence() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(2, 4 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let other = Arc::new(admission.reserve(0).unwrap());
+        let quota = ScratchDiskQuota::new(2 << 20).unwrap();
+        for mode in 0..3 {
+            let mut scratch = AdministrativeScratch::new(
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+                &queue(),
+                pin(),
+                1,
+            )
+            .unwrap();
+            let summary = run_scan(1, 0, false, &job, |packet| scratch.append(packet)).unwrap();
+            let mut scratch = scratch.seal(&summary).unwrap();
+            let ordinary = RecordSnapshot {
+                next_sequence: if mode == 2 { 2 } else { 1 },
+                ..Default::default()
+            };
+            let result = if mode == 0 {
+                scratch.reduce_with_ordinary_effects(
+                    &ordinary,
+                    &Default::default(),
+                    directory.path(),
+                    Arc::clone(&quota),
+                    &job,
+                )
+            } else {
+                scratch.validate_before_business(
+                    &ordinary,
+                    directory.path(),
+                    Arc::clone(&quota),
+                    if mode == 1 { &other } else { &job },
+                )
+            };
+            assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+            assert!(scratch.next_command().is_err());
+            drop(scratch);
+            drop(summary);
+            assert_eq!(quota.usage().unwrap(), 0);
+            assert_eq!(admission.usage().unwrap(), (2, 0));
         }
     }
 }

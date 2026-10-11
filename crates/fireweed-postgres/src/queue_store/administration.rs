@@ -524,6 +524,128 @@ async fn prepare_native_scratch<'r>(
     })
 }
 
+struct OwnedScratchDirectory {
+    path: std::path::PathBuf,
+    _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
+}
+impl OwnedScratchDirectory {
+    fn as_path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+/// Input-bounded ordinary command plus external administrative commands, still
+/// awaiting byte/result limits and atomic application. No publication approval.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private finalization qualification precedes public activation"
+    )
+)]
+struct NativeProvisionalGroup {
+    scratch: fireweed_queue_spool::SealedAdministrativeScratch,
+    summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
+    ordinary: fireweed_engine::queue_administration::ProvisionalOrdinaryCandidate,
+    initial: OwnedLoaded,
+}
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private finalization qualification precedes public activation"
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+async fn finalize_native_semantics(
+    prepared: NativeAdministrativePreparation<'_>,
+    address: &QueueAddress,
+    group: &CommitGroup,
+    queue: &QueueRow<'_>,
+    ownership_now: impl FnOnce() -> QueueResult<i64>,
+    reservation: &Arc<QueueReservation>,
+    workers: &fireweed_queue_spool::ScratchWorkers,
+    directory: &std::path::Path,
+    quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
+) -> QueueResult<Result<NativeProvisionalGroup, Rejection>> {
+    use fireweed_engine::queue_administration::{
+        propose_ordinary_after_administration, validate_ordinary_prospective_authority,
+    };
+    let NativeAdministrativePreparation {
+        mut scratch,
+        summary,
+        ordinary,
+    } = prepared;
+    scratch.verify_context(address, queue.definition_pin, queue.next_sequence)?;
+    validate_ordinary_prospective_authority(group, &ordinary.snapshot, &queue.schema, reservation)?;
+    let ordinary = ordinary.into_owned(reservation)?;
+    let names = directory.as_os_str().len() as u64;
+    let path_charge = reservation.owned_buffer(
+        names
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or_else(|| storage("scratch path bound overflow"))?,
+    )?;
+    let path = OwnedScratchDirectory {
+        path: directory.to_owned(),
+        _charge: path_charge,
+    };
+    let run_quota = Arc::clone(&quota);
+    let run_job = Arc::clone(reservation);
+    let (mut scratch, ordinary, decision, path) = workers
+        .run(move || {
+            let decision = scratch.validate_before_business(
+                &ordinary.snapshot,
+                path.as_path(),
+                run_quota,
+                &run_job,
+            )?;
+            Ok((scratch, ordinary, decision, path))
+        })
+        .await?;
+    if summary.overlaps_explicit_work() {
+        return Ok(Err(Rejection::Invalid(
+            "administrative target overlaps explicit group work".into(),
+        )));
+    }
+    if decision.administrative_collision {
+        return Ok(Err(Rejection::UniqueConflict));
+    }
+    let proposal = match propose_ordinary_after_administration(
+        group,
+        &ordinary.snapshot,
+        ownership_now,
+        &queue.schema,
+        reservation,
+    )? {
+        Ok(candidate) => candidate,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let run_job = Arc::clone(reservation);
+    let (scratch, proposal, decision) = workers
+        .run(move || {
+            let decision = scratch.reduce_with_ordinary_effects(
+                proposal.initial_authority(),
+                proposal.unique_effects(),
+                path.as_path(),
+                quota,
+                &run_job,
+            )?;
+            drop(path);
+
+            Ok((scratch, proposal, decision))
+        })
+        .await?;
+    if decision.final_collision {
+        return Ok(Err(Rejection::UniqueConflict));
+    }
+    Ok(Ok(NativeProvisionalGroup {
+        scratch,
+        summary,
+        ordinary: proposal,
+        initial: ordinary,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,6 +849,69 @@ mod tests {
                 .unwrap();
             drop(summary);
             drop(ordinary);
+        }
+        assert_eq!(quota.usage().unwrap(), 0);
+        {
+            let prepared = prepare_native_scratch(
+                &tx,
+                &address,
+                &fenced,
+                &group,
+                &intent,
+                &QueueLimits::default(),
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap();
+            let clocks = std::cell::Cell::new(0);
+            let finalized = finalize_native_semantics(
+                prepared,
+                &address,
+                &group,
+                &fenced,
+                || {
+                    clocks.set(clocks.get() + 1);
+                    Ok(0)
+                },
+                &job,
+                &workers,
+                directory.path(),
+                Arc::clone(&quota),
+            )
+            .await
+            .unwrap()
+            .unwrap_or_else(|reason| panic!("unexpected ordinary rejection: {reason:?}"));
+            assert_eq!(clocks.get(), 1);
+            assert_eq!(finalized.summary.packet_count(), 5001);
+            assert_eq!(finalized.ordinary.delta().next_sequence, 5002);
+            assert_eq!(finalized.ordinary.delta().state[0].key, "workflow");
+            assert_eq!(finalized.ordinary.delta().work[0].record.work.key, "next");
+            assert_eq!(finalized.initial.snapshot.next_sequence, 5001);
+            assert!(finalized.initial.ids.is_empty());
+            let NativeProvisionalGroup {
+                mut scratch,
+                summary,
+                ordinary,
+                initial,
+            } = finalized;
+            workers
+                .run(move || {
+                    let mut count = 0;
+                    while let Some(command) = scratch.next_command()? {
+                        drop(command);
+                        count += 1;
+                    }
+                    assert_eq!(count, 5001);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            drop(summary);
+            drop(ordinary);
+            drop(initial);
         }
         assert_eq!(quota.usage().unwrap(), 0);
         let unchanged: i64 = tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND version=1 AND priority=0", &[&queue_id]).await.unwrap().get(0);

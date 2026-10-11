@@ -114,21 +114,19 @@ fn descriptor(
     result.validate(data_bytes, count)?;
     Ok(result)
 }
-fn compare_segment(data: &mut File, left: (u64, u64), right: (u64, u64)) -> QueueResult<Ordering> {
+fn compare_windows(
+    left: (u64, u64),
+    right: (u64, u64),
+    mut read: impl FnMut(bool, u64, &mut [u8]) -> QueueResult<()>,
+) -> QueueResult<Ordering> {
     let common = left.1.min(right.1);
     let mut position = 0;
     let mut left_bytes = [0; WINDOW];
     let mut right_bytes = [0; WINDOW];
     while position < common {
         let length = (common - position).min(WINDOW as u64) as usize;
-        data.seek(SeekFrom::Start(add(left.0, position)?))
-            .map_err(unknown)?;
-        data.read_exact(&mut left_bytes[..length])
-            .map_err(unknown)?;
-        data.seek(SeekFrom::Start(add(right.0, position)?))
-            .map_err(unknown)?;
-        data.read_exact(&mut right_bytes[..length])
-            .map_err(unknown)?;
+        read(true, add(left.0, position)?, &mut left_bytes[..length])?;
+        read(false, add(right.0, position)?, &mut right_bytes[..length])?;
         let order = left_bytes[..length].cmp(&right_bytes[..length]);
         if order != Ordering::Equal {
             return Ok(order);
@@ -137,6 +135,41 @@ fn compare_segment(data: &mut File, left: (u64, u64), right: (u64, u64)) -> Queu
     }
     Ok(left.1.cmp(&right.1))
 }
+fn read_window(file: &mut File, offset: u64, buffer: &mut [u8]) -> QueueResult<()> {
+    file.seek(SeekFrom::Start(offset)).map_err(unknown)?;
+    file.read_exact(buffer).map_err(unknown)
+}
+fn compare_segment(data: &mut File, left: (u64, u64), right: (u64, u64)) -> QueueResult<Ordering> {
+    compare_windows(left, right, |_, offset, buffer| {
+        read_window(data, offset, buffer)
+    })
+}
+fn compare_keys_across(
+    left: &mut File,
+    a: Descriptor,
+    right: &mut File,
+    b: Descriptor,
+) -> QueueResult<Ordering> {
+    let present = a.0[0].cmp(&b.0[0]);
+    if present != Ordering::Equal {
+        return Ok(present);
+    }
+    for (offset, length) in [(1, 2), (3, 4), (5, 6)] {
+        let order = compare_windows(
+            (a.0[offset], a.0[length]),
+            (b.0[offset], b.0[length]),
+            |is_left, position, buffer| {
+                read_window(if is_left { left } else { right }, position, buffer)
+            },
+        )?;
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+    }
+    // Ordinals belong to different producers and are deliberately not compared.
+    Ok(Ordering::Equal)
+}
+
 fn compare(data: &mut File, left: Descriptor, right: Descriptor) -> QueueResult<Ordering> {
     let present = left.0[0].cmp(&right.0[0]);
     if present != Ordering::Equal {
