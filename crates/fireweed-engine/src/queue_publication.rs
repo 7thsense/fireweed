@@ -11,7 +11,11 @@ use crate::{
 };
 use fireweed_core::queue_contract::*;
 
+mod administrative_receipt;
+mod administrative_result;
+pub use administrative_receipt::*;
 mod measurement;
+pub use administrative_result::*;
 mod work_fragment;
 pub use work_fragment::*;
 #[cfg(test)]

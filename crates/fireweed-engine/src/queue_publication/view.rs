@@ -344,7 +344,7 @@ fn identity<'a>(s: &mut Scan<'a>) -> PublicationResult<IdentityRef<'a>> {
     let (collection, key) = s.identity()?;
     Ok(IdentityRef { collection, key })
 }
-fn fields<'a>(s: &mut Scan<'a>, edits: bool) -> PublicationResult<FieldsRef<'a>> {
+pub(super) fn fields<'a>(s: &mut Scan<'a>, edits: bool) -> PublicationResult<FieldsRef<'a>> {
     let count = s.count()?;
     let start = s.rest;
     let mut last = None;
