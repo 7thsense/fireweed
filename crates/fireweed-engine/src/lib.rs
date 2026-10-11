@@ -358,3 +358,5 @@ pub mod queue_schema_codec;
 
 /// Versioned resolved mutation framing and bounded structural scan.
 pub mod queue_publication;
+
+pub mod queue_sql;

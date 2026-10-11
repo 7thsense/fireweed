@@ -1,6 +1,7 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
 mod replay;
+mod selection;
 mod snapshot;
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
@@ -22,6 +23,7 @@ use fireweed_engine::{
 };
 use fireweed_queue_spool::ScratchWorkers;
 pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
+pub use selection::AdmittedClaimSelection;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 use turso::{
@@ -3001,6 +3003,454 @@ mod tests {
         .await;
         assert_eq!(integer(&row[0]).unwrap(), 3);
         assert_eq!(integer(&row[1]).unwrap(), 2);
+    }
+    async fn select_fixture(
+        projection: &Arc<QueueProjection>,
+        definition: &AdmittedQueueDefinition,
+        request: ClaimRequest,
+        now: i64,
+        offset: u64,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedClaimSelection> {
+        projection
+            .select_claim_candidates(
+                ClaimReplayInput {
+                    genesis: encode_checked_genesis(
+                        1,
+                        &address(),
+                        definition,
+                        &[31; 32],
+                        16 << 20,
+                        job,
+                    )?,
+                    request,
+                    now,
+                    limits: QueueLimits::default(),
+                    required_next_offset: offset,
+                    required_insertion_sequence: 2,
+                    required_last_record_epoch: 1,
+                },
+                job,
+                workers,
+            )
+            .await
+    }
+    #[tokio::test]
+    async fn native_candidate_filters_priority_typed_ranges_and_wide_sets_without_leasing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native-selection.db");
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) = bootstrap(&path, &job, &workers).await;
+        let mut snapshot = seed(&projection, &definition, &job, &workers, true).await;
+        let mut priorities = group("selection-priorities");
+        priorities.work_updates = vec![patch("a", 1, Some(-9), None), patch("b", 1, Some(8), None)];
+        priorities.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+            priority: Some(-9),
+            fields: BTreeMap::from([
+                ("meta/rank".into(), Some(FieldValue::Integer(i64::MAX))),
+                ("meta/tag".into(), Some(FieldValue::Text("match".into()))),
+                ("meta/range".into(), Some(FieldValue::Float(2.0))),
+            ]),
+            ..Default::default()
+        });
+        priorities.work_updates[1].change = UnclaimedChange::Patch(WorkPatch {
+            priority: Some(8),
+            fields: BTreeMap::from([("meta/rank".into(), Some(FieldValue::Float(2.0)))]),
+            ..Default::default()
+        });
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut snapshot,
+            &priorities,
+            2,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        let base = ClaimRequest {
+            queue: address(),
+            request_id: "fresh".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        let cases = vec![
+            (Predicate::Equal(FieldValue::Integer(1)), vec!["a"]),
+            (Predicate::In(vec![FieldValue::Integer(2)]), vec!["b"]),
+            (
+                Predicate::Range {
+                    lower: Some(Bound::Included(FieldValue::Integer(1))),
+                    upper: Some(Bound::Excluded(FieldValue::Integer(2))),
+                },
+                vec!["a"],
+            ),
+            (
+                Predicate::Range {
+                    lower: Some(Bound::Excluded(FieldValue::Integer(1))),
+                    upper: Some(Bound::Included(FieldValue::Integer(2))),
+                },
+                vec!["b"],
+            ),
+        ];
+        let mut invalid = base.clone();
+        invalid
+            .filter
+            .fields
+            .insert("u".into(), Predicate::In(vec![]));
+        assert!(matches!(
+            select_fixture(&projection, &definition, invalid, 11, 3, &job, &workers).await,
+            Err(QueueError::Invalid(_))
+        ));
+        for (predicate, expected) in cases {
+            let mut request = base.clone();
+            request.filter.fields.insert("u".into(), predicate);
+            let selected = select_fixture(&projection, &definition, request, 11, 3, &job, &workers)
+                .await
+                .unwrap();
+            assert_eq!(
+                selected
+                    .keys()
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        for (predicate, expected) in [
+            (
+                Predicate::Range {
+                    lower: Some(Bound::Included(FieldValue::Integer(i64::MAX))),
+                    upper: None,
+                },
+                "a",
+            ),
+            (
+                Predicate::Range {
+                    lower: Some(Bound::Included(FieldValue::Float(1.0))),
+                    upper: Some(Bound::Included(FieldValue::Float(3.0))),
+                },
+                "b",
+            ),
+        ] {
+            let mut request = base.clone();
+            request.filter.fields.insert("meta/rank".into(), predicate);
+            let selected = select_fixture(&projection, &definition, request, 11, 3, &job, &workers)
+                .await
+                .unwrap();
+            assert_eq!(selected.keys(), &[expected.to_string()]);
+        }
+        let mut mixed = base.clone();
+        mixed.filter.fields = BTreeMap::from([
+            (
+                "u".into(),
+                Predicate::In(vec![
+                    FieldValue::Integer(1),
+                    FieldValue::Integer(1),
+                    FieldValue::Integer(2),
+                ]),
+            ),
+            (
+                "opaque".into(),
+                Predicate::Range {
+                    lower: Some(Bound::Included(FieldValue::Bytes(vec![6]))),
+                    upper: Some(Bound::Included(FieldValue::Bytes(vec![8]))),
+                },
+            ),
+            (
+                "meta/tag".into(),
+                Predicate::Equal(FieldValue::Text("match".into())),
+            ),
+            (
+                "meta/range".into(),
+                Predicate::Range {
+                    lower: Some(Bound::Included(FieldValue::Float(1.0))),
+                    upper: Some(Bound::Included(FieldValue::Float(3.0))),
+                },
+            ),
+        ]);
+        assert_eq!(
+            select_fixture(
+                &projection,
+                &definition,
+                mixed.clone(),
+                11,
+                3,
+                &job,
+                &workers
+            )
+            .await
+            .unwrap()
+            .keys(),
+            &["a".to_string()]
+        );
+        let explain_projection = Arc::clone(&projection);
+        let explain_request = mixed.clone();
+        let details = tokio::task::spawn_blocking(move || {
+            crate::tx::block_on_owned_apply(async {
+                let writer = explain_projection.writer.lock().await;
+                let connection = writer.as_ref().unwrap();
+                let queue_id = integer(
+                    &one(connection, "SELECT id FROM q7_queues", vec![], 1)
+                        .await
+                        .unwrap()
+                        .unwrap()[0],
+                )
+                .unwrap();
+                let (sql, pool) =
+                    selection::candidate_sql(&explain_request, &schema(), queue_id, 11).unwrap();
+                let mut rows = connection
+                    .query(
+                        &format!("EXPLAIN QUERY PLAN {sql}"),
+                        vec![Value::Blob(pool)],
+                    )
+                    .await
+                    .unwrap();
+                let mut details = Vec::new();
+                while let Some(row) = rows.next().await.unwrap() {
+                    match row.get_value(3).unwrap() {
+                        Value::Text(text) => details.push(text),
+                        _ => panic!("non-text query plan"),
+                    }
+                }
+                details
+            })
+        })
+        .await
+        .unwrap();
+        for index in [
+            "q7_field_equal",
+            "q7_field_range",
+            "q7_additional_equal",
+            "q7_additional_range",
+        ] {
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("SEARCH f") && detail.contains(index)),
+                "{index}: {details:?}"
+            );
+        }
+        mixed.filter.fields.insert(
+            "meta/range".into(),
+            Predicate::Range {
+                lower: Some(Bound::Included(FieldValue::Float(1.0))),
+                upper: Some(Bound::Excluded(FieldValue::Float(2.0))),
+            },
+        );
+        assert!(
+            select_fixture(&projection, &definition, mixed, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys()
+                .is_empty()
+        );
+        let mut descending = base.clone();
+        descending.order = ClaimOrder::PriorityDescending;
+        assert_eq!(
+            select_fixture(&projection, &definition, descending, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys(),
+            &["b".to_string(), "a".to_string()]
+        );
+        let mut disjoint = base.clone();
+        disjoint.filter.keys = Some(["a".into()].into());
+        disjoint
+            .filter
+            .fields
+            .insert("u".into(), Predicate::Equal(FieldValue::Integer(2)));
+        assert!(
+            select_fixture(&projection, &definition, disjoint, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys()
+                .is_empty()
+        );
+        let mut keys = base.clone();
+        keys.filter.keys = Some(
+            (0..10001)
+                .map(|n| format!("missing-{n}"))
+                .chain(["a".into()])
+                .collect(),
+        );
+        assert_eq!(
+            select_fixture(&projection, &definition, keys, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys(),
+            &["a".to_string()]
+        );
+        let mut values = base.clone();
+        values.filter.fields.insert(
+            "u".into(),
+            Predicate::In((1..=10001).map(FieldValue::Integer).collect()),
+        );
+        assert_eq!(
+            select_fixture(&projection, &definition, values, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys(),
+            &["a".to_string(), "b".to_string()]
+        );
+        // Force a discovery collision: complete values still decide membership.
+        execute_for_test(
+            &projection,
+            "UPDATE q7_records SET key_hash=?2 WHERE key=?1",
+            vec![blob(b"b"), blob(&discovery_digest(b"a"))],
+        )
+        .await;
+        let mut keys = base.clone();
+        keys.filter.keys = Some(["a".into()].into());
+        assert_eq!(
+            select_fixture(&projection, &definition, keys, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys(),
+            &["a".to_string()]
+        );
+        execute_for_test(
+            &projection,
+            "UPDATE q7_records SET key_hash=?2 WHERE key=?1",
+            vec![blob(b"b"), blob(&discovery_digest(b"b"))],
+        )
+        .await;
+        let row=inspect(&projection,"SELECT (SELECT COUNT(*) FROM q7_records WHERE lifecycle=1),(SELECT COUNT(*) FROM q7_requests),applied_next_offset FROM q7_queues",vec![],3).await;
+        assert_eq!(integer(&row[0]).unwrap(), 0);
+        assert_eq!(integer(&row[1]).unwrap(), 2);
+        assert_eq!(integer(&row[2]).unwrap(), 3);
+        let (record, _, _, _) = claim_fixture(
+            ClaimFixture {
+                before: &snapshot,
+                definition: &definition,
+                job: &job,
+                identity: "leased",
+                now: 10,
+                token_seed: 11,
+                selected: &["a", "b"],
+            },
+            false,
+        );
+        projection.apply(record, 3, &job, &workers).await.unwrap();
+        assert!(
+            select_fixture(
+                &projection,
+                &definition,
+                base.clone(),
+                11,
+                4,
+                &job,
+                &workers
+            )
+            .await
+            .unwrap()
+            .keys()
+            .is_empty()
+        );
+        assert_eq!(
+            select_fixture(&projection, &definition, base, 1_000_010, 4, &job, &workers)
+                .await
+                .unwrap()
+                .keys(),
+            &["a".to_string(), "b".to_string()]
+        );
+        drop(projection);
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn native_candidate_conjunction_handles_5001_additional_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wide-conjunction.db");
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) = bootstrap(&path, &job, &workers).await;
+        let mut snapshot = seed(&projection, &definition, &job, &workers, false).await;
+        let mut wide = group("wide-fields");
+        let mut update = patch("a", 1, None, None);
+        update.change = UnclaimedChange::Patch(WorkPatch {
+            fields: (0..5001)
+                .map(|n| (format!("meta/f{n}"), Some(FieldValue::Integer(n))))
+                .collect(),
+            ..Default::default()
+        });
+        wide.work_updates.push(update);
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut snapshot,
+            &wide,
+            2,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        let mut request = ClaimRequest {
+            queue: address(),
+            request_id: "wide-selector".into(),
+            filter: Filter {
+                fields: (0..5001)
+                    .map(|n| {
+                        (
+                            format!("meta/f{n}"),
+                            Predicate::Equal(FieldValue::Integer(n)),
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        assert_eq!(
+            select_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                11,
+                3,
+                &job,
+                &workers
+            )
+            .await
+            .unwrap()
+            .keys(),
+            &["a".to_string()]
+        );
+        request.filter.fields.insert(
+            "meta/f5000".into(),
+            Predicate::Equal(FieldValue::Integer(-1)),
+        );
+        assert!(
+            select_fixture(&projection, &definition, request, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .keys()
+                .is_empty()
+        );
+        drop(projection);
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
     }
     #[tokio::test]
     async fn selective_and_empty_current_replay_omit_opaque_payload_under_small_admission() {

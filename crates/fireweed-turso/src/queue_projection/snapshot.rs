@@ -7,6 +7,24 @@ pub(super) struct NativeQueueSnapshot {
     pub insertion_sequence: u64,
     pub last_record_epoch: u64,
 }
+impl NativeQueueSnapshot {
+    pub(super) fn validate_claim_input(&self, input: &ClaimReplayInput) -> QueueResult<()> {
+        input
+            .request
+            .validate(self.definition.schema(), &input.limits)?;
+        let view = input.genesis.view()?;
+        let address = view.address();
+        if input.request.queue.tenant != address.tenant
+            || input.request.queue.queue != address.queue
+            || self.next_offset != input.required_next_offset
+            || self.insertion_sequence != input.required_insertion_sequence
+            || self.last_record_epoch != input.required_last_record_epoch
+        {
+            return Err(unknown("claim snapshot authority mismatch"));
+        }
+        Ok(())
+    }
+}
 pub(super) async fn read_snapshot(
     connection: &Connection,
     genesis: &OwnedQueueLogRecord,

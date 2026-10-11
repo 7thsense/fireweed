@@ -80,20 +80,9 @@ impl NativeTransactionWork for ReplayWorker {
         let snapshot = super::snapshot::read_snapshot(connection, &self.input.genesis, &self.job)
             .await?
             .ok_or_else(|| unknown("replay projection missing"))?;
+        snapshot.validate_claim_input(&self.input)?;
         let definition = snapshot.definition;
         let request = &self.input.request;
-        request.validate(definition.schema(), &self.input.limits)?;
-        let view = self.input.genesis.view()?;
-        let address = view.address();
-        if request.queue.tenant != address.tenant || request.queue.queue != address.queue {
-            return Err(unknown("replay address mismatch"));
-        }
-        if snapshot.next_offset != self.input.required_next_offset
-            || snapshot.last_record_epoch != self.input.required_last_record_epoch
-            || snapshot.insertion_sequence != self.input.required_insertion_sequence
-        {
-            return Err(unknown("replay projection authority mismatch"));
-        }
         let queue_id = snapshot.queue_id;
         let sequence = snapshot.insertion_sequence;
         let identity_hash = discovery_digest(request.request_id.as_bytes());
