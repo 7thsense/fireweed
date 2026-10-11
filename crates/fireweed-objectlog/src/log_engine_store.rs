@@ -203,6 +203,8 @@ pub enum PackedAppendError {
     /// `engine.produce` or later `advance_high_water`→`put_json` failed or timed out.
     /// Positions must not be reused; the shard is poisoned.
     PostPositionAmbiguous { shard: QueueKey, reason: String },
+    /// Native conditional append was definitely not indexed at the expected head.
+    HeadRejected { expected: i64, current: i64 },
 }
 
 impl PackedAppendError {
@@ -215,6 +217,9 @@ impl PackedAppendError {
     pub fn into_engine(self) -> EngineError {
         match self {
             Self::BeforePosition(error) => error,
+            Self::HeadRejected { .. } => EngineError::Backpressure {
+                resource: "api007-log-head-moved",
+            },
             Self::PostPositionAmbiguous { shard, reason } => EngineError::Storage(format!(
                 "object-log post-position ambiguous: {reason}; shard={shard:?}"
             )),
@@ -1390,7 +1395,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         expected_epoch: u64,
         encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
     ) -> Result<Vec<CommandPosition>, PackedAppendError> {
-        self.produce_payload_with_owner(shard, expected_epoch, encode, None, None)
+        self.produce_payload_with_owner(shard, expected_epoch, encode, None, None, None)
             .await
     }
 
@@ -1401,6 +1406,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
         owner: Option<object_log::AppendOwner>,
         job: Option<&Arc<fireweed_engine::queue_admission::QueueReservation>>,
+        expected_head: Option<i64>,
     ) -> Result<Vec<CommandPosition>, PackedAppendError> {
         let retain_completion = owner.is_some();
         let trace_started = Instant::now();
@@ -1474,19 +1480,34 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         let produced = async {
             let produce_started = Instant::now();
             let outcome = match owner {
-                Some(owner) => {
-                    self.engine
-                        .produce_owned_at_epoch(
-                            partition_key(shard),
-                            payload,
-                            record_count,
-                            (),
-                            Durability::Sequenced,
-                            expected_epoch,
-                            owner,
-                        )
-                        .await
-                }
+                Some(owner) => match expected_head {
+                    Some(head) => {
+                        self.engine
+                            .produce_conditional_at_epoch(
+                                partition_key(shard),
+                                payload,
+                                record_count,
+                                (),
+                                expected_epoch,
+                                head,
+                                owner,
+                            )
+                            .await
+                    }
+                    None => {
+                        self.engine
+                            .produce_owned_at_epoch(
+                                partition_key(shard),
+                                payload,
+                                record_count,
+                                (),
+                                Durability::Sequenced,
+                                expected_epoch,
+                                owner,
+                            )
+                            .await
+                    }
+                },
                 None => {
                     self.engine
                         .produce_at_epoch(
@@ -1501,21 +1522,37 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 }
             }
             .map_err(|error| match error {
-                // The partition's fence moved past this epoch; nothing was committed.
-                object_log::ObjectLogError::Fenced { .. } => EngineError::EpochFenced,
-                other => store_err(other),
+                object_log::ObjectLogError::Fenced { .. } => {
+                    PackedAppendError::BeforePosition(EngineError::EpochFenced)
+                }
+                object_log::ObjectLogError::HeadRejected { expected, current } => {
+                    PackedAppendError::HeadRejected { expected, current }
+                }
+                other => PackedAppendError::PostPositionAmbiguous {
+                    shard: shard.clone(),
+                    reason: format!("{}; store={}", store_err(other), self.store_tag),
+                },
             })?;
             let produce_us = produce_started.elapsed().as_micros();
             post_metadata_started.store(true, Ordering::Relaxed);
             let metadata_started = Instant::now();
-            let base = outcome.base_offset.ok_or_else(|| {
-                EngineError::Storage("sequenced produce missing base_offset".into())
-            })? as u64;
+            let base =
+                outcome
+                    .base_offset
+                    .ok_or_else(|| PackedAppendError::PostPositionAmbiguous {
+                        shard: shard.clone(),
+                        reason: "sequenced produce missing base_offset".into(),
+                    })? as u64;
             let positions: Vec<CommandPosition> = (0..record_count as u64)
                 .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
                 .collect();
             if let Some(last) = positions.last() {
-                self.advance_high_water_held(shard, last).await?;
+                self.advance_high_water_held(shard, last)
+                    .await
+                    .map_err(|error| PackedAppendError::PostPositionAmbiguous {
+                        shard: shard.clone(),
+                        reason: format!("{error}; store={}", self.store_tag),
+                    })?;
             }
             if log_trace_enabled() {
                 eprintln!(
@@ -1524,20 +1561,12 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                     self.store_tag,
                 );
             }
-            EngineResult::Ok(positions)
+            Ok::<_, PackedAppendError>(positions)
         };
         let mut produced = Box::pin(produced);
         match tokio::time::timeout(post_timeout, &mut produced).await {
             Ok(Ok(positions)) => Ok(positions),
-            // A fenced commit assigned no offset, so the outcome is definite and the shard is
-            // not poisoned.
-            Ok(Err(EngineError::EpochFenced)) => {
-                Err(PackedAppendError::BeforePosition(EngineError::EpochFenced))
-            }
-            Ok(Err(error)) => Err(PackedAppendError::PostPositionAmbiguous {
-                shard: shard.clone(),
-                reason: format!("{error}; store={}", self.store_tag),
-            }),
+            Ok(Err(error)) => Err(error),
             Err(_) => {
                 let post_phase = if post_metadata_started.load(Ordering::Relaxed) {
                     "high-water metadata"

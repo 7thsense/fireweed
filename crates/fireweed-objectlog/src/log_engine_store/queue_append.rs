@@ -28,18 +28,22 @@ struct AppendWorker<S: Sequencer> {
     namespace: VerifiedApi007Namespace,
     payload: Bytes,
     epoch: u64,
+    expected_head: i64,
     lifetime: object_log::AppendOwner,
     job: Arc<QueueReservation>,
     output_charge: Option<OwnedQueueBufferCharge>,
 }
 impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     /// Local/S3 only: persistent alias caches cannot carry per-operation owners.
+    /// Bind authoritative_next_offset to the fully applied authoritative log,
+    /// never insertion sequence or a sparse metadata hint.
     /// Dispatched work completes independently of caller cancellation. Owner
     /// terminal cleanup remains separate from both ACK and scheduler drain.
     pub async fn append_api007_record(
         self: &Arc<Self>,
         namespace: VerifiedApi007Namespace,
         record: OwnedQueueLogRecord,
+        authoritative_next_offset: u64,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<AdmittedApi007Append> {
@@ -53,6 +57,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 "raw append requires a local or S3 authority without persistent payload aliases",
             ));
         }
+        let expected_head = i64::try_from(authoritative_next_offset).map_err(unknown)?;
         self.validate_api007_namespace(&namespace)?;
         if !record.belongs_to(job) || !namespace.belongs_to(job) {
             return Err(unknown("append buffers belong to another operation"));
@@ -96,6 +101,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             namespace,
             payload: record.into_admitted_bytes(),
             epoch,
+            expected_head,
             lifetime: Arc::new(AppendLifetime { _charge: transport }),
             job: Arc::clone(job),
             output_charge: Some(output_charge),
@@ -117,6 +123,7 @@ impl<S: Sequencer<Meta = ()> + 'static> AppendWorker<S> {
                 || Ok((self.payload.clone(), 1)),
                 Some(Arc::clone(&self.lifetime)),
                 Some(&self.job),
+                Some(self.expected_head),
             )
             .await;
         let outcome = match outcome {
@@ -188,7 +195,7 @@ mod tests {
         let record = encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
         let workers = ScratchWorkers::new(1, 2).unwrap();
         let result = store
-            .append_api007_record(namespace, record, &job, &workers)
+            .append_api007_record(namespace, record, 0, &job, &workers)
             .await
             .unwrap();
         assert_eq!(result.outcome().as_ref().unwrap().sequence, 0);
@@ -197,7 +204,7 @@ mod tests {
         let stale =
             encode_genesis(epoch + 1, &address(), &definition, &[11; 32], 4096, &job).unwrap();
         let result = store
-            .append_api007_record(namespace, stale, &job, &workers)
+            .append_api007_record(namespace, stale, 1, &job, &workers)
             .await
             .unwrap();
         assert!(matches!(
@@ -218,6 +225,28 @@ mod tests {
             &job,
         )
         .unwrap();
+        // Insertion sequence is still zero, but authoritative log next offset
+        // is one after genesis. Using insertion sequence must not publish.
+        let wrong = fireweed_engine::queue_log_record::encode_publication_record(
+            epoch,
+            frame.as_bytes(),
+            4096,
+            &job,
+        )
+        .unwrap();
+        let wrong_namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let rejected = store
+            .append_api007_record(wrong_namespace, wrong, 0, &job, &workers)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rejected.outcome(),
+            Err(PackedAppendError::HeadRejected {
+                expected: 0,
+                current: 1
+            })
+        ));
+        drop(rejected);
         let record = fireweed_engine::queue_log_record::encode_publication_record(
             epoch,
             frame.as_bytes(),
@@ -236,7 +265,7 @@ mod tests {
             .next()
             .unwrap() = 63;
         let result = store
-            .append_api007_record(namespace, record, &job, &workers)
+            .append_api007_record(namespace, record, 1, &job, &workers)
             .await
             .unwrap();
         assert!(matches!(
@@ -301,7 +330,7 @@ mod tests {
         let workers = ScratchWorkers::new(1, 1).unwrap();
         assert!(
             store
-                .append_api007_record(namespace, record, &job, &workers)
+                .append_api007_record(namespace, record, 0, &job, &workers)
                 .await
                 .is_err()
         );
@@ -356,7 +385,7 @@ mod tests {
         assert!(!store.raw_io_qualified);
         assert!(
             store
-                .append_api007_record(namespace, record, &job, &workers)
+                .append_api007_record(namespace, record, 0, &job, &workers)
                 .await
                 .is_err()
         );
@@ -373,7 +402,7 @@ mod tests {
         let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
         let record = encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
         let result = store
-            .append_api007_record(namespace, record, &job, &workers)
+            .append_api007_record(namespace, record, 0, &job, &workers)
             .await
             .unwrap();
         assert!(
@@ -399,6 +428,105 @@ mod tests {
             .unwrap();
         assert_eq!(admission.usage().unwrap(), (0, 0));
         drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_epoch_physical_genesis_race_indexes_one_original_secret() {
+        let root = super::super::tests::temp_root("genesis-head-race");
+        let flush = FlushConfig {
+            linger: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let first = Arc::new(
+            ObjectLogEngineStore::open_local(&root, flush)
+                .await
+                .unwrap(),
+        );
+        let second = Arc::new(
+            ObjectLogEngineStore::open_local(&root, flush)
+                .await
+                .unwrap(),
+        );
+        let admission = QueueAdmission::new(2, 16 << 20).unwrap();
+        let job_a = Arc::new(admission.reserve(0).unwrap());
+        let job_b = Arc::new(admission.reserve(0).unwrap());
+        let ns_a = first
+            .bind_api007_namespace(&address(), &job_a)
+            .await
+            .unwrap();
+        let ns_b = second
+            .bind_api007_namespace(&address(), &job_b)
+            .await
+            .unwrap();
+        let shard = first.checked_api007_shard(&ns_a).unwrap().clone();
+        let epoch = first.acquire_epoch(shard).await.unwrap();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition_a = AdmittedQueueDefinition::from_raw(&raw, &job_a).unwrap();
+        let definition_b = AdmittedQueueDefinition::from_raw(&raw, &job_b).unwrap();
+        let record_a =
+            encode_genesis(epoch, &address(), &definition_a, &[1; 32], 4096, &job_a).unwrap();
+        let record_b =
+            encode_genesis(epoch, &address(), &definition_b, &[2; 32], 4096, &job_b).unwrap();
+        drop(definition_a);
+        drop(definition_b);
+        let workers = ScratchWorkers::new(2, 2).unwrap();
+        let (a, b) = tokio::join!(
+            first.append_api007_record(ns_a, record_a, 0, &job_a, &workers),
+            second.append_api007_record(ns_b, record_b, 0, &job_b, &workers)
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_eq!(
+            usize::from(a.outcome().is_ok()) + usize::from(b.outcome().is_ok()),
+            1
+        );
+        let winner = if a.outcome().is_ok() { 1 } else { 2 };
+        let loser = if a.outcome().is_ok() {
+            b.outcome()
+        } else {
+            a.outcome()
+        };
+        assert!(matches!(
+            loser,
+            Err(PackedAppendError::HeadRejected {
+                expected: 0,
+                current: 1
+            })
+        ));
+        drop(a);
+        drop(b);
+        let ns = first
+            .bind_api007_namespace(&address(), &job_a)
+            .await
+            .unwrap();
+        let read = first
+            .plan_api007_read(&ns, 0, 65536, &job_a)
+            .unwrap()
+            .read(&workers, 4096)
+            .await
+            .unwrap()
+            .unwrap();
+        let view = read.view().unwrap();
+        let fireweed_engine::queue_log_record::QueueLogPayload::Genesis(genesis) = view.payload()
+        else {
+            panic!("expected genesis")
+        };
+        assert_eq!(genesis.cursor_secret(), &[winner; 32]);
+        assert_eq!(genesis.definition_bytes(), raw);
+        assert!(
+            first
+                .plan_api007_read(&ns, 1, 65536, &job_a)
+                .unwrap()
+                .is_eof()
+        );
+        drop(read);
+        drop(ns);
+        drop(job_a);
+        drop(job_b);
+        workers.close_and_drain().await.unwrap();
+        drop(first);
+        drop(second);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -472,7 +600,8 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owned_deadlines_drain_started_io_and_survive_caller_drop() {
-        for phase in [1, 2, 3] {
+        // Phase 4 drains a late head rejection after the caller deadline.
+        for phase in [1, 2, 3, 4] {
             for cancel in [false, true] {
                 let root = super::super::tests::temp_root("owned-deadline");
                 std::fs::create_dir_all(&root).unwrap();
@@ -515,15 +644,33 @@ mod tests {
                 let record =
                     encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
                 drop(definition);
+                if phase == 4 {
+                    let seed_namespace =
+                        store.bind_api007_namespace(&address(), &job).await.unwrap();
+                    let seed_definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+                    let seed =
+                        encode_genesis(epoch, &address(), &seed_definition, &[12; 32], 4096, &job)
+                            .unwrap();
+                    let seed_workers = ScratchWorkers::new(1, 1).unwrap();
+                    let seeded = store
+                        .append_api007_record(seed_namespace, seed, 0, &job, &seed_workers)
+                        .await
+                        .unwrap();
+                    assert!(seeded.outcome().is_ok());
+                    drop(seeded);
+                    drop(seed_definition);
+                    seed_workers.close_and_drain().await.unwrap();
+                }
                 if phase == 1 {
                     store.epochs.lock().unwrap().clear();
                 }
                 store
                     .pre_position_timeout_ms
                     .store(if phase == 1 { 1 } else { 5000 }, Ordering::SeqCst);
-                store
-                    .post_position_timeout_ms
-                    .store(if phase == 2 { 1 } else { 1000 }, Ordering::SeqCst);
+                store.post_position_timeout_ms.store(
+                    if phase == 2 || phase == 4 { 1 } else { 1000 },
+                    Ordering::SeqCst,
+                );
                 if phase == 1 {
                     let paused = Arc::clone(&blob);
                     let epoch_path = root.join("fwmeta/epochs");
@@ -534,13 +681,14 @@ mod tests {
                             }
                         }));
                 }
-                blob.phase.store(phase, Ordering::SeqCst);
+                blob.phase
+                    .store(if phase == 4 { 2 } else { phase }, Ordering::SeqCst);
                 let workers = ScratchWorkers::new(1, 1).unwrap();
                 let owned_workers = workers.clone();
                 let writer = store.clone();
                 let caller = tokio::spawn(async move {
                     writer
-                        .append_api007_record(namespace, record, &job, &owned_workers)
+                        .append_api007_record(namespace, record, 0, &job, &owned_workers)
                         .await
                 });
                 tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
@@ -572,7 +720,7 @@ mod tests {
                         ));
                     } else {
                         assert!(
-                            matches!(result.outcome(), Err(PackedAppendError::PostPositionAmbiguous { reason, .. }) if reason.contains(if phase == 2 { "produce timed out" } else { "high-water metadata timed out" }))
+                            matches!(result.outcome(), Err(PackedAppendError::PostPositionAmbiguous { reason, .. }) if reason.contains(if phase == 2 || phase == 4 { "produce timed out" } else { "high-water metadata timed out" }))
                         );
                     }
                     drop(result);
@@ -587,6 +735,13 @@ mod tests {
                     .plan_fetch(&partition_key(&shard), 0, 1, 65536, 1)
                     .unwrap();
                 assert_eq!(plan.entries().len(), usize::from(phase != 1));
+                if phase == 4 {
+                    let eof = store
+                        .engine
+                        .plan_fetch(&partition_key(&shard), 1, 1, 65536, 1)
+                        .unwrap();
+                    assert!(eof.entries().is_empty());
+                }
                 *super::super::namespace::METADATA_READ_HOOK.lock().unwrap() = None;
                 drop(store);
                 std::fs::remove_dir_all(root).unwrap();

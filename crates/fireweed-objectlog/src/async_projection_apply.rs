@@ -402,6 +402,12 @@ where
                 }
                 inner
             }
+            error @ PackedAppendError::HeadRejected { .. } => {
+                if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
+                    coordinator.cancel(reservation).await;
+                }
+                error.into_engine()
+            }
             PackedAppendError::PostPositionAmbiguous { shard, reason } => {
                 if let Some(coordinator) = coordinator {
                     coordinator
