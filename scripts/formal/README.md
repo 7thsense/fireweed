@@ -80,3 +80,32 @@ edge coverage. Eight-world smoke is qualified before deeper execution. Compact
 reports retain all observations; evidence may be gzip-compressed with original
 and compressed SHA-256 hashes. Concurrent prefixes permit either order, so a full
 corpus pass alone cannot witness both mutually exclusive targeted edges.
+
+For complete **witnessed** bounded graph coverage, use `--replay-profile
+schedule-smoke --workers 8` before `--replay-profile exhaustive --workers 8` with
+`with_rustfs.py`. Exhaustive selects 20,920 cases / 153,819 steps from the complete
+independent model, adding 3,918 reverse polling cases to canonical forward paths.
+Backend polling telemetry must prove overlapping calls, observed paths must realize
+the requested schedules, and actual per-step edge witnesses must set-equal all
+20,913 graph edges. Missing edges or forged aggregate coverage fail closed. Full
+oracle alternatives remain intact; schedule prediction only defines the stimulus
+coverage obligation. This is bounded backend graph coverage, not universal refinement.
+
+
+The isolated RustFS wrapper accepts `--fixture-parent /absolute/disk/path`.
+Complete replay must choose a filesystem with sufficient inode and byte headroom;
+free bytes alone do not establish capacity. Before launching, require conservative
+operational headroom of 64 inodes and 64KiB per selected case plus 8,192 inodes and
+128MiB reserve. This is a fixture capacity guard, not a formal footprint theorem.
+Filesystems reporting no fixed inode total are not rejected merely for reporting
+zero available inodes. Record device identity, parent, unique owned root, sibling
+`s3/` and `worlds/` directories, child TMPDIR, and filesystem statistics before,
+after execution and after confirmed cleanup. Every world's S3 objects remain
+available until final qualification and owned fixture cleanup. The wrapper must
+preserve the oracle, model and per-trace deadline when changing fixture placement.
+
+For example, run the schedule-smoke and exhaustive commands with
+`--fixture-parent /mnt/scratch/Projects/fireweed/target/formal-fixtures` on this host.
+The /tmp tmpfs has a one-million-inode ceiling; accumulating independent worlds can
+exhaust that limit despite many free gigabytes. A resource-failed run with missing
+detailed observations is unqualified and contributes no final edge witnesses.

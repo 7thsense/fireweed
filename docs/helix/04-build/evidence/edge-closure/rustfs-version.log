@@ -1,0 +1,11 @@
+rustfs 1.0.0
+build time   : 2026-09-16 07:46:40 +00:00
+build profile: release
+build os     : linux-x86_64
+rust version : rustc 1.98.1 (48a229cea 2026-09-01)
+rust channel : stable-x86_64-unknown-linux-gnu
+git branch   : 
+git commit   : d47f54bfb2f39f48bd1adda334bd27e151fe85b8
+git tag      : 1.0.0
+git status   :
+

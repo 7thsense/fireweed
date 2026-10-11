@@ -124,3 +124,48 @@ Storage-generation detection must resolve their common namespace parent, never
 fall back to an empty whole-bucket prefix. A regression checks the production
 prefix resolver against the actual fixture factory. This prevents unrelated
 completed worlds from changing the cost/scope of initial open and reopen.
+
+## Scheduled witnessed-edge exhaustiveness
+
+The `exhaustive` profile expands canonical action prefixes with independently
+selected request-order stimuli. Forward canonical paths plus greedy reverse
+paths cover the complete bounded graph: 20,920 cases and 153,819 steps. Selection
+is deterministically regenerated from the independent model, never from observed
+implementation results. Each scheduled case records base trace ID, schedule and
+unique execution ID. Every step retains all permitted transition alternatives;
+schedule prediction cannot replace compatible predecessor propagation.
+
+A concurrent stimulus polls the actual two backend futures in declared biased
+order. Evidence records each request's first poll, first Pending and completion.
+Both invocations must reach Pending before either completes, exactly once each;
+sequential calls, immediate-ready impostors, malformed or duplicate events fail.
+First polling does not prove backend admission order. Actual result/history must
+realize the independently predicted schedule path; a scheduling failure is a
+coverage/fixture failure, not automatically a product safety counterexample.
+
+The runner reconstructs per-case edge sets from successful per-step witnesses,
+reconciles exact corpus/case/base/schedule/progress identities and requires the
+aggregate witnessed set to equal the independently rebuilt complete graph edge
+set. A count match, intended-edge list, forged aggregate or exhaustiveness flag
+cannot establish qualification. `exhaustive` fails if any graph edge remains
+unwitnessed. This discharges finite abstract edge coverage for the declared
+backend fixture, not all internal interleavings or unbounded refinement.
+
+
+The isolated RustFS wrapper accepts `--fixture-parent /absolute/disk/path`.
+Complete replay must choose a filesystem with sufficient inode and byte headroom;
+free bytes alone do not establish capacity. Before launching, require conservative
+operational headroom of 64 inodes and 64KiB per selected case plus 8,192 inodes and
+128MiB reserve. This is a fixture capacity guard, not a formal footprint theorem.
+Filesystems reporting no fixed inode total are not rejected merely for reporting
+zero available inodes. Record device identity, parent, unique owned root, sibling
+`s3/` and `worlds/` directories, child TMPDIR, and filesystem statistics before,
+after execution and after confirmed cleanup. Every world's S3 objects remain
+available until final qualification and owned fixture cleanup. The wrapper must
+preserve the oracle, model and per-trace deadline when changing fixture placement.
+
+For example, run the schedule-smoke and exhaustive commands with
+`--fixture-parent /mnt/scratch/Projects/fireweed/target/formal-fixtures` on this host.
+The /tmp tmpfs has a one-million-inode ceiling; accumulating independent worlds can
+exhaust that limit despite many free gigabytes. A resource-failed run with missing
+detailed observations is unqualified and contributes no final edge witnesses.

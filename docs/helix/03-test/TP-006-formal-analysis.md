@@ -91,3 +91,41 @@ The fixture-prefix regression requires `generation_scan_prefix` of the actual
 incomplete pre-fix progress and source-bound diagnostic as fixture-scaling
 evidence, not a passing qualification or product safety counterexample. After
 correction rerun smoke and the entire full corpus on the corrected source.
+
+### Scheduled complete witnessed-edge qualification
+
+First run `with_rustfs.py --replay-profile schedule-smoke --workers 8`, then run
+`--replay-profile exhaustive --workers 8` on the same frozen source. Require all
+20,920 cases and 153,819 steps, six Rust controls, zero ignored, both real backend
+calls Pending before either completion, and actual per-case schedule-path equality.
+Independently reconstruct the complete graph and require exact witnessed-edge set
+equality for all 20,913 edges. All 3,918 previously unwitnessed edges must have
+physical observations: 26 concurrent transitions and 3,892 downstream transitions.
+
+Negative controls reject sequential/immediate-ready concurrency impostors,
+wrong polling order, duplicate completion events, malformed/missing schedules,
+dropped reverse cases, fabricated aggregate coverage/exhaustiveness, unrealized
+schedule paths and incompatible branch switching. Retain source hashes, all
+scheduled identities, actual polling telemetry, physical frontiers, native CAS
+preflight and exact-byte artifacts. Astra Ultra independently reviews selection
+and audits final source, transition paths and graph set equality. The model,
+normalization, compatible-state oracle and 20-second deadline stay unchanged.
+
+
+The isolated RustFS wrapper accepts `--fixture-parent /absolute/disk/path`.
+Complete replay must choose a filesystem with sufficient inode and byte headroom;
+free bytes alone do not establish capacity. Before launching, require conservative
+operational headroom of 64 inodes and 64KiB per selected case plus 8,192 inodes and
+128MiB reserve. This is a fixture capacity guard, not a formal footprint theorem.
+Filesystems reporting no fixed inode total are not rejected merely for reporting
+zero available inodes. Record device identity, parent, unique owned root, sibling
+`s3/` and `worlds/` directories, child TMPDIR, and filesystem statistics before,
+after execution and after confirmed cleanup. Every world's S3 objects remain
+available until final qualification and owned fixture cleanup. The wrapper must
+preserve the oracle, model and per-trace deadline when changing fixture placement.
+
+For example, run the schedule-smoke and exhaustive commands with
+`--fixture-parent /mnt/scratch/Projects/fireweed/target/formal-fixtures` on this host.
+The /tmp tmpfs has a one-million-inode ceiling; accumulating independent worlds can
+exhaust that limit despite many free gigabytes. A resource-failed run with missing
+detailed observations is unqualified and contributes no final edge witnesses.
