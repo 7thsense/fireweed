@@ -982,6 +982,203 @@ async fn finalize_native_semantics(
     }))
 }
 
+struct OwnedNativePublicationRequest {
+    address: QueueAddress,
+    group: CommitGroup,
+    intent: fireweed_core::queue_administration::AdministrativeIntent,
+    pin: fireweed_engine::queue_schema_codec::DefinitionPin,
+    _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
+}
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "resolved publication qualification precedes public activation"
+    )
+)]
+struct NativePreparedPublication {
+    provisional: NativeProvisionalGroup,
+    frame: fireweed_engine::queue_publication::AdministrativePublicationFrame,
+}
+/// None is a fully validated logical TooLarge decision, never a partial frame.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "resolved publication qualification precedes public activation"
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_native_publication(
+    provisional: NativeProvisionalGroup,
+    address: &QueueAddress,
+    queue: &QueueRow<'_>,
+    group: &CommitGroup,
+    intent: &fireweed_core::queue_administration::AdministrativeIntent,
+    reservation: &Arc<QueueReservation>,
+    workers: &fireweed_queue_spool::ScratchWorkers,
+) -> QueueResult<Option<NativePreparedPublication>> {
+    let NativePublicationDecision::Fits {
+        bytes: expected_bytes,
+        commands,
+    } = provisional.assess_publication_limit(address, queue, group, intent, reservation)?
+    else {
+        return Ok(None);
+    };
+    let headers = group
+        .claimed_updates
+        .len()
+        .checked_add(group.state_updates.len())
+        .and_then(|n| n.checked_add(group.work_updates.len()))
+        .and_then(|n| n.checked_add(group.work_inserts.len()))
+        .ok_or_else(|| storage("publication input header overflow"))? as u64;
+    let nodes = match &intent.operation {
+        fireweed_core::queue_administration::AdministrativeOperation::Addressed(entries) => {
+            entries.iter().try_fold(0u64, |n, entry| {
+                n.checked_add(entry.precondition.nodes.len() as u64)
+                    .and_then(|n| n.checked_add(4))
+            })
+        }
+        fireweed_core::queue_administration::AdministrativeOperation::SelectFirst(clauses) => {
+            clauses.iter().try_fold(0u64, |n, clause| {
+                n.checked_add(clause.selector.nodes.len() as u64)
+                    .and_then(|n| n.checked_add(clause.precondition.nodes.len() as u64))
+                    .and_then(|n| n.checked_add(4))
+            })
+        }
+    }
+    .ok_or_else(|| storage("publication selector header overflow"))?;
+    let mut containers = 0u64;
+    let mut add_containers = |n: usize| -> QueueResult<()> {
+        containers = containers
+            .checked_add(n as u64)
+            .ok_or_else(|| storage("publication container count overflow"))?;
+        Ok(())
+    };
+    for item in &group.claimed_updates {
+        add_containers(item.patch.fields.len())?;
+    }
+    for item in &group.state_updates {
+        if let StateChange::Put { fields, .. } = &item.change {
+            add_containers(fields.len())?;
+        }
+    }
+    for item in &group.work_inserts {
+        add_containers(item.fields.len())?;
+    }
+    for item in &group.work_updates {
+        match &item.change {
+            UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } => {
+                add_containers(patch.fields.len())?
+            }
+            UnclaimedChange::Replace(work) => add_containers(work.fields.len())?,
+            UnclaimedChange::Delete => {}
+        }
+    }
+    use fireweed_core::queue_administration::{
+        AdministrativeAction, AdministrativeOperation, SelectorNode,
+    };
+    let mut count_selector =
+        |selector: &fireweed_core::queue_administration::WorkSelector| -> QueueResult<()> {
+            for node in &selector.nodes {
+                match node {
+                    SelectorNode::Keys(keys) => add_containers(keys.len())?,
+                    SelectorNode::Field {
+                        predicate: Predicate::In(values),
+                        ..
+                    } => add_containers(values.len())?,
+                    SelectorNode::StoredLifecycleIn(values)
+                    | SelectorNode::EffectiveLifecycleIn(values) => add_containers(values.len())?,
+                    _ => {}
+                }
+            }
+            Ok(())
+        };
+    match &intent.operation {
+        AdministrativeOperation::Addressed(entries) => {
+            for entry in entries {
+                count_selector(&entry.precondition)?;
+            }
+        }
+        AdministrativeOperation::SelectFirst(clauses) => {
+            for clause in clauses {
+                count_selector(&clause.selector)?;
+                count_selector(&clause.precondition)?;
+            }
+        }
+    }
+    let mut count_action = |action: &AdministrativeAction| -> QueueResult<()> {
+        if let AdministrativeAction::Update {
+            patch,
+            remove_field_prefixes,
+            ..
+        } = action
+        {
+            add_containers(patch.fields.len())?;
+            add_containers(remove_field_prefixes.len())?;
+        }
+        Ok(())
+    };
+    match &intent.operation {
+        AdministrativeOperation::Addressed(entries) => {
+            for entry in entries {
+                count_action(&entry.action)?;
+            }
+        }
+        AdministrativeOperation::SelectFirst(clauses) => {
+            for clause in clauses {
+                count_action(&clause.action)?;
+            }
+        }
+    }
+    if let Some(names) = &intent.before_fields {
+        add_containers(names.len())?;
+    }
+    let bytes = encoded_len(&(address, group, intent))?
+        .checked_mul(12)
+        .and_then(|n| headers.checked_mul(1024).and_then(|h| n.checked_add(h)))
+        .and_then(|n| nodes.checked_mul(256).and_then(|h| n.checked_add(h)))
+        .and_then(|n| containers.checked_mul(256).and_then(|h| n.checked_add(h)))
+        .and_then(|n| n.checked_add(65536))
+        .ok_or_else(|| storage("publication input admission overflow"))?;
+    let charge = reservation.owned_buffer(bytes)?;
+    let request = OwnedNativePublicationRequest {
+        address: address.clone(),
+        group: group.clone(),
+        intent: intent.clone(),
+        pin: queue.definition_pin,
+        _charge: charge,
+    };
+    let job = Arc::clone(reservation);
+    workers
+        .run(move || {
+            let mut provisional = provisional;
+            let administration = provisional
+                .summary
+                .result()
+                .ok_or_else(|| storage("publication lacks complete administration"))?;
+            let input = fireweed_queue_spool::ResolvedAdministrativePublicationInput {
+                queue: &request.address,
+                pin: request.pin,
+                group: &request.group,
+                intent: &request.intent,
+                before: provisional.ordinary.initial_authority(),
+                ordinary: provisional.ordinary.delta(),
+                administration,
+                max_result_bytes: provisional.max_result_bytes,
+                max_publication_bytes: provisional.max_publication_bytes,
+                expected_bytes,
+                expected_commands: commands,
+            };
+            let frame = provisional
+                .scratch
+                .prepare_resolved_publication(&input, &job)?;
+            drop(request);
+            Ok(Some(NativePreparedPublication { provisional, frame }))
+        })
+        .await
+}
+
 /// Apply a sealed resolved stream under the original queue fence. This private
 /// prerequisite does not create a receipt or establish publication-size approval.
 /// Every command targets an existing record; no physical ID may be allocated.
@@ -2227,7 +2424,67 @@ mod tests {
                             .assess_publication_limit(&address, &queue, &changed, &addressed, &job)
                             .is_err()
                     );
+                    let prepared = prepare_native_publication(
+                        prepared, &address, &queue, &ordinary, &addressed, &job, &workers,
+                    )
+                    .await
+                    .unwrap();
+                    if publication_limit == publication_bytes {
+                        let prepared = prepared.expect("exact-limit full frame");
+                        assert_eq!(prepared.frame.as_bytes().len() as u64, publication_bytes);
+                    } else {
+                        assert!(prepared.is_none());
+                    }
                 }
+                let NativePreparedPublication {
+                    provisional: finalized,
+                    frame,
+                } = prepare_native_publication(
+                    finalized, &address, &queue, &ordinary, &addressed, &job, &workers,
+                )
+                .await
+                .unwrap()
+                .expect("complete resolved publication");
+                assert_eq!(frame.as_bytes().len() as u64, publication_bytes);
+                assert!(
+                    fireweed_engine::queue_publication::view_publication(frame.as_bytes()).is_err()
+                );
+                let view =
+                    fireweed_engine::queue_publication::view_resolved_publication(frame.as_bytes())
+                        .unwrap();
+                assert_eq!(view.summary().commands, 4);
+                assert_eq!(view.summary().initial_sequence, 4);
+                assert_eq!(view.summary().final_sequence, 5);
+                let receipt = view.receipts().next().unwrap().unwrap();
+                assert_eq!(
+                    *receipt.fingerprint,
+                    ordinary
+                        .administrative_fingerprint(&address, &addressed, u64::MAX)
+                        .unwrap()
+                );
+                let fireweed_engine::queue_publication::ReceiptOutcomeRef::Commit(
+                    fireweed_engine::queue_publication::CommitOutcomeRef::AdministrativeCommitted {
+                        versions,
+                        ..
+                    },
+                ) = receipt.outcome
+                else {
+                    panic!("administrative receipt")
+                };
+                assert_eq!(
+                    versions
+                        .iter()
+                        .map(|version| version.unwrap().identity.key)
+                        .collect::<Vec<_>>(),
+                    vec!["workflow", "next"]
+                );
+
+                assert_eq!(
+                    view.commands()
+                        .map(|command| command.unwrap().identity.key)
+                        .collect::<Vec<_>>(),
+                    vec!["key-0", "key-1", "next", "workflow"]
+                );
                 let NativeProvisionalGroup {
                     scratch,
                     summary,
@@ -2273,6 +2530,7 @@ mod tests {
                 assert_eq!(logical, "5");
                 let added:i64=tx.query_one("SELECT count(*) FROM fireweed_api007.records WHERE queue_id=$1 AND active AND key=ANY($2::bytea[])",&[&queue.id,&vec![b"workflow".to_vec(),b"next".to_vec()]]).await.unwrap().get(0);
                 assert_eq!(added, 2);
+                drop(frame);
                 drop(summary);
                 drop(ordinary);
                 drop(initial);

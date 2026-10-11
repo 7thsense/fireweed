@@ -888,3 +888,6 @@ pub use administrative::*;
 
 mod worker;
 pub use worker::ScratchWorkers;
+
+mod publication;
+pub use publication::ResolvedAdministrativePublicationInput;

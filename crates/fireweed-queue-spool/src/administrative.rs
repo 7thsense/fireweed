@@ -263,6 +263,10 @@ pub struct AdmittedScratchWorkCommand {
     _charge: OwnedQueueBufferCharge,
 }
 impl AdmittedScratchWorkCommand {
+    /// Exact canonical command bytes from the already verified scratch packet.
+    pub fn resolved_bytes(&self) -> &[u8] {
+        &self.bytes[HEADER..self.bytes.len() - TRAILER]
+    }
     pub fn command(&self) -> QueueResult<CommandRef<'_>> {
         parse_administrative_work_fragment(
             &self.bytes[HEADER..self.bytes.len() - TRAILER],
@@ -279,6 +283,9 @@ pub struct SealedAdministrativeScratch {
     context: Context,
 }
 impl SealedAdministrativeScratch {
+    pub(super) fn poison_publication(&mut self) {
+        self.poisoned = true;
+    }
     pub fn validate_publication_context(
         &self,
         queue: &QueueAddress,
@@ -762,6 +769,122 @@ pub(super) mod tests {
             Arc::clone(job),
             |packet| futures::future::ready(sink(packet)),
         ))
+    }
+    #[test]
+    fn shared_publication_assembly_checks_late_source_corruption_and_poisons() {
+        use fireweed_engine::queue_publication::*;
+        for corrupt in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let admission = QueueAdmission::new(1, 2 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let quota = ScratchDiskQuota::new(2 << 20).unwrap();
+            let group = CommitGroup {
+                request_id: "operation".into(),
+                claimed_updates: vec![],
+                state_updates: vec![],
+                work_updates: vec![],
+                work_inserts: vec![],
+            };
+            let intent = AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                    id: "all".into(),
+                    selector: WorkSelector::all(vec![]),
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Update {
+                        patch: WorkPatch {
+                            priority: Some(17),
+                            ..Default::default()
+                        },
+                        lifecycle: AdministrativeLifecycle::Keep,
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                        remove_field_prefixes: Default::default(),
+                    },
+                }]),
+            };
+            let before = RecordSnapshot {
+                next_sequence: 1,
+                ..Default::default()
+            };
+            let ordinary = fireweed_engine::queue_planner::plan_commit_group(
+                &group,
+                &mut before.clone(),
+                0,
+                &schema(false),
+            )
+            .unwrap();
+            let mut scratch = AdministrativeScratch::new(
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+                &queue(),
+                pin(),
+                1,
+            )
+            .unwrap();
+            let summary = run_scan(1, 0, false, &job, |packet| scratch.append(packet)).unwrap();
+            let mut scratch = scratch.seal(&summary).unwrap();
+            scratch
+                .validate_before_business(&before, directory.path(), Arc::clone(&quota), &job)
+                .unwrap();
+            let address = queue();
+            let outcome = AdministrativeReceiptOutcome::Committed {
+                versions: &[],
+                administration: summary.result().unwrap(),
+            };
+            let receipt = AdministrativePublicationReceipt::new(
+                &address, &group, &intent, 4096, &outcome, &job,
+            )
+            .unwrap();
+            let expected = measure_administrative_publication(
+                &address,
+                pin(),
+                scratch.command_bytes(),
+                &receipt,
+            )
+            .unwrap();
+            if corrupt {
+                scratch
+                    .commands
+                    .data
+                    .set_len(scratch.commands.data_bytes - 1)
+                    .unwrap();
+            }
+            let input = crate::ResolvedAdministrativePublicationInput {
+                queue: &address,
+                pin: pin(),
+                group: &group,
+                intent: &intent,
+                before: &before,
+                ordinary: &ordinary,
+                administration: summary.result().unwrap(),
+                max_result_bytes: 4096,
+                max_publication_bytes: 1 << 20,
+                expected_bytes: expected,
+                expected_commands: 1,
+            };
+            let result = scratch.prepare_resolved_publication(&input, &job);
+            if corrupt {
+                assert!(result.is_err());
+                assert!(scratch.rewind_commands().is_err());
+            } else {
+                let frame = result.unwrap();
+                assert_eq!(frame.as_bytes().len() as u64, expected);
+                assert_eq!(
+                    view_resolved_publication(frame.as_bytes())
+                        .unwrap()
+                        .summary()
+                        .commands,
+                    1
+                );
+                drop(frame);
+            }
+            drop(scratch);
+            drop(summary);
+            assert_eq!(quota.usage().unwrap(), 0);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
     }
     #[test]
     fn oversized_body_group_does_not_fill_disk_after_command_overflow() {

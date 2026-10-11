@@ -188,6 +188,26 @@ pub fn encode_publication<'a>(
     max_frame_bytes: u64,
     reservation: &'a QueueReservation,
 ) -> PublicationResult<PublicationFrame<'a>> {
+    encode_publication_pinned(
+        queue,
+        DefinitionPin::from_persisted_bytes(raw_definition),
+        before,
+        delta,
+        receipts,
+        max_frame_bytes,
+        reservation,
+    )
+}
+/// Encode using the exact persisted definition pin already held by a fenced job.
+pub fn encode_publication_pinned<'a>(
+    queue: &QueueAddress,
+    pin: DefinitionPin,
+    before: &RecordSnapshot,
+    delta: &CommitDelta,
+    receipts: &[PublicationReceipt<'_>],
+    max_frame_bytes: u64,
+    reservation: &'a QueueReservation,
+) -> PublicationResult<PublicationFrame<'a>> {
     validate_delta(before, delta)?;
     if receipts.iter().any(|r| r.queue != queue) {
         return invalid("receipt queue mismatch");
@@ -198,7 +218,6 @@ pub fn encode_publication<'a>(
         }
     }
     validate_receipt_bounds(before, delta, receipts, reservation)?;
-    let pin = DefinitionPin::from_persisted_bytes(raw_definition);
     let mut count = Sink::Count(0);
     write_frame(&mut count, queue, pin, before, delta, receipts)?;
     let Sink::Count(size) = count else {
