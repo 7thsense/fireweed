@@ -134,6 +134,40 @@ impl QueueReservation {
         })
     }
 }
+/// A scoped charge transferred to an owned worker without releasing capacity.
+/// The reservation Arc keeps the operation slot/base charge alive until terminal.
+#[derive(Debug)]
+pub struct OwnedQueueBufferCharge {
+    reservation: Arc<QueueReservation>,
+    bytes: u64,
+}
+impl QueueBufferCharge<'_> {
+    pub fn into_owned(
+        mut self,
+        reservation: Arc<QueueReservation>,
+    ) -> QueueResult<OwnedQueueBufferCharge> {
+        if !std::ptr::eq(self.reservation, reservation.as_ref()) {
+            return Err(QueueError::OutcomeUnknown(
+                "cannot transfer buffer to another job".into(),
+            ));
+        }
+        let bytes = self.bytes;
+        self.bytes = 0;
+        Ok(OwnedQueueBufferCharge { reservation, bytes })
+    }
+}
+impl QueueReservation {
+    pub fn owned_buffer(self: &Arc<Self>, bytes: u64) -> QueueResult<OwnedQueueBufferCharge> {
+        self.buffer(bytes)?.into_owned(Arc::clone(self))
+    }
+}
+impl Drop for OwnedQueueBufferCharge {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.reservation.admission.state.lock() {
+            state.bytes -= self.bytes;
+        }
+    }
+}
 impl Drop for QueueBufferCharge<'_> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.reservation.admission.state.lock() {
@@ -152,6 +186,57 @@ impl Drop for QueueReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owned_transfer_holds_job_after_caller_drop_and_close() {
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let job = Arc::new(admission.reserve(10).unwrap());
+        let scoped = job.buffer(40).unwrap();
+        let owned = scoped.into_owned(Arc::clone(&job)).unwrap();
+        assert_eq!(admission.usage().unwrap(), (1, 50));
+        assert!(matches!(job.buffer(51), Err(QueueError::OutcomeUnknown(_))));
+        admission.close().unwrap();
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (1, 50));
+        assert!(matches!(admission.reserve(0), Err(QueueError::Busy)));
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_release = Arc::clone(&release);
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            worker_release.wait();
+            drop(owned);
+        });
+        ready.wait();
+        assert_eq!(admission.usage().unwrap(), (1, 50));
+        release.wait();
+        worker.join().unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+    #[test]
+    fn owned_transfer_rejects_other_job_without_stealing_capacity() {
+        let admission = QueueAdmission::new(2, 100).unwrap();
+        let first = Arc::new(admission.reserve(10).unwrap());
+        let second = Arc::new(admission.reserve(20).unwrap());
+        let scoped = first.buffer(40).unwrap();
+        assert!(matches!(
+            scoped.into_owned(Arc::clone(&second)),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(admission.usage().unwrap(), (2, 30));
+        let owned = first.owned_buffer(50).unwrap();
+        assert_eq!(admission.usage().unwrap(), (2, 80));
+        assert!(matches!(
+            second.owned_buffer(21),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        drop(first);
+        assert_eq!(admission.usage().unwrap(), (2, 80));
+        drop(owned);
+        assert_eq!(admission.usage().unwrap(), (1, 20));
+        drop(second);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
     #[test]
     fn merging_same_job_charges_never_releases_capacity_early() {
         let admission = QueueAdmission::new(2, 100).unwrap();

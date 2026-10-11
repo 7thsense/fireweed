@@ -80,3 +80,25 @@ The comparator's window bound does not eliminate semantic tuple hydration.
 Scratch failure remains whole-owner Unknown/rollback; semantic logical TooLarge
 still requires complete-result/frame measurements and durable positional receipts.
 No backend parity, power-loss durability or performance qualification is implied.
+
+## Owned worker admission — iteration 45
+
+A scoped buffer charge can transfer to OwnedQueueBufferCharge only with the Arc
+of the exact same reservation. Transfer changes no admission counters and exposes
+no unprotected parts; another-job transfer fails closed. owned_buffer reuses the
+existing admission rules. The owned guard keeps both buffer capacity and the
+operation's slot/base reservation alive through the last worker-held resource.
+
+The shared physical spool now uses this owned guard and has no borrowed job
+lifetime. Its files still drop before disk/memory guards. One implementation can
+move intact into a blocking worker without cloning buffers or releasing/reacquiring
+capacity. Tests pause a real worker holding scratch, drop the caller's reservation
+Arc and close admission, then verify file/quota/slot/base/buffer ownership survives
+until the worker sorts, reads and closes the files. Foreign-job conversion,
+unchanged transfer counters and failed capacity acquisition are also checked.
+
+This qualifies guard and physical-handle ownership, not a live backend blocking
+scheduler or shutdown drain. Native integration must keep completion notification
+and terminal ownership attached to pending workers, await their results, preserve
+the queue fence and avoid unbounded task/channel accumulation. Semantic evidence
+streaming and actual administrative publication remain pending.

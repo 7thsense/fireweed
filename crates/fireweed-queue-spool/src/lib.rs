@@ -1,7 +1,7 @@
 //! Disposable operation-local external grouping. This is not a durable log.
 //! Synchronous I/O must run inside a backend's owned blocking execution boundary.
 use fireweed_core::queue_contract::{QueueError, QueueResult};
-use fireweed_engine::queue_admission::{QueueBufferCharge, QueueReservation};
+use fireweed_engine::queue_admission::{OwnedQueueBufferCharge, QueueReservation};
 use fireweed_engine::queue_planner::UniqueIdentity;
 use std::cmp::Ordering;
 use std::fs::File;
@@ -156,7 +156,7 @@ fn compare(data: &mut File, left: Descriptor, right: Descriptor) -> QueueResult<
 }
 /// Anonymous files close/unlink on operation drop, including failure. File and
 /// identity payloads drop before memory/disk guards. No run descriptor Vec exists.
-pub struct QueueSpool<'r> {
+pub struct QueueSpool {
     data: File,
     index: File,
     spare: File,
@@ -167,15 +167,15 @@ pub struct QueueSpool<'r> {
     disk: DiskCharge,
     #[cfg(test)]
     fault: Option<TestFault>,
-    _memory: QueueBufferCharge<'r>,
+    _memory: OwnedQueueBufferCharge,
 }
-impl<'r> QueueSpool<'r> {
+impl QueueSpool {
     pub fn new(
         directory: &Path,
         quota: Arc<ScratchDiskQuota>,
-        reservation: &'r QueueReservation,
+        reservation: &Arc<QueueReservation>,
     ) -> QueueResult<Self> {
-        let memory = reservation.buffer((3 * WINDOW + 8192) as u64)?;
+        let memory = reservation.owned_buffer((3 * WINDOW + 8192) as u64)?;
         Ok(Self {
             data: tempfile::tempfile_in(directory).map_err(unknown)?,
             index: tempfile::tempfile_in(directory).map_err(unknown)?,
@@ -252,7 +252,7 @@ impl<'r> QueueSpool<'r> {
     /// Certifies only the successfully appended scratch image. The driver must
     /// separately complete and close its selected source under the queue fence.
     /// Errors discard the entire owner; sorting is not publication or an ACK.
-    pub fn seal(mut self) -> QueueResult<SortedSpool<'r>> {
+    pub fn seal(mut self) -> QueueResult<SortedSpool> {
         if self.poisoned {
             return Err(unknown("seal poisoned spool"));
         }
@@ -382,7 +382,7 @@ impl SpoolEntry {
         ((d[0] == 1).then_some(d[2]), d[4], d[6], d[8])
     }
 }
-pub struct SortedSpool<'r> {
+pub struct SortedSpool {
     data: File,
     index: File,
     _spare: File,
@@ -392,9 +392,9 @@ pub struct SortedSpool<'r> {
     position: u64,
     poisoned: bool,
     _disk: DiskCharge,
-    _memory: QueueBufferCharge<'r>,
+    _memory: OwnedQueueBufferCharge,
 }
-impl SortedSpool<'_> {
+impl SortedSpool {
     pub fn rewind(&mut self) -> QueueResult<()> {
         if self.poisoned {
             return Err(unknown("rewind poisoned reader"));
@@ -473,7 +473,7 @@ mod tests {
             full_sort_key: bytes.to_vec(),
         }
     }
-    fn component(spool: &mut SortedSpool<'_>, entry: &SpoolEntry, part: SpoolComponent) -> Vec<u8> {
+    fn component(spool: &mut SortedSpool, entry: &SpoolEntry, part: SpoolComponent) -> Vec<u8> {
         let mut output = Vec::new();
         let mut window = [0; WINDOW];
         loop {
@@ -486,7 +486,7 @@ mod tests {
             output.extend_from_slice(&window[..bytes]);
         }
     }
-    fn collect(spool: &mut SortedSpool<'_>) -> Vec<(UniqueIdentity, Vec<u8>)> {
+    fn collect(spool: &mut SortedSpool) -> Vec<(UniqueIdentity, Vec<u8>)> {
         let mut rows = Vec::new();
         while let Some(entry) = spool.next_entry().unwrap() {
             let (collection, _, _, _) = entry.lengths();
@@ -512,7 +512,7 @@ mod tests {
         for count in [0, 1, 3, 1027] {
             let directory = tempfile::tempdir().unwrap();
             let admission = QueueAdmission::new(1, 65536).unwrap();
-            let job = admission.reserve(0).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
             let quota = ScratchDiskQuota::new(16 << 20).unwrap();
             let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
             let fixed = admission.usage().unwrap().1;
@@ -552,7 +552,7 @@ mod tests {
     fn full_key_prefixes_and_payloads_larger_than_window_are_exact_and_stable() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 65536).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let quota = ScratchDiskQuota::new(8 << 20).unwrap();
         let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
         let prefix = "p".repeat(WINDOW * 3 + 9);
@@ -575,7 +575,7 @@ mod tests {
     fn duplicate_tuple_tie_order_is_producer_order_not_payload_order() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 65536).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let quota = ScratchDiskQuota::new(4096).unwrap();
         let mut spool = QueueSpool::new(directory.path(), quota, &job).unwrap();
         let identity = key(None, "u", &[7]);
@@ -595,7 +595,7 @@ mod tests {
     fn both_index_file_peak_is_reserved_and_quota_failure_is_not_semantic_overflow() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 65536).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let identity = key(None, "u", &[7]);
         let data_bytes = 4;
         let exact = data_bytes + INDEX_BYTES * 4;
@@ -644,7 +644,7 @@ mod tests {
     fn partial_append_remains_charged_and_poisoned_until_owner_drop() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 65536).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let quota = ScratchDiskQuota::new(4096).unwrap();
         let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
         spool.fault = Some(TestFault::PartialAppend);
@@ -665,7 +665,7 @@ mod tests {
     fn partial_merge_failure_exposes_no_sealed_handle_and_cleans_guards() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 65536).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let quota = ScratchDiskQuota::new(4096).unwrap();
         let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
         for value in [2, 1, 3] {
@@ -682,7 +682,7 @@ mod tests {
         for corruption in 0..5 {
             let directory = tempfile::tempdir().unwrap();
             let admission = QueueAdmission::new(1, 65536).unwrap();
-            let job = admission.reserve(0).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
             let quota = ScratchDiskQuota::new(4096).unwrap();
             let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
             spool.append(&key(None, "u", &[1]), b"body").unwrap();
@@ -717,7 +717,7 @@ mod tests {
     fn reader_failure_and_foreign_entry_permanently_poison_eof() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 65536).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let quota = ScratchDiskQuota::new(4096).unwrap();
         let mut a = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
         let mut b = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
@@ -745,10 +745,57 @@ mod tests {
         assert_eq!(admission.usage().unwrap().1, 0);
     }
     #[test]
+    fn blocking_owner_keeps_scratch_and_job_alive_after_caller_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 65536).unwrap();
+        let job = Arc::new(admission.reserve(128).unwrap());
+        let quota = ScratchDiskQuota::new(4096).unwrap();
+        let mut spool = QueueSpool::new(directory.path(), Arc::clone(&quota), &job).unwrap();
+        for value in [3, 1, 2] {
+            spool.append(&key(None, "u", &[value]), b"owned").unwrap();
+        }
+        let ready = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_release = Arc::clone(&release);
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            worker_release.wait();
+            let mut sorted = spool.seal().unwrap();
+            for value in [1, 2, 3] {
+                let entry = sorted.next_entry().unwrap().unwrap();
+                assert_eq!(
+                    component(&mut sorted, &entry, SpoolComponent::Tuple),
+                    [value]
+                );
+                assert_eq!(
+                    component(&mut sorted, &entry, SpoolComponent::Payload),
+                    b"owned"
+                );
+            }
+            assert!(sorted.next_entry().unwrap().is_none());
+            drop(sorted);
+        });
+        ready.wait();
+        admission.close().unwrap();
+        drop(job);
+        assert_eq!(
+            admission.usage().unwrap(),
+            (1, 128 + (3 * WINDOW + 8192) as u64)
+        );
+        assert!(quota.usage().unwrap() > 0);
+        assert!(matches!(admission.reserve(0), Err(QueueError::Busy)));
+        release.wait();
+        worker.join().unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        assert_eq!(quota.usage().unwrap(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+    #[test]
     fn memory_admission_failure_creates_no_files_or_disk_charge() {
         let directory = tempfile::tempdir().unwrap();
         let admission = QueueAdmission::new(1, 64).unwrap();
-        let job = admission.reserve(0).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let quota = ScratchDiskQuota::new(4096).unwrap();
         assert!(QueueSpool::new(directory.path(), Arc::clone(&quota), &job).is_err());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
