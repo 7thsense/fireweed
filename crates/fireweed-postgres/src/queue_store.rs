@@ -2408,7 +2408,7 @@ mod tests {
                 }),
             }],
         };
-        let rejected_rekey = update_target("rejected-rekey", "a", 2, "new-owner");
+        let rejected_rekey = update_target("rejected-rekey", "a", 3, "new-owner");
         let free_and_create = CommitGroup {
             request_id: "free-create".into(),
             claimed_updates: vec![],
@@ -2427,7 +2427,7 @@ mod tests {
             }],
         };
         let rekey_created = update_target("rekey-created", "d", 1, "final-owner");
-        let reuse = update_target("reuse", "a", 2, "new-owner");
+        let reuse = update_target("reuse", "a", 3, "new-owner");
         let writer_readset = load_envelope(&[
             writer_group.clone(),
             rejected_rekey.clone(),
@@ -2619,7 +2619,69 @@ mod tests {
         }
         assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&b_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(10));
         assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0β".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(20));
+        assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(1));
+        assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&b_id, &"/payload/control\0β".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(2));
+        assert_eq!(
+            tx.query_one(
+                "SELECT full_key FROM fireweed_api007.indexes WHERE record_id=$1 AND index_no=0",
+                &[&work_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, Vec<u8>>(0),
+            ordered_key(&[Some(&FieldValue::Boolean(true))]).unwrap()
+        );
+        assert_eq!(
+            tx.query_one(
+                "SELECT full_key FROM fireweed_api007.indexes WHERE record_id=$1 AND index_no=1",
+                &[&b_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, Vec<u8>>(0),
+            ordered_key(&[Some(&FieldValue::Text("new-owner".into()))]).unwrap()
+        );
         drop(output_charge);
+        let remove_only = CommitGroup {
+            request_id: "remove-only".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(2),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    fields: BTreeMap::from([("/payload/control\0α".into(), None)]),
+                    ..WorkPatch::default()
+                }),
+            }],
+        };
+        let remove_before = writer.snapshot.clone();
+        load_unique_probes(&tx, &writer_row, &mut writer, &remove_only, 0, &writer_job)
+            .await
+            .unwrap();
+        let remove_delta =
+            plan_commit_group(&remove_only, &mut writer.snapshot, 0, &schema).unwrap();
+        assert!(
+            matches!(&remove_delta.work_fields["a"], ResolvedFields::Edit(edits) if edits.len() == 1 && edits.values().all(Option::is_none))
+        );
+        let remove_output = writer_job
+            .buffer(encoded_len(&remove_delta).unwrap() * 4)
+            .unwrap();
+        persist_delta_with_mode(
+            &tx,
+            &writer_row,
+            &remove_delta,
+            &remove_before,
+            &mut writer,
+            FieldPersistenceMode::Selected,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tx.query_one("SELECT count(*) FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,i64>(0), 0);
+        assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&work_id, &"/payload/control\0β".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(20));
+        assert_eq!(decode::<FieldValue>(&tx.query_one("SELECT value FROM fireweed_api007.additional_fields WHERE record_id=$1 AND name=$2", &[&b_id, &"/payload/control\0α".as_bytes()]).await.unwrap().get::<_,Vec<u8>>(0)).unwrap(), FieldValue::Integer(10));
+        drop(remove_output);
         let physical_before = writer.snapshot.clone();
         let mut deltas = vec![];
         for (index, operation) in [rejected_rekey, free_and_create, rekey_created, reuse]
