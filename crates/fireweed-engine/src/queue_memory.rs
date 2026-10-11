@@ -710,6 +710,35 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     #[test]
+    fn every_retained_receipt_golden_is_measured_without_changing_ordinals() {
+        // Historical bytes, independent of current serializer output. These
+        // must remain readable when new variants are appended later.
+        let outcomes = [
+            vec![0],
+            vec![1],
+            vec![2, 1, 1, 1, b's', 1, b'k', 128, 1],
+            vec![3, 0],
+            vec![3, 1],
+            vec![3, 2],
+            vec![3, 3],
+            vec![3, 4],
+            vec![3, 5, 1, b'x'],
+            vec![3, 6],
+            vec![3, 7],
+        ];
+        for outcome in outcomes {
+            let raw = [vec![1, b'r'], outcome].concat();
+            let receipt: CommitReceipt = postcard::from_bytes(&raw).unwrap();
+            assert_eq!(postcard::to_allocvec(&receipt).unwrap(), raw);
+            assert!(
+                CommitReceipt::stored_headers(&raw).unwrap() >= receipt_headers(&receipt).unwrap()
+            );
+            let mut trailing = raw;
+            trailing.push(0);
+            assert!(CommitReceipt::stored_headers(&trailing).is_err());
+        }
+    }
+    #[test]
     fn borrowed_measurements_cover_schema_and_all_receipt_shapes() {
         let schema = QueueSchema {
             work: CollectionDefinition {

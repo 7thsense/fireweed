@@ -1019,11 +1019,33 @@ impl InsertRequest {
         byte_limit(self, limits.max_request_bytes)
     }
 }
-impl CommitGroup {
-    pub fn fingerprint(&self, queue: &QueueAddress) -> QueueResult<[u8; 32]> {
-        fingerprint("commit", &(queue, self))
+/// Frozen ordinary commit identity: original five fields, in their original
+/// order. Future optional control fields must not enter this v3 projection.
+#[derive(Serialize)]
+struct CommitFingerprintV3<'a> {
+    request_id: &'a str,
+    claimed_updates: &'a [ClaimedUpdate],
+    state_updates: &'a [StateUpdate],
+    work_inserts: &'a [NewWork],
+    work_updates: &'a [UnclaimedUpdate],
+}
+impl<'a> From<&'a CommitGroup> for CommitFingerprintV3<'a> {
+    fn from(group: &'a CommitGroup) -> Self {
+        Self {
+            request_id: &group.request_id,
+            claimed_updates: &group.claimed_updates,
+            state_updates: &group.state_updates,
+            work_inserts: &group.work_inserts,
+            work_updates: &group.work_updates,
+        }
     }
 }
+impl CommitGroup {
+    pub fn fingerprint(&self, queue: &QueueAddress) -> QueueResult<[u8; 32]> {
+        fingerprint("commit", &(queue, CommitFingerprintV3::from(self)))
+    }
+}
+
 impl NumericBucketDimension {
     pub fn validate(&self, definition: &CollectionDefinition) -> QueueResult<()> {
         name(&self.field)?;
@@ -1566,6 +1588,142 @@ mod tests {
             max_bytes: 1024,
         };
         assert!(request.validate(&QueueLimits::default()).is_err());
+    }
+    #[test]
+    fn codec_v3_golden_commit_projection() {
+        let address = QueueAddress {
+            tenant: "t\0/x".into(),
+            queue: "q/é".into(),
+        };
+        let empty = CommitGroup {
+            request_id: "empty".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+        };
+        let rich = CommitGroup {
+            request_id: "commit\0/é".into(),
+            claimed_updates: vec![ClaimedUpdate {
+                key: "claimed".into(),
+                lease: LeaseCredential {
+                    token: vec![0, 255, 1],
+                },
+                expected_version: u64::MAX,
+                patch: WorkPatch {
+                    priority: Some(-7),
+                    available_at: Some(i64::MIN),
+                    fields: BTreeMap::from([
+                        ("nul\0/key".into(), Some(FieldValue::Bytes(vec![0, 255]))),
+                        ("removed".into(), None),
+                    ]),
+                    body: Some(Bytes::new()),
+                },
+                disposition: Disposition::RetryAt(-1),
+            }],
+            state_updates: vec![StateUpdate {
+                collection: "instance".into(),
+                key: "s".into(),
+                expect: StateExpect::Version(128),
+                change: StateChange::Put {
+                    fields: BTreeMap::from([("flag".into(), FieldValue::Boolean(true))]),
+                    value: Bytes::from_static(&[0, 1, 255]),
+                },
+            }],
+            work_inserts: vec![NewWork {
+                key: "next".into(),
+                priority: i64::MAX,
+                available_at: -2,
+                fields: BTreeMap::from([
+                    ("a".into(), FieldValue::Integer(-128)),
+                    ("b".into(), FieldValue::Float(-0.0)),
+                    ("c".into(), FieldValue::Text("é\0/".into())),
+                ]),
+                body: Bytes::from_static(&[255, 0]),
+            }],
+            work_updates: vec![UnclaimedUpdate {
+                key: "remove".into(),
+                expect: StateExpect::Version(1),
+                change: UnclaimedChange::Delete,
+            }],
+        };
+        for (group, wire, digest) in [
+            (
+                &empty,
+                "0474002f7804712fc3a905656d70747900000000",
+                "ee3a8791dd0a46a3445d71b36d2c0b3f67cd9082b2c26aa2aae8f81cdf68ce63",
+            ),
+            (
+                &rich,
+                "0474002f7804712fc3a90a636f6d6d6974002fc3a90107636c61696d65640300ff01ffffffffffffffffff01010d01ffffffffffffffffff0102086e756c002f6b657901040200ff0772656d6f76656400010003010108696e7374616e63650173018001000104666c61670201030001ff01046e657874feffffffffffffffff010303016100ff01016201000000000000008001630304c3a9002f02ff00010672656d6f7665010103",
+                "f6bffe65f454e14c35943a1438cd252a47bb8dbc74a5641977998ddcb13c419e",
+            ),
+        ] {
+            let original = postcard::to_allocvec(&(&address, group)).unwrap();
+            let projected =
+                postcard::to_allocvec(&(&address, CommitFingerprintV3::from(group))).unwrap();
+            assert_eq!(original, projected);
+            assert_eq!(
+                group.fingerprint(&address).unwrap(),
+                fingerprint("commit", &(&address, group)).unwrap()
+            );
+            let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            assert_eq!(hex(&original), wire);
+            assert_eq!(hex(&group.fingerprint(&address).unwrap()), digest);
+        }
+    }
+    #[test]
+    fn retained_receipt_ordinals_and_bytes_are_frozen() {
+        let outcomes = [
+            (GroupOutcome::RequestConflict, vec![0]),
+            (GroupOutcome::RequestExpired, vec![1]),
+            (
+                GroupOutcome::Committed {
+                    versions: vec![RecordVersion {
+                        collection: Some("s".into()),
+                        key: "k".into(),
+                        version: 128,
+                    }],
+                },
+                vec![2, 1, 1, 1, b's', 1, b'k', 128, 1],
+            ),
+            (GroupOutcome::Rejected(Rejection::StaleLease), vec![3, 0]),
+            (
+                GroupOutcome::Rejected(Rejection::VersionConflict),
+                vec![3, 1],
+            ),
+            (GroupOutcome::Rejected(Rejection::AlreadyExists), vec![3, 2]),
+            (GroupOutcome::Rejected(Rejection::NotFound), vec![3, 3]),
+            (GroupOutcome::Rejected(Rejection::Leased), vec![3, 4]),
+            (
+                GroupOutcome::Rejected(Rejection::Invalid("x".into())),
+                vec![3, 5, 1, b'x'],
+            ),
+            (
+                GroupOutcome::Rejected(Rejection::UniqueConflict),
+                vec![3, 6],
+            ),
+            (GroupOutcome::Rejected(Rejection::Terminal), vec![3, 7]),
+        ];
+        for (outcome, encoded) in outcomes {
+            assert_eq!(postcard::to_allocvec(&outcome).unwrap(), encoded);
+            let receipt = CommitReceipt {
+                request_id: "r".into(),
+                outcome,
+            };
+            let raw = [vec![1, b'r'], encoded].concat();
+            assert_eq!(postcard::to_allocvec(&receipt).unwrap(), raw);
+            assert_eq!(
+                postcard::from_bytes::<CommitReceipt>(&raw).unwrap(),
+                receipt
+            );
+            assert_eq!(
+                postcard::from_bytes::<ReceiptLookup>(&[vec![0], raw].concat()).unwrap(),
+                ReceiptLookup::Found(receipt)
+            );
+        }
+        assert_eq!(postcard::to_allocvec(&ReceiptLookup::Absent).unwrap(), [1]);
+        assert_eq!(postcard::to_allocvec(&ReceiptLookup::Expired).unwrap(), [2]);
     }
     #[test]
     fn codec_v3_golden_claim() {
