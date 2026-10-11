@@ -97,6 +97,24 @@ pub struct QueueBufferCharge<'a> {
     reservation: &'a QueueReservation,
     bytes: u64,
 }
+impl<'a> QueueBufferCharge<'a> {
+    /// Transfer two charges from the identical job into one guard without a
+    /// release/reacquire interval. This does not increase admitted capacity.
+    pub fn merge(mut self, mut other: Self) -> QueueResult<Self> {
+        if !std::ptr::eq(self.reservation, other.reservation) {
+            return Err(QueueError::OutcomeUnknown(
+                "cannot merge charges from different jobs".into(),
+            ));
+        }
+        let combined = self
+            .bytes
+            .checked_add(other.bytes)
+            .ok_or_else(|| QueueError::OutcomeUnknown("combined buffer charge overflow".into()))?;
+        self.bytes = combined;
+        other.bytes = 0;
+        Ok(self)
+    }
+}
 impl QueueReservation {
     pub fn buffer(&self, bytes: u64) -> QueueResult<QueueBufferCharge<'_>> {
         let mut state = self
@@ -134,6 +152,30 @@ impl Drop for QueueReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merging_same_job_charges_never_releases_capacity_early() {
+        let admission = QueueAdmission::new(2, 100).unwrap();
+        let first = admission.reserve(10).unwrap();
+        let second = admission.reserve(10).unwrap();
+        let left = first.buffer(20).unwrap();
+        let right = first.buffer(30).unwrap();
+        assert_eq!(admission.usage().unwrap(), (2, 70));
+        let merged = left.merge(right).unwrap();
+        assert_eq!(admission.usage().unwrap(), (2, 70));
+        assert!(matches!(
+            first.buffer(31),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        drop(merged);
+        assert_eq!(admission.usage().unwrap(), (2, 20));
+        let left = first.buffer(20).unwrap();
+        let right = second.buffer(30).unwrap();
+        assert!(matches!(
+            left.merge(right),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(admission.usage().unwrap(), (2, 20));
+    }
     #[test]
     fn transferred_reservation_outlives_caller_and_close() {
         let admission = QueueAdmission::new(1, 100).unwrap();

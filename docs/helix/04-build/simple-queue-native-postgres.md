@@ -158,3 +158,46 @@ non-test dead-code expectation explaining the activation gate. No public control
 input is ignored or accepted by an unsupported path. Streaming one-row hydration,
 fenced exhaustion, durable complete-result receipts/replay, exact publication
 limits and preview remain required before public administration activation.
+
+## Private fenced row provider — iteration 38
+
+The private provider declares a non-scrollable server cursor over the native
+first-owner selection and fetches one metadata row at a time. Key length is read
+before variable key/record construction is charged. It reuses the ordinary native
+record loader for one selected record, loads opaque bodies only for explicit body
+comparison, freezes exact prefix edits through the shared resolver, and loads
+prospective unique owner/nonowner authority under the same outer queue fence.
+Active-lease deletion uses the common eligible unique tuple codec rather than the
+ordinary delete planner's lease rejection. Identity amplification is charged
+before native tuple generation.
+
+Same-job buffer guards transfer into one streamed hydration guard without releasing
+or reacquiring admitted capacity; different jobs cannot merge. Native loaded payloads
+now drop before their guards on error paths. The shared asynchronous accumulator
+consumes the cursor to verified exhaustion; successful CLOSE precedes its fresh
+ordinary ownership clock and final CAS/uniqueness checks. The caller retains the
+outer transaction and queue-row fence through publication or rollback. Any error or cancellation of this owner future requires rollback of the entire
+containing transaction; callers must not continue sibling groups in that transaction.
+An open/failed cursor is never a partial success.
+
+Actual normal and forced-collision fixtures stream 5,001 bulk no-ops with constant
+retained client admission, compact results and no retained work/probe images. They
+check omitted megabyte bodies, minimal changed metadata, fresh-clock stale-lease
+rollback, zero matches and cursor reuse. Another physical fixture checks initial
+owner conflict, free-tuple sibling collision, prefix removal before explicit writes,
+explicit empty-body replacement, and deletion of a lease acquired through the public
+claim path. A real SQL division-by-zero during the second row, after an earlier
+accepted proposal, returns unknown with no final clock/result and releases planning
+charges; the outer transaction rolls back.
+
+This remains private planning qualification. It fetches metadata individually and
+hydrates complete fields for one selected row; selective dynamic-field hydration,
+batched metadata and server execution/resource measurements remain performance gates.
+It is not a full-queue client-filtering path. Durable complete administrative receipts,
+exact result/publication limits, preview, public activation, S3/Turso and matched
+benchmarks remain outstanding.
+
+Native physical fixtures share a schema whose store-open path deliberately takes
+a global DDL fence. They now share a test-only fixture mutex, preventing long
+selection transactions from blocking unrelated fencing/cancellation fixtures.
+Concurrency within each fixture remains enabled and timeouts remain unchanged.

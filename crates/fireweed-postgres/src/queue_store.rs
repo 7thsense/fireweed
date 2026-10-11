@@ -534,11 +534,12 @@ fn record(row: &Row, fields: Fields, body: Vec<u8>) -> QueueResult<StoredWork> {
     })
 }
 struct Loaded<'a> {
+    // Drop owned payloads before their admission guards on every error path.
+    snapshot: RecordSnapshot,
+    ids: BTreeMap<RecordIdentity, i64>,
     _charge: QueueBufferCharge<'a>,
     _selection_charge: Option<QueueBufferCharge<'a>>,
     _probe_charges: Vec<QueueBufferCharge<'a>>,
-    snapshot: RecordSnapshot,
-    ids: BTreeMap<RecordIdentity, i64>,
 }
 async fn load_group<'a>(
     tx: &Transaction<'_>,
@@ -2108,6 +2109,18 @@ fn selected_field_numbers(
         .transpose()
 }
 
+// These fixtures share one schema: opening a store intentionally takes a
+// global DDL fence. Isolate fixtures, not the concurrent operations they test.
+#[cfg(test)]
+async fn physical_fixture() -> tokio::sync::OwnedMutexGuard<()> {
+    static FIXTURE: std::sync::OnceLock<Arc<Mutex<()>>> = std::sync::OnceLock::new();
+    FIXTURE
+        .get_or_init(|| Arc::new(Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2159,6 +2172,7 @@ mod tests {
         staged_selective_fixture().await;
     }
     async fn staged_selective_fixture() {
+        let _fixture = physical_fixture().await;
         use fireweed_engine::{queue_fields::CheckedFields, queue_planner::required_work_fields};
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let store = PostgresQueueStore::connect(
@@ -2926,6 +2940,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn fresh_groups_read_prior_sql_writes_and_storage_failure_rolls_back() {
+        let _fixture = physical_fixture().await;
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -3136,6 +3151,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn admitted_caller_cancellation_drains_and_reopens_complete_group() {
+        let _fixture = physical_fixture().await;
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
         let store = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 1)
@@ -3261,6 +3277,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn full_values_disambiguate_all_discovery_hash_collisions() {
+        let _fixture = physical_fixture().await;
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -3342,6 +3359,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn reopening_schema_fences_writers_before_dependent_tables() {
+        let _fixture = physical_fixture().await;
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
         let store = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 1)
@@ -3386,6 +3404,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn invalid_envelope_precedes_saturated_admission() {
+        let _fixture = physical_fixture().await;
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
         let limits = QueueLimits {
