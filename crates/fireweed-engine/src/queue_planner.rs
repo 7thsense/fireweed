@@ -633,6 +633,55 @@ fn checked_unique_keys(
     }
     Ok(keys)
 }
+/// Exact-name read closure for a fenced ordinary work envelope. Work payload
+/// bodies are separate. Replacements regenerate all query indexes from new full
+/// fields; only old unique components need authority. State remains full-image.
+pub fn required_work_fields(
+    group: &CommitGroup,
+    schema: &QueueSchema,
+) -> QueueResult<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    let indexes = schema
+        .work
+        .unique_indexes
+        .iter()
+        .map(|name| {
+            schema.work.indexes.get(name).ok_or_else(|| {
+                QueueError::OutcomeUnknown("missing unique index read authority".into())
+            })
+        })
+        .collect::<QueueResult<Vec<_>>>()?;
+    let unique_columns = || indexes.iter().flat_map(|columns| columns.iter());
+    let mut patches = Vec::new();
+    for update in &group.claimed_updates {
+        if update.disposition == Disposition::Delete {
+            names.extend(unique_columns().cloned());
+        }
+        patches.push(&update.patch);
+    }
+    for update in &group.work_updates {
+        match &update.change {
+            UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } => {
+                patches.push(patch)
+            }
+            UnclaimedChange::Replace(_) | UnclaimedChange::Delete => {
+                names.extend(unique_columns().cloned())
+            }
+        }
+    }
+    if !group.work_inserts.is_empty() {
+        names.extend(unique_columns().cloned());
+    }
+    for patch in patches {
+        names.extend(patch.fields.keys().cloned());
+        for columns in schema.work.indexes.values() {
+            if columns.iter().any(|name| patch.fields.contains_key(name)) {
+                names.extend(columns.iter().cloned());
+            }
+        }
+    }
+    Ok(names)
+}
 /// Complete prospective tuples for an insert vector, independent of per-item
 /// acceptance. Load authority once, then apply individual items in request order.
 /// Sparse tuples remain NULLS DISTINCT; duplicate tuples are probed once.
@@ -823,13 +872,38 @@ fn unique_effects(
             }
             if let Some(old) = old {
                 let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
-                if new.is_some() {
-                    let index_effects = crate::queue_fields::resolve_index_effects(
-                        &view,
-                        &delta.work_fields[&version.key],
-                        &schema.work,
-                    )?;
-                    effects.extend(&owner, &index_effects)?;
+                if let Some(new) = new {
+                    let change = &delta.work_fields[&version.key];
+                    if matches!(change, ResolvedFields::Replace(_)) {
+                        let old: BTreeSet<_> = checked_unique_keys(None, &view, &schema.work)?
+                            .into_iter()
+                            .collect();
+                        let new: BTreeSet<_> = record_unique_keys(None, new, &schema.work)?
+                            .into_iter()
+                            .collect();
+                        for tuple in old.difference(&new) {
+                            if effects
+                                .releases
+                                .get(tuple)
+                                .is_some_and(|prior| prior != &owner)
+                            {
+                                return Err(QueueError::OutcomeUnknown(
+                                    "contradictory released tuple ownership".into(),
+                                ));
+                            }
+                            effects.releases.insert(tuple.clone(), owner.clone());
+                        }
+                        for tuple in new.difference(&old) {
+                            effects.claims.push((tuple.clone(), owner.clone()));
+                        }
+                    } else {
+                        let index_effects = crate::queue_fields::resolve_index_effects(
+                            &view,
+                            change,
+                            &schema.work,
+                        )?;
+                        effects.extend(&owner, &index_effects)?;
+                    }
                 } else {
                     for tuple in checked_unique_keys(None, &view, &schema.work)? {
                         if effects
@@ -1535,6 +1609,51 @@ mod tests {
         let mut persisted = seed.work_inserts[0].fields.clone();
         partial.work_fields["a"].clone().apply(&mut persisted);
         assert_eq!(persisted, full.work["a"].record.work.fields);
+    }
+    #[test]
+    fn selective_read_closure_loads_touched_composites_but_only_old_unique_for_replace() {
+        let mut s = unique_schema();
+        s.work.fields.insert("a".into(), FieldType::Integer);
+        s.work.fields.insert("b".into(), FieldType::Text);
+        s.work
+            .indexes
+            .insert("by_ab".into(), vec!["a".into(), "b".into()]);
+        let mut g = group();
+        g.work_updates.push(UnclaimedUpdate {
+            key: "input".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Patch(WorkPatch {
+                fields: BTreeMap::from([("a".into(), Some(FieldValue::Integer(1)))]),
+                ..WorkPatch::default()
+            }),
+        });
+        assert_eq!(
+            required_work_fields(&g, &s).unwrap(),
+            BTreeSet::from(["a".into(), "b".into()])
+        );
+        g.work_updates[0].change = UnclaimedChange::Replace(work("input"));
+        assert_eq!(
+            required_work_fields(&g, &s).unwrap(),
+            BTreeSet::from(["target".into()])
+        );
+        let mut snapshot = claimed_snapshot();
+        let row = snapshot.work.get_mut("input").unwrap();
+        row.record.lifecycle = Lifecycle::Pending;
+        row.lease_hash = None;
+        row.record.lease_expires_at = None;
+        row.field_coverage = FieldCoverage::Selected {
+            names: BTreeSet::from(["target".into()]),
+            prefixes: BTreeSet::new(),
+        };
+        let delta = plan_commit_group(&g, &mut snapshot, 0, &s).unwrap();
+        assert!(matches!(
+            delta.receipt.outcome,
+            GroupOutcome::Committed { .. }
+        ));
+        assert!(matches!(
+            delta.work_fields["input"],
+            ResolvedFields::Replace(_)
+        ));
     }
     #[test]
     fn packed_delete_reinsert_requires_full_replace_and_preserves_highwater() {

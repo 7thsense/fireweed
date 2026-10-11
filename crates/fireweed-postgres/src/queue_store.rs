@@ -400,6 +400,30 @@ async fn save_receipt<T: Serialize>(
         &[&queue,&domain,&probe_hash(id.as_bytes()),&id.as_bytes(),&fp,&encode(value)?]).await.map_err(storage)?;
     Ok(())
 }
+fn selected_ordinals(
+    ids: &[i64],
+    schema: &QueueSchema,
+    cols: &BTreeMap<i64, i32>,
+    selected: Option<&BTreeSet<String>>,
+) -> QueueResult<Option<Vec<i32>>> {
+    let Some(wanted) = selected else {
+        return Ok(None);
+    };
+    let partitions = ids
+        .iter()
+        .map(|id| {
+            cols.get(id)
+                .copied()
+                .ok_or_else(|| storage("missing field partition authority"))
+        })
+        .collect::<QueueResult<BTreeSet<_>>>()?;
+    let mut ordinals = BTreeSet::new();
+    for col in partitions {
+        let def = definition(schema, col)?;
+        ordinals.extend(wanted.iter().filter_map(|name| field_no(def, name).ok()));
+    }
+    Ok(Some(ordinals.into_iter().collect()))
+}
 async fn load_fields<C: GenericClient + Sync>(
     client: &C,
     ids: &[i64],
@@ -410,18 +434,7 @@ async fn load_fields<C: GenericClient + Sync>(
     if selected.is_some_and(BTreeSet::is_empty) || ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let ordinals: Option<Vec<i32>> = selected.map(|wanted| {
-        cols.values()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .flat_map(|col| {
-                definition(schema, col)
-                    .into_iter()
-                    .flat_map(move |d| wanted.iter().filter_map(move |name| field_no(d, name).ok()))
-            })
-            .collect()
-    });
+    let ordinals = selected_ordinals(ids, schema, cols, selected)?;
     let rows=client.query("SELECT record_id,field,value FROM fireweed_api007.fields WHERE record_id=ANY($1) AND ($2::int[] IS NULL OR field=ANY($2))",&[&ids,&ordinals]).await.map_err(storage)?;
     let mut out: BTreeMap<i64, Fields> = BTreeMap::new();
     for row in rows {
@@ -519,6 +532,7 @@ fn record(row: &Row, fields: Fields, body: Vec<u8>) -> QueueResult<StoredWork> {
 }
 struct Loaded<'a> {
     _charge: QueueBufferCharge<'a>,
+    _selection_charge: Option<QueueBufferCharge<'a>>,
     _probe_charges: Vec<QueueBufferCharge<'a>>,
     snapshot: RecordSnapshot,
     ids: BTreeMap<RecordIdentity, i64>,
@@ -528,6 +542,16 @@ async fn load_group<'a>(
     queue: &QueueRow<'_>,
     group: &CommitGroup,
     reservation: &'a QueueReservation,
+) -> QueueResult<Loaded<'a>> {
+    // Production stays complete until selective read/apply activation is reviewed.
+    load_group_with_fields(tx, queue, group, reservation, None).await
+}
+async fn load_group_with_fields<'a>(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    group: &CommitGroup,
+    reservation: &'a QueueReservation,
+    selected_work: Option<&BTreeSet<String>>,
 ) -> QueueResult<Loaded<'a>> {
     let mut identities = BTreeSet::new();
     for key in group
@@ -570,11 +594,31 @@ async fn load_group<'a>(
                 .map_err(storage)?,
         );
     }
-    let ids_vec: Vec<i64> = rows
-        .iter()
-        .filter(|r| r.get::<_, bool>(4))
-        .map(|r| r.get(0))
-        .collect();
+    // Reserve certificate multiplicity AND SQL parameter scratch before cloning
+    // any requested names. Absent names still occupy every selected certificate.
+    let selection_charge = if let Some(names) = selected_work {
+        let name_bytes = names.iter().try_fold(64u64, |n, name| {
+            n.checked_add(name.len() as u64)
+                .and_then(|n| n.checked_add(256))
+                .ok_or(QueueError::TooLarge)
+        })?;
+        let count = rows
+            .iter()
+            .filter(|row| row.get::<_, i32>(1) == 0 && row.get::<_, bool>(4))
+            .count() as u64;
+        let retained = name_bytes.checked_mul(count).ok_or(QueueError::TooLarge)?;
+        let scratch = name_bytes.checked_add(4096).ok_or(QueueError::TooLarge)?;
+        Some(
+            reservation.buffer(
+                retained
+                    .checked_add(scratch)
+                    .and_then(|n| n.checked_mul(4))
+                    .ok_or(QueueError::TooLarge)?,
+            )?,
+        )
+    } else {
+        None
+    };
     // Only administrative body comparisons require old opaque work bodies.
     let body_keys:BTreeSet<_>=group.work_updates.iter().filter(|u|matches!(&u.change,UnclaimedChange::Administrative {patch,..} if patch.body.is_some())).map(|u|u.key.as_bytes()).collect();
     let body_ids: Vec<i64> = rows
@@ -587,11 +631,9 @@ async fn load_group<'a>(
         .map(|r| r.get(0))
         .collect();
     let body_size=u64::try_from(tx.query_one("SELECT COALESCE(sum(octet_length(value)),0)::bigint FROM fireweed_api007.bodies WHERE record_id=ANY($1)",&[&body_ids]).await.map_err(storage)?.get::<_,i64>(0)).map_err(storage)?;
-    let field_sizes=tx.query("SELECT COALESCE(sum(octet_length(value)+octet_length(full_key)),0)::bigint FROM fireweed_api007.fields WHERE record_id=ANY($1)",&[&ids_vec]).await.map_err(storage)?;
-    let extra_size=tx.query_one("SELECT COALESCE(sum(octet_length(name)+octet_length(value)+octet_length(full_key)+256),0)::bigint FROM fireweed_api007.additional_fields WHERE record_id=ANY($1)",&[&ids_vec]).await.map_err(storage)?.get::<_,i64>(0);
-    let mut names_and_headers = record_headers(rows.len(), 0)?
-        .checked_add(u64::try_from(extra_size).map_err(storage)?)
-        .ok_or(QueueError::TooLarge)?;
+    let cols: BTreeMap<i64, i32> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+    let mut names_and_headers = record_headers(rows.len(), 0)?;
+    let mut partitions = Vec::new();
     for col in rows
         .iter()
         .map(|row| row.get::<_, i32>(1))
@@ -603,10 +645,24 @@ async fn load_group<'a>(
             .map(|row| row.get(0))
             .collect();
         let def = definition(&queue.schema, col)?;
+        let selected = if col == 0 { selected_work } else { None };
+        let ordinals: Option<Vec<i32>> = selected.map(|names| {
+            names
+                .iter()
+                .filter_map(|name| field_no(def, name).ok())
+                .collect()
+        });
         let names: Vec<i64> = def.fields.keys().map(|name| name.len() as i64).collect();
-        let size=tx.query_one("SELECT COALESCE(sum(($2::bigint[])[field+1]+256),0)::bigint FROM fireweed_api007.fields WHERE record_id=ANY($1)",&[&col_ids,&names]).await.map_err(storage)?.get::<_,i64>(0);
+        let size = tx.query_one("SELECT COALESCE(sum(octet_length(value)+octet_length(full_key)+COALESCE(($2::bigint[])[field+1],0)+256),0)::bigint FROM fireweed_api007.fields WHERE record_id=ANY($1) AND ($3::int[] IS NULL OR field=ANY($3))", &[&col_ids, &names, &ordinals]).await.map_err(storage)?.get::<_,i64>(0);
+        let extra_names: Option<Vec<Vec<u8>>> =
+            selected.map(|names| names.iter().map(|name| name.as_bytes().to_vec()).collect());
+        let extra_hashes: Option<Vec<Vec<u8>>> = extra_names
+            .as_ref()
+            .map(|names| names.iter().map(|name| probe_hash(name)).collect());
+        let extra_size = tx.query_one("SELECT COALESCE(sum(octet_length(name)+octet_length(value)+octet_length(full_key)+256),0)::bigint FROM fireweed_api007.additional_fields WHERE record_id=ANY($1) AND ($2::bytea[] IS NULL OR (name_hash=ANY($2) AND name=ANY($3)))", &[&col_ids, &extra_hashes, &extra_names]).await.map_err(storage)?.get::<_,i64>(0);
         names_and_headers = names_and_headers
             .checked_add(u64::try_from(size).map_err(storage)?)
+            .and_then(|n| n.checked_add(u64::try_from(extra_size).ok()?))
             .ok_or(QueueError::TooLarge)?;
         if col != 0 {
             let name = queue
@@ -623,18 +679,26 @@ async fn load_group<'a>(
                 )
                 .ok_or(QueueError::TooLarge)?;
         }
+        partitions.push((col, col_ids));
     }
     let retained = body_size
         .checked_add(names_and_headers)
-        .and_then(|n| n.checked_add(field_sizes[0].get::<_, i64>(0) as u64))
         .and_then(|n| n.checked_mul(4))
         .ok_or(QueueError::TooLarge)?;
     let charge = reservation.buffer(retained)?;
-    let cols = rows
-        .iter()
-        .map(|r| (r.get::<_, i64>(0), r.get::<_, i32>(1)))
-        .collect();
-    let mut fields = load_fields(tx, &ids_vec, &queue.schema, &cols, None).await?;
+    let mut fields = BTreeMap::new();
+    for (col, ids) in partitions {
+        fields.extend(
+            load_fields(
+                tx,
+                &ids,
+                &queue.schema,
+                &cols,
+                if col == 0 { selected_work } else { None },
+            )
+            .await?,
+        );
+    }
     let mut bodies = load_bodies(tx, &body_ids).await?;
     let mut snapshot = RecordSnapshot {
         next_sequence: queue.next_sequence,
@@ -692,11 +756,18 @@ async fn load_group<'a>(
             };
             let mut stored = record(&row, fields.remove(&id).unwrap_or_default(), body)?;
             stored.body_loaded = materialized;
+            if let Some(names) = selected_work {
+                stored.field_coverage = fireweed_engine::queue_fields::FieldCoverage::Selected {
+                    names: names.clone(),
+                    prefixes: BTreeSet::new(),
+                };
+            }
             snapshot.work.insert(record_key, stored);
         }
     }
     Ok(Loaded {
         _charge: charge,
+        _selection_charge: selection_charge,
         _probe_charges: vec![],
         snapshot,
         ids,
@@ -1921,6 +1992,254 @@ mod tests {
             read_cursor(&corrupt, b"secret", [1; 32]),
             Err(QueueError::Invalid(_))
         ));
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn staged_selective_loader_avoids_payload_and_partial_persistence_stays_blocked() {
+        use fireweed_engine::{queue_fields::CheckedFields, queue_planner::required_work_fields};
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let queue = QueueAddress {
+            tenant: "api007-staged-selective".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        let mut schema = fireweed_conformance::queue_contract::schema();
+        schema.work.fields = BTreeMap::from([
+            ("gate".into(), FieldType::Boolean),
+            ("target".into(), FieldType::Text),
+            ("unrelated".into(), FieldType::Bytes),
+        ]);
+        schema.work.indexes.clear();
+        schema.work.unique_indexes.clear();
+        schema
+            .work
+            .additional_field_prefixes
+            .insert("/payload/".into());
+        schema.state = BTreeMap::from([(
+            "state".into(),
+            CollectionDefinition {
+                fields: BTreeMap::from([
+                    ("aaa".into(), FieldType::Text),
+                    ("bbb".into(), FieldType::Text),
+                    ("gate".into(), FieldType::Boolean),
+                ]),
+                indexes: BTreeMap::new(),
+                unique_indexes: BTreeSet::new(),
+                additional_field_prefixes: BTreeSet::new(),
+            },
+        )]);
+        schema
+            .work
+            .indexes
+            .insert("by_gate".into(), vec!["gate".into()]);
+        schema
+            .work
+            .indexes
+            .insert("by_target".into(), vec!["target".into()]);
+        schema.work.unique_indexes.insert("by_target".into());
+        store
+            .provision(ProvisionRequest {
+                queue: queue.clone(),
+                schema: schema.clone(),
+            })
+            .await
+            .unwrap();
+        let item = NewWork {
+            key: "a".into(),
+            priority: 0,
+            available_at: 0,
+            body: Default::default(),
+            fields: BTreeMap::from([
+                ("gate".into(), FieldValue::Boolean(false)),
+                ("target".into(), FieldValue::Text("owned".into())),
+                ("/payload/blob".into(), FieldValue::Bytes(vec![7; 1 << 20])),
+                ("unrelated".into(), FieldValue::Bytes(vec![8; 1 << 20])),
+            ]),
+        };
+        let mut other = item.clone();
+        other.key = "b".into();
+        other
+            .fields
+            .insert("target".into(), FieldValue::Text("other".into()));
+        store
+            .insert(InsertRequest {
+                queue: queue.clone(),
+                request_id: "seed".into(),
+                mode: InsertMode::InsertOnly,
+                items: vec![
+                    item,
+                    other,
+                    NewWork {
+                        key: "c".into(),
+                        priority: 0,
+                        available_at: 0,
+                        fields: Fields::new(),
+                        body: Default::default(),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+        let state_update = StateUpdate {
+            collection: "state".into(),
+            key: "s".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: BTreeMap::from([
+                    ("aaa".into(), FieldValue::Text("a".into())),
+                    ("bbb".into(), FieldValue::Text("b".into())),
+                    ("gate".into(), FieldValue::Boolean(false)),
+                ]),
+                value: Default::default(),
+            },
+        };
+        store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![CommitGroup {
+                    request_id: "seed-state".into(),
+                    claimed_updates: vec![],
+                    work_updates: vec![],
+                    work_inserts: vec![],
+                    state_updates: vec![state_update.clone()],
+                }],
+            })
+            .await
+            .unwrap();
+        let mut state_update = state_update;
+        state_update.expect = StateExpect::Version(1);
+        let group = CommitGroup {
+            request_id: "staged-control".into(),
+            claimed_updates: vec![],
+            state_updates: vec![state_update],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(1),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    fields: BTreeMap::from([("gate".into(), Some(FieldValue::Boolean(true)))]),
+                    ..WorkPatch::default()
+                }),
+            }],
+        };
+        let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let tx = client.transaction().await.unwrap();
+        let admission = QueueAdmission::new(1, 256 << 10).unwrap();
+        let job = admission.reserve(0).unwrap();
+        let row = queue_row(&tx, &queue, &job).await.unwrap();
+        assert!(matches!(
+            load_group(&tx, &row, &group, &job).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let wanted = required_work_fields(&group, &schema).unwrap();
+        assert_eq!(wanted, BTreeSet::from(["gate".into()]));
+        let mut selected = load_group_with_fields(&tx, &row, &group, &job, Some(&wanted))
+            .await
+            .unwrap();
+        assert_eq!(selected.snapshot.work["a"].record.work.fields.len(), 1);
+        assert_eq!(
+            selected.snapshot.state[&("state".into(), "s".into())]
+                .fields
+                .len(),
+            3
+        );
+        let work_id = selected.ids[&RecordIdentity {
+            collection: None,
+            key: "a".into(),
+        }];
+        let state_id = selected.ids[&RecordIdentity {
+            collection: Some("state".into()),
+            key: "s".into(),
+        }];
+        assert_eq!(
+            selected_ordinals(
+                &[work_id],
+                &schema,
+                &BTreeMap::from([(work_id, 0), (state_id, 1)]),
+                Some(&wanted)
+            )
+            .unwrap(),
+            Some(vec![0])
+        );
+        let work = &selected.snapshot.work["a"];
+        let view = CheckedFields::new(&work.record.work.fields, &work.field_coverage).unwrap();
+        assert_eq!(view.get("gate").unwrap(), Some(&FieldValue::Boolean(false)));
+        assert!(view.get("target").is_err());
+        assert!(view.get("/payload/blob").is_err());
+        let before = selected.snapshot.clone();
+        let delta = plan_commit_group(&group, &mut selected.snapshot, 0, &schema).unwrap();
+        assert!(matches!(
+            persist_delta(&tx, &row, &delta, &before, &mut selected).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(
+            tx.query_one(
+                "SELECT version::text FROM fireweed_api007.records WHERE queue_id=$1 AND key=$2",
+                &[&row.id, &b"a".as_slice()]
+            )
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+            "1"
+        );
+        assert!(admission.usage().unwrap().1 < 256 << 10);
+        drop(selected);
+        let mut two_rows = group.clone();
+        let mut other = two_rows.work_updates[0].clone();
+        other.key = "b".into();
+        two_rows.work_updates.push(other);
+        let absent = BTreeSet::from([format!("/payload/{}", "x\0λ".repeat(20_000))]);
+        let before_usage = admission.usage().unwrap();
+        assert!(matches!(
+            load_group_with_fields(&tx, &row, &two_rows, &job, Some(&absent)).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(admission.usage().unwrap(), before_usage);
+        // Rollback-scoped corruption: invalid ordinal must not hide payload bytes
+        // from complete production-reader preflight.
+        let corrupt_id: i64 = tx
+            .query_one(
+                "SELECT id FROM fireweed_api007.records WHERE queue_id=$1 AND key=$2",
+                &[&row.id, &b"c".as_slice()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.execute("INSERT INTO fireweed_api007.fields(record_id,queue_id,collection,field,prefix,hash,full_key,value) VALUES($1,$2,0,999,$3,$3,$3,$4)", &[&corrupt_id, &row.id, &vec![0u8], &vec![0u8; 1 << 20]]).await.unwrap();
+        let mut corrupt_group = group.clone();
+        corrupt_group.state_updates.clear();
+        corrupt_group.work_updates[0].key = "c".into();
+        corrupt_group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+            priority: Some(1),
+            ..WorkPatch::default()
+        });
+        let error = load_group(&tx, &row, &corrupt_group, &job)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, QueueError::OutcomeUnknown(message) if message.contains("admitted buffer capacity"))
+        );
+        assert_eq!(admission.usage().unwrap(), before_usage);
+        drop(row);
+        tx.rollback().await.unwrap();
+        drop(client);
+        driver.await.unwrap().unwrap();
+        store.shutdown().await.unwrap();
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]

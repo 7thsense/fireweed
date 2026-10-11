@@ -116,3 +116,36 @@ still loads complete fields and rejects partial views before its existing full
 regeneration SQL. The pure broad administrative oracle also remains complete-only.
 No new durable S3/Turso codec is activated; admission and canonical publication
 qualification still belong to later integration slices.
+
+## Guarded physical reader staging
+
+The shared required_work_fields helper computes exact-name closure for an ordinary
+work envelope: explicit patch names and every component of touched composite
+indexes; old unique components for delete, replacement and insert/upsert readsets.
+A replacement regenerates query indexes from its new full bag and therefore does
+not load old nonunique components. Invalid unique schema authority fails closed.
+
+PostgreSQL uses one field loader implementation with an optional exact-name
+selection. The production load_group wrapper always passes None and continues
+complete reads. Only the isolated test invokes selection; the existing production
+persistence guard still rejects partial views before any writes. Loaded-value
+sizes, encoded sort keys, full names and headers are measured using the same SQL
+selection before allocating retained field bags. State reads remain complete.
+
+An isolated PostgreSQL regression retains a 256 KiB reservation, proves a complete
+read of a record with a megabyte equality attribute cannot fit, then loads only
+its gate field. Unloaded target/payload values remain unknown. Planning its gate
+change succeeds, persistence rejects the partial view, and the stored version
+stays unchanged. This is guarded reader evidence, not physical selective-write or
+production performance qualification. Automatic approval review rejected combined
+read activation and guard removal; activation remains pending a concrete reviewed
+writer and the required approval.
+
+Reader review also requires reservation for requested-name certificates even when
+SQL returns no matching field, multiplied by live work-row count, plus temporary
+name/hash/ordinal buffers before their allocation. Loaded retains that guard.
+Selected ordinal derivation is restricted to the supplied record IDs, so a state
+collection's ordinal cannot widen a work read. The size expression counts payload
+bytes even when an ordinal is corrupt; the decoder still rejects corrupt schema
+references. The isolated regression covers mixed collection ordinals, two long
+absent-name certificates, and rollback-only corrupt payload sizing.
