@@ -85,3 +85,20 @@ ordinary reuse/collision, independent clocks and compact 5001-target no-op resul
 The 5001 oracle proves no planner match cap; native indexed streaming, durability,
 preview/replay, immutable complete-result receipts, bounded decoding/admission,
 above-4096 physical publication, S3/Turso and consumer activation remain required.
+
+## Asynchronous source bridge — iteration 36
+
+plan_broad_group_stream drives a pinned asynchronous row source through the same
+admitted accumulator and private finalizer. It does not collect the source into
+an iterator or queue image. Source Pending retains accepted effects and their
+charges; successful EOF precedes ordinary clock sampling. A late source error
+returns OutcomeUnknown and discards all speculative effects. Dropping the owner
+future releases planning admission without producing a result. Public caller
+cancellation must still be isolated by the existing owned backend operation job;
+owner-future drop is not a substitute for that guarantee.
+
+The backend must retain its queue fence through selection, final planning and
+atomic publication. EOF alone does not establish authority to write. The internal
+bridge provides no native selector implementation, receipt encoding or public
+administrative activation. A manually polled regression checks suspension after
+an accepted mutation, successful EOF, late failure, output lifetime and owner drop.

@@ -292,6 +292,7 @@ fn propose_target_view(
 mod stream;
 pub use stream::{
     AdmittedAdministrativeGroupProposal, SelectedAdministrativeInput, plan_broad_group,
+    plan_broad_group_stream,
 };
 
 /// Native selection ownership, resolved under the containing queue fence.

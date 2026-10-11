@@ -385,6 +385,45 @@ pub fn plan_broad_group<'s, 'r>(
     state.finish(ordinary_image, ownership_now)
 }
 
+/// The backend retains its queue fence through selection, final planning and
+/// atomic publication; stream EOF alone never grants publication authority.
+/// Every yielded owned row must already hold its hydration charge. This driver
+/// shares the synchronous adapter's accumulator and finalizer; it does not
+/// collect a queue image or expose intermediate administrative successes.
+#[allow(clippy::too_many_arguments)]
+pub async fn plan_broad_group_stream<'s, 'r>(
+    ordinary: &CommitGroup,
+    intent: &AdministrativeIntent,
+    targets: impl futures::Stream<Item = QueueResult<SelectedAdministrativeInput<'s, 'r>>>,
+    ordinary_image: &RecordSnapshot,
+    ownership_now: impl FnOnce() -> QueueResult<i64>,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+    reservation: &'r QueueReservation,
+) -> QueueResult<AdmittedAdministrativeGroupProposal<'r>> {
+    use futures::StreamExt;
+    if !matches!(intent.operation, AdministrativeOperation::SelectFirst(_)) {
+        return Err(QueueError::Invalid(
+            "broad driver requires selector administration".into(),
+        ));
+    }
+    validate_snapshot(ordinary_image)?;
+    let mut state = Accumulator::new(
+        ordinary,
+        intent,
+        ordinary_image,
+        schema,
+        limits,
+        reservation,
+    )?;
+    futures::pin_mut!(targets);
+    while let Some(target) = targets.next().await {
+        let target = target.map_err(|_| unknown("administrative source failed before EOF"))?;
+        state.visit(target)?;
+    }
+    state.finish(ordinary_image, ownership_now)
+}
+
 fn dependency_bound(proposal: &AdministrativeProposal, schema: &QueueSchema) -> QueueResult<u64> {
     let mut bytes = 2048;
     if let Some(ResolvedFields::Edit(edits)) = &proposal.resolved_fields {
@@ -1045,6 +1084,117 @@ mod tests {
             next_sequence: sequence,
             ..Default::default()
         }
+    }
+    #[test]
+    fn asynchronous_source_suspension_failure_and_owner_drop_never_finish_early() {
+        use futures::{FutureExt, task::noop_waker_ref};
+        use std::task::{Context, Poll};
+        let limits = QueueLimits::default();
+        for fail in [false, true] {
+            let admission = QueueAdmission::new(1, 8 << 20).unwrap();
+            let job = admission.reserve(0).unwrap();
+            let phase = Cell::new(0);
+            let clock_calls = Cell::new(0);
+            let definition = schema();
+            let request = ordinary();
+            let mut action = update();
+            if let AdministrativeAction::Update { patch, .. } = &mut action {
+                patch.priority = Some(7);
+            }
+            let operation = intent(action);
+            let before = RecordSnapshot {
+                next_sequence: 1,
+                ..Default::default()
+            };
+            let source = futures::stream::poll_fn(|cx| match phase.get() {
+                0 => {
+                    phase.set(1);
+                    let hydration = job.buffer(64 << 10).unwrap();
+                    Poll::Ready(Some(Ok(SelectedAdministrativeInput::OwnedOneRow {
+                        clause: 0,
+                        image: one_row(row(), "row", 1),
+                        hydration,
+                    })))
+                }
+                1 => {
+                    phase.set(2);
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                2 if fail => {
+                    phase.set(3);
+                    Poll::Ready(Some(Err(QueueError::Busy)))
+                }
+                _ => Poll::Ready(None),
+            });
+            let future = plan_broad_group_stream(
+                &request,
+                &operation,
+                source,
+                &before,
+                || {
+                    assert!(phase.get() >= 2);
+                    clock_calls.set(clock_calls.get() + 1);
+                    Ok(0)
+                },
+                &definition,
+                &limits,
+                &job,
+            );
+            futures::pin_mut!(future);
+            assert!(
+                future
+                    .as_mut()
+                    .poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+                    .is_pending()
+            );
+            assert_eq!(clock_calls.get(), 0);
+            assert!(admission.usage().unwrap().1 > 0);
+            let result = futures::executor::block_on(future);
+            if fail {
+                assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+                assert_eq!(clock_calls.get(), 0);
+            } else {
+                let plan = result.unwrap();
+                assert_eq!(clock_calls.get(), 1);
+                assert_eq!(plan.proposal().delta.work.len(), 1);
+                assert_eq!(plan.proposal().delta.work[0].record.work.priority, 7);
+                assert!(admission.usage().unwrap().1 > 0);
+                drop(plan);
+            }
+            assert_eq!(admission.usage().unwrap().1, 0);
+        }
+        let admission = QueueAdmission::new(1, 8 << 20).unwrap();
+        let job = admission.reserve(0).unwrap();
+        let definition = schema();
+        let request = ordinary();
+        let operation = intent(update());
+        let before = RecordSnapshot::default();
+        let calls = Cell::new(0);
+        let source = futures::stream::pending::<QueueResult<SelectedAdministrativeInput<'_, '_>>>();
+        let mut future = Box::pin(plan_broad_group_stream(
+            &request,
+            &operation,
+            source,
+            &before,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(0)
+            },
+            &definition,
+            &limits,
+            &job,
+        ));
+        assert!(
+            future
+                .as_mut()
+                .poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+                .is_pending()
+        );
+        assert!(admission.usage().unwrap().1 > 0);
+        drop(future);
+        assert_eq!(calls.get(), 0);
+        assert_eq!(admission.usage().unwrap().1, 0);
     }
     #[test]
     fn sparse_absence_certificates_are_charged_before_proposal_clones() {
