@@ -154,6 +154,34 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
         vec!["low", "high"]
     );
     assert_eq!(store.claim(request.clone()).await.unwrap(), selected);
+    let mut renewal = group("renew-first-claim");
+    renewal.claimed_updates = selected
+        .iter()
+        .map(|work| {
+            let mut change = update(work);
+            change.disposition = Disposition::Retain {
+                renew_nanos: Some(2_000_000_000),
+            };
+            change
+        })
+        .collect();
+    committed(
+        &store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![renewal],
+            })
+            .await
+            .unwrap()[0],
+    );
+    let renewed = store.claim(request.clone()).await.unwrap();
+    assert_eq!(renewed.len(), selected.len());
+    for (current, original) in renewed.iter().zip(&selected) {
+        assert_eq!(current.lease.token, original.lease.token);
+        assert!(current.record.version > original.record.version);
+        assert!(current.record.lease_expires_at > original.record.lease_expires_at);
+    }
+    let selected = renewed;
     let mut transition = group("transition");
     transition.claimed_updates.push(update(&selected[0]));
     transition.state_updates.push(StateUpdate {

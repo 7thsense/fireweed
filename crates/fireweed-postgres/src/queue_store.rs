@@ -2,7 +2,9 @@
 //! retain admission and connection ownership after caller cancellation.
 use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_body::ResolvedBody;
-use fireweed_engine::queue_claim::{ClaimContext, claim_expiry, plan_claim};
+use fireweed_engine::queue_claim::{
+    ClaimContext, ClaimOwnership, checked_lease_hash, claim_expiry, plan_claim,
+};
 use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
@@ -77,7 +79,7 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.requests (
  outcome BYTEA NOT NULL);
 CREATE INDEX IF NOT EXISTS request_identity_probe ON fireweed_api007.requests(queue_id,domain,identity_hash);
 "#;
-const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r.lifecycle,r.priority,r.available_at,r.eligible_since,r.attempts,r.lease_until,r.lease_hash,r.insertion_sequence::text";
+const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r.lifecycle,r.priority,r.available_at,r.eligible_since,r.attempts,r.lease_until,CASE WHEN r.lease_hash IS NULL OR octet_length(r.lease_hash)=32 THEN r.lease_hash ELSE ''::bytea END,r.insertion_sequence::text";
 fn storage(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(error.to_string())
 }
@@ -1952,7 +1954,8 @@ impl QueueStore for PostgresQueueStore {
                     if rows.len()!=ids.len(){return Err(QueueError::ClaimExpired);}
                     let metadata:BTreeMap<i64,&Row>=rows.iter().map(|row|(row.get(0),row)).collect();
                     for (id,token) in &replay.items {let row=metadata.get(id).ok_or(QueueError::ClaimExpired)?;
-                        if row.get::<_,i16>(5)!=1 || row.get::<_,Option<i64>>(10).is_none_or(|expiry|expiry<=now) || row.get::<_,Option<Vec<u8>>>(11).as_deref()!=Some(lease_hash(token).as_slice()) {return Err(QueueError::ClaimExpired);}}
+                        let raw_hash:Option<Vec<u8>>=row.get(11);
+                        ClaimOwnership {lifecycle:lifecycle(row.get(5))?,expires_at:row.get(10),token_hash:checked_lease_hash(raw_hash.as_deref())?}.validate(token,now)?;}
                     let selected_fields=selected_field_numbers(&queue.schema.work,request.fields.as_ref())?;
                     payload_budget(&tx,&ids,selected_fields.as_ref(),request.include_body,request.max_bytes,&queue.schema.work).await?;
                     let _headers=_owned_job.buffer(materialized_headers(&tx,&rows.iter().map(|row|row.get::<_,i64>(0)).collect::<Vec<_>>(),selected_fields.as_ref()).await?)?;
@@ -1960,7 +1963,7 @@ impl QueueStore for PostgresQueueStore {
                     let map:BTreeMap<_,_>=rows.iter().map(|row|row.get::<_,i64>(0)).zip(stored).collect();let mut out=vec![];
                     for (id,token) in replay.items {
                         let work=map.get(&id).ok_or(QueueError::ClaimExpired)?;
-                        if work.record.lifecycle!=Lifecycle::Leased||work.record.lease_expires_at.is_none_or(|expiry|expiry<=now)||work.lease_hash!=Some(lease_hash(&token)){return Err(QueueError::ClaimExpired);}
+                        ClaimOwnership {lifecycle:work.record.lifecycle,expires_at:work.record.lease_expires_at,token_hash:work.lease_hash}.validate(&token,now)?;
                         out.push(ClaimedWork {record:work.record.clone(),lease:LeaseCredential {token}});
                     }
                     if encoded_len(&out)?>request.max_bytes{return Err(QueueError::TooLarge);}return Ok(out);
@@ -2388,6 +2391,78 @@ async fn physical_fixture() -> tokio::sync::OwnedMutexGuard<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn replay_rejects_oversized_raw_lease_hash_before_payload_hydration() {
+        let _fixture = physical_fixture().await;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let address = QueueAddress {
+            tenant: "lease-corruption".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        store
+            .provision(ProvisionRequest {
+                queue: address.clone(),
+                schema: fireweed_conformance::queue_contract::schema(),
+            })
+            .await
+            .unwrap();
+        store
+            .insert(InsertRequest {
+                queue: address.clone(),
+                request_id: "seed".into(),
+                mode: InsertMode::InsertOnly,
+                items: vec![NewWork {
+                    key: "a".into(),
+                    priority: 0,
+                    available_at: 0,
+                    fields: BTreeMap::from([
+                        ("kind".into(), FieldValue::Text("task".into())),
+                        ("target".into(), FieldValue::Text("a".into())),
+                    ]),
+                    body: Default::default(),
+                }],
+            })
+            .await
+            .unwrap();
+        let request = ClaimRequest {
+            queue: address.clone(),
+            request_id: "claim".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000_000,
+            max_records: 1,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        assert_eq!(store.claim(request.clone()).await.unwrap().len(), 1);
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        client.execute("UPDATE fireweed_api007.records r SET lease_hash=decode(repeat('ab',4194304),'hex') FROM fireweed_api007.queues q WHERE r.queue_id=q.id AND q.tenant=$1 AND q.name=$2", &[&address.tenant.as_bytes(), &address.queue.as_bytes()]).await.unwrap();
+        assert!(matches!(
+            store.claim(request).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        store.shutdown().await.unwrap();
+        drop(client);
+        driver.await.unwrap().unwrap();
+    }
     #[test]
     fn cursor_hmac_matches_standard_vector_and_rejects_scope_tampering() {
         let tag = mac(&[0x0b; 20], b"Hi There");

@@ -24,6 +24,37 @@ impl ClaimTransition {
         }
     }
 }
+/// Current lease authority for replay; creation versions intentionally do not
+/// enter this check because renewal returns the current record and expiry.
+#[derive(Clone, Copy)]
+pub struct ClaimOwnership {
+    pub lifecycle: Lifecycle,
+    pub expires_at: Option<i64>,
+    pub token_hash: Option<[u8; 32]>,
+}
+impl ClaimOwnership {
+    pub fn validate(&self, token: &[u8], now: i64) -> QueueResult<()> {
+        let leased = self.lifecycle == Lifecycle::Leased;
+        if leased != self.expires_at.is_some() || leased != self.token_hash.is_some() {
+            return Err(authority("inconsistent raw replay lease"));
+        }
+        if !leased
+            || self.expires_at.is_none_or(|expiry| expiry <= now)
+            || self.token_hash != Some(lease_hash(token))
+        {
+            return Err(QueueError::ClaimExpired);
+        }
+        Ok(())
+    }
+}
+pub fn checked_lease_hash(raw: Option<&[u8]>) -> QueueResult<Option<[u8; 32]>> {
+    raw.map(|bytes| {
+        bytes
+            .try_into()
+            .map_err(|_| authority("invalid stored lease hash length"))
+    })
+    .transpose()
+}
 fn authority(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(format!("claim authority: {message}"))
 }
@@ -213,5 +244,38 @@ mod tests {
             Some(&FieldValue::Integer(7))
         );
         assert!(fields.get("omitted").is_err());
+    }
+    #[test]
+    fn live_replay_accepts_renewal_and_expires_the_entire_owned_selection() {
+        let token = [3; 32];
+        let mut live = ClaimOwnership {
+            lifecycle: Lifecycle::Leased,
+            expires_at: Some(20),
+            token_hash: Some(lease_hash(&token)),
+        };
+        assert_eq!(live.validate(&token, 19), Ok(()));
+        assert_eq!(live.validate(&token, 20), Err(QueueError::ClaimExpired));
+        live.expires_at = Some(30);
+        assert_eq!(live.validate(&token, 20), Ok(()));
+        assert_eq!(live.validate(&[4; 32], 20), Err(QueueError::ClaimExpired));
+        let settled = ClaimOwnership {
+            lifecycle: Lifecycle::Completed,
+            expires_at: None,
+            token_hash: None,
+        };
+        assert!(
+            [live, settled]
+                .iter()
+                .try_for_each(|entry| entry.validate(&token, 20))
+                .is_err()
+        );
+        live.token_hash = None;
+        assert!(matches!(
+            live.validate(&token, 20),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(checked_lease_hash(None), Ok(None));
+        assert_eq!(checked_lease_hash(Some(&token)), Ok(Some(token)));
+        assert!(checked_lease_hash(Some(&[3; 33])).is_err());
     }
 }
