@@ -1306,18 +1306,37 @@ fn bucket_sql_scratch(request: &StatsRequest) -> QueueResult<u64> {
             .ok_or(QueueError::TooLarge)
     })
 }
+// Shared typed field SQL vocabulary; administrative selectors bind one flat
+// byte-array pool instead of allocating a protocol parameter per leaf.
+trait FieldSqlParameters {
+    fn bytes(&mut self, value: Vec<u8>) -> String;
+    fn byte_list(&mut self, values: Vec<Vec<u8>>) -> String;
+    fn integer(&mut self, value: i32) -> String;
+}
+impl FieldSqlParameters for Parameters {
+    fn bytes(&mut self, value: Vec<u8>) -> String {
+        parameter(self, value)
+    }
+    fn byte_list(&mut self, values: Vec<Vec<u8>>) -> String {
+        parameter(self, values)
+    }
+    fn integer(&mut self, value: i32) -> String {
+        parameter(self, value)
+    }
+}
+mod administration;
 fn field_identity_sql(
     field: &str,
     def: &CollectionDefinition,
-    params: &mut Parameters,
+    params: &mut impl FieldSqlParameters,
 ) -> QueueResult<(&'static str, String)> {
     let no = field_no(def, field)?;
     let result = if no >= 0 {
-        let no = parameter(params, no);
+        let no = params.integer(no);
         ("fireweed_api007.fields", format!("f.field={no}"))
     } else {
-        let hash = parameter(params, probe_hash(field.as_bytes()));
-        let name = parameter(params, field.as_bytes().to_vec());
+        let hash = params.bytes(probe_hash(field.as_bytes()));
+        let name = params.bytes(field.as_bytes().to_vec());
         (
             "fireweed_api007.additional_fields",
             format!("f.name_hash={hash} AND f.name={name}"),
@@ -1325,13 +1344,16 @@ fn field_identity_sql(
     };
     Ok(result)
 }
-fn field_predicate_sql(predicate: &Predicate, params: &mut Parameters) -> QueueResult<String> {
+fn field_predicate_sql(
+    predicate: &Predicate,
+    params: &mut impl FieldSqlParameters,
+) -> QueueResult<String> {
     let mut sql = String::new();
     match predicate {
         Predicate::Equal(value) => {
             let bytes = ordered_key(&[Some(value)])?;
-            let hp = parameter(params, probe_hash(&bytes));
-            let vp = parameter(params, bytes);
+            let hp = params.bytes(probe_hash(&bytes));
+            let vp = params.bytes(bytes);
             sql.push_str(&format!(" AND f.hash={hp} AND f.full_key={vp}"));
         }
         Predicate::In(values) => {
@@ -1340,8 +1362,8 @@ fn field_predicate_sql(predicate: &Predicate, params: &mut Parameters) -> QueueR
                 .map(|v| ordered_key(&[Some(v)]))
                 .collect::<QueueResult<_>>()?;
             let hashes: Vec<_> = bytes.iter().map(|b| probe_hash(b)).collect();
-            let hp = parameter(params, hashes);
-            let vp = parameter(params, bytes);
+            let hp = params.byte_list(hashes);
+            let vp = params.byte_list(bytes);
             sql.push_str(&format!(" AND f.hash=ANY({hp}) AND f.full_key=ANY({vp})"));
         }
         Predicate::Range { lower, upper } => {
@@ -1355,8 +1377,8 @@ fn field_predicate_sql(predicate: &Predicate, params: &mut Parameters) -> QueueR
             let floor = scalar_type_prefix(value.field_type());
             let mut ceiling = floor;
             ceiling[2] += 1;
-            let fp = parameter(params, floor.to_vec());
-            let cp = parameter(params, ceiling.to_vec());
+            let fp = params.bytes(floor.to_vec());
+            let cp = params.bytes(ceiling.to_vec());
             sql.push_str(&format!(" AND f.prefix>={fp} AND f.prefix<{cp}"));
             for (bound, lower) in [(lower, true), (upper, false)] {
                 if let Some(bound) = bound {
@@ -1365,8 +1387,8 @@ fn field_predicate_sql(predicate: &Predicate, params: &mut Parameters) -> QueueR
                         Bound::Excluded(v) => (v, false),
                     };
                     let bytes = ordered_key(&[Some(value)])?;
-                    let pp = parameter(params, prefix(&bytes));
-                    let vp = parameter(params, bytes);
+                    let pp = params.bytes(prefix(&bytes));
+                    let vp = params.bytes(bytes);
                     let prefix_op = if lower { ">=" } else { "<=" };
                     let op = match (lower, inclusive) {
                         (true, true) => ">=",

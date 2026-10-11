@@ -128,3 +128,33 @@ that admitted owned jobs continue, drain and reopen with their complete receipt.
 Native indexed administration, result/publication byte qualification and preview
 remain pending. This iteration changes ordering within the existing ordinary native
 commit path; it activates no administrative interface or alternate backend.
+
+## Private native control selector preparation — iteration 37
+
+The private administrative SQL compiler resolves first-clause ownership in the
+server over active work records, ordered by full key and physical identity. It
+shares the ordinary adapter's typed equality/range and exact field-name SQL.
+Hash probes retain full identity comparisons. Stored and effective lifecycle,
+active lease, attempts, availability, missing fields, keys and nested boolean
+selectors match the common evaluator at explicit operator time. Preconditions do
+not change first-clause ownership.
+
+A flat byte-array pool keeps protocol parameter count fixed at three: queue,
+bytes and operator time. Wide n-ary boolean expressions are balanced for server
+parsing/planning. SQL and parameter allocation is charged before construction,
+including expression-copy and container-header scratch, and held until drop.
+These conservative bounds are not a performance qualification.
+
+Two actual PostgreSQL fixtures, including forced discovery-hash collisions, compare
+native selection against the shared evaluator across all leaf types and nested
+logic at times before, exactly at and after lease expiry. They cover signed-minimum and signed-maximum
+availability boundaries, sparse fields, typed range isolation, 80 KiB field names,
+40,000 membership values, a 10,000-term boolean selector, 5,007 selected records,
+first ownership despite false preconditions and pre-build capacity failure.
+All ten native queue fixtures and strict PostgreSQL library/test Clippy pass.
+
+The compiler is privately staged; its entry point and output carry a temporary
+non-test dead-code expectation explaining the activation gate. No public control
+input is ignored or accepted by an unsupported path. Streaming one-row hydration,
+fenced exhaustion, durable complete-result receipts/replay, exact publication
+limits and preview remain required before public administration activation.
