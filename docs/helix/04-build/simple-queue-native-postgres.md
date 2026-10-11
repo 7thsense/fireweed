@@ -201,3 +201,37 @@ Native physical fixtures share a schema whose store-open path deliberately takes
 a global DDL fence. They now share a test-only fixture mutex, preventing long
 selection transactions from blocking unrelated fencing/cancellation fixtures.
 Concurrency within each fixture remains enabled and timeouts remain unchanged.
+
+## Clock-independent ordinary authority and raw pins — iteration 39
+
+The private native control planner now loads its own current ordinary addressed
+image and prospective unique authority under the queue fence. The shared pure
+prospective tuple helper does not run CAS, lease/lifecycle validation or consult a
+clock. Patches discover old/new tuples for affected unique composites through
+checked field coverage; unrelated unique fields need no certificate. Inserts,
+replacement, deletion and state updates discover their corresponding prospective
+old/new tuples. Claimed deletion discovers every old unique tuple even with an
+empty patch. Caller admission precedes tuple allocation.
+
+This avoids classifying an ordinary update with an early clock: a live leased
+ordinary patch or RejectActive rekey can become eligible when its lease expires
+during broad selection. Its tuple authority remains available when the shared
+finalizer samples the single fresh post-EOF ownership clock. Native regressions
+use a real claim, reject before expiry with zero administrative effects, then
+succeed exactly at expiry with disjoint administration plus rekey. A valid
+claimed delete includes an unrelated unique index to verify complete releases.
+Pure tests additionally cover stale credentials/CAS, sparse tuples, affected-only
+certificates and state plus new work.
+
+QueueRow retains DefinitionPin from the exact persisted definition bytes before
+those bytes are discarded. The future control publication format must use that
+pin directly; equivalent legacy schema re-encoding changes it. A physical fixture
+reads modern and unframed legacy definitions with equal decoded semantics and
+verifies their correct distinct original pins. Its temporarily unused private
+field explicitly marks the forthcoming frame activation. QueueRow drops owned
+schema/secret buffers before admission guards, matching native loaded data.
+
+No public administration input, receipt format or preview is activated. Bounded
+incremental canonical counting/spooling, complete-result budgets and rejection
+publication floors, ordinary exact-limit size compatibility, physical changed-ID
+resolution, FWQP2, durable replay and preview remain prerequisites for activation.

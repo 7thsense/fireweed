@@ -217,17 +217,15 @@ async fn plan_native_broad<'r>(
     queue: &QueueRow<'_>,
     ordinary: &CommitGroup,
     intent: &fireweed_core::queue_administration::AdministrativeIntent,
-    ordinary_image: &RecordSnapshot,
     ownership_now: impl FnOnce() -> QueueResult<i64>,
     limits: &QueueLimits,
     reservation: &'r QueueReservation,
 ) -> QueueResult<fireweed_engine::queue_administration::AdmittedAdministrativeGroupProposal<'r>> {
     use fireweed_core::queue_administration::AdministrativeOperation;
-    if ordinary_image.next_sequence != queue.next_sequence {
-        return Err(storage(
-            "native ordinary authority has a different insertion sequence",
-        ));
-    }
+    // Prospective ordinary tuples are independent of lease/CAS eligibility.
+    // Eligibility is decided once, with the fresh clock after successful EOF.
+    let mut ordinary_loaded = load_group(tx, queue, ordinary, reservation).await?;
+    load_prospective_unique_probes(tx, queue, &mut ordinary_loaded, ordinary, reservation).await?;
     let prepared = prepare_selection(queue, intent, limits, reservation)?;
     // Fixed metadata charge covers one FETCH result and command/driver scratch;
     // variable key and hydration bytes are charged after lengths, before data.
@@ -427,7 +425,7 @@ async fn plan_native_broad<'r>(
         ordinary,
         intent,
         source,
-        ordinary_image,
+        &ordinary_loaded.snapshot,
         ownership_now,
         &queue.schema,
         limits,
@@ -501,9 +499,16 @@ mod tests {
                 .to_string(),
         };
         let mut schema = fireweed_conformance::queue_contract::schema();
-        schema.work.fields = BTreeMap::from([("value".into(), FieldType::Text)]);
+        schema.work.fields = BTreeMap::from([
+            ("value".into(), FieldType::Text),
+            ("other".into(), FieldType::Text),
+        ]);
         schema.work.indexes = BTreeMap::from([("unique".into(), vec!["value".into()])]);
-        schema.work.unique_indexes = BTreeSet::from(["unique".into()]);
+        schema
+            .work
+            .indexes
+            .insert("unrelated_unique".into(), vec!["other".into()]);
+        schema.work.unique_indexes = BTreeSet::from(["unique".into(), "unrelated_unique".into()]);
         schema
             .work
             .additional_field_prefixes
@@ -524,6 +529,7 @@ mod tests {
                 body: vec![9; 1 << 20].into(),
                 fields: BTreeMap::from([
                     ("value".into(), FieldValue::Text(value.into())),
+                    ("other".into(), FieldValue::Text(format!("other-{key}"))),
                     ("/attrs/old".into(), FieldValue::Text("old".into())),
                 ]),
             })
@@ -573,10 +579,6 @@ mod tests {
             work_inserts: vec![],
             work_updates: vec![],
         };
-        let before = RecordSnapshot {
-            next_sequence: fenced.next_sequence,
-            ..Default::default()
-        };
         let clause = |key: &str, value: &str| AdministrativeClause {
             id: key.into(),
             selector: WorkSelector::leaf(SelectorNode::Keys(BTreeSet::from([key.into()]))),
@@ -607,7 +609,6 @@ mod tests {
             &fenced,
             &ordinary,
             &intent,
-            &before,
             || Ok(0),
             &QueueLimits::default(),
             &job,
@@ -638,7 +639,6 @@ mod tests {
             &fenced,
             &ordinary,
             &intent,
-            &before,
             || Ok(0),
             &QueueLimits::default(),
             &job,
@@ -675,7 +675,6 @@ mod tests {
             &fenced,
             &ordinary,
             &intent,
-            &before,
             || Ok(0),
             &QueueLimits::default(),
             &job,
@@ -708,7 +707,6 @@ mod tests {
             &fenced,
             &ordinary,
             &body_intent,
-            &before,
             || Ok(0),
             &QueueLimits::default(),
             &job,
@@ -739,7 +737,6 @@ mod tests {
             &fenced,
             &ordinary,
             &intent,
-            &before,
             || Ok(0),
             &QueueLimits::default(),
             &job,
@@ -757,6 +754,141 @@ mod tests {
             current.get::<_, String>(1),
             claimed[0].record.version.to_string()
         );
+        let mut selected = clause("a", "x");
+        if let AdministrativeAction::Update { patch, .. } = &mut selected.action {
+            patch.priority = Some(7);
+        }
+        let rekey_intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![selected]),
+        };
+        for administrative in [false, true] {
+            let patch = WorkPatch {
+                fields: BTreeMap::from([("value".into(), Some(FieldValue::Text("free".into())))]),
+                ..Default::default()
+            };
+            let group = CommitGroup {
+                work_updates: vec![UnclaimedUpdate {
+                    key: "c".into(),
+                    expect: StateExpect::Version(claimed[0].record.version),
+                    change: if administrative {
+                        UnclaimedChange::Administrative {
+                            patch,
+                            lifecycle: AdministrativeLifecycle::Keep,
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                        }
+                    } else {
+                        UnclaimedChange::Patch(patch)
+                    },
+                }],
+                ..ordinary.clone()
+            };
+            let loaded = load_group(&tx, &fenced, &group, &job).await.unwrap();
+            assert!(
+                required_unique_probes(&group, &loaded.snapshot, 0, &fenced.schema)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                prospective_unique_probes(&group, &loaded.snapshot, &fenced.schema)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            drop(loaded);
+            let rejected = plan_native_broad(
+                &tx,
+                &fenced,
+                &group,
+                &rekey_intent,
+                || Ok(0),
+                &QueueLimits::default(),
+                &job,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rejected.proposal().delta.receipt.outcome,
+                GroupOutcome::Rejected(Rejection::Leased)
+            );
+            assert!(rejected.proposal().delta.work.is_empty());
+            drop(rejected);
+            let clocks = std::cell::Cell::new(0);
+            let plan = plan_native_broad(
+                &tx,
+                &fenced,
+                &group,
+                &rekey_intent,
+                || {
+                    clocks.set(clocks.get() + 1);
+                    Ok(1_000_000)
+                },
+                &QueueLimits::default(),
+                &job,
+            )
+            .await
+            .unwrap();
+            assert_eq!(clocks.get(), 1);
+            assert!(matches!(
+                plan.proposal().delta.receipt.outcome,
+                GroupOutcome::Committed { .. }
+            ));
+            assert_eq!(plan.proposal().delta.work.len(), 2);
+            let rekeyed = plan
+                .proposal()
+                .delta
+                .work
+                .iter()
+                .find(|row| row.record.work.key == "c")
+                .unwrap();
+            assert_eq!(
+                rekeyed.record.work.fields["value"],
+                FieldValue::Text("free".into())
+            );
+            assert_eq!(
+                plan.proposal()
+                    .administration
+                    .as_ref()
+                    .unwrap()
+                    .histogram
+                    .outcomes[&AdministrativeOutcomeKind::Changed],
+                1
+            );
+            drop(plan);
+        }
+        let mut deletion = ordinary.clone();
+        deletion.claimed_updates.push(ClaimedUpdate {
+            key: "c".into(),
+            lease: claimed[0].lease.clone(),
+            expected_version: claimed[0].record.version,
+            patch: WorkPatch::default(),
+            disposition: Disposition::Delete,
+        });
+        let plan = plan_native_broad(
+            &tx,
+            &fenced,
+            &deletion,
+            &rekey_intent,
+            || Ok(0),
+            &QueueLimits::default(),
+            &job,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            plan.proposal().delta.receipt.outcome,
+            GroupOutcome::Committed { .. }
+        ));
+        assert_eq!(plan.proposal().delta.deleted_work, vec!["c"]);
+        assert_eq!(plan.proposal().delta.work.len(), 1);
+        assert!(
+            plan.initial_authority()
+                .unique_probes_loaded
+                .iter()
+                .any(|tuple| tuple.index == "unrelated_unique")
+        );
+        drop(plan);
         let mut failing = operation(vec![WorkSelector::all(vec![])], 0);
         let AdministrativeOperation::SelectFirst(clauses) = &mut failing.operation else {
             unreachable!()
@@ -786,7 +918,6 @@ mod tests {
             &fenced,
             &ordinary,
             &failing,
-            &before,
             || {
                 clocks.set(clocks.get() + 1);
                 Ok(0)
@@ -801,6 +932,109 @@ mod tests {
         assert_eq!(clocks.get(), 0);
         assert_eq!(admission.usage().unwrap().1, base_usage);
         drop(reset);
+        tx.rollback().await.unwrap();
+        store.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn native_definition_pin_retains_original_legacy_and_framed_bytes() {
+        let _fixture = physical_fixture().await;
+        #[derive(Serialize)]
+        struct OldDefinition<'a> {
+            fields: &'a BTreeMap<String, FieldType>,
+            indexes: &'a BTreeMap<String, Vec<String>>,
+            unique_indexes: &'a BTreeSet<String>,
+        }
+        #[derive(Serialize)]
+        struct OldSchema<'a> {
+            work: OldDefinition<'a>,
+            state: BTreeMap<String, OldDefinition<'a>>,
+            progress_bound_nanos: u64,
+            max_attempts: u32,
+        }
+        fn old(def: &CollectionDefinition) -> OldDefinition<'_> {
+            OldDefinition {
+                fields: &def.fields,
+                indexes: &def.indexes,
+                unique_indexes: &def.unique_indexes,
+            }
+        }
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let schema = fireweed_conformance::queue_contract::schema();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let queue = QueueAddress {
+            tenant: "api007-native-definition-pin".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        store
+            .provision(ProvisionRequest {
+                queue: queue.clone(),
+                schema: schema.clone(),
+            })
+            .await
+            .unwrap();
+        let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            connection.await.unwrap();
+        });
+        let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+        let job = admission.reserve(0).unwrap();
+        let tx = client.transaction().await.unwrap();
+        let framed = queue_row(&tx, &queue, &job).await.unwrap();
+        let raw: Vec<u8> = tx
+            .query_one(
+                "SELECT definition FROM fireweed_api007.queues WHERE id=$1",
+                &[&framed.id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            framed.definition_pin,
+            DefinitionPin::from_persisted_bytes(&raw)
+        );
+        let legacy = postcard::to_allocvec(&OldSchema {
+            work: old(&schema.work),
+            state: schema
+                .state
+                .iter()
+                .map(|(name, def)| (name.clone(), old(def)))
+                .collect(),
+            progress_bound_nanos: schema.progress_bound_nanos,
+            max_attempts: schema.max_attempts,
+        })
+        .unwrap();
+        assert_eq!(decode_definition(&legacy).unwrap(), schema);
+        tx.execute(
+            "UPDATE fireweed_api007.queues SET definition=$2 WHERE id=$1",
+            &[&framed.id, &legacy],
+        )
+        .await
+        .unwrap();
+        let unframed = queue_row(&tx, &queue, &job).await.unwrap();
+        assert_eq!(unframed.schema, framed.schema);
+        assert_eq!(
+            unframed.definition_pin,
+            DefinitionPin::from_persisted_bytes(&legacy)
+        );
+        assert_ne!(unframed.definition_pin, framed.definition_pin);
+        assert_ne!(
+            unframed.definition_pin,
+            DefinitionPin::from_persisted_bytes(&encode_definition(&unframed.schema).unwrap())
+        );
         tx.rollback().await.unwrap();
         store.shutdown().await.unwrap();
     }
@@ -1154,10 +1388,6 @@ mod tests {
             work_inserts: vec![],
             work_updates: vec![],
         };
-        let before = RecordSnapshot {
-            next_sequence: 5007,
-            ..Default::default()
-        };
         let mut noops = operation(
             vec![WorkSelector::leaf(SelectorNode::Present {
                 name: "integer".into(),
@@ -1213,7 +1443,6 @@ mod tests {
             &fenced,
             &ordinary,
             &noops,
-            &before,
             || {
                 clock_calls.set(clock_calls.get() + 1);
                 assert_eq!(bulk_count.get(), 5001);
@@ -1249,7 +1478,6 @@ mod tests {
             &fenced,
             &ordinary,
             &empty,
-            &before,
             || Ok(10),
             &QueueLimits::default(),
             &job,
@@ -1277,9 +1505,6 @@ mod tests {
             patch: WorkPatch::default(),
             disposition: Disposition::Complete,
         });
-        let loaded = load_group(&tx, &fenced, &expired_group, &job)
-            .await
-            .unwrap();
         let mut control = noops.clone();
         let AdministrativeOperation::SelectFirst(clauses) = &mut control.operation else {
             unreachable!()
@@ -1295,7 +1520,6 @@ mod tests {
             &fenced,
             &ordinary,
             &control,
-            &before,
             || Ok(9),
             &QueueLimits::default(),
             &job,
@@ -1318,7 +1542,6 @@ mod tests {
             &fenced,
             &expired_group,
             &control,
-            &loaded.snapshot,
             || Ok(20),
             &QueueLimits::default(),
             &job,

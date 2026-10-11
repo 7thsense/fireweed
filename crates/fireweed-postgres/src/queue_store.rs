@@ -5,7 +5,7 @@ use fireweed_engine::queue_body::ResolvedBody;
 use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
-    decode_definition, definition_headers, encode_definition,
+    DefinitionPin, decode_definition, definition_headers, encode_definition,
 };
 use fireweed_engine::{
     Clock,
@@ -15,7 +15,7 @@ use fireweed_engine::{
     queue_planner::{
         CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity, combine_deltas,
         insert_unique_probes, lease_hash, plan_commit_group, plan_insert_vector,
-        required_unique_probes, required_work_fields,
+        prospective_unique_probes, required_unique_probes, required_work_fields,
     },
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -315,12 +315,21 @@ impl Drop for JobCompletion {
     }
 }
 struct QueueRow<'a> {
-    _schema_charge: QueueBufferCharge<'a>,
-    _schema_headers: QueueBufferCharge<'a>,
     id: i64,
     schema: QueueSchema,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "exact definition authority retained for forthcoming resolved control frames"
+        )
+    )]
+    definition_pin: DefinitionPin,
     next_sequence: u64,
     secret: Vec<u8>,
+    // Retain schema admission until all owned payloads have dropped.
+    _schema_charge: QueueBufferCharge<'a>,
+    _schema_headers: QueueBufferCharge<'a>,
 }
 async fn queue_row<'a>(
     tx: &Transaction<'_>,
@@ -359,6 +368,7 @@ async fn queue_row<'a>(
         _schema_headers: headers,
         id,
         schema: decode_definition(&definition)?,
+        definition_pin: DefinitionPin::from_persisted_bytes(&definition),
         next_sequence: version(row.get(2))?,
         secret: row.get(3),
     })
@@ -793,6 +803,25 @@ async fn load_unique_probes<'a>(
     )?)?;
     loaded._probe_charges.push(charge);
     let probes: Vec<_> = required_unique_probes(group, &loaded.snapshot, now, &queue.schema)?
+        .into_iter()
+        .filter(|probe| !loaded.snapshot.unique_probes_loaded.contains(probe))
+        .collect();
+    load_unique_authority(tx, queue, loaded, probes, reservation).await
+}
+async fn load_prospective_unique_probes<'a>(
+    tx: &Transaction<'_>,
+    queue: &QueueRow<'_>,
+    loaded: &mut Loaded<'a>,
+    group: &CommitGroup,
+    reservation: &'a QueueReservation,
+) -> QueueResult<()> {
+    let charge = reservation.buffer(group_expansion_budget(
+        group,
+        &loaded.snapshot,
+        &queue.schema,
+    )?)?;
+    loaded._probe_charges.push(charge);
+    let probes = prospective_unique_probes(group, &loaded.snapshot, &queue.schema)?
         .into_iter()
         .filter(|probe| !loaded.snapshot.unique_probes_loaded.contains(probe))
         .collect();

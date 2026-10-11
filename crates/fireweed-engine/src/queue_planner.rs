@@ -714,6 +714,117 @@ pub fn insert_unique_probes(
     }
     Ok(keys)
 }
+/// Clock-independent prospective unique authority. This discovers only tuple
+/// bytes: it does not run CAS, lease/lifecycle checks or business planning. A
+/// caller admits group_expansion_budget before allocation and holds the queue
+/// fence through final planning; eligibility may change while selection waits.
+/// Only affected unique indexes require selective old-field certificates.
+pub fn prospective_unique_probes(
+    group: &CommitGroup,
+    snapshot: &RecordSnapshot,
+    schema: &QueueSchema,
+) -> QueueResult<BTreeSet<UniqueIdentity>> {
+    fn patched(
+        probes: &mut BTreeSet<UniqueIdentity>,
+        old: &StoredWork,
+        edits: &crate::queue_fields::FieldEdits,
+        definition: &CollectionDefinition,
+    ) -> QueueResult<()> {
+        let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+        for index in &definition.unique_indexes {
+            let columns = definition.indexes.get(index).ok_or_else(|| {
+                QueueError::OutcomeUnknown("missing prospective unique index".into())
+            })?;
+            if !columns.iter().any(|name| edits.contains_key(name)) {
+                continue;
+            }
+            let before = columns
+                .iter()
+                .map(|name| view.get(name))
+                .collect::<QueueResult<Vec<_>>>()?;
+            let after = columns
+                .iter()
+                .map(|name| match edits.get(name) {
+                    Some(value) => Ok(value.as_ref()),
+                    None => view.get(name),
+                })
+                .collect::<QueueResult<Vec<_>>>()?;
+            for values in [before, after] {
+                if values.iter().any(Option::is_none) {
+                    continue;
+                }
+                probes.insert(UniqueIdentity {
+                    collection: None,
+                    index: index.clone(),
+                    full_sort_key: crate::queue_index::ordered_key(&values)?,
+                });
+            }
+        }
+        Ok(())
+    }
+    let mut probes = BTreeSet::new();
+    for update in &group.claimed_updates {
+        if let Some(old) = snapshot.work.get(&update.key) {
+            if matches!(update.disposition, Disposition::Delete) {
+                let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                probes.extend(checked_unique_keys(None, &view, &schema.work)?);
+            } else {
+                patched(&mut probes, old, &update.patch.fields, &schema.work)?;
+            }
+        }
+    }
+    for update in &group.work_updates {
+        let Some(old) = snapshot.work.get(&update.key) else {
+            continue;
+        };
+        match &update.change {
+            UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } => {
+                patched(&mut probes, old, &patch.fields, &schema.work)?
+            }
+            UnclaimedChange::Replace(work) => {
+                let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                probes.extend(checked_unique_keys(None, &view, &schema.work)?);
+                probes.extend(record_unique_keys(None, &work.fields, &schema.work)?);
+            }
+            UnclaimedChange::Delete => {
+                let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+                probes.extend(checked_unique_keys(None, &view, &schema.work)?);
+            }
+        }
+    }
+    for work in &group.work_inserts {
+        if let Some(old) = snapshot.work.get(&work.key) {
+            let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
+            probes.extend(checked_unique_keys(None, &view, &schema.work)?);
+        }
+        probes.extend(record_unique_keys(None, &work.fields, &schema.work)?);
+    }
+    for update in &group.state_updates {
+        let definition = schema.state.get(&update.collection).ok_or_else(|| {
+            QueueError::OutcomeUnknown("missing prospective state collection".into())
+        })?;
+        if let Some(old) = snapshot
+            .state
+            .iter()
+            .find(|((collection, key), _)| collection == &update.collection && key == &update.key)
+            .map(|(_, row)| row)
+        {
+            probes.extend(record_unique_keys(
+                Some(update.collection.clone()),
+                &old.fields,
+                definition,
+            )?);
+        }
+        if let StateChange::Put { fields, .. } = &update.change {
+            probes.extend(record_unique_keys(
+                Some(update.collection.clone()),
+                fields,
+                definition,
+            )?);
+        }
+    }
+    Ok(probes)
+}
 /// Probe these complete tuples while retaining the authoritative storage lock.
 /// A hash/prefix lookup is only candidate discovery; compare full_sort_key.
 pub fn required_unique_probes(
@@ -1627,6 +1738,162 @@ mod tests {
             .unique_probes_loaded
             .extend(required_unique_probes(group, snapshot, 0, s).unwrap());
         plan_commit_group(group, snapshot, 0, s).unwrap()
+    }
+    #[test]
+    fn prospective_authority_uses_only_affected_composites_and_ignores_claim_guards() {
+        let mut definition = unique_schema();
+        definition
+            .work
+            .fields
+            .insert("other".into(), FieldType::Text);
+        definition
+            .work
+            .indexes
+            .insert("other_unique".into(), vec!["other".into()]);
+        definition.work.unique_indexes.insert("other_unique".into());
+        let row = StoredWork {
+            record: WorkRecord {
+                work: unique_work("a", "old"),
+                version: 1,
+                insertion_sequence: 1,
+                lifecycle: Lifecycle::Leased,
+                eligible_since: 0,
+                attempts: 1,
+                lease_expires_at: Some(10),
+            },
+            lease_hash: Some(lease_hash(&[42; 32])),
+            field_coverage: FieldCoverage::Selected {
+                names: BTreeSet::from(["target".into()]),
+                prefixes: BTreeSet::new(),
+            },
+            body_loaded: false,
+        };
+        let snapshot = RecordSnapshot {
+            work: BTreeMap::from([("a".into(), row)]),
+            versions: BTreeMap::from([(
+                RecordIdentity {
+                    collection: None,
+                    key: "a".into(),
+                },
+                1,
+            )]),
+            next_sequence: 1,
+            ..Default::default()
+        };
+        let mut request = group();
+        request.claimed_updates.push(ClaimedUpdate {
+            key: "a".into(),
+            lease: LeaseCredential { token: vec![0; 32] },
+            expected_version: 99,
+            patch: WorkPatch {
+                fields: BTreeMap::from([("target".into(), Some(FieldValue::Text("new".into())))]),
+                ..Default::default()
+            },
+            disposition: Disposition::Complete,
+        });
+        assert!(
+            required_unique_probes(&request, &snapshot, 0, &definition)
+                .unwrap()
+                .is_empty()
+        );
+        let prospective = prospective_unique_probes(&request, &snapshot, &definition).unwrap();
+        assert_eq!(prospective.len(), 2);
+        assert!(prospective.iter().all(|tuple| tuple.index == "by_target"));
+        request.claimed_updates[0]
+            .patch
+            .fields
+            .insert("target".into(), None);
+        assert_eq!(
+            prospective_unique_probes(&request, &snapshot, &definition)
+                .unwrap()
+                .len(),
+            1
+        );
+        request.claimed_updates[0].patch.fields.clear();
+        assert!(
+            prospective_unique_probes(&request, &snapshot, &definition)
+                .unwrap()
+                .is_empty()
+        );
+        let mut deletion = snapshot.clone();
+        let old = deletion.work.get_mut("a").unwrap();
+        old.field_coverage = FieldCoverage::Complete;
+        old.record
+            .work
+            .fields
+            .insert("other".into(), FieldValue::Text("unrelated".into()));
+        request.claimed_updates[0].disposition = Disposition::Delete;
+        assert!(request.claimed_updates[0].patch.fields.is_empty());
+        let releases = prospective_unique_probes(&request, &deletion, &definition).unwrap();
+        assert_eq!(releases.len(), 2);
+        assert!(releases.iter().any(|tuple| tuple.index == "other_unique"));
+        request.claimed_updates[0].disposition = Disposition::Complete;
+        // A composite edit must certify unchanged components, even when one
+        // changed component is explicitly removed and the tuple will be sparse.
+        definition
+            .work
+            .indexes
+            .insert("by_target".into(), vec!["target".into(), "other".into()]);
+        request.claimed_updates[0]
+            .patch
+            .fields
+            .insert("target".into(), None);
+        assert!(matches!(
+            prospective_unique_probes(&request, &snapshot, &definition),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+    }
+    #[test]
+    fn prospective_state_and_insert_tuples_do_not_depend_on_cas_or_lease_outcomes() {
+        let mut definition = unique_schema();
+        definition
+            .state
+            .insert("instance".into(), definition.work.clone());
+        let snapshot = RecordSnapshot {
+            state: BTreeMap::from([(
+                ("instance".into(), "instance".into()),
+                StateRecord {
+                    collection: "instance".into(),
+                    key: "instance".into(),
+                    version: 1,
+                    fields: BTreeMap::from([("target".into(), FieldValue::Text("old".into()))]),
+                    value: Default::default(),
+                },
+            )]),
+            versions: BTreeMap::from([(
+                RecordIdentity {
+                    collection: Some("instance".into()),
+                    key: "instance".into(),
+                },
+                1,
+            )]),
+            ..Default::default()
+        };
+        let mut request = group();
+        request.work_inserts.push(unique_work("new", "inserted"));
+        request.state_updates.push(StateUpdate {
+            collection: "instance".into(),
+            key: "instance".into(),
+            expect: StateExpect::Version(99),
+            change: StateChange::Put {
+                fields: BTreeMap::from([("target".into(), FieldValue::Text("new".into()))]),
+                value: Default::default(),
+            },
+        });
+        assert!(
+            required_unique_probes(&request, &snapshot, 0, &definition)
+                .unwrap()
+                .is_empty()
+        );
+        let prospective = prospective_unique_probes(&request, &snapshot, &definition).unwrap();
+        assert_eq!(prospective.len(), 3);
+        assert_eq!(
+            prospective
+                .iter()
+                .filter(|tuple| tuple.collection.as_deref() == Some("instance"))
+                .count(),
+            2
+        );
     }
     #[test]
     fn complete_and_selected_planning_match_without_unrelated_payload() {
