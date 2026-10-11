@@ -46,6 +46,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Small backend-neutral claim/commit queue interface (API-007).
+pub mod queue;
+
 mod facade;
 mod operator;
 #[cfg(feature = "turso")]

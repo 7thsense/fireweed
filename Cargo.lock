@@ -1400,6 +1400,7 @@ name = "fireweed"
 version = "0.31.32"
 dependencies = [
  "bytes",
+ "fireweed-conformance",
  "fireweed-core",
  "fireweed-engine",
  "fireweed-memory",

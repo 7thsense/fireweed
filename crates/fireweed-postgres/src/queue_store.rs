@@ -174,7 +174,8 @@ struct Inner {
     limits: QueueLimits,
 }
 /// Uses real SQL transactions and indexed selection, not the old blocking
-/// PostgreSQL adapter or an in-memory projection. No production activation yet.
+/// PostgreSQL adapter or an in-memory projection. The concrete consumer facade
+/// constructs this mandatory native baseline; S3/Turso qualification is separate.
 #[derive(Clone)]
 pub struct PostgresQueueStore {
     inner: Arc<Inner>,

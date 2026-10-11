@@ -50,8 +50,9 @@ tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync
 # Public construction is object-log + Turso (ADR-024). Whitebox tests use
 # Turso `:memory:` (`TursoConfig::in_memory`), not `fireweed-memory`.
 # `memory` stays available as an opt-in crate feature and is not a public
-# projection. `postgres` is opt-in and is the control-plane client, not a
-# public log or projection.
+# projection. `postgres` is opt-in: the legacy facade uses it for the control
+# plane; API-007 queue::Queue also offers the native PostgreSQL baseline. It does
+# not restore retired PostgreSQL log/projection axes on the legacy facade.
 default = ["objectlog", "turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 # objectlog enables the shared Tokio reactor used by LogEngine I/O.
@@ -61,6 +62,7 @@ postgres = ["dep:fireweed-postgres", "dep:tokio"]
 turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
 
 [dev-dependencies]
+fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }
 # product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.
 fireweed-release = { path = "../fireweed-release" }
@@ -196,3 +198,8 @@ required-features = ["memory", "objectlog", "postgres", "turso"]
 name = "objectlog_turso_postgres_control"
 path = "tests/objectlog_turso_postgres_control.rs"
 required-features = ["objectlog", "turso", "postgres"]
+
+[[test]]
+name = "simple_queue_postgres"
+path = "tests/simple_queue_postgres.rs"
+required-features = ["postgres"]
