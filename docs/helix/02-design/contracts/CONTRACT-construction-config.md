@@ -11,7 +11,7 @@ ddx:
       to: api-queue-claim-commit-contract
 ---
 
-This is the target design and its acceptance contract. The public PostgreSQL path is implemented; S3/Turso assembly and the single Snorri adapter cutover remain pending. Invalid configuration before all I/O and explicit bounded capacity settings remain implementation and negative-test gates, including checked admission/scratch multipliers before PostgreSQL connection or DDL. Existing code is not qualified merely by this specification.
+This is the target design and its acceptance contract. The public PostgreSQL path validates interface limits, pool size, checked admission/scratch multipliers and the required parsed URL before connection or DDL; configuration and connection-setup errors redact credentials. S3/Turso assembly, explicit custom capacity settings and the single Snorri adapter cutover remain pending. Existing code is not qualified merely by this specification.
 
 
 # Queue construction and configuration

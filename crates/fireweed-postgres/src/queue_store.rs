@@ -130,23 +130,38 @@ impl PostgresQueueStore {
         limits: QueueLimits,
         pool_size: usize,
     ) -> QueueResult<Self> {
-        limits.validate()?;
+        let runtime = fireweed_engine::queue_runtime::ValidatedQueueRuntime::for_limits(&limits)?;
         if !(1..=32).contains(&pool_size) {
             return Err(QueueError::Invalid("pool size must be 1..32".into()));
         }
+        if url.trim().is_empty() {
+            return Err(QueueError::Invalid("PostgreSQL URL is required".into()));
+        }
+        let config: tokio_postgres::Config = url
+            .parse()
+            .map_err(|_| QueueError::Invalid("invalid PostgreSQL URL".into()))?;
+        // Every fallible resource/configuration check precedes TLS, DNS, socket
+        // creation and schema DDL. No late arithmetic can fail after publication.
+        let admission = QueueAdmission::new(runtime.operations(), runtime.retained_bytes())?;
+        let scratch_quota = fireweed_queue_spool::ScratchDiskQuota::new(runtime.scratch_bytes())?;
+        let scratch_workers =
+            fireweed_queue_spool::ScratchWorkers::new(pool_size, runtime.operations())?;
         let mut clients = vec![];
         let mut drivers = vec![];
         for connection_index in 0..pool_size {
             #[cfg(not(feature = "tls"))]
-            let (mut client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+            let (mut client, connection) = config
+                .connect(tokio_postgres::NoTls)
                 .await
-                .map_err(storage)?;
+                .map_err(|_| storage("PostgreSQL connection setup failed"))?;
             #[cfg(feature = "tls")]
             let (mut client, connection) = {
-                let tls = native_tls::TlsConnector::new().map_err(storage)?;
-                tokio_postgres::connect(url, postgres_native_tls::MakeTlsConnector::new(tls))
+                let tls = native_tls::TlsConnector::new()
+                    .map_err(|_| storage("PostgreSQL connection setup failed"))?;
+                config
+                    .connect(postgres_native_tls::MakeTlsConnector::new(tls))
                     .await
-                    .map_err(storage)?
+                    .map_err(|_| storage("PostgreSQL connection setup failed"))?
             };
             drivers.push(tokio::spawn(connection));
             // A success must survive process/server loss, regardless of URL/session
@@ -195,27 +210,18 @@ impl PostgresQueueStore {
             }
             clients.push(Mutex::new(Some(client)));
         }
-        let bytes = limits
-            .max_request_bytes
-            .checked_mul(8)
-            .ok_or(QueueError::TooLarge)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 clients,
                 drivers: Mutex::new(drivers),
-                admission: QueueAdmission::new(64, bytes)?,
+                admission,
                 slots: Arc::new(Semaphore::new(pool_size)),
                 next: AtomicUsize::new(0),
                 done: Arc::new(Notify::new()),
                 clock,
                 limits,
-                scratch_workers: fireweed_queue_spool::ScratchWorkers::new(pool_size, 64)?,
-                scratch_quota: fireweed_queue_spool::ScratchDiskQuota::new(
-                    limits
-                        .max_group_bytes
-                        .checked_mul(16)
-                        .ok_or(QueueError::TooLarge)?,
-                )?,
+                scratch_workers,
+                scratch_quota,
             }),
         })
     }

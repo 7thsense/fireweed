@@ -128,3 +128,50 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     assert_eq!(state[0].as_ref().unwrap().value.as_ref(), &[7, 8]);
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn invalid_construction_never_contacts_server_and_redacts_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let secret = "CONSTRUCTION-SECRET-MUST-NOT-APPEAR";
+    let url = format!("postgresql://user:{secret}@{address}/postgres");
+    let clock = Arc::new(TestClock::default());
+    let mut cases = Vec::new();
+    let mut invalid = PostgresOptions::new(ConfigSecret::new(url.clone()));
+    invalid.limits.max_records = 0;
+    cases.push((invalid, false));
+    for pool in [0, 33] {
+        let mut invalid = PostgresOptions::new(ConfigSecret::new(url.clone()));
+        invalid.pool_size = pool;
+        cases.push((invalid, false));
+    }
+    let mut overflow = PostgresOptions::new(ConfigSecret::new(url.clone()));
+    overflow.limits.max_request_bytes = u64::MAX / 8 + 1;
+    cases.push((overflow, true));
+    let mut overflow = PostgresOptions::new(ConfigSecret::new(url));
+    overflow.limits.max_request_bytes = u64::MAX / 16 + 1;
+    overflow.limits.max_group_bytes = u64::MAX / 16 + 1;
+    cases.push((overflow, true));
+    for invalid_url in ["   ".to_owned(), format!("host='{secret}")] {
+        cases.push((PostgresOptions::new(ConfigSecret::new(invalid_url)), false));
+    }
+    for (options, overflow) in cases {
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::select! {
+                result = Queue::postgres(options, clock.clone()) => match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("invalid configuration constructed a queue"),
+                },
+                _ = listener.accept() => panic!("invalid configuration contacted PostgreSQL"),
+            }
+        })
+        .await
+        .expect("configuration must fail without waiting for I/O");
+        assert!(!format!("{error:?}").contains(secret));
+        if overflow {
+            assert_eq!(error, QueueError::TooLarge);
+        } else {
+            assert!(matches!(error, QueueError::Invalid(_)));
+        }
+    }
+}
