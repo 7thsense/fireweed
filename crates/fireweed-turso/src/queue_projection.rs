@@ -1,5 +1,6 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
+mod replay;
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -19,6 +20,7 @@ use fireweed_engine::{
     },
 };
 use fireweed_queue_spool::ScratchWorkers;
+pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 use turso::{
@@ -2434,13 +2436,6 @@ mod tests {
         input: ClaimFixture<'_>,
         bad_priority: bool,
     ) -> (OwnedQueueLogRecord, RecordSnapshot, Vec<u8>, [u8; 32]) {
-        use fireweed_engine::{
-            queue_claim_publication::{ClaimPublicationInput, encode_claim_publication},
-            queue_claim_receipt::{ClaimLease, encode_claim_receipt},
-            queue_log_record::encode_checked_claim_record,
-            queue_planner::CommitDelta,
-        };
-        let before = input.before;
         let request = ClaimRequest {
             queue: address(),
             request_id: input.identity.into(),
@@ -2453,6 +2448,20 @@ mod tests {
             fields: Some(Default::default()),
             include_body: false,
         };
+        claim_fixture_with_request(input, bad_priority, request)
+    }
+    fn claim_fixture_with_request(
+        input: ClaimFixture<'_>,
+        bad_priority: bool,
+        request: ClaimRequest,
+    ) -> (OwnedQueueLogRecord, RecordSnapshot, Vec<u8>, [u8; 32]) {
+        use fireweed_engine::{
+            queue_claim_publication::{ClaimPublicationInput, encode_claim_publication},
+            queue_claim_receipt::{ClaimLease, encode_claim_receipt},
+            queue_log_record::encode_checked_claim_record,
+            queue_planner::CommitDelta,
+        };
+        let before = input.before;
         let mut after = before.clone();
         let mut work = vec![];
         let mut versions = vec![];
@@ -2549,6 +2558,611 @@ mod tests {
             expected,
             fingerprint,
         )
+    }
+    async fn read_claim_fixture(
+        projection: &Arc<QueueProjection>,
+        definition: &AdmittedQueueDefinition,
+        request: ClaimRequest,
+        now: i64,
+        offset: u64,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<AdmittedClaimReplay>> {
+        projection
+            .replay_claim(
+                ClaimReplayInput {
+                    genesis: encode_checked_genesis(
+                        1,
+                        &address(),
+                        definition,
+                        &[31; 32],
+                        16 << 20,
+                        job,
+                    )?,
+                    request,
+                    now,
+                    limits: QueueLimits::default(),
+                    required_next_offset: offset,
+                    required_insertion_sequence: 2,
+                    required_last_record_epoch: 1,
+                },
+                job,
+                workers,
+            )
+            .await
+    }
+    #[tokio::test]
+    async fn current_claim_replay_renews_reopens_and_rejects_whole_partial_group_before_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("live-replay.db");
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (mut projection, definition) = bootstrap(&path, &job, &workers).await;
+        let before = seed(&projection, &definition, &job, &workers, false).await;
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "live".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: None,
+            include_body: true,
+        };
+        let (record, mut claimed, _, _) = claim_fixture_with_request(
+            ClaimFixture {
+                before: &before,
+                definition: &definition,
+                job: &job,
+                identity: "live",
+                now: 10,
+                token_seed: 11,
+                selected: &["a", "b"],
+            },
+            false,
+            request.clone(),
+        );
+        projection.apply(record, 2, &job, &workers).await.unwrap();
+        let replay = read_claim_fixture(
+            &projection,
+            &definition,
+            request.clone(),
+            11,
+            3,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            replay
+                .records()
+                .iter()
+                .map(|work| work.record.work.key.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            replay.records()[0].record.work.fields,
+            before.work["a"].record.work.fields
+        );
+        assert_eq!(
+            replay.records()[0].record.work.body,
+            before.work["a"].record.work.body
+        );
+        let original = replay.records().to_vec();
+        drop(replay);
+        let mut missing = request.clone();
+        missing.request_id = "absent".into();
+        assert!(
+            read_claim_fixture(&projection, &definition, missing, 11, 3, &job, &workers)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut conflict = request.clone();
+        conflict.order = ClaimOrder::PriorityDescending;
+        let conflict_result =
+            read_claim_fixture(&projection, &definition, conflict, 11, 3, &job, &workers).await;
+        assert_eq!(conflict_result.err(), Some(QueueError::RequestConflict));
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                11,
+                2,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        for (sql, restore) in [
+            (
+                "UPDATE q7_queues SET next_sequence=x'0000000000000003'",
+                "UPDATE q7_queues SET next_sequence=x'0000000000000002'",
+            ),
+            (
+                "UPDATE q7_queues SET last_record_epoch=x'0000000000000002'",
+                "UPDATE q7_queues SET last_record_epoch=x'0000000000000001'",
+            ),
+        ] {
+            execute_for_test(&projection, sql, vec![]).await;
+            assert!(matches!(
+                read_claim_fixture(
+                    &projection,
+                    &definition,
+                    request.clone(),
+                    11,
+                    3,
+                    &job,
+                    &workers
+                )
+                .await,
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            execute_for_test(&projection, restore, vec![]).await;
+        }
+        execute_for_test(&projection,"INSERT INTO q7_fields SELECT record_id,queue_id,collection,999,prefix,hash,full_key,value FROM q7_fields WHERE record_id=(SELECT id FROM q7_records WHERE key=?1)",vec![blob(b"a")]).await;
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                11,
+                3,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        execute_for_test(&projection, "DELETE FROM q7_fields WHERE field=999", vec![]).await;
+        execute_for_test(&projection,"UPDATE q7_fields SET value=?2 WHERE record_id=(SELECT id FROM q7_records WHERE key=?1)",vec![blob(b"a"),blob(&encode(&FieldValue::Text("wrong-type".into())).unwrap())]).await;
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                11,
+                3,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        execute_for_test(&projection,"UPDATE q7_fields SET value=?2 WHERE record_id=(SELECT id FROM q7_records WHERE key=?1)",vec![blob(b"a"),blob(&encode(&FieldValue::Integer(1)).unwrap())]).await;
+        let mut renewal = group("renew-live");
+        renewal.claimed_updates = original
+            .iter()
+            .map(|work| ClaimedUpdate {
+                key: work.record.work.key.clone(),
+                lease: work.lease.clone(),
+                expected_version: work.record.version,
+                patch: WorkPatch::default(),
+                disposition: Disposition::Retain {
+                    renew_nanos: Some(2_000_000),
+                },
+            })
+            .collect();
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut claimed,
+            &renewal,
+            3,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        drop(projection);
+        projection = QueueProjection::open(&path, &job, &workers).await.unwrap();
+        let renewed = read_claim_fixture(
+            &projection,
+            &definition,
+            request.clone(),
+            1_000_010,
+            4,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        for (current, old) in renewed.records().iter().zip(&original) {
+            assert_eq!(current.lease, old.lease);
+            assert!(current.record.version > old.record.version);
+            assert_eq!(current.record.lease_expires_at, Some(2_000_020));
+        }
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                2_000_020,
+                4,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::ClaimExpired)
+        ));
+        execute_for_test(
+            &projection,
+            "UPDATE q7_records SET lease_hash=zeroblob(4194304) WHERE key=?1",
+            vec![blob(b"a")],
+        )
+        .await;
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                21,
+                4,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        execute_for_test(
+            &projection,
+            "UPDATE q7_records SET lease_hash=?2 WHERE key=?1",
+            vec![
+                blob(b"a"),
+                blob(&fireweed_engine::queue_planner::lease_hash(
+                    &original[0].lease.token,
+                )),
+            ],
+        )
+        .await;
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET expired=1 WHERE domain=1 AND identity=?1",
+            vec![blob(b"live")],
+        )
+        .await;
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                21,
+                4,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::RequestExpired)
+        ));
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET expired=0 WHERE domain=1 AND identity=?1",
+            vec![blob(b"live")],
+        )
+        .await;
+        let mut settlement = group("settle-one");
+        let current = &renewed.records()[0];
+        settlement.claimed_updates.push(ClaimedUpdate {
+            key: current.record.work.key.clone(),
+            lease: current.lease.clone(),
+            expected_version: current.record.version,
+            patch: WorkPatch::default(),
+            disposition: Disposition::Complete,
+        });
+        drop(renewed);
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut claimed,
+            &settlement,
+            4,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        execute_for_test(&projection,"UPDATE q7_bodies SET value=zeroblob(4194304) WHERE record_id=(SELECT id FROM q7_records WHERE key=?1)",vec![blob(b"b")]).await;
+        assert!(matches!(
+            read_claim_fixture(&projection, &definition, request, 21, 5, &job, &workers).await,
+            Err(QueueError::ClaimExpired)
+        ));
+        let autocommit = tokio::task::spawn_blocking({
+            let projection = Arc::clone(&projection);
+            move || {
+                crate::tx::block_on_owned_apply(async {
+                    projection
+                        .writer
+                        .lock()
+                        .await
+                        .as_ref()
+                        .unwrap()
+                        .is_autocommit()
+                        .unwrap()
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert!(autocommit);
+        drop(projection);
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_started_claim_reader_retains_snapshot_and_result_until_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cancel-replay.db");
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) = bootstrap(&path, &job, &workers).await;
+        let before = seed(&projection, &definition, &job, &workers, false).await;
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "cancel-reader".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: None,
+            include_body: true,
+        };
+        let (record, _, _, _) = claim_fixture_with_request(
+            ClaimFixture {
+                before: &before,
+                definition: &definition,
+                job: &job,
+                identity: "cancel-reader",
+                now: 10,
+                token_seed: 11,
+                selected: &["a", "b"],
+            },
+            false,
+            request.clone(),
+        );
+        projection.apply(record, 2, &job, &workers).await.unwrap();
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        let terminal = Arc::new(tokio::sync::Notify::new());
+        let notify = Arc::clone(&terminal);
+        let job = Arc::new(
+            admission
+                .reserve(0)
+                .unwrap()
+                .with_terminal_callback(move || notify.notify_one())
+                .unwrap(),
+        );
+        let definition =
+            AdmittedQueueDefinition::from_raw(&encode_definition(&schema()).unwrap(), &job)
+                .unwrap();
+        let genesis =
+            encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job).unwrap();
+        drop(definition);
+        let pause = Arc::new(ApplyPause {
+            after_commit: false,
+            fail_reply: false,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(false).0,
+        });
+        *projection.pause.lock().await = Some(Arc::clone(&pause));
+        let reader = Arc::clone(&projection);
+        let owned_workers = workers.clone();
+        let caller = tokio::spawn(async move {
+            reader
+                .replay_claim(
+                    ClaimReplayInput {
+                        genesis,
+                        request,
+                        now: 11,
+                        limits: QueueLimits::default(),
+                        required_next_offset: 3,
+                        required_insertion_sequence: 2,
+                        required_last_record_epoch: 1,
+                    },
+                    &job,
+                    &owned_workers,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
+            .await
+            .unwrap();
+        let held = admission.usage().unwrap();
+        assert_eq!(held.0, 1);
+        assert!(held.1 > 65536);
+        caller.abort();
+        assert!(caller.await.is_err());
+        assert_eq!(admission.usage().unwrap(), held);
+        pause.release.send_replace(true);
+        workers.close_and_drain().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), terminal.notified())
+            .await
+            .unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        let writer = Arc::clone(&projection);
+        assert!(
+            tokio::task::spawn_blocking(move || crate::tx::block_on_owned_apply(async {
+                writer
+                    .writer
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .is_autocommit()
+                    .unwrap()
+            }))
+            .await
+            .unwrap()
+        );
+        let row = inspect(
+            &projection,
+            "SELECT applied_next_offset,(SELECT COUNT(*) FROM q7_requests) FROM q7_queues",
+            vec![],
+            2,
+        )
+        .await;
+        assert_eq!(integer(&row[0]).unwrap(), 3);
+        assert_eq!(integer(&row[1]).unwrap(), 2);
+    }
+    #[tokio::test]
+    async fn selective_and_empty_current_replay_omit_opaque_payload_under_small_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("selective-replay.db");
+        let initial = QueueAdmission::new(1, 64 << 20).unwrap();
+        let initial_job = Arc::new(initial.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) = bootstrap(&path, &initial_job, &workers).await;
+        let mut before = seed(&projection, &definition, &initial_job, &workers, true).await;
+        for work in before.work.values_mut() {
+            work.record.work.fields.clear();
+            work.record.work.body = Bytes::new();
+            work.field_coverage = FieldCoverage::Selected {
+                names: Default::default(),
+                prefixes: Default::default(),
+            };
+            work.body_loaded = false;
+        }
+        drop(definition);
+        drop(initial_job);
+        assert_eq!(initial.usage().unwrap(), (0, 0));
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let definition =
+            AdmittedQueueDefinition::from_raw(&encode_definition(&schema()).unwrap(), &job)
+                .unwrap();
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "selective".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        let (record, claimed, _, _) = claim_fixture_with_request(
+            ClaimFixture {
+                before: &before,
+                definition: &definition,
+                job: &job,
+                identity: "selective",
+                now: 10,
+                token_seed: 11,
+                selected: &["a", "b"],
+            },
+            false,
+            request.clone(),
+        );
+        projection.apply(record, 2, &job, &workers).await.unwrap();
+        let replay = read_claim_fixture(&projection, &definition, request, 11, 3, &job, &workers)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.records().len(), 2);
+        assert!(
+            replay
+                .records()
+                .iter()
+                .all(|work| work.record.work.fields.is_empty() && work.record.work.body.is_empty())
+        );
+        drop(replay);
+        let mut empty_request = ClaimRequest {
+            queue: address(),
+            request_id: "empty-current".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        let (record, _, _, _) = claim_fixture_with_request(
+            ClaimFixture {
+                before: &claimed,
+                definition: &definition,
+                job: &job,
+                identity: "empty-current",
+                now: 10,
+                token_seed: 11,
+                selected: &[],
+            },
+            false,
+            empty_request.clone(),
+        );
+        projection.apply(record, 3, &job, &workers).await.unwrap();
+        drop(projection);
+        let projection = QueueProjection::open(&path, &job, &workers).await.unwrap();
+        for now in [11, i64::MAX] {
+            let replay = read_claim_fixture(
+                &projection,
+                &definition,
+                empty_request.clone(),
+                now,
+                4,
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(replay.records().is_empty());
+        }
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET expired=1 WHERE identity=?1",
+            vec![blob(b"empty-current")],
+        )
+        .await;
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                empty_request.clone(),
+                11,
+                4,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::RequestExpired)
+        ));
+        empty_request.order = ClaimOrder::PriorityDescending;
+        assert!(matches!(
+            read_claim_fixture(
+                &projection,
+                &definition,
+                empty_request,
+                11,
+                4,
+                &job,
+                &workers
+            )
+            .await,
+            Err(QueueError::RequestConflict)
+        ));
+        drop(projection);
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
     }
     #[tokio::test]
     async fn claims_empty_reclaim_and_late_failures_publish_one_atomic_receipt_cursor() {
