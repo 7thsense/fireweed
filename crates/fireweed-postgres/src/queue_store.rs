@@ -7,6 +7,11 @@ use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
     DefinitionPin, decode_definition, definition_headers, encode_definition,
 };
+use fireweed_engine::queue_storage_layout::{
+    collection_definition as definition, collection_number as collection, decode,
+    decode_lifecycle as lifecycle, discovery_digest, discovery_prefix as prefix, encode,
+    encode_lifecycle as life, field_number as field_no, index_number as index_no,
+};
 use fireweed_engine::{
     Clock,
     queue_admission::{QueueAdmission, QueueBufferCharge, QueueReservation},
@@ -75,16 +80,6 @@ const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r
 fn storage(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(error.to_string())
 }
-fn encode<T: Serialize>(value: &T) -> QueueResult<Vec<u8>> {
-    postcard::to_allocvec(value).map_err(storage)
-}
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> QueueResult<T> {
-    let (value, rest) = postcard::take_from_bytes(bytes).map_err(storage)?;
-    if !rest.is_empty() {
-        return Err(storage("trailing persisted bytes"));
-    }
-    Ok(value)
-}
 #[cfg(test)]
 thread_local! {
     // Only discovery hashes collide. Semantic fingerprints, lease hashes and
@@ -97,70 +92,13 @@ fn probe_hash(bytes: &[u8]) -> Vec<u8> {
     if COLLIDING_PROBES.get() {
         return vec![0; 32];
     }
-    Sha256::digest(bytes).to_vec()
-}
-fn prefix(bytes: &[u8]) -> Vec<u8> {
-    bytes[..bytes.len().min(256)].to_vec()
+    discovery_digest(bytes).to_vec()
 }
 fn version(raw: String) -> QueueResult<u64> {
     raw.parse().map_err(storage)
 }
 fn key(raw: Vec<u8>) -> QueueResult<String> {
     String::from_utf8(raw).map_err(storage)
-}
-fn life(value: Lifecycle) -> i16 {
-    match value {
-        Lifecycle::Pending => 0,
-        Lifecycle::Leased => 1,
-        Lifecycle::Completed => 2,
-        Lifecycle::Failed => 3,
-    }
-}
-fn lifecycle(value: i16) -> QueueResult<Lifecycle> {
-    match value {
-        0 => Ok(Lifecycle::Pending),
-        1 => Ok(Lifecycle::Leased),
-        2 => Ok(Lifecycle::Completed),
-        3 => Ok(Lifecycle::Failed),
-        _ => Err(storage("corrupt lifecycle")),
-    }
-}
-fn collection(schema: &QueueSchema, name: Option<&str>) -> QueueResult<i32> {
-    match name {
-        None => Ok(0),
-        Some(name) => schema
-            .state
-            .keys()
-            .position(|key| key == name)
-            .map(|n| n as i32 + 1)
-            .ok_or_else(|| QueueError::Invalid("undeclared state collection".into())),
-    }
-}
-fn definition(schema: &QueueSchema, col: i32) -> QueueResult<&CollectionDefinition> {
-    if col == 0 {
-        Ok(&schema.work)
-    } else {
-        schema
-            .state
-            .values()
-            .nth((col - 1) as usize)
-            .ok_or_else(|| storage("corrupt collection id"))
-    }
-}
-fn field_no(def: &CollectionDefinition, name: &str) -> QueueResult<i32> {
-    def.fields
-        .keys()
-        .position(|key| key == name)
-        .map(|n| n as i32)
-        .or_else(|| def.admits_field(name).then_some(-1))
-        .ok_or_else(|| QueueError::Invalid("undeclared field".into()))
-}
-fn index_no(def: &CollectionDefinition, name: &str) -> QueueResult<i32> {
-    def.indexes
-        .keys()
-        .position(|key| key == name)
-        .map(|n| n as i32)
-        .ok_or_else(|| QueueError::Invalid("undeclared index".into()))
 }
 
 struct Inner {
