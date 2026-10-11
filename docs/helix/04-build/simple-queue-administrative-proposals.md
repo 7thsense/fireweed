@@ -1,0 +1,65 @@
+---
+ddx:
+  id: build-simple-queue-administrative-proposals
+  depends_on:
+    - build-simple-queue-consumer-integration-binding
+    - build-simple-queue-indexed-attributes
+  status: accepted
+---
+
+# Shared administrative selection and target proposals
+
+This iteration adds supporting vocabulary and pure per-target proposals. It does
+not activate an administrative QueueStore operation or manufacture a durable
+receipt. The operation planner must still enforce queue fencing, native indexed
+selection, initial-snapshot ownership, positional duplicates, disjoint atomic
+state/new-work updates, uniqueness, retained replay, overflow, preview and exact
+resolved publication. No unsupported backend method or new transaction API exists.
+
+Selectors express All/Any/Not, typed field predicates, presence/absence, key sets,
+stored or effective lifecycle, attempts, exact signed-nanosecond available time,
+and lease activity at explicit evaluated_at. Stored lifecycle is preserved raw;
+expired leases may separately classify effectively Pending. Empty All is true and
+empty Any false. Presence of canonical JSON-null bytes differs from field absence.
+SelectFirst freezes the earliest matching clause before checking its preconditions.
+Failure cannot transfer a target to another rule.
+
+Addressed entries retain input order, optional expected versions and per-target
+business outcomes. Standalone validation enforces the common addressed count,
+types, structure and individual body bounds; complete serialized-intent and
+resolved-publication byte admission remain integration gates. The old Turso-only
+1000-entry cap is not a generic interface requirement. Duplicate keys remain representable: the operation planner
+must report later duplicates positionally Invalid. An expected version of zero
+is representable and conflicts with a real positive version. Broad selections
+have no helper match-count cap and return aggregates rather than before rows.
+
+Before metadata retains stored lifecycle, version, attempts, due/eligible time and
+lease expiry plus explicitly selected fields, never the body or a lease token.
+Prefix removal is restricted to provisioned additional namespaces. Removal happens
+before explicit edits, so additions win. Complete field authority is required;
+old body authority is required only when comparing an explicit body replacement.
+An unloaded body stays Preserve. Proposals validate durable version high water
+and fail closed on inconsistent authority or exhausted versions.
+
+Existing version-fenced Administrative updates now call one extracted transition
+helper with unchanged operational-clock semantics. Administrative proposals call
+that same helper with explicit evaluated_at. This timestamp confers no claim
+credentials and does not change ordinary claim/token/renewal ownership clocks.
+Candidates are not uniqueness-qualified or durably committed; final operation
+planning must still reject or attribute unique conflicts before publication.
+
+Validation and reference evaluation use child-iterator stacks with O(depth)
+scratch. An explicit common maximum selector depth of 64 must be checked before
+recursive serialization/fingerprinting; this is a new expression bound, not a
+match cap. The owned AST still has recursive derived clone/drop/deserialization.
+No wire decoder or receipt persistence is activated here. The eventual transport
+must bound decoding/ownership before exposing these types to untrusted input;
+merely calling validation after an unbounded decode is insufficient.
+
+Pure regressions cover first-match failed preconditions over 5001 targets, wide
+selector traversal, exact expiry boundaries, raw/effective lifecycle distinction,
+missing/null bytes, prefix precedence, compact before fields, no-op versions,
+missing/conflicting rows, unloaded-body preservation and materialization failures.
+The 5001-target test establishes absence of a helper cap only. Whole-selector
+atomicity, bounded spooling, above-4096 publication, preview/replay, native backend
+parity, legacy migration and consumer activation remain required next gates.

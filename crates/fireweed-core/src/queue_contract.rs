@@ -432,10 +432,10 @@ pub fn timestamp_from_nanos(value: i64) -> crate::UtcTimestamp {
         nanoseconds: value.rem_euclid(1_000_000_000) as u32,
     }
 }
-fn invalid(message: &str) -> QueueError {
+pub(crate) fn invalid(message: &str) -> QueueError {
     QueueError::Invalid(message.into())
 }
-fn name(value: &str) -> QueueResult<()> {
+pub(crate) fn name(value: &str) -> QueueResult<()> {
     if value.trim().is_empty() {
         return Err(invalid("invalid identifier"));
     }
@@ -608,40 +608,48 @@ impl Filter {
             }
         }
         for (key, predicate) in &self.fields {
-            name(key)?;
-            if !definition.admits_field(key) {
-                return Err(invalid("undeclared filter field"));
-            }
-            match predicate {
-                Predicate::Equal(value) => definition.validate_value(key, value)?,
-                Predicate::In(values) => {
-                    if values.is_empty() {
-                        return Err(invalid("empty membership predicate"));
-                    }
-                    for value in values {
-                        definition.validate_value(key, value)?;
-                    }
-                }
-                Predicate::Range { lower, upper } => {
-                    if lower.is_none() && upper.is_none() {
-                        return Err(invalid("empty range"));
-                    }
-                    for bound in lower.iter().chain(upper.iter()) {
-                        definition.validate_value(key, bound.value())?;
-                    }
-                    if let (Some(lower), Some(upper)) = (lower, upper)
-                        && matches!(
-                            compare_fields(lower.value(), upper.value()),
-                            None | Some(std::cmp::Ordering::Greater)
-                        )
-                    {
-                        return Err(invalid("inverted range"));
-                    }
-                }
-            }
+            validate_field_predicate(definition, key, predicate)?;
         }
         Ok(())
     }
+}
+pub(crate) fn validate_field_predicate(
+    definition: &CollectionDefinition,
+    key: &str,
+    predicate: &Predicate,
+) -> QueueResult<()> {
+    name(key)?;
+    if !definition.admits_field(key) {
+        return Err(invalid("undeclared filter field"));
+    }
+    match predicate {
+        Predicate::Equal(value) => definition.validate_value(key, value)?,
+        Predicate::In(values) => {
+            if values.is_empty() {
+                return Err(invalid("empty membership predicate"));
+            }
+            for value in values {
+                definition.validate_value(key, value)?;
+            }
+        }
+        Predicate::Range { lower, upper } => {
+            if lower.is_none() && upper.is_none() {
+                return Err(invalid("empty range"));
+            }
+            for bound in lower.iter().chain(upper.iter()) {
+                definition.validate_value(key, bound.value())?;
+            }
+            if let (Some(lower), Some(upper)) = (lower, upper)
+                && matches!(
+                    compare_fields(lower.value(), upper.value()),
+                    None | Some(std::cmp::Ordering::Greater)
+                )
+            {
+                return Err(invalid("inverted range"));
+            }
+        }
+    }
+    Ok(())
 }
 /// Shared comparison oracle for filters, stats and cursor ordering.
 pub fn compare_fields(a: &FieldValue, b: &FieldValue) -> Option<std::cmp::Ordering> {
@@ -760,7 +768,11 @@ fn work(item: &NewWork, schema: &QueueSchema, limits: &QueueLimits) -> QueueResu
     }
     Ok(())
 }
-fn patch(value: &WorkPatch, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
+pub(crate) fn patch(
+    value: &WorkPatch,
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+) -> QueueResult<()> {
     for (key, value) in &value.fields {
         name(key)?;
         if !schema.work.admits_field(key) {

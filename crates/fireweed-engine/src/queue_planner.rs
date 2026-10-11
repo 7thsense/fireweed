@@ -264,6 +264,69 @@ fn checked_expiry(now: i64, duration: u64) -> Result<i64, Rejection> {
     )
     .ok_or_else(|| Rejection::Invalid("lease expiry overflow".into()))
 }
+pub(crate) fn apply_administrative_update(
+    stored: &mut StoredWork,
+    patch: &WorkPatch,
+    lifecycle: &AdministrativeLifecycle,
+    lease_guard: &AdministrativeLeaseGuard,
+    now: i64,
+) -> Result<bool, Rejection> {
+    let before = stored.clone();
+    let active = stored.record.lifecycle == Lifecycle::Leased
+        && stored
+            .record
+            .lease_expires_at
+            .is_some_and(|expiry| expiry > now);
+    match lease_guard {
+        AdministrativeLeaseGuard::RejectActive if active => {
+            return Err(Rejection::Leased);
+        }
+        AdministrativeLeaseGuard::RequireActive if !active => {
+            return Err(Rejection::StaleLease);
+        }
+        _ => {}
+    }
+    if matches!(
+        stored.record.lifecycle,
+        Lifecycle::Completed | Lifecycle::Failed
+    ) && matches!(
+        lifecycle,
+        AdministrativeLifecycle::Completed | AdministrativeLifecycle::Failed
+    ) {
+        return Err(Rejection::Terminal);
+    }
+    let desired = match lifecycle {
+        AdministrativeLifecycle::Keep
+            if stored.record.lifecycle == Lifecycle::Leased
+                && *lease_guard == AdministrativeLeaseGuard::InvalidateActive =>
+        {
+            Lifecycle::Pending
+        }
+        AdministrativeLifecycle::Keep => stored.record.lifecycle,
+        AdministrativeLifecycle::Pending => Lifecycle::Pending,
+        AdministrativeLifecycle::Completed => Lifecycle::Completed,
+        AdministrativeLifecycle::Failed => Lifecycle::Failed,
+    };
+    if active
+        && desired != Lifecycle::Leased
+        && *lease_guard == AdministrativeLeaseGuard::RejectActive
+    {
+        return Err(Rejection::Leased);
+    }
+    patch_work(stored, patch);
+    stored.record.lifecycle = desired;
+    if desired != Lifecycle::Leased || *lease_guard == AdministrativeLeaseGuard::InvalidateActive {
+        stored.record.lease_expires_at = None;
+        stored.lease_hash = None;
+    }
+    if desired == Lifecycle::Pending
+        && (before.record.lifecycle != Lifecycle::Pending
+            || before.record.work.available_at != stored.record.work.available_at)
+    {
+        stored.record.eligible_since = now.max(stored.record.work.available_at);
+    }
+    Ok(*stored != before)
+}
 fn apply_group(
     group: &CommitGroup,
     snapshot: &mut RecordSnapshot,
@@ -413,63 +476,7 @@ fn apply_group(
                 lifecycle,
                 lease_guard,
             } => {
-                let before = stored.clone();
-                let active = stored.record.lifecycle == Lifecycle::Leased
-                    && stored
-                        .record
-                        .lease_expires_at
-                        .is_some_and(|expiry| expiry > now);
-                match lease_guard {
-                    AdministrativeLeaseGuard::RejectActive if active => {
-                        return Err(Rejection::Leased);
-                    }
-                    AdministrativeLeaseGuard::RequireActive if !active => {
-                        return Err(Rejection::StaleLease);
-                    }
-                    _ => {}
-                }
-                if matches!(
-                    stored.record.lifecycle,
-                    Lifecycle::Completed | Lifecycle::Failed
-                ) && matches!(
-                    lifecycle,
-                    AdministrativeLifecycle::Completed | AdministrativeLifecycle::Failed
-                ) {
-                    return Err(Rejection::Terminal);
-                }
-                let desired = match lifecycle {
-                    AdministrativeLifecycle::Keep
-                        if stored.record.lifecycle == Lifecycle::Leased
-                            && *lease_guard == AdministrativeLeaseGuard::InvalidateActive =>
-                    {
-                        Lifecycle::Pending
-                    }
-                    AdministrativeLifecycle::Keep => stored.record.lifecycle,
-                    AdministrativeLifecycle::Pending => Lifecycle::Pending,
-                    AdministrativeLifecycle::Completed => Lifecycle::Completed,
-                    AdministrativeLifecycle::Failed => Lifecycle::Failed,
-                };
-                if active
-                    && desired != Lifecycle::Leased
-                    && *lease_guard == AdministrativeLeaseGuard::RejectActive
-                {
-                    return Err(Rejection::Leased);
-                }
-                patch_work(&mut stored, patch);
-                stored.record.lifecycle = desired;
-                if desired != Lifecycle::Leased
-                    || *lease_guard == AdministrativeLeaseGuard::InvalidateActive
-                {
-                    stored.record.lease_expires_at = None;
-                    stored.lease_hash = None;
-                }
-                if desired == Lifecycle::Pending
-                    && (before.record.lifecycle != Lifecycle::Pending
-                        || before.record.work.available_at != stored.record.work.available_at)
-                {
-                    stored.record.eligible_since = now.max(stored.record.work.available_at);
-                }
-                if stored != before {
+                if apply_administrative_update(&mut stored, patch, lifecycle, lease_guard, now)? {
                     version = next_version(snapshot, None, &update.key)?;
                 }
                 stored.record.version = version;
