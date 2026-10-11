@@ -892,7 +892,7 @@ impl CommitBatch {
                     }
                 }
             }
-            byte_limit(group, limits.max_group_bytes)?;
+            byte_limit(&CommitFingerprintV3::from(group), limits.max_group_bytes)?;
         }
         // Bound the complete positional response before any admitted group runs.
         // u64::MAX reserves maximum version encoding; rejected messages are capped.
@@ -937,7 +937,7 @@ impl CommitBatch {
                 return Err(QueueError::TooLarge);
             }
         }
-        byte_limit(self, limits.max_request_bytes)
+        byte_limit(&OrdinaryCommitEnvelope(self), limits.max_request_bytes)
     }
 }
 fn expect(value: &StateExpect) -> QueueResult<()> {
@@ -1038,6 +1038,29 @@ impl<'a> From<&'a CommitGroup> for CommitFingerprintV3<'a> {
             work_inserts: &group.work_inserts,
             work_updates: &group.work_updates,
         }
+    }
+}
+/// Borrowed legacy envelope accounting. Serialize each frozen group directly;
+/// neither an added DTO field nor a temporary vector can alter ordinary limits.
+struct OrdinaryCommitEnvelope<'a>(&'a CommitBatch);
+struct OrdinaryCommitGroups<'a>(&'a [CommitGroup]);
+impl Serialize for OrdinaryCommitGroups<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for group in self.0 {
+            sequence.serialize_element(&CommitFingerprintV3::from(group))?;
+        }
+        sequence.end()
+    }
+}
+impl Serialize for OrdinaryCommitEnvelope<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut envelope = serializer.serialize_struct("CommitBatch", 2)?;
+        envelope.serialize_field("queue", &self.0.queue)?;
+        envelope.serialize_field("groups", &OrdinaryCommitGroups(&self.0.groups))?;
+        envelope.end()
     }
 }
 impl CommitGroup {
@@ -1262,7 +1285,7 @@ impl RequestPreflight for InsertRequest {
 }
 impl RequestPreflight for CommitBatch {
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
-        envelope(&self.queue, self, limits)?;
+        envelope(&self.queue, &OrdinaryCommitEnvelope(self), limits)?;
         if self.groups.is_empty() || self.groups.len() > limits.max_groups as usize {
             return Err(invalid("invalid commit group count"));
         }
@@ -1282,7 +1305,7 @@ impl RequestPreflight for CommitBatch {
             if count == 0 || count > limits.max_records as usize {
                 return Err(invalid("invalid group record count"));
             }
-            byte_limit(group, limits.max_group_bytes)?;
+            byte_limit(&CommitFingerprintV3::from(group), limits.max_group_bytes)?;
         }
         Ok(())
     }
@@ -1670,6 +1693,38 @@ mod tests {
             let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
             assert_eq!(hex(&original), wire);
             assert_eq!(hex(&group.fingerprint(&address).unwrap()), digest);
+        }
+    }
+    #[test]
+    fn ordinary_envelope_accounting_preserves_exact_legacy_boundaries() {
+        let group = CommitGroup {
+            request_id: "ordinary\0/é".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![item("next")],
+            work_updates: vec![],
+        };
+        let batch = CommitBatch {
+            queue: queue(),
+            groups: vec![group.clone(), group],
+        };
+        let projected = OrdinaryCommitEnvelope(&batch);
+        assert_eq!(
+            postcard::to_allocvec(&batch).unwrap(),
+            postcard::to_allocvec(&projected).unwrap()
+        );
+        let size = encoded_len(&projected).unwrap();
+        assert!(byte_limit(&projected, size).is_ok());
+        assert_eq!(byte_limit(&projected, size - 1), Err(QueueError::TooLarge));
+        for group in &batch.groups {
+            let projection = CommitFingerprintV3::from(group);
+            assert_eq!(
+                postcard::to_allocvec(group).unwrap(),
+                postcard::to_allocvec(&projection).unwrap()
+            );
+            let size = encoded_len(&projection).unwrap();
+            assert!(byte_limit(&projection, size).is_ok());
+            assert_eq!(byte_limit(&projection, size - 1), Err(QueueError::TooLarge));
         }
     }
     #[test]

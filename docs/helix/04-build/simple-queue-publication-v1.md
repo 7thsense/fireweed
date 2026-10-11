@@ -146,3 +146,18 @@ path. It currently measures FWQP1. FWQP2 administrative results/fingerprints,
 complete receipt budgets, overflow precedence, incremental execution/spooling,
 selection drain, durable TooLarge receipts and preview remain required. Counting
 after retaining a whole group would still be insufficient and is not activated.
+
+## Ordinary request-size compatibility — iteration 41
+
+Ordinary commit preflight and schema validation now measure the same explicit
+frozen five-field group projection used by v3 identity. Envelope measurement uses
+a borrowed serializer that visits those projections in producer order, preserving
+the original queue and vector framing without constructing another group vector.
+Both group and whole-envelope byte accounting must retain this projection when
+administrative inputs are added; preserving only fingerprints would not protect
+exact-limit requests or retained replays from an extra optional-field byte.
+
+Exact legacy/projected bytes and N/N-1 boundaries are checked for groups and a
+multi-group envelope with UTF-8/NUL identities. This refactor does not add control
+inputs or change existing accepted request sizes. Future administrative envelope
+accounting must explicitly dispatch each group to its own appropriate projection.
