@@ -14,7 +14,7 @@ use fireweed_engine::{
     queue_index::{ordered_key, scalar_type_prefix},
     queue_planner::{
         CommitDelta, RecordIdentity, RecordSnapshot, StoredWork, UniqueIdentity, combine_deltas,
-        insert_unique_probes, lease_hash, load_envelope, plan_commit_group, plan_insert_vector,
+        insert_unique_probes, lease_hash, plan_commit_group, plan_insert_vector,
         required_unique_probes, required_work_fields,
     },
 };
@@ -1218,6 +1218,71 @@ async fn persist_delta(
     .map_err(storage)?;
     Ok(())
 }
+#[cfg(test)]
+#[derive(Clone)]
+struct GroupBoundaryTest {
+    queue_id: i64,
+    expected: Vec<Vec<(String, u64, bool, u64)>>,
+    visits: usize,
+    fail_at: Option<usize>,
+}
+#[cfg(test)]
+thread_local! {
+    static GROUP_BOUNDARY_TEST: std::cell::RefCell<Option<GroupBoundaryTest>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+async fn check_group_boundary(tx: &Transaction<'_>, queue_id: i64) -> QueueResult<()> {
+    let step = GROUP_BOUNDARY_TEST.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let probe = slot.as_mut()?;
+        if probe.queue_id != queue_id {
+            return None;
+        }
+        let visit = probe.visits;
+        probe.visits += 1;
+        Some((
+            probe.expected.get(visit).cloned(),
+            probe.fail_at == Some(visit),
+            visit + 1,
+        ))
+    });
+    let Some((expected, fail, receipt_count)) = step else {
+        return Ok(());
+    };
+    let rows = tx.query("SELECT key,version::text,active,insertion_sequence::text FROM fireweed_api007.records WHERE queue_id=$1 AND collection=0 ORDER BY key", &[&queue_id]).await.map_err(storage)?;
+    let observed: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                String::from_utf8(row.get(0)).map_err(storage)?,
+                version(row.get(1))?,
+                row.get(2),
+                version(row.get(3))?,
+            ))
+        })
+        .collect::<QueueResult<_>>()?;
+    if expected.as_ref() != Some(&observed) {
+        return Err(storage(format!(
+            "per-group SQL visibility mismatch: expected {expected:?}, observed {observed:?}"
+        )));
+    }
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=2",
+            &[&queue_id],
+        )
+        .await
+        .map_err(storage)?
+        .get(0);
+    if count != receipt_count as i64 {
+        return Err(storage("per-group receipt visibility mismatch"));
+    }
+    if fail {
+        tx.query_one("SELECT 1 / 0", &[]).await.map_err(storage)?;
+    }
+    Ok(())
+}
+
 type Parameters = Vec<Box<dyn ToSql + Sync + Send>>;
 fn parameter<T: ToSql + Sync + Send + 'static>(params: &mut Parameters, value: T) -> String {
     params.push(Box::new(value));
@@ -1435,13 +1500,11 @@ impl QueueStore for PostgresQueueStore {
             self.dispatch(charge, move |client, reservation| {
                 Box::pin(async move {
                     let tx = client.transaction().await.map_err(storage)?;
-                    let queue = queue_row(&tx, &request.queue, &reservation).await?;
+                    let mut queue = queue_row(&tx, &request.queue, &reservation).await?;
                     request.validate(&queue.schema, &limits)?;
                     let mut receipt_charges = vec![];
                     let mut out = vec![];
-                    let mut deltas = vec![];
                     let mut known = vec![];
-                    let mut fresh = vec![];
                     for group in &request.groups {
                         let fp = group.fingerprint(&request.queue)?;
                         let outcome = match receipt::<CommitReceipt>(
@@ -1466,37 +1529,37 @@ impl QueueStore for PostgresQueueStore {
                             }),
                             Err(error) => return Err(error),
                         };
-                        if outcome.is_none() {
-                            fresh.push(group.clone());
-                        }
                         known.push((fp, outcome));
                     }
-                    // A retained receipt never depends on current addressed record materialization.
-                    let read_set = load_envelope(&fresh);
-                    let mut loaded = load_group(&tx, &queue, &read_set, &reservation).await?;
-                    let before = loaded.snapshot.clone();
+                    // Replay is resolved before any current-record materialization.
+                    // Each fresh group reads the previous groups' physical writes
+                    // inside this same fenced transaction. No public transaction
+                    // or partial acknowledgement is introduced.
                     for (group, (fp, known)) in request.groups.iter().zip(known) {
                         if let Some(known) = known {
                             out.push(known);
                             continue;
                         }
+                        let mut loaded = load_group(&tx, &queue, group, &reservation).await?;
+                        let before = loaded.snapshot.clone();
                         let now = timestamp_nanos(clock.now())?;
                         load_unique_probes(&tx, &queue, &mut loaded, group, now, &reservation)
                             .await?;
                         let delta =
                             plan_commit_group(group, &mut loaded.snapshot, now, &queue.schema)?;
+                        let _output_charge = reservation.buffer(
+                            encoded_len(&delta)?
+                                .checked_mul(4)
+                                .ok_or(QueueError::TooLarge)?,
+                        )?;
+                        persist_delta(&tx, &queue, &delta, &before, &mut loaded).await?;
                         save_receipt(&tx, queue.id, 2, &group.request_id, &fp, &delta.receipt)
                             .await?;
-                        out.push(delta.receipt.clone());
-                        deltas.push(delta);
+                        #[cfg(test)]
+                        check_group_boundary(&tx, queue.id).await?;
+                        queue.next_sequence = delta.next_sequence;
+                        out.push(delta.receipt);
                     }
-                    let combined = combine_deltas(&deltas, queue.next_sequence)?;
-                    let _output_charge = reservation.buffer(
-                        encoded_len(&combined)?
-                            .checked_mul(4)
-                            .ok_or(QueueError::TooLarge)?,
-                    )?;
-                    persist_delta(&tx, &queue, &combined, &before, &mut loaded).await?;
                     tx.commit().await.map_err(storage)?;
                     Ok(out)
                 })
@@ -2396,7 +2459,7 @@ mod tests {
         };
         let rekey_created = update_target("rekey-created", "d", 1, "final-owner");
         let reuse = update_target("reuse", "a", 3, "new-owner");
-        let writer_readset = load_envelope(&[
+        let writer_readset = fireweed_engine::queue_planner::load_envelope(&[
             writer_group.clone(),
             rejected_rekey.clone(),
             free_and_create.clone(),
@@ -2837,6 +2900,216 @@ mod tests {
         drop(client);
         driver.await.unwrap().unwrap();
         store.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn fresh_groups_read_prior_sql_writes_and_storage_failure_rolls_back() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                GROUP_BOUNDARY_TEST.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let item = |key: &str, target: &str| NewWork {
+            key: key.into(),
+            priority: 0,
+            available_at: 0,
+            fields: BTreeMap::from([("target".into(), FieldValue::Text(target.into()))]),
+            body: Default::default(),
+        };
+        let group = |id: &str| CommitGroup {
+            request_id: id.into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+        };
+        let state = |expect: StateExpect, value: u8| StateUpdate {
+            collection: "instances".into(),
+            key: "state".into(),
+            expect,
+            change: StateChange::Put {
+                fields: Fields::new(),
+                value: vec![value].into(),
+            },
+        };
+        let mut first = group("first");
+        first.work_inserts.push(item("x", "alpha"));
+        first.state_updates.push(state(StateExpect::Absent, 1));
+        let mut stale = group("stale");
+        stale
+            .state_updates
+            .push(state(StateExpect::Version(999), 99));
+        stale.work_inserts.push(item("never", "never"));
+        let mut rekey = group("rekey");
+        rekey.work_updates.push(UnclaimedUpdate {
+            key: "x".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Patch(WorkPatch {
+                fields: BTreeMap::from([("target".into(), Some(FieldValue::Text("beta".into())))]),
+                ..Default::default()
+            }),
+        });
+        rekey.work_inserts.push(item("y", "alpha"));
+        rekey.state_updates.push(state(StateExpect::Version(1), 2));
+        let mut delete = group("delete");
+        delete.work_updates.push(UnclaimedUpdate {
+            key: "x".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Delete,
+        });
+        delete.state_updates.push(state(StateExpect::Version(2), 3));
+        let mut recreate = group("recreate");
+        recreate.work_inserts.push(item("x", "gamma"));
+        let groups = vec![first, stale, rekey, delete, recreate];
+        let expected = vec![
+            vec![("x".into(), 1, true, 1)],
+            vec![("x".into(), 1, true, 1)],
+            vec![("x".into(), 2, true, 1), ("y".into(), 1, true, 2)],
+            vec![("x".into(), 3, false, 0), ("y".into(), 1, true, 2)],
+            vec![("x".into(), 4, true, 3), ("y".into(), 1, true, 2)],
+        ];
+        for fail in [true, false] {
+            let queue = QueueAddress {
+                tenant: "api007-group-sql".into(),
+                queue: format!("{nonce}-{fail}"),
+            };
+            let mut schema = fireweed_conformance::queue_contract::schema();
+            schema.work.fields.insert("target".into(), FieldType::Text);
+            schema
+                .work
+                .indexes
+                .insert("target".into(), vec!["target".into()]);
+            schema.work.unique_indexes.insert("target".into());
+            store
+                .provision(ProvisionRequest {
+                    queue: queue.clone(),
+                    schema,
+                })
+                .await
+                .unwrap();
+            let queue_id: i64 = client
+                .query_one(
+                    "SELECT id FROM fireweed_api007.queues WHERE tenant=$1 AND name=$2",
+                    &[&queue.tenant.as_bytes(), &queue.queue.as_bytes()],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            GROUP_BOUNDARY_TEST.with(|slot| {
+                *slot.borrow_mut() = Some(GroupBoundaryTest {
+                    queue_id,
+                    expected: expected.clone(),
+                    visits: 0,
+                    fail_at: fail.then_some(2),
+                })
+            });
+            let request = CommitBatch {
+                queue: queue.clone(),
+                groups: groups.clone(),
+            };
+            let outcome = store.commit(request.clone()).await;
+            if fail {
+                assert!(matches!(outcome, Err(QueueError::OutcomeUnknown(_))));
+                assert_eq!(
+                    GROUP_BOUNDARY_TEST.with(|slot| slot.borrow().as_ref().unwrap().visits),
+                    3
+                );
+                let rows = client.query_one("SELECT (SELECT COUNT(*) FROM fireweed_api007.records WHERE queue_id=$1), (SELECT COUNT(*) FROM fireweed_api007.requests WHERE queue_id=$1), next_sequence::text FROM fireweed_api007.queues WHERE id=$1", &[&queue_id]).await.unwrap();
+                assert_eq!(rows.get::<_, i64>(0), 0);
+                assert_eq!(rows.get::<_, i64>(1), 0);
+                assert_eq!(rows.get::<_, String>(2), "0");
+                assert!(
+                    store
+                        .read_commit(ReceiptReadRequest {
+                            queue: queue.clone(),
+                            request_ids: groups.iter().map(|g| g.request_id.clone()).collect(),
+                            max_bytes: 1 << 20
+                        })
+                        .await
+                        .unwrap()
+                        .iter()
+                        .all(|r| *r == ReceiptLookup::Absent)
+                );
+                GROUP_BOUNDARY_TEST.with(|slot| {
+                    let mut slot = slot.borrow_mut();
+                    let probe = slot.as_mut().unwrap();
+                    probe.fail_at = None;
+                    probe.visits = 0;
+                });
+            }
+            let receipts = if fail {
+                store.commit(request.clone()).await.unwrap()
+            } else {
+                outcome.unwrap()
+            };
+            assert_eq!(
+                GROUP_BOUNDARY_TEST.with(|slot| slot.borrow().as_ref().unwrap().visits),
+                5
+            );
+            assert_eq!(
+                receipts[1].outcome,
+                GroupOutcome::Rejected(Rejection::VersionConflict)
+            );
+            for index in [0, 2, 3, 4] {
+                assert!(matches!(
+                    receipts[index].outcome,
+                    GroupOutcome::Committed { .. }
+                ));
+            }
+            let mut reverse = request.clone();
+            reverse.groups.reverse();
+            let replay = store.commit(reverse).await.unwrap();
+            assert_eq!(replay, receipts.into_iter().rev().collect::<Vec<_>>());
+            assert_eq!(
+                GROUP_BOUNDARY_TEST.with(|slot| slot.borrow().as_ref().unwrap().visits),
+                5
+            );
+            let states = store
+                .read_state(StateReadRequest {
+                    queue: queue.clone(),
+                    collection: "instances".into(),
+                    keys: vec!["state".into()],
+                    max_bytes: 1 << 20,
+                })
+                .await
+                .unwrap();
+            assert_eq!(states[0].as_ref().unwrap().version, 3);
+            assert_eq!(states[0].as_ref().unwrap().value.as_ref(), &[3]);
+            GROUP_BOUNDARY_TEST.with(|slot| *slot.borrow_mut() = None);
+            let mut final_group = group("after-replay");
+            final_group.work_inserts.push(item("z", "delta"));
+            store
+                .commit(CommitBatch {
+                    queue,
+                    groups: vec![final_group],
+                })
+                .await
+                .unwrap();
+            let sequence: String = client.query_one("SELECT insertion_sequence::text FROM fireweed_api007.records WHERE queue_id=$1 AND key=$2", &[&queue_id, &b"z".as_slice()]).await.unwrap().get(0);
+            assert_eq!(sequence, "4");
+        }
+        store.shutdown().await.unwrap();
+        drop(client);
+        driver.await.unwrap().unwrap();
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]

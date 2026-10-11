@@ -98,3 +98,33 @@ Full Snorri/Cayce facade migration and run-wide gates/membership/control mapping
 still require verification against actual consumers. Production activation and
 legacy-code removal remain gated by those tests and comparable settled-work
 benchmarks. Historical API-006 measurements do not qualify this source.
+
+## Per-group physical visibility — iteration 34
+
+Ordinary commit groups now load, plan and apply in order inside the same existing
+fenced SQL transaction. Each fresh group publishes its data and immutable receipt
+before the next group's native reads. The local insertion sequence advances from
+that group's resolved delta. Retained replay skips current record materialization,
+physical writes and sequence changes. Business rejection persists its positional
+receipt without applying candidate effects. The outer commit remains the only
+acknowledgement boundary; no public transaction handle is introduced.
+
+This ordering is necessary for future native administrative selectors to observe
+prior successful groups. It replaces end-of-envelope coalescing for ordinary
+commits with per-group physical writes. That structural tradeoff has no performance
+claim; comparable settled benchmarks must measure the final implementation. Insert
+vector packing remains unchanged. Whole administrative selection must still freeze
+one group's complete initial ownership before any of its mutations are applied.
+
+A queue-scoped test-only hook reads physical SQL records and receipts after every
+fresh group. The fixture covers a stale CAS rejection between successes, unique
+ownership release/reuse, deletion/reinsertion, exact highwater and insertion sequence,
+reverse retained replay and the next fresh insert. A real SQL division-by-zero after
+three groups forces transaction failure before acknowledgement; all unacknowledged
+records, state, receipts and queue sequence roll back, and exact retry succeeds.
+This is separate from caller cancellation: the existing caller-drop test confirms
+that admitted owned jobs continue, drain and reopen with their complete receipt.
+
+Native indexed administration, result/publication byte qualification and preview
+remain pending. This iteration changes ordering within the existing ordinary native
+commit path; it activates no administrative interface or alternate backend.
