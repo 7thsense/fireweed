@@ -11,6 +11,11 @@ use crate::{
 };
 use fireweed_core::queue_contract::*;
 
+#[cfg(test)]
+mod replay_tests;
+mod view;
+pub use view::*;
+
 const MAGIC: &[u8; 5] = b"FWQP1";
 #[derive(Debug, PartialEq, Eq)]
 pub enum PublicationError {
@@ -802,193 +807,13 @@ impl<'a> Scan<'a> {
         };
         Ok((c, self.text()?))
     }
-    fn value(&mut self) -> PublicationResult<()> {
-        match self.tag()? {
-            0 => {
-                self.raw(8)?;
-            }
-            1 => {
-                if !f64::from_bits(self.n()?).is_finite() {
-                    return invalid("nonfinite field");
-                }
-            }
-            2 => {
-                self.presence()?;
-            }
-            3 => {
-                self.text()?;
-            }
-            4 => {
-                self.bytes()?;
-            }
-            _ => return invalid("unknown field tag"),
-        };
-        Ok(())
-    }
-    fn fields(&mut self, edits: bool) -> PublicationResult<()> {
-        let n = self.count()?;
-        let mut last = None;
-        for _ in 0..n {
-            let name = self.text()?;
-            if last.is_some_and(|last| last >= name) {
-                return invalid("field identity order");
-            }
-            last = Some(name);
-            if !edits || self.presence()? {
-                self.value()?;
-            }
-        }
-        Ok(())
-    }
+    #[cfg(test)]
     fn rejection(&mut self) -> PublicationResult<()> {
-        match self.tag()? {
-            0..=4 | 6..=7 => Ok(()),
-            5 => {
-                self.text()?;
-                Ok(())
-            }
-            _ => invalid("unknown rejection tag"),
-        }
+        view::parse_rejection(self).map(|_| ())
     }
 }
 pub fn scan_publication(raw: &[u8]) -> PublicationResult<PublicationSummary<'_>> {
-    let mut s = Scan { rest: raw };
-    if s.raw(MAGIC.len())? != MAGIC {
-        return invalid("unsupported publication version");
-    }
-    let queue = (s.text()?, s.text()?);
-    let definition_pin = s.raw(32)?;
-    let initial_sequence = s.n()?;
-    let final_sequence = s.n()?;
-    if final_sequence < initial_sequence {
-        return invalid("regressing insertion sequence");
-    }
-    let commands = s.count()?;
-    let mut last = None;
-    for _ in 0..commands {
-        let id = s.identity()?;
-        if last.is_some_and(|last| last >= id) {
-            return invalid("command identity order");
-        }
-        last = Some(id);
-        let existing = if s.presence()? { Some(s.n()?) } else { None };
-        let prior = s.n()?;
-        let output = s.n()?;
-        if existing.is_some_and(|v| v == 0 || v != prior) || output == 0 || output <= prior {
-            return invalid("invalid predecessor highwater");
-        }
-        match s.tag()? {
-            0 => {}
-            1 if id.0.is_some() => {
-                s.fields(false)?;
-                s.bytes()?;
-            }
-            1 => {
-                s.raw(16)?;
-                let sequence = s.n()?;
-                if sequence == 0 || sequence > final_sequence {
-                    return invalid("invalid work sequence");
-                }
-                if existing.is_none() && sequence <= initial_sequence {
-                    return invalid("absent work sequence reuses insertion order");
-                }
-                let life = match s.tag()? {
-                    0 => Lifecycle::Pending,
-                    1 => Lifecycle::Leased,
-                    2 => Lifecycle::Completed,
-                    3 => Lifecycle::Failed,
-                    _ => return invalid("unknown lifecycle"),
-                };
-                s.raw(12)?;
-                let expiry = s.presence()?;
-                if expiry {
-                    s.raw(8)?;
-                }
-                let hash = s.presence()?;
-                if hash {
-                    s.raw(32)?;
-                }
-                validate_lease(life, expiry, hash)?;
-                let fields = s.tag()?;
-                match fields {
-                    0 => {}
-                    1 => s.fields(false)?,
-                    2 => s.fields(true)?,
-                    _ => return invalid("unknown field command"),
-                }
-                let body = s.tag()?;
-                match body {
-                    0 => {}
-                    1 => {
-                        s.bytes()?;
-                    }
-                    _ => return invalid("unknown body command"),
-                }
-                if existing.is_none() && (fields != 1 || body != 1) {
-                    return invalid("partial absent work creation");
-                }
-            }
-            _ => return invalid("unknown effect tag"),
-        }
-    }
-    let receipts = s.count()?;
-    let mut last = None;
-    for _ in 0..receipts {
-        let domain = s.tag()?;
-        if !matches!(domain, 0 | 2) {
-            return invalid("unknown receipt domain");
-        }
-        let id = s.text()?;
-        if last.is_some_and(|last| last >= (domain, id)) {
-            return invalid("receipt identity order");
-        }
-        last = Some((domain, id));
-        if s.tag()? != 3 {
-            return invalid("unsupported fingerprint format");
-        }
-        s.raw(32)?;
-        if domain == 2 {
-            match s.tag()? {
-                0 => {
-                    let n = s.count()?;
-                    for _ in 0..n {
-                        s.identity()?;
-                        if s.n()? == 0 {
-                            return invalid("zero receipt version");
-                        }
-                    }
-                }
-                1 => s.rejection()?,
-                _ => return invalid("non-fresh commit outcome"),
-            }
-        } else {
-            let n = s.count()?;
-            for _ in 0..n {
-                let tag = s.tag()?;
-                s.text()?;
-                match tag {
-                    0 | 1 => {
-                        if s.n()? == 0 {
-                            return invalid("zero insert result version");
-                        }
-                    }
-                    2 => s.rejection()?,
-                    _ => return invalid("unknown insert result"),
-                }
-            }
-        }
-    }
-    if !s.rest.is_empty() {
-        return invalid("trailing publication bytes");
-    }
-    Ok(PublicationSummary {
-        queue,
-        definition_pin,
-        initial_sequence,
-        final_sequence,
-        commands,
-        receipts,
-    })
+    view::summary(raw)
 }
 
 #[cfg(test)]
@@ -1002,7 +827,7 @@ mod tests {
     };
     use sha2::Digest;
     use std::collections::{BTreeMap, BTreeSet};
-    fn schema() -> QueueSchema {
+    pub(super) fn schema() -> QueueSchema {
         let def = CollectionDefinition {
             fields: BTreeMap::from([
                 ("blob".into(), FieldType::Bytes),
@@ -1022,13 +847,13 @@ mod tests {
             max_attempts: 3,
         }
     }
-    fn queue() -> QueueAddress {
+    pub(super) fn queue() -> QueueAddress {
         QueueAddress {
             tenant: "t\0/α".into(),
             queue: "q\0/β".into(),
         }
     }
-    fn group(id: &str) -> CommitGroup {
+    pub(super) fn group(id: &str) -> CommitGroup {
         CommitGroup {
             request_id: id.into(),
             claimed_updates: vec![],
@@ -1037,7 +862,7 @@ mod tests {
             work_inserts: vec![],
         }
     }
-    fn seed() -> CommitGroup {
+    pub(super) fn seed() -> CommitGroup {
         let mut g = group("a-seed");
         g.work_inserts.push(NewWork {
             key: "key\0/λ".into(),

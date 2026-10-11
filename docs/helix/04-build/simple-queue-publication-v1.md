@@ -82,3 +82,37 @@ Complete and selective megabyte read views encode identical small metadata frame
 every proper prefix of the rich frame is rejected. Charge lifetime, frame limit,
 receipt identity/queue/order, malformed lease/hwm, and absent create/delete packing
 are covered. This is codec evidence, not crash replay or S3/Turso qualification.
+
+## Borrowed replay consumption — iteration 30
+
+view_publication validates the entire frame before returning a private-slice
+PublicationView. scan_publication delegates to this exact parser; there is one
+wire acceptance implementation. Frozen tags and golden bytes are unchanged.
+Restartable command/receipt iterators retain only slices, counts and scalar state;
+fields, edits/removals, body bytes, version vectors, positional insert outcomes
+and rejection reasons remain borrowed. No payload/list allocation, sorting or
+per-command scan from frame start occurs. Read materialization is never decoded
+as a write. Consumers can perform independent complete authority and apply passes.
+
+The cfg(test)-only complete-image oracle checks queue/raw schema pin, initial
+sequence, expected existence/version and exact tombstone highwater, every referenced
+existing record's identity/sequence, field schema/type/namespace admissibility,
+fresh receipts and success-version bounds before effects. Already-retained matching
+receipts cannot authorize a new apply. Omitted verified no-op receipt versions
+require current durable authority. Late command/receipt failures leave the original
+logical image and receipt map unchanged. The clone and owned test maps are not a
+production replay implementation or bounded-memory proof.
+
+Thirteen codec/view/replay scenarios cover frozen scalar/wire branches, complete
+versus selective metadata encoding, all truncations, corrupt tags/lengths/types,
+restartable lists, atomic state/new work, edits/removals/empty bodies, an actual
+uncoalesced Leased Put with Preserve, work/state Delete tombstones, full reinsertion,
+intermediate packed receipt versions, inserted/replaced/rejected positional results,
+direct rejected-commit decoding, omitted no-op receipts and stale/late authority.
+
+This is logical primary-record/highwater/sequence/receipt replay evidence. The
+oracle schema has no unique indexes and does not rebuild physical indexes or
+compare speculative unique-probe caches. Stock Turso still must qualify physical
+index regeneration, unique authority, admitted bounded rows/buffers and all data+
+receipt+external log cursor publication through the existing owned writer pipeline.
+No physical projector or new store append route is activated by this iteration.
