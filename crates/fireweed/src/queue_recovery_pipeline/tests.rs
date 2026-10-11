@@ -1054,3 +1054,272 @@ async fn receipt_read_discards_stale_absence_and_confirms_current_errors() {
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop() {
+    use fireweed_conformance::queue_contract::TestClock;
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-api007-insert-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let admission = QueueAdmission::new(4, 128 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(2, 4).unwrap();
+    provision(&store, &job, &workers).await;
+    let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+        .await
+        .unwrap();
+    let pipeline =
+        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+            .unwrap();
+    let clock = Arc::new(TestClock::default());
+    clock.set(100);
+    let item = |key: &str, priority: i64| NewWork {
+        key: key.into(),
+        priority,
+        available_at: 0,
+        fields: Default::default(),
+        body: bytes::Bytes::new(),
+    };
+    let request = InsertRequest {
+        queue: address(),
+        request_id: "owned-original".into(),
+        mode: InsertMode::InsertOnly,
+        items: vec![item("a", 1), item("b", 2)],
+    };
+    let response = pipeline
+        .insert(
+            request.clone(),
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    let original = response.outcomes().to_vec();
+    drop(response);
+    assert_eq!(
+        original,
+        vec![
+            InsertOutcome::Inserted {
+                key: "a".into(),
+                version: 1
+            },
+            InsertOutcome::Inserted {
+                key: "b".into(),
+                version: 1
+            }
+        ]
+    );
+    let upsert = InsertRequest {
+        queue: address(),
+        request_id: "owned-upsert".into(),
+        mode: InsertMode::Upsert,
+        items: vec![item("a", 10), item("c", 3)],
+    };
+    let response = pipeline
+        .insert(upsert, QueueLimits::default(), clock.clone(), job.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        response.outcomes(),
+        [
+            InsertOutcome::Replaced { version: 2, .. },
+            InsertOutcome::Inserted { version: 1, .. }
+        ]
+    ));
+    drop(response);
+    let replay = pipeline
+        .insert(
+            request.clone(),
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.outcomes(), original);
+    drop(replay);
+    let mut changed = request.clone();
+    changed.items[0].priority += 1;
+    assert!(matches!(
+        pipeline
+            .insert(changed, QueueLimits::default(), clock.clone(), job.clone())
+            .await,
+        Err(QueueError::RequestConflict)
+    ));
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 3);
+    drop(recovered);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.before_insert_append.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+    let cancelled_job = Arc::new(
+        admission
+            .reserve(0)
+            .unwrap()
+            .with_terminal_callback(move || {
+                let _ = terminal_tx.send(());
+            })
+            .unwrap(),
+    );
+    let cancelled = InsertRequest {
+        queue: address(),
+        request_id: "cancelled-insert-original".into(),
+        mode: InsertMode::InsertOnly,
+        items: vec![item("d", 4)],
+    };
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = cancelled.clone();
+        let clock = clock.clone();
+        async move {
+            pipeline
+                .insert(request, QueueLimits::default(), clock, cancelled_job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    assert!(matches!(caller.await,Err(error) if error.is_cancelled()));
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(30), terminal_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    *pipeline.before_insert_append.lock().unwrap() = None;
+    let replay = pipeline
+        .insert(
+            cancelled,
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay.outcomes(),
+        [InsertOutcome::Inserted { version: 1, .. }]
+    ));
+    drop(replay);
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 4);
+    drop(recovered);
+    drop(pipeline);
+    // A fresh derived database must replay exact original authority, including
+    // the original insert result whose current row has since been replaced.
+    let projection = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
+        .await
+        .unwrap();
+    let rebuilt =
+        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+            .unwrap();
+    let replay = rebuilt
+        .insert(request, QueueLimits::default(), clock, job.clone())
+        .await
+        .unwrap();
+    assert_eq!(replay.outcomes(), original);
+    drop(replay);
+    drop(rebuilt);
+    workers.close_and_drain().await.unwrap();
+    drop(job);
+    drop(store);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn losing_insert_fence_resolves_winner_without_replanning_or_extra_publication() {
+    use fireweed_conformance::queue_contract::TestClock;
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-api007-insert-loser-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let admission = QueueAdmission::new(2, 128 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(1, 2).unwrap();
+    provision(&store, &job, &workers).await;
+    let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+        .await
+        .unwrap();
+    let pipeline =
+        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+            .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.before_insert_append.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let clock = Arc::new(TestClock::default());
+    clock.set(100);
+    let request = InsertRequest {
+        queue: address(),
+        request_id: "insert".into(),
+        mode: InsertMode::InsertOnly,
+        items: vec![NewWork {
+            key: "a".into(),
+            priority: 9,
+            available_at: 0,
+            fields: Default::default(),
+            body: bytes::Bytes::new(),
+        }],
+    };
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .insert(request, QueueLimits::default(), clock, job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    // A newer authority publishes the same original identity while the first
+    // producer's fully prepared record is paused. It cannot win that old fence.
+    append_insert(&store, &job, &workers).await;
+    release.notify_one();
+    let resolved = caller.await.unwrap().unwrap();
+    assert_eq!(
+        resolved.outcomes(),
+        [InsertOutcome::Inserted {
+            key: "a".into(),
+            version: 1
+        }]
+    );
+    drop(resolved);
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(
+        recovered.target_next_offset, 2,
+        "losing producer must not publish or replan another insert"
+    );
+    drop(recovered);
+    drop(pipeline);
+    workers.close_and_drain().await.unwrap();
+    drop(job);
+    drop(store);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+    std::fs::remove_dir_all(root).unwrap();
+}

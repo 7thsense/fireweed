@@ -10704,8 +10704,8 @@
           "P2f"
         ],
         "detail": "error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "1b87249d9542a003f200",
-        "identity": "efbf5d4710496e65bc924932624b4e5a6422abe63a004d4c07ddf0bb3ea6cc01",
+        "id": "b8b4d2bd2c768f9e61d1",
+        "identity": "6552f1c376bb185b314f0945b0ca9fde5f1fbed2b2bf03394ca79776ef3c4e5e",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -16777,6 +16777,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
           "--",
           "--exact"
@@ -16784,6 +16804,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop"
       },
       {
         "exact_invocation": [
@@ -24412,10 +24452,10 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "360f12138b68c52c75524d1990cbb32e8754dbc8590b5db4a2f66d1a9a35503e",
+  "source_inventory_sha256": "e51cdab3f70c19aca8242f2b3a3b36d7f235fa99db369b3665f116e7b7bc5baa",
   "workspaces": [
     {
-      "listing_error_sha256": "efbf5d4710496e65bc924932624b4e5a6422abe63a004d4c07ddf0bb3ea6cc01",
+      "listing_error_sha256": "6552f1c376bb185b314f0945b0ca9fde5f1fbed2b2bf03394ca79776ef3c4e5e",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"

@@ -2,6 +2,8 @@
 //! Coverage is operation-scoped; this is not a consumer transaction or readiness cache.
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 mod claim;
+mod insert;
+mod publication;
 mod receipts;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -33,6 +35,10 @@ pub struct QueueRecoveryPipeline {
     before_claim_append: StagePause,
     #[cfg(test)]
     before_claim_replay: StagePause,
+    #[cfg(test)]
+    before_insert_append: StagePause,
+    #[cfg(test)]
+    before_insert_replay: StagePause,
     #[cfg(test)]
     after_receipt_read: StagePause,
 }
@@ -80,6 +86,10 @@ impl QueueRecoveryPipeline {
             before_claim_append: std::sync::Mutex::new(None),
             #[cfg(test)]
             before_claim_replay: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_insert_append: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_insert_replay: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_receipt_read: std::sync::Mutex::new(None),
         }))

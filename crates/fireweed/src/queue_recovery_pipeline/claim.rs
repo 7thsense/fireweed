@@ -182,26 +182,9 @@ impl ClaimTask {
                 release.notified().await;
             }
         }
-        // After submission every unresolved stage failure is uncertain. A new
-        // Busy/TooLarge cannot imply that the original claim had no effect.
-        let appended = self
-            .pipeline
-            .store
-            .append_api007_record(
-                namespace,
-                record,
-                expected_head,
-                &self.job,
-                &self.pipeline.workers,
-            )
-            .await;
-        if let Ok(result) = &appended
-            && let Ok(position) = result.outcome()
-            && (position.backend_epoch != epoch || position.sequence != expected_head)
-        {
-            return Err(unknown("append position disagrees with prepared claim"));
-        }
-        drop(appended);
+        self.pipeline
+            .publish_prepared(namespace, record, expected_head, epoch, &self.job)
+            .await?;
         self.resolve(None).await
     }
 }
