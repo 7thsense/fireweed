@@ -11,9 +11,11 @@ use crate::{
 };
 use fireweed_core::queue_contract::*;
 
+mod measurement;
 #[cfg(test)]
 mod replay_tests;
 mod view;
+pub use measurement::*;
 pub use view::*;
 
 const MAGIC: &[u8; 5] = b"FWQP1";
@@ -599,6 +601,157 @@ fn identity(s: &mut Sink<'_>, collection: Option<&str>, key: &str) -> Publicatio
     }
     s.text(key)
 }
+fn write_state_value(s: &mut Sink<'_>, row: Option<&StateRecord>) -> PublicationResult<()> {
+    if let Some(row) = row {
+        s.tag(1)?;
+        fields(s, &row.fields)?;
+        s.bytes(&row.value)
+    } else {
+        s.tag(0)
+    }
+}
+fn write_work_value(
+    s: &mut Sink<'_>,
+    row: &StoredWork,
+    change: &ResolvedFields,
+    body: &ResolvedBody,
+) -> PublicationResult<()> {
+    let r = &row.record;
+    s.tag(1)?;
+    s.i(r.work.priority)?;
+    s.i(r.work.available_at)?;
+    s.n(r.insertion_sequence)?;
+    s.tag(match r.lifecycle {
+        Lifecycle::Pending => 0,
+        Lifecycle::Leased => 1,
+        Lifecycle::Completed => 2,
+        Lifecycle::Failed => 3,
+    })?;
+    s.i(r.eligible_since)?;
+    s.raw(&r.attempts.to_le_bytes())?;
+    s.tag(u8::from(r.lease_expires_at.is_some()))?;
+    if let Some(expiry) = r.lease_expires_at {
+        s.i(expiry)?;
+    }
+    s.tag(u8::from(row.lease_hash.is_some()))?;
+    if let Some(hash) = row.lease_hash {
+        s.raw(&hash)?;
+    }
+    match change {
+        ResolvedFields::Preserve => s.tag(0)?,
+        ResolvedFields::Replace(f) => {
+            s.tag(1)?;
+            fields(s, f)?;
+        }
+        ResolvedFields::Edit(edits) => {
+            s.tag(2)?;
+            s.n(edits.len() as u64)?;
+            for (n, v) in edits {
+                s.text(n)?;
+                s.tag(u8::from(v.is_some()))?;
+                if let Some(v) = v {
+                    value(s, v)?;
+                }
+            }
+        }
+    }
+    match body {
+        ResolvedBody::Preserve => s.tag(0)?,
+        ResolvedBody::Replace(b) => {
+            s.tag(1)?;
+            s.bytes(b)?;
+        }
+    }
+    Ok(())
+}
+fn write_receipt_header(
+    s: &mut Sink<'_>,
+    domain: u8,
+    id: &str,
+    fingerprint_version: u8,
+    fingerprint: &[u8; 32],
+) -> PublicationResult<()> {
+    s.tag(domain)?;
+    s.text(id)?;
+    s.tag(fingerprint_version)?;
+    s.raw(fingerprint)
+}
+fn write_receipt(s: &mut Sink<'_>, r: &PublicationReceipt<'_>) -> PublicationResult<()> {
+    write_receipt_header(s, r.identity().0, r.id, 3, &r.fingerprint)?;
+    match &r.result {
+        ReceiptResult::Commit(outcome) => match outcome {
+            GroupOutcome::Committed { versions } => {
+                s.tag(0)?;
+                s.n(versions.len() as u64)?;
+                for v in versions {
+                    if v.version == 0 {
+                        return invalid("zero receipt version");
+                    }
+                    identity(s, v.collection.as_deref(), &v.key)?;
+                    s.n(v.version)?;
+                }
+            }
+            GroupOutcome::Rejected(reason) => {
+                s.tag(1)?;
+                rejection(s, reason)?;
+            }
+            _ => return invalid("non-fresh commit outcome"),
+        },
+        ReceiptResult::Insert(outcomes) => {
+            s.n(outcomes.len() as u64)?;
+            for o in *outcomes {
+                match o {
+                    InsertOutcome::Inserted { key, version } => {
+                        s.tag(0)?;
+                        s.text(key)?;
+                        s.n(*version)?;
+                    }
+                    InsertOutcome::Replaced { key, version } => {
+                        s.tag(1)?;
+                        s.text(key)?;
+                        s.n(*version)?;
+                    }
+                    InsertOutcome::Rejected { key, reason } => {
+                        s.tag(2)?;
+                        s.text(key)?;
+                        rejection(s, reason)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn write_mutation_header(
+    s: &mut Sink<'_>,
+    version: &RecordVersion,
+    predecessor: Option<u64>,
+    highwater: u64,
+) -> PublicationResult<()> {
+    identity(s, version.collection.as_deref(), &version.key)?;
+    s.tag(u8::from(predecessor.is_some()))?;
+    if let Some(previous) = predecessor {
+        s.n(previous)?;
+    }
+    s.n(highwater)?;
+    s.n(version.version)
+}
+fn write_frame_header(
+    s: &mut Sink<'_>,
+    queue: &QueueAddress,
+    pin: DefinitionPin,
+    initial: u64,
+    final_sequence: u64,
+    commands: u64,
+) -> PublicationResult<()> {
+    s.raw(MAGIC)?;
+    s.text(&queue.tenant)?;
+    s.text(&queue.queue)?;
+    s.raw(pin.as_bytes())?;
+    s.n(initial)?;
+    s.n(final_sequence)?;
+    s.n(commands)
+}
 fn write_frame(
     s: &mut Sink<'_>,
     queue: &QueueAddress,
@@ -607,143 +760,46 @@ fn write_frame(
     d: &CommitDelta,
     receipts: &[PublicationReceipt<'_>],
 ) -> PublicationResult<()> {
-    s.raw(MAGIC)?;
-    s.text(&queue.tenant)?;
-    s.text(&queue.queue)?;
-    s.raw(pin.as_bytes())?;
-    s.n(before.next_sequence)?;
-    s.n(d.next_sequence)?;
     let mut authority = InitialAuthority::new(before);
     let mutation_count = d
         .versions
         .iter()
         .filter(|v| v.version > authority.next(v.collection.as_deref(), &v.key).highwater)
         .count();
-    s.n(mutation_count as u64)?;
+    write_frame_header(
+        s,
+        queue,
+        pin,
+        before.next_sequence,
+        d.next_sequence,
+        mutation_count as u64,
+    )?;
     let mut authority = InitialAuthority::new(before);
     for v in &d.versions {
         let prior = authority.next(v.collection.as_deref(), &v.key);
         if v.version == prior.highwater {
             continue;
         }
-        identity(s, v.collection.as_deref(), &v.key)?;
-        let old = prior.version();
-        s.tag(u8::from(old.is_some()))?;
-        if let Some(version) = old {
-            s.n(version)?;
-        }
-        s.n(prior.highwater)?;
-        s.n(v.version)?;
+        write_mutation_header(s, v, prior.version(), prior.highwater)?;
         if let Some(c) = &v.collection {
-            if let Ok(i) = d.state.binary_search_by(|r| {
-                (r.collection.as_str(), r.key.as_str()).cmp(&(c.as_str(), v.key.as_str()))
-            }) {
-                s.tag(1)?;
-                fields(s, &d.state[i].fields)?;
-                s.bytes(&d.state[i].value)?;
-            } else {
-                s.tag(0)?;
-            }
+            let row = d
+                .state
+                .binary_search_by(|r| {
+                    (r.collection.as_str(), r.key.as_str()).cmp(&(c.as_str(), v.key.as_str()))
+                })
+                .ok()
+                .map(|index| &d.state[index]);
+            write_state_value(s, row)?;
         } else if let Ok(i) = d.work.binary_search_by(|r| r.record.work.key.cmp(&v.key)) {
             let row = &d.work[i];
-            let r = &row.record;
-            s.tag(1)?;
-            s.i(r.work.priority)?;
-            s.i(r.work.available_at)?;
-            s.n(r.insertion_sequence)?;
-            s.tag(match r.lifecycle {
-                Lifecycle::Pending => 0,
-                Lifecycle::Leased => 1,
-                Lifecycle::Completed => 2,
-                Lifecycle::Failed => 3,
-            })?;
-            s.i(r.eligible_since)?;
-            s.raw(&r.attempts.to_le_bytes())?;
-            s.tag(u8::from(r.lease_expires_at.is_some()))?;
-            if let Some(expiry) = r.lease_expires_at {
-                s.i(expiry)?;
-            }
-            s.tag(u8::from(row.lease_hash.is_some()))?;
-            if let Some(hash) = row.lease_hash {
-                s.raw(&hash)?;
-            }
-            match &d.work_fields[&v.key] {
-                ResolvedFields::Preserve => s.tag(0)?,
-                ResolvedFields::Replace(f) => {
-                    s.tag(1)?;
-                    fields(s, f)?;
-                }
-                ResolvedFields::Edit(edits) => {
-                    s.tag(2)?;
-                    s.n(edits.len() as u64)?;
-                    for (n, v) in edits {
-                        s.text(n)?;
-                        s.tag(u8::from(v.is_some()))?;
-                        if let Some(v) = v {
-                            value(s, v)?;
-                        }
-                    }
-                }
-            }
-            match &d.work_bodies[&v.key] {
-                ResolvedBody::Preserve => s.tag(0)?,
-                ResolvedBody::Replace(b) => {
-                    s.tag(1)?;
-                    s.bytes(b)?;
-                }
-            }
+            write_work_value(s, row, &d.work_fields[&v.key], &d.work_bodies[&v.key])?;
         } else {
             s.tag(0)?;
         }
     }
     s.n(receipts.len() as u64)?;
     for r in receipts {
-        s.tag(r.identity().0)?;
-        s.text(r.id)?;
-        s.tag(3)?;
-        s.raw(&r.fingerprint)?;
-        match &r.result {
-            ReceiptResult::Commit(outcome) => match outcome {
-                GroupOutcome::Committed { versions } => {
-                    s.tag(0)?;
-                    s.n(versions.len() as u64)?;
-                    for v in versions {
-                        if v.version == 0 {
-                            return invalid("zero receipt version");
-                        }
-                        identity(s, v.collection.as_deref(), &v.key)?;
-                        s.n(v.version)?;
-                    }
-                }
-                GroupOutcome::Rejected(reason) => {
-                    s.tag(1)?;
-                    rejection(s, reason)?;
-                }
-                _ => return invalid("non-fresh commit outcome"),
-            },
-            ReceiptResult::Insert(outcomes) => {
-                s.n(outcomes.len() as u64)?;
-                for o in *outcomes {
-                    match o {
-                        InsertOutcome::Inserted { key, version } => {
-                            s.tag(0)?;
-                            s.text(key)?;
-                            s.n(*version)?;
-                        }
-                        InsertOutcome::Replaced { key, version } => {
-                            s.tag(1)?;
-                            s.text(key)?;
-                            s.n(*version)?;
-                        }
-                        InsertOutcome::Rejected { key, reason } => {
-                            s.tag(2)?;
-                            s.text(key)?;
-                            rejection(s, reason)?;
-                        }
-                    }
-                }
-            }
-        }
+        write_receipt(s, r)?;
     }
     Ok(())
 }

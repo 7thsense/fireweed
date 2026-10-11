@@ -116,3 +116,33 @@ compare speculative unique-probe caches. Stock Turso still must qualify physical
 index regeneration, unique authority, admitted bounded rows/buffers and all data+
 receipt+external log cursor publication through the existing owned writer pipeline.
 No physical projector or new store append route is activated by this iteration.
+
+## Shared incremental byte measurement — iteration 40
+
+The complete frame encoder and incremental measurers now call the same work/state,
+mutation-header, receipt/header and frame-header serializers. Header counts and
+sequences are fixed-width, so their final values do not alter the header footprint.
+Per-work/state measurements include exact field/body intent, predecessor metadata,
+deletions and tombstones; verified no-ops contribute no command bytes. The fresh
+receipt measurer preserves logical receipt order/identity before physical packing.
+An empty rejection publication floor includes queue and request identity bytes and
+the actual rejection payload, using that same serializer without allocating an ID
+or frame. Long identifiers therefore cannot disappear from future preflight floors.
+
+PublicationByteBudget counts one logical group without owning payloads. Crossing
+its configured limit is sticky, including checked-add overflow; malformed command
+metadata remains a validation error. Measurements take already validated resolved
+commands and do not establish business/storage authority or acknowledgement.
+They do not impose a match cap or split/coalesce logical groups.
+
+Regressions compare incremental parts with the frozen 489-byte frame, exact and
+one-byte-under boundaries, field edits, explicit empty body, verified no-op,
+work/state deletion, long-identity rejection floors and overflow. A megabyte body
+can be counted repeatedly without constructing frames or retaining body copies.
+The original frozen bytes and full parser/replay tests remain unchanged.
+
+This is a counting foundation, not a completed bounded administrative execution
+path. It currently measures FWQP1. FWQP2 administrative results/fingerprints,
+complete receipt budgets, overflow precedence, incremental execution/spooling,
+selection drain, durable TooLarge receipts and preview remain required. Counting
+after retaining a whole group would still be insufficient and is not activated.
