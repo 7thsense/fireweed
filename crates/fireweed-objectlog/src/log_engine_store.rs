@@ -31,6 +31,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::s3_create_only::S3CreateOnlyPut;
+mod namespace;
+pub use namespace::VerifiedApi007Namespace;
 
 fn fresh_writer_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -409,6 +411,7 @@ fn valid_snapshot_ref_id(ref_id: &str) -> bool {
 pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     engine: Arc<LogEngine<S>>,
     blob: Arc<dyn BlobStore>,
+    namespace_origin: Arc<()>,
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
@@ -504,6 +507,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let store = Self {
             engine,
             blob,
+            namespace_origin: Arc::new(()),
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
@@ -710,6 +714,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let store = Self {
             engine,
             blob,
+            namespace_origin: Arc::new(()),
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
@@ -1014,6 +1019,73 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .await
     }
 
+    async fn publish_immutable_bytes(&self, key: &str, bytes: Vec<u8>) -> EngineResult<bool> {
+        self.publish_immutable_bytes_owned(key, bytes, None).await
+    }
+    async fn publish_immutable_bytes_owned(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        charge: Option<fireweed_engine::queue_admission::OwnedQueueBufferCharge>,
+    ) -> EngineResult<bool> {
+        struct Payload {
+            bytes: Vec<u8>,
+            _charge: Option<fireweed_engine::queue_admission::OwnedQueueBufferCharge>,
+        }
+        let payload = Payload {
+            bytes,
+            _charge: charge,
+        };
+        Ok(match &self.definition_authority {
+            DefinitionAuthority::Local { root } => {
+                struct Worker {
+                    root: std::path::PathBuf,
+                    key: String,
+                    payload: Payload,
+                }
+                let worker = Worker {
+                    root: root.clone(),
+                    key: key.to_owned(),
+                    payload,
+                };
+                tokio::task::spawn_blocking(move || {
+                    let worker = worker;
+                    publish_local_definition(&worker.root, &worker.key, &worker.payload.bytes)
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "local definition publication worker failed: {error}"
+                    ))
+                })??
+            }
+            DefinitionAuthority::ProcessLocal => {
+                let _permit = self.definition_permit.lock().await;
+                if self.blob.get(key).await.map_err(store_err)?.is_some() {
+                    false
+                } else {
+                    self.blob
+                        .put(key, Bytes::from(payload.bytes))
+                        .await
+                        .map_err(store_err)?;
+                    true
+                }
+            }
+            DefinitionAuthority::S3CreateOnly { put } => {
+                put.put_if_absent(key, Bytes::from(payload.bytes)).await?
+            }
+            DefinitionAuthority::ConditionalCreateUnavailable => {
+                return Err(EngineError::Storage(
+                    "NativeConditionalWrite queue-definition authority is unavailable: the \
+                     configured BlobStore exposes overwrite-only put and cannot prove create-only \
+                     publication; use the local filesystem adapter or the S3 open path (which \
+                     issues If-None-Match: * PutObject for definitions)"
+                        .into(),
+                ));
+            }
+        })
+    }
+
     /// Atomically publish or read the durable first-writer definition for one queue.
     ///
     /// The returned winner is cached even when the caller later rejects it as incompatible.
@@ -1042,43 +1114,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .cloned();
         let publication = legacy_winner.clone().unwrap_or_else(|| definition.clone());
         let bytes = serde_json::to_vec(&publication).map_err(store_err)?;
-        let physically_created = match &self.definition_authority {
-            DefinitionAuthority::Local { root } => {
-                let root = root.clone();
-                let key = key.clone();
-                tokio::task::spawn_blocking(move || publish_local_definition(&root, &key, &bytes))
-                    .await
-                    .map_err(|error| {
-                        EngineError::Storage(format!(
-                            "local definition publication worker failed: {error}"
-                        ))
-                    })??
-            }
-            DefinitionAuthority::ProcessLocal => {
-                let _permit = self.definition_permit.lock().await;
-                if self.blob.get(&key).await.map_err(store_err)?.is_some() {
-                    false
-                } else {
-                    self.blob
-                        .put(&key, Bytes::from(bytes))
-                        .await
-                        .map_err(store_err)?;
-                    true
-                }
-            }
-            DefinitionAuthority::S3CreateOnly { put } => {
-                put.put_if_absent(&key, Bytes::from(bytes)).await?
-            }
-            DefinitionAuthority::ConditionalCreateUnavailable => {
-                return Err(EngineError::Storage(
-                    "NativeConditionalWrite queue-definition authority is unavailable: the \
-                     configured BlobStore exposes overwrite-only put and cannot prove create-only \
-                     publication; use the local filesystem adapter or the S3 open path (which \
-                     issues If-None-Match: * PutObject for definitions)"
-                        .into(),
-                ));
-            }
-        };
+        let physically_created = self.publish_immutable_bytes(&key, bytes).await?;
         let created = physically_created && legacy_winner.is_none();
         let winner_bytes = self
             .blob
@@ -1122,12 +1158,7 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
 
     let publish = std::fs::hard_link(&temp_path, &final_path);
     let created = match publish {
-        Ok(()) => {
-            std::fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(store_err)?;
-            true
-        }
+        Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(error) => {
             let _ = std::fs::remove_file(&temp_path);
@@ -1136,7 +1167,22 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
             )));
         }
     };
+    #[cfg(test)]
+    namespace::publication_hook(&final_path, created, false);
     std::fs::remove_file(&temp_path).map_err(store_err)?;
+    // An EEXIST observer can otherwise outrun the winner's directory fsync.
+    // Sync every ancestor so freshly created directory links are durable too.
+    let mut directory = Some(parent);
+    while let Some(path) = directory {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(store_err)?;
+        #[cfg(test)]
+        if path == parent {
+            namespace::publication_hook(&final_path, created, true);
+        }
+        directory = path.parent();
+    }
     Ok(created)
 }
 
@@ -1845,7 +1891,7 @@ mod tests {
     use crate::async_projection_apply::AsyncProjectionApplyCoordinator;
     use object_log::FlushConfig;
 
-    fn temp_root(tag: &str) -> std::path::PathBuf {
+    pub(super) fn temp_root(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "fireweed-olog-{tag}-{}-{}",
             std::process::id(),
@@ -1860,7 +1906,7 @@ mod tests {
         }
     }
 
-    fn qdef() -> QueueDefinition {
+    pub(super) fn qdef() -> QueueDefinition {
         QueueDefinition {
             tenant_id: TenantId::new("t").unwrap(),
             queue_id: QueueId::new("q").unwrap(),

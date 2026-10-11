@@ -53,7 +53,7 @@ pub use compose_log::{
 pub use log_engine_store::{
     ApplyPublish, LockWaitStats, OBJECT_LOG_POST_POSITION_TIMEOUT, OBJECT_LOG_PRE_POSITION_TIMEOUT,
     ObjectLogEngineStore, PackedAppendError, PackedAppendOutcome, PackedApplyBatch, PackerStats,
-    flush_config_from_segment,
+    VerifiedApi007Namespace, flush_config_from_segment,
 };
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
 #[doc(hidden)]

@@ -92,6 +92,13 @@ pub fn decode_namespace(component: &str) -> QueueResult<Vec<u8>> {
     Ok(raw)
 }
 
+/// Discovery bucket only; full immutable address authority decides identity.
+pub fn address_bucket(raw: &[u8]) -> QueueResult<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    view_address(raw)?;
+    Ok(Sha256::digest(raw).into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

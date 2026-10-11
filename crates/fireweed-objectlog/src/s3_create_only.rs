@@ -144,6 +144,97 @@ impl S3CreateOnlyPut {
         }
     }
 
+    /// Metadata precedes admission; the subsequent read must use this exact ETag.
+    pub(crate) async fn immutable_metadata(
+        &self,
+        key: &str,
+    ) -> EngineResult<Option<(u64, String)>> {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let size = output
+                    .content_length()
+                    .and_then(|n| u64::try_from(n).ok())
+                    .ok_or_else(|| {
+                        EngineError::Storage(
+                            "immutable authority HEAD omitted a valid length".into(),
+                        )
+                    })?;
+                let etag = output
+                    .e_tag()
+                    .filter(|tag| !tag.is_empty())
+                    .ok_or_else(|| {
+                        EngineError::Storage("immutable authority HEAD omitted ETag".into())
+                    })?
+                    .to_owned();
+                Ok(Some((size, etag)))
+            }
+            Err(error) if is_not_found(&error) => Ok(None),
+            Err(error) => Err(EngineError::Storage(format!(
+                "immutable authority HEAD failed: {error}"
+            ))),
+        }
+    }
+
+    /// Caller admits the complete body/scratch before invoking this bounded read.
+    pub(crate) async fn read_immutable_exact(
+        &self,
+        key: &str,
+        size: u64,
+        etag: &str,
+    ) -> EngineResult<Bytes> {
+        let mut output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .if_match(etag)
+            .send()
+            .await
+            .map_err(|error| {
+                EngineError::Storage(format!(
+                    "immutable authority conditional GET failed: {error}"
+                ))
+            })?;
+        if output.e_tag() != Some(etag)
+            || output.content_length().and_then(|n| u64::try_from(n).ok()) != Some(size)
+        {
+            return Err(EngineError::Storage(
+                "immutable authority response metadata changed".into(),
+            ));
+        }
+        let capacity = usize::try_from(size).map_err(|_| {
+            EngineError::Storage("immutable authority length exceeds address space".into())
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
+        while let Some(chunk) = output.body.try_next().await.map_err(|error| {
+            EngineError::Storage(format!("immutable authority body read failed: {error}"))
+        })? {
+            if bytes
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|n| n > capacity)
+            {
+                return Err(EngineError::Storage(
+                    "immutable authority body exceeds admitted length".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() != capacity {
+            return Err(EngineError::Storage(
+                "immutable authority body truncated".into(),
+            ));
+        }
+        Ok(Bytes::from(bytes))
+    }
+
     /// Conditional put: replace `key` only when its current ETag matches `expected_etag`.
     ///
     /// `Ok(true)` = this call won the CAS and wrote `value`.
