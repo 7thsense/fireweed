@@ -336,73 +336,8 @@ impl ApplyWorker {
         crate::tx::block_on_owned_apply(self.execute_inner())
     }
     async fn execute_inner(&mut self) -> QueueResult<AppliedQueueRecord> {
-        let mut writer = self.projection.writer.lock().await;
-        let connection = writer
-            .as_mut()
-            .ok_or_else(|| unknown("projection connection is poisoned"))?;
-        let transaction = match catch_apply_panic(
-            connection.transaction_with_behavior(TransactionBehavior::Immediate),
-        )
-        .await
-        {
-            Ok(Ok(transaction)) => transaction,
-            failure => {
-                drop(failure);
-                let _ = catch_apply_panic(connection.execute("ROLLBACK", ())).await;
-                if !matches!(connection.is_autocommit(), Ok(true)) {
-                    *writer = None;
-                }
-                return Err(unknown("native transaction begin failed"));
-            }
-        };
-        let applied = catch_apply_panic(apply_transaction(
-            &transaction,
-            &self.record,
-            self.offset,
-            &self.job,
-            #[cfg(test)]
-            self.projection
-                .panic_after_command
-                .swap(false, std::sync::atomic::Ordering::SeqCst),
-        ))
-        .await
-        .and_then(|value| value);
-        match applied {
-            Ok(()) => {
-                #[cfg(test)]
-                self.projection.pause_apply(false).await;
-                if let Err(error) = catch_apply_panic(transaction.commit())
-                    .await
-                    .and_then(|value| value.map_err(unknown))
-                {
-                    // commit consumed the transaction. Force any SDK-deferred
-                    // rollback through a real awaited access before release.
-                    let _ = catch_apply_panic(connection.execute("ROLLBACK", ())).await;
-                    if !matches!(connection.is_autocommit(), Ok(true)) {
-                        *writer = None;
-                    }
-                    return Err(error);
-                }
-            }
-            Err(error) => {
-                let mut transaction = transaction;
-                let rolled_back = match transaction.is_autocommit() {
-                    Ok(true) => {
-                        transaction.set_drop_behavior(DropBehavior::Ignore);
-                        drop(transaction);
-                        true
-                    }
-                    Ok(false) => {
-                        matches!(catch_apply_panic(transaction.rollback()).await, Ok(Ok(())))
-                    }
-                    Err(_) => matches!(catch_apply_panic(transaction.rollback()).await, Ok(Ok(()))),
-                };
-                if !rolled_back {
-                    *writer = None;
-                }
-                return Err(error);
-            }
-        }
+        let projection = Arc::clone(&self.projection);
+        owned_native_transaction(&projection, TransactionBehavior::Immediate, self).await?;
         #[cfg(test)]
         if self.projection.pause_apply(true).await {
             return Err(unknown("injected lost apply reply after commit"));
@@ -414,6 +349,98 @@ impl ApplyWorker {
                 .ok_or(QueueError::TooLarge)?,
             _charge: self.output_charge.take().expect("one result charge"),
         })
+    }
+}
+/// Internal only: physical operations share one proven begin/panic/rollback/poison
+/// lifecycle. The owning ScratchWorker retains all input and admission until it
+/// returns; no transaction handle is exposed to queue consumers.
+trait NativeTransactionWork {
+    type Output;
+    async fn run(&mut self, connection: &Connection) -> QueueResult<Self::Output>;
+    async fn before_commit(&mut self) {}
+}
+impl NativeTransactionWork for ApplyWorker {
+    type Output = ();
+    async fn run(&mut self, connection: &Connection) -> QueueResult<()> {
+        apply_transaction(
+            connection,
+            &self.record,
+            self.offset,
+            &self.job,
+            #[cfg(test)]
+            self.projection
+                .panic_after_command
+                .swap(false, std::sync::atomic::Ordering::SeqCst),
+        )
+        .await
+    }
+    async fn before_commit(&mut self) {
+        #[cfg(test)]
+        self.projection.pause_apply(false).await;
+    }
+}
+async fn owned_native_transaction<W: NativeTransactionWork>(
+    projection: &Arc<QueueProjection>,
+    behavior: TransactionBehavior,
+    work: &mut W,
+) -> QueueResult<W::Output> {
+    let mut writer = projection.writer.lock().await;
+    let connection = writer
+        .as_mut()
+        .ok_or_else(|| unknown("projection connection is poisoned"))?;
+    let transaction = match catch_apply_panic(connection.transaction_with_behavior(behavior)).await
+    {
+        Ok(Ok(transaction)) => transaction,
+        failure => {
+            drop(failure);
+            let _ = catch_apply_panic(connection.execute("ROLLBACK", ())).await;
+            if !matches!(connection.is_autocommit(), Ok(true)) {
+                *writer = None;
+            }
+            return Err(unknown("native transaction begin failed"));
+        }
+    };
+    let applied = catch_apply_panic(async {
+        let value = work.run(&transaction).await?;
+        work.before_commit().await;
+        Ok(value)
+    })
+    .await
+    .and_then(|value| value);
+    match applied {
+        Ok(value) => {
+            if let Err(error) = catch_apply_panic(transaction.commit())
+                .await
+                .and_then(|value| value.map_err(unknown))
+            {
+                // commit consumed the transaction. Force any SDK-deferred
+                // rollback through a real awaited access before release.
+                let _ = catch_apply_panic(connection.execute("ROLLBACK", ())).await;
+                if !matches!(connection.is_autocommit(), Ok(true)) {
+                    *writer = None;
+                }
+                return Err(error);
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            let mut transaction = transaction;
+            let rolled_back = match transaction.is_autocommit() {
+                Ok(true) => {
+                    transaction.set_drop_behavior(DropBehavior::Ignore);
+                    drop(transaction);
+                    true
+                }
+                Ok(false) => {
+                    matches!(catch_apply_panic(transaction.rollback()).await, Ok(Ok(())))
+                }
+                Err(_) => matches!(catch_apply_panic(transaction.rollback()).await, Ok(Ok(()))),
+            };
+            if !rolled_back {
+                *writer = None;
+            }
+            Err(error)
+        }
     }
 }
 
