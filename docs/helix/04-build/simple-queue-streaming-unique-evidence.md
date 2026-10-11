@@ -143,3 +143,26 @@ owned asynchronous scheduling/drain, resolved command streaming, logical overflo
 and receipt/result sizing, actual publication and backend parity remain pending.
 The pure complete-image planner remains the differential reference; the native
 path must not reconstruct its aggregate predecessor/probe maps at finalization.
+
+## Final-reservation drain notification — iteration 47
+
+Terminal notification now belongs to the reservation's final owner. A small,
+nonblocking, non-panicking one-shot callback is registered before Arc sharing.
+The final reservation drop first releases slot/base counters and the admission
+metadata lock, then signals completion. Owned child buffers release their own
+capacity before dropping that reservation Arc. Duplicate callback registration
+fails closed while preserving the original terminal signal. The callback is not
+storage finalization, publication or a second scheduling protocol.
+
+PostgreSQL dispatch captures only its shared completion Notify in this callback.
+Its former root-task-only notification could occur before a worker's child guard
+released the last slot, leaving shutdown asleep after the later release. Shutdown
+still enables its notification before checking counters and closes clients only
+after admission drains. The physical regression makes dispatch return while an
+already-owned blocking child is paused, polls shutdown Pending with nonzero
+usage, then releases the child and requires shutdown completion with zero usage.
+The existing caller-drop durable commit/reopen regression remains mandatory.
+
+This closes a live baseline shutdown wake-up gap and provides the terminal signal
+needed by upcoming scratch scheduling. It does not activate administrative input,
+create a blocking worker pool or prove complete selected-source publication.

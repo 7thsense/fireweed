@@ -15,10 +15,20 @@ pub struct QueueAdmission {
     max_bytes: u64,
     state: Mutex<State>,
 }
-#[derive(Debug)]
 pub struct QueueReservation {
     admission: Arc<QueueAdmission>,
     bytes: u64,
+    terminal: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+impl std::fmt::Debug for QueueReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QueueReservation")
+            .field("admission", &self.admission)
+            .field("bytes", &self.bytes)
+            .field("has_terminal_callback", &self.terminal.is_some())
+            .finish()
+    }
 }
 impl QueueAdmission {
     pub fn new(max_slots: usize, max_bytes: u64) -> QueueResult<Arc<Self>> {
@@ -54,6 +64,7 @@ impl QueueAdmission {
         Ok(QueueReservation {
             admission: Arc::clone(self),
             bytes,
+            terminal: None,
         })
     }
     pub fn close(&self) -> QueueResult<()> {
@@ -72,6 +83,22 @@ impl QueueAdmission {
     }
 }
 impl QueueReservation {
+    /// Bind completion to the final reservation owner, including worker-held
+    /// child guards. Register once before sharing this reservation through Arc.
+    /// The callback is a small, nonblocking, non-panicking terminal signal;
+    /// storage finalization belongs to the owning operation before this drop.
+    pub fn with_terminal_callback(
+        mut self,
+        callback: impl FnOnce() + Send + Sync + 'static,
+    ) -> QueueResult<Self> {
+        if self.terminal.is_some() {
+            return Err(QueueError::OutcomeUnknown(
+                "terminal callback already registered".into(),
+            ));
+        }
+        self.terminal = Some(Box::new(callback));
+        Ok(self)
+    }
     /// Charge loaded records/planning/seal buffers before retaining them. Failure
     /// does not lose the existing reservation or pretend admitted work rolled back.
     pub fn grow(&mut self, additional: u64) -> QueueResult<()> {
@@ -191,11 +218,59 @@ impl Drop for QueueReservation {
             state.slots -= 1;
             state.bytes -= self.bytes;
         }
+        // Wake only after counters change and the metadata lock is released.
+        if let Some(terminal) = self.terminal.take() {
+            terminal();
+        }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_callback_runs_once_after_final_child_and_counter_release() {
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let completion = Arc::clone(&observed);
+        let counter = Arc::clone(&admission);
+        let job = Arc::new(
+            admission
+                .reserve(10)
+                .unwrap()
+                .with_terminal_callback(move || {
+                    completion.lock().unwrap().push(counter.usage().unwrap());
+                })
+                .unwrap(),
+        );
+        let parent = job.owned_buffer(20).unwrap();
+        let child = parent.child_buffer(30).unwrap();
+        drop(job);
+        drop(parent);
+        assert_eq!(admission.usage().unwrap(), (1, 40));
+        assert!(observed.lock().unwrap().is_empty());
+        drop(child);
+        assert_eq!(*observed.lock().unwrap(), vec![(0, 0)]);
+    }
+    #[test]
+    fn duplicate_terminal_registration_preserves_original_completion() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let original = Arc::clone(&calls);
+        let job = admission
+            .reserve(10)
+            .unwrap()
+            .with_terminal_callback(move || {
+                original.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+        assert!(matches!(
+            job.with_terminal_callback(|| panic!("replacement must never run")),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
     #[test]
     fn child_capacity_keeps_job_after_parent_guard_and_caller_drop() {
         let admission = QueueAdmission::new(1, 100).unwrap();

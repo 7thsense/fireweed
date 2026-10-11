@@ -169,7 +169,7 @@ struct Inner {
     admission: Arc<QueueAdmission>,
     slots: Arc<Semaphore>,
     next: AtomicUsize,
-    done: Notify,
+    done: Arc<Notify>,
     clock: Arc<dyn Clock>,
     limits: QueueLimits,
 }
@@ -263,7 +263,7 @@ impl PostgresQueueStore {
                 admission: QueueAdmission::new(64, bytes)?,
                 slots: Arc::new(Semaphore::new(pool_size)),
                 next: AtomicUsize::new(0),
-                done: Notify::new(),
+                done: Arc::new(Notify::new()),
                 clock,
                 limits,
             }),
@@ -274,44 +274,38 @@ impl PostgresQueueStore {
         T: Send + 'static,
         F: for<'a> FnOnce(&'a mut Client, QueueReservation) -> QueueFuture<'a, T> + Send + 'static,
     {
-        let reservation = self.inner.admission.reserve(bytes)?;
+        let done = Arc::clone(&self.inner.done);
+        let reservation = self
+            .inner
+            .admission
+            .reserve(bytes)?
+            .with_terminal_callback(move || done.notify_waiters())?;
         let inner = Arc::clone(&self.inner);
         let task = tokio::spawn(async move {
-            let _completion = JobCompletion(Arc::clone(&inner));
-            async move {
-                let permit = Arc::clone(&inner.slots)
-                    .acquire_owned()
-                    .await
-                    .map_err(storage)?;
-                let start = inner.next.fetch_add(1, Ordering::Relaxed) % inner.clients.len();
-                let mut selected = None;
-                for offset in 0..inner.clients.len() {
-                    if let Ok(guard) =
-                        inner.clients[(start + offset) % inner.clients.len()].try_lock()
-                    {
-                        selected = Some(guard);
-                        break;
-                    }
+            let permit = Arc::clone(&inner.slots)
+                .acquire_owned()
+                .await
+                .map_err(storage)?;
+            let start = inner.next.fetch_add(1, Ordering::Relaxed) % inner.clients.len();
+            let mut selected = None;
+            for offset in 0..inner.clients.len() {
+                if let Ok(guard) = inner.clients[(start + offset) % inner.clients.len()].try_lock()
+                {
+                    selected = Some(guard);
+                    break;
                 }
-                let mut guard =
-                    selected.ok_or_else(|| storage("pool permit without free connection"))?;
-                let result = match guard.as_mut() {
-                    Some(client) => job(client, reservation).await,
-                    None => Err(storage("store closed")),
-                };
-                drop(guard);
-                drop(permit);
-                result
             }
-            .await
+            let mut guard =
+                selected.ok_or_else(|| storage("pool permit without free connection"))?;
+            let result = match guard.as_mut() {
+                Some(client) => job(client, reservation).await,
+                None => Err(storage("store closed")),
+            };
+            drop(guard);
+            drop(permit);
+            result
         });
         task.await.map_err(storage)?
-    }
-}
-struct JobCompletion(Arc<Inner>);
-impl Drop for JobCompletion {
-    fn drop(&mut self) {
-        self.0.done.notify_waiters();
     }
 }
 struct QueueRow<'a> {
@@ -2282,6 +2276,53 @@ mod tests {
             read_cursor(&corrupt, b"secret", [1; 32]),
             Err(QueueError::Invalid(_))
         ));
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn shutdown_waits_for_final_worker_reservation_after_dispatch_root_returns() {
+        let _fixture = physical_fixture().await;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let (ready, held) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        store
+            .dispatch(128, move |_client, reservation| {
+                Box::pin(async move {
+                    let reservation = Arc::new(reservation);
+                    let resource = reservation.owned_buffer(4096)?;
+                    let worker = tokio::task::spawn_blocking(move || {
+                        let _resource = resource;
+                        ready.send(()).unwrap();
+                        wait.recv().unwrap();
+                    });
+                    // Model root-owner termination while an already-owned worker finishes.
+                    drop(worker);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        held.await.unwrap();
+        assert_eq!(store.inner.admission.usage().unwrap(), (1, 128 + 4096));
+        let shutdown = store.shutdown();
+        tokio::pin!(shutdown);
+        assert!(matches!(
+            futures::poll!(shutdown.as_mut()),
+            std::task::Poll::Pending
+        ));
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.inner.admission.usage().unwrap(), (0, 0));
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
