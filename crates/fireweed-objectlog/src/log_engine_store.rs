@@ -1356,6 +1356,29 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if commands.is_empty() {
             return Ok(Vec::new());
         }
+        self.produce_payload_immediate(shard, expected_epoch, || {
+            let payload = Bytes::from(
+                fireweed_engine::command_codec::encode_log_batch(expected_epoch, commands)
+                    .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
+            );
+            let record_count = i32::try_from(commands.len()).map_err(|_| {
+                PackedAppendError::BeforePosition(EngineError::Invalid(
+                    "batch too large for object-log record_count",
+                ))
+            })?;
+            Ok((payload, record_count))
+        })
+        .await
+    }
+
+    // Encoding remains under the epoch-checked metadata permit. All payload
+    // formats share the same durable append and outcome classification.
+    async fn produce_payload_immediate(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
+    ) -> Result<Vec<CommandPosition>, PackedAppendError> {
         let trace_started = Instant::now();
         let pre_budget =
             Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
@@ -1381,15 +1404,12 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             if epoch != expected_epoch {
                 return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
             }
-            let payload = Bytes::from(
-                fireweed_engine::command_codec::encode_log_batch(expected_epoch, commands)
-                    .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
-            );
-            let record_count = i32::try_from(commands.len()).map_err(|_| {
-                PackedAppendError::BeforePosition(EngineError::Invalid(
-                    "batch too large for object-log record_count",
-                ))
-            })?;
+            let (payload, record_count) = encode()?;
+            if record_count <= 0 {
+                return Err(PackedAppendError::BeforePosition(EngineError::Invalid(
+                    "object-log record_count must be positive",
+                )));
+            }
             Ok((metadata, payload, record_count))
         };
         let remaining = pre_deadline.saturating_duration_since(Instant::now());
@@ -1441,7 +1461,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             let base = outcome.base_offset.ok_or_else(|| {
                 EngineError::Storage("sequenced produce missing base_offset".into())
             })? as u64;
-            let positions: Vec<CommandPosition> = (0..commands.len() as u64)
+            let positions: Vec<CommandPosition> = (0..record_count as u64)
                 .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
                 .collect();
             if let Some(last) = positions.last() {
@@ -2164,6 +2184,88 @@ mod tests {
         assert_eq!(outcome.definition, durable);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn shared_payload_append_preserves_fence_count_and_cold_replay() {
+        let root = temp_root("shared-payload");
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let def = qdef();
+        let shard = QueueKey::new(def.tenant_id, def.queue_id);
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let encoded = std::sync::atomic::AtomicBool::new(false);
+        assert!(matches!(
+            log.produce_payload_immediate(&shard, epoch + 1, || {
+                encoded.store(true, Ordering::SeqCst);
+                Ok((bytes::Bytes::from_static(b"wrong epoch"), 1))
+            })
+            .await,
+            Err(PackedAppendError::BeforePosition(EngineError::EpochFenced))
+        ));
+        assert!(!encoded.load(Ordering::SeqCst));
+        assert!(matches!(
+            log.produce_payload_immediate(&shard, epoch, || Ok((bytes::Bytes::new(), 0)))
+                .await,
+            Err(PackedAppendError::BeforePosition(EngineError::Invalid(_)))
+        ));
+        let positions = log
+            .produce_payload_immediate(&shard, epoch, || {
+                Ok((bytes::Bytes::from_static(b"opaque resolved record"), 1))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            positions,
+            vec![CommandPosition::new(shard.clone(), epoch, 0)]
+        );
+        let next = log
+            .produce_payload_immediate(&shard, epoch, || {
+                Ok((bytes::Bytes::from_static(b"second payload"), 2))
+            })
+            .await
+            .unwrap();
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].sequence, 1);
+        assert_eq!(next[1].sequence, 2);
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let plan = reopened
+            .engine
+            .plan_fetch(&super::partition_key(&shard), 0, 8, 65536, 4096)
+            .unwrap();
+        assert_eq!(plan.entries().len(), 2);
+        let first = reopened
+            .engine
+            .read_planned_batch(&plan, 0, 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.payload,
+            bytes::Bytes::from_static(b"opaque resolved record")
+        );
+        assert_eq!(plan.entries()[0].record_count, 1);
+        assert_eq!(plan.entries()[1].record_count, 2);
+        let raw = reopened
+            .blob
+            .get(&reopened.high_water_key(&shard))
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        // Persisted hints deliberately lag; actual durable EOF is authoritative.
+        assert_eq!(metadata["sequence"], 0);
+        let eof = reopened
+            .engine
+            .plan_fetch(&super::partition_key(&shard), 3, 8, 65536, 4096)
+            .unwrap();
+        assert!(eof.entries().is_empty());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
