@@ -77,7 +77,11 @@ writer without shutdown and starts a fresh verifier process. The shared scenario
 checks the original acknowledged receipt and exact replay, completed source, state
 value and emitted next work together. The readiness payload is published by atomic
 rename only after the writer has received successful commit acknowledgement. This
-proves writer-process loss; abrupt database/server crash remains a separate gate.
+proves writer-process loss. The isolated queue_server_crash fixture additionally
+verifies acknowledged-transaction recovery after PostgreSQL immediate shutdown
+and restart with WAL recovery evidence; see [durability qualification](simple-queue-postgres-durability.md).
+This is a private stock PostgreSQL 16.15 fixture, not power-loss or storage-corruption
+qualification.
 
 A native current-thread fixture now forces all discovery hashes to the same
 32-byte value. Shared contract, ordered uniqueness, typed predicate and long-value
@@ -88,7 +92,8 @@ disambiguation, not adversarial storage corruption or S3/Turso parity.
 
 This iteration is a functional native adapter slice. It does not qualify matched
 throughput, 10M indexed query paths, numeric progress bounds,
-full legacy persisted-data migration, server/PG crash recovery, or S3/Turso parity.
+full legacy persisted-data migration, power-loss/storage-corruption recovery,
+or S3/Turso parity.
 Full Snorri/Cayce facade migration and run-wide gates/membership/control mapping
 still require verification against actual consumers. Production activation and
 legacy-code removal remain gated by those tests and comparable settled-work

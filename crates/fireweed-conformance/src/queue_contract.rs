@@ -1251,9 +1251,10 @@ pub async fn unrestricted_names_obey_response_bounds(store: &dyn QueueStore, que
     assert_eq!(keys, vec!["page-0", "page-1", "page-2", "page-3", "state"]);
 }
 
-/// Fixture-independent acknowledged-write payload for adapter process-loss tests.
-/// The fixture must kill the writer without calling shutdown, then open a fresh
-/// process and invoke `verify_process_loss`; neither function weakens semantics.
+/// Fixture-independent acknowledged-write payload for adapter loss tests.
+/// Writer-loss bindings kill without shutdown and use a fresh verifier process;
+/// server-loss bindings crash/recover storage and open a fresh store. Both invoke
+/// `verify_process_loss` with the exact acknowledgement; neither weakens semantics.
 pub async fn prepare_process_loss(
     store: &dyn QueueStore,
     queue: QueueAddress,
@@ -1339,6 +1340,22 @@ pub async fn verify_process_loss(
         panic!("acknowledged receipt missing: {receipts:?}")
     };
     committed(original);
+    let GroupOutcome::Committed { versions } = &original.outcome else {
+        unreachable!()
+    };
+    let acknowledged_state_version = versions
+        .iter()
+        .find(|v| v.collection.as_deref() == Some("instances") && v.key == "crash-state")
+        .expect("state version in acknowledged atomic receipt")
+        .version;
+    assert_eq!(
+        state[0].as_ref().unwrap().version,
+        acknowledged_state_version
+    );
+    assert_eq!(
+        state[0].as_ref().unwrap().fields.get("run"),
+        Some(&FieldValue::Text("crash-run".into()))
+    );
     assert_eq!(store.commit(batch).await.unwrap(), vec![original.clone()]);
     assert_eq!(
         store.claim(claim(&queue, "crash-claim", "source")).await,
