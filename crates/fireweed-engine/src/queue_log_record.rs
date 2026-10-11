@@ -167,6 +167,18 @@ impl OwnedQueueLogRecord {
     pub fn belongs_to(&self, job: &QueueReservation) -> bool {
         std::ptr::eq(self._charge.reservation(), job)
     }
+    /// Transfer admission into the shared payload owner. Every Bytes clone and
+    /// slice keeps the charge until the final physical alias disappears.
+    /// Do not send through stores that retain these aliases as persistent data:
+    /// such a store would retain this operation's reservation indefinitely.
+    pub fn into_admitted_bytes(self) -> Bytes {
+        Bytes::from_owner(self)
+    }
+}
+impl AsRef<[u8]> for OwnedQueueLogRecord {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 impl std::fmt::Debug for OwnedQueueLogRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -315,6 +327,40 @@ mod tests {
     }
     fn job() -> Arc<QueueReservation> {
         Arc::new(QueueAdmission::new(1, 1 << 20).unwrap().reserve(0).unwrap())
+    }
+    #[test]
+    fn payload_clones_and_slices_retain_final_reservation_until_last_alias() {
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let terminal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = std::sync::Arc::clone(&terminal);
+        let job = Arc::new(
+            admission
+                .reserve(0)
+                .unwrap()
+                .with_terminal_callback(move || {
+                    signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+                .unwrap(),
+        );
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let record = encode_genesis(7, &address(), &definition, &[19; 32], 4096, &job).unwrap();
+        let expected = record.bytes().to_vec();
+        drop(definition);
+        let usage = admission.usage().unwrap();
+        let bytes = record.into_admitted_bytes();
+        assert_eq!(&bytes[..], &expected);
+        let clone = bytes.clone();
+        let slice = clone.slice(22..);
+        drop(job);
+        drop(bytes);
+        drop(clone);
+        assert_eq!(admission.usage().unwrap(), usage);
+        assert!(!terminal.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(&slice[..], &expected[22..]);
+        drop(slice);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        assert!(terminal.load(std::sync::atomic::Ordering::SeqCst));
     }
     #[test]
     fn genesis_literal_pin_secret_and_exact_boundary() {
