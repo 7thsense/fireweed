@@ -233,6 +233,18 @@ fn blob(out: &mut Vec<u8>, raw: &[u8]) -> QueueResult<()> {
     out.extend_from_slice(raw);
     Ok(())
 }
+/// Exact FWQL1 genesis size, shared by preflight and the admitted writer.
+pub fn genesis_record_len(
+    address: &QueueAddress,
+    definition: &AdmittedQueueDefinition,
+) -> QueueResult<u64> {
+    address.validate()?;
+    let size = framed_address_len(address)?
+        .checked_add(definition.raw().len())
+        .and_then(|n| n.checked_add(70))
+        .ok_or(QueueError::TooLarge)?;
+    u64::try_from(size).map_err(|_| QueueError::TooLarge)
+}
 pub fn encode_genesis(
     epoch: u64,
     address: &QueueAddress,
@@ -245,11 +257,9 @@ pub fn encode_genesis(
     if !definition.belongs_to(job) {
         return Err(invalid("genesis definition belongs to another job"));
     }
-    let payload = framed_address_len(address)?
-        .checked_add(definition.raw().len())
-        .and_then(|n| n.checked_add(48))
-        .ok_or(QueueError::TooLarge)?;
-    let size = payload.checked_add(22).ok_or(QueueError::TooLarge)?;
+    let size = usize::try_from(genesis_record_len(address, definition)?)
+        .map_err(|_| QueueError::TooLarge)?;
+    let payload = size.checked_sub(22).ok_or(QueueError::TooLarge)?;
     let mut out = admitted_output(size, max_bytes, job)?;
     header(&mut out.bytes, epoch, GENESIS, payload)?;
     let framed = encode_address(address)?;

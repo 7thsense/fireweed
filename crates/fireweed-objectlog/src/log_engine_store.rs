@@ -33,9 +33,11 @@ use tokio::sync::{Notify, Semaphore};
 use crate::s3_create_only::S3CreateOnlyPut;
 mod namespace;
 mod queue_append;
+mod queue_provision;
 mod queue_replay;
 pub use namespace::VerifiedApi007Namespace;
 pub use queue_append::AdmittedApi007Append;
+pub use queue_provision::{Api007GenesisRequest, ProvisionedApi007Genesis};
 pub use queue_replay::{AdmittedApi007Read, AdmittedApi007State, Api007ReadPlan};
 
 fn fresh_writer_id() -> String {
@@ -422,6 +424,7 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     blob: Arc<dyn BlobStore>,
     namespace_origin: Arc<()>,
     raw_io_qualified: bool,
+    native_provision_tasks: Arc<tokio::sync::Semaphore>,
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
@@ -519,6 +522,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             blob,
             namespace_origin: Arc::new(()),
             raw_io_qualified: true,
+            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(64)),
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
@@ -731,6 +735,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             blob,
             namespace_origin: Arc::new(()),
             raw_io_qualified: false,
+            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(64)),
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),

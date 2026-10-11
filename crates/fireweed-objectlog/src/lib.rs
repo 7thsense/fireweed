@@ -51,10 +51,11 @@ pub use compose_log::{
     open_object_log_engine_s3_sync,
 };
 pub use log_engine_store::{
-    AdmittedApi007Append, AdmittedApi007Read, AdmittedApi007State, Api007ReadPlan, ApplyPublish,
-    LockWaitStats, OBJECT_LOG_POST_POSITION_TIMEOUT, OBJECT_LOG_PRE_POSITION_TIMEOUT,
-    ObjectLogEngineStore, PackedAppendError, PackedAppendOutcome, PackedApplyBatch, PackerStats,
-    VerifiedApi007Namespace, flush_config_from_segment,
+    AdmittedApi007Append, AdmittedApi007Read, AdmittedApi007State, Api007GenesisRequest,
+    Api007ReadPlan, ApplyPublish, LockWaitStats, OBJECT_LOG_POST_POSITION_TIMEOUT,
+    OBJECT_LOG_PRE_POSITION_TIMEOUT, ObjectLogEngineStore, PackedAppendError, PackedAppendOutcome,
+    PackedApplyBatch, PackerStats, ProvisionedApi007Genesis, VerifiedApi007Namespace,
+    flush_config_from_segment,
 };
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
 #[doc(hidden)]
