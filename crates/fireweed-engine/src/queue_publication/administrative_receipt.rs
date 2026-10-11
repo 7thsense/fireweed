@@ -1,5 +1,5 @@
-//! Private future complete-receipt layout. Public activation must append the
-//! corresponding variants without altering legacy ones. These bytes carry no
+//! Frozen complete-receipt projection matching the live appended variants.
+//! Legacy variant layouts remain unchanged. These bytes carry no
 //! execution/source/request authority and must not be acknowledged standalone.
 use super::*;
 use fireweed_core::queue_administration::AdministrativeResult;
@@ -235,9 +235,102 @@ mod tests {
     use crate::queue_admission::QueueAdmission;
     use serde::Deserialize;
     use sha2::Digest;
+    use std::collections::BTreeMap;
+    #[test]
+    fn stored_administrative_headers_borrow_large_before_bytes_and_reject_nonfinite_fields() {
+        use crate::queue_memory::{PersistedStructure, receipt_headers};
+        use fireweed_core::queue_administration::*;
+        let mut histogram = AdministrativeHistogram::default();
+        histogram
+            .record(&AdministrativeOutcome::Changed { version: 2 })
+            .unwrap();
+        let mut live = CommitReceipt {
+            request_id: "large-before".into(),
+            outcome: GroupOutcome::AdministrativeCommitted {
+                versions: vec![],
+                administration: AdministrativeResult {
+                    histogram,
+                    clauses: vec![],
+                    items: vec![AdministrativeItemResult {
+                        key: "k".into(),
+                        outcome: AdministrativeOutcome::Changed { version: 2 },
+                        before: Some(AdministrativeBefore {
+                            version: 1,
+                            lifecycle: Lifecycle::Pending,
+                            available_at: i64::MIN,
+                            eligible_since: i64::MAX,
+                            attempts: u32::MAX,
+                            lease_expires_at: None,
+                            fields: BTreeMap::from([
+                                ("opaque".into(), FieldValue::Bytes(vec![3; 4 << 20])),
+                                ("zero".into(), FieldValue::Float(-0.0)),
+                            ]),
+                        }),
+                    }],
+                },
+            },
+        };
+        let raw = postcard::to_allocvec(&live).unwrap();
+        let headers = CommitReceipt::stored_headers(&raw).unwrap();
+        assert!(headers >= receipt_headers(&live).unwrap());
+        assert!(headers < 16384);
+        for length in [0, 1, 20, raw.len() - 1] {
+            assert!(CommitReceipt::stored_headers(&raw[..length]).is_err());
+        }
+        let GroupOutcome::AdministrativeCommitted { administration, .. } = &mut live.outcome else {
+            unreachable!()
+        };
+        administration.items[0]
+            .before
+            .as_mut()
+            .unwrap()
+            .fields
+            .insert("zero".into(), FieldValue::Float(f64::NAN));
+        assert!(CommitReceipt::stored_headers(&postcard::to_allocvec(&live).unwrap()).is_err());
+        assert!(live.validate_persisted().is_err());
+    }
+    #[test]
+    fn live_public_receipts_match_frozen_future_projection_and_borrowed_scans() {
+        use crate::queue_memory::{PersistedStructure, receipt_headers};
+        let result = AdministrativeResult {
+            histogram: Default::default(),
+            items: vec![],
+            clauses: vec![],
+        };
+        let live = CommitReceipt {
+            request_id: "live".into(),
+            outcome: GroupOutcome::AdministrativeCommitted {
+                versions: vec![],
+                administration: result.clone(),
+            },
+        };
+        let projected = CompleteReceipt {
+            request_id: "live",
+            outcome: &AdministrativeReceiptOutcome::Committed {
+                versions: &[],
+                administration: &result,
+            },
+        };
+        let raw = postcard::to_allocvec(&live).unwrap();
+        assert_eq!(raw, postcard::to_allocvec(&projected).unwrap());
+        assert!(CommitReceipt::stored_headers(&raw).unwrap() >= receipt_headers(&live).unwrap());
+        live.validate_persisted().unwrap();
+        let too_large = CommitReceipt {
+            request_id: "r".into(),
+            outcome: GroupOutcome::Rejected(Rejection::TooLarge),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&too_large).unwrap(),
+            vec![1, b'r', 3, 8]
+        );
+        let mut trailing = raw.clone();
+        trailing.push(0);
+        assert!(CommitReceipt::stored_headers(&trailing).is_err());
+    }
     #[test]
     fn receipt_base_preserves_full_identities_and_is_monotone_across_versions() {
         let group = CommitGroup {
+            administration: None,
             request_id: "α\0".repeat(10000),
             claimed_updates: vec![ClaimedUpdate {
                 key: "claimedα".into(),
@@ -419,6 +512,14 @@ mod tests {
                 administration: administration.clone(),
             },
         };
+        let live = CommitReceipt {
+            request_id: "rich".into(),
+            outcome: GroupOutcome::AdministrativeCommitted {
+                versions: versions.clone(),
+                administration: administration.clone(),
+            },
+        };
+        assert_eq!(encoded.as_bytes(), postcard::to_allocvec(&live).unwrap());
         assert_eq!(encoded.as_bytes(), postcard::to_allocvec(&future).unwrap());
         assert_eq!(encoded.as_bytes().len(), 365);
         assert_eq!(

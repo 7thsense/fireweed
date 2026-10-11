@@ -45,7 +45,28 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     suite::indexed_additional_attributes(&queue, address("additional-attributes")).await;
     suite::numeric_bucket_stats(&queue, &clock, address("numeric-buckets")).await;
     suite::unrestricted_names_obey_response_bounds(&queue, address("names-bounds")).await;
+    suite::atomic_administration_preview_and_replay(&queue, address("administration-preview"))
+        .await;
+    suite::administrative_size_siblings_and_preflight(&queue, address("administration-sizes"))
+        .await;
+    suite::broad_administration_exceeds_input_chunk(&queue, address("administration-broad")).await;
     let acknowledged = suite::prepare_process_loss(&queue, address("acknowledged-reopen")).await;
+    let administrative_expected = queue
+        .read_commit(ReceiptReadRequest {
+            queue: address("administration-preview"),
+            request_ids: vec!["admin-transition".into()],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
+    let wide_expected = queue
+        .read_commit(ReceiptReadRequest {
+            queue: address("administration-sizes"),
+            request_ids: vec!["wide-accepted".into(), "middle".into()],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
     let clone = queue.clone();
     queue.shutdown().await.unwrap();
     other.shutdown().await.unwrap();
@@ -72,6 +93,29 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
         expected
     );
     suite::verify_process_loss(&reopened, acknowledged).await;
+    assert_eq!(
+        reopened
+            .read_commit(ReceiptReadRequest {
+                queue: address("administration-preview"),
+                request_ids: vec!["admin-transition".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        administrative_expected
+    );
+    assert_eq!(
+        reopened
+            .read_commit(ReceiptReadRequest {
+                queue: address("administration-sizes"),
+                request_ids: vec!["wide-accepted".into(), "middle".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        wide_expected
+    );
+
     let state = reopened
         .read_state(StateReadRequest {
             queue: primary,

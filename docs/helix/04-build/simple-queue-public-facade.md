@@ -6,8 +6,8 @@ Clock/SystemClock/UtcTimestamp, errors, limits and futures through its queue mod
 Backend selection occurs only at construction. There is no backend injection/getter,
 transaction/session, capability negotiation or optional unsupported operation.
 
-The nine mandatory methods delegate the original store future directly: provision,
-insert, filtered priority claim, atomic commit with state/new work, stats, state
+The ten mandatory methods delegate the original store future directly: provision,
+insert, filtered priority claim, atomic commit with state/new work, fresh preview, stats, state
 read, indexed query, receipt lookup and shutdown. No task, clock, admission or
 cancellation layer is added. Clones share native storage/admission; shutdown through
 one clone closes admission and drains admitted jobs for all clones.
@@ -37,7 +37,10 @@ It compares the exact original receipt across reopen and checks shared shutdown
 through a clone. The identical S3/Turso fixture must eventually construct Queue
 through its own factory and run these same calls/assertions.
 
-This lands the facade and native binding only. S3/Turso construction, bounded broad
-administrative whole-operation wire/preview/size outcomes, Snorri/Cayce migration,
+Iteration 62 activates bounded addressed/broad administration in PostgreSQL commit
+and fresh preview. Administrative receipts, complete before data, result/publication
+size gates and zero-effect TooLarge groups share the mandatory conformance suite.
+Preview never reads or saves execution receipts and never allocates physical IDs.
+S3/Turso construction, Snorri/Cayce migration,
 consumer JSON model/visibility bindings and matched release qualification remain
 open. The legacy public facade remains until those cutover gates are fulfilled.

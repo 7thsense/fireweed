@@ -13,6 +13,7 @@ pub trait QueueStore: Send + Sync {
     fn insert(&self, request: InsertRequest) -> QueueFuture<'_, Vec<InsertOutcome>>;
     fn claim(&self, request: ClaimRequest) -> QueueFuture<'_, Vec<ClaimedWork>>;
     fn commit(&self, request: CommitBatch) -> QueueFuture<'_, Vec<CommitReceipt>>;
+    fn preview(&self, request: PreviewRequest) -> QueueFuture<'_, PreviewResult>;
     fn stats(&self, request: StatsRequest) -> QueueFuture<'_, QueueStats>;
     fn read_state(&self, request: StateReadRequest) -> QueueFuture<'_, Vec<Option<StateRecord>>>;
     fn query(&self, request: QueryRequest) -> QueueFuture<'_, QueryPage>;

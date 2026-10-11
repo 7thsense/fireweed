@@ -184,6 +184,7 @@ pub async fn run(
                     vec![]
                 };
                 groups.push(CommitGroup {
+                    administration: None,
                     request_id: format!("settle-{stage}-{n}"),
                     claimed_updates: vec![ClaimedUpdate {
                         key: work.record.work.key,

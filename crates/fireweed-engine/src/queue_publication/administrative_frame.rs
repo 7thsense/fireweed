@@ -181,7 +181,11 @@ fn write_administrative_receipt(
         }
         AdministrativeReceiptOutcome::Rejected(reason) => {
             s.tag(1)?;
-            rejection(s, reason)
+            if matches!(reason, Rejection::TooLarge) {
+                s.tag(8)
+            } else {
+                rejection(s, reason)
+            }
         }
         AdministrativeReceiptOutcome::TooLarge => {
             s.tag(1)?;
@@ -682,6 +686,7 @@ mod tests {
     }
     fn group(id: &str) -> CommitGroup {
         CommitGroup {
+            administration: None,
             request_id: id.into(),
             claimed_updates: vec![],
             state_updates: vec![],

@@ -1,4 +1,4 @@
-//! Private native selector preparation; no public administrative activation.
+//! Native fenced administration shared by public commit and fresh preview.
 use super::*;
 use fireweed_core::queue_administration::{Comparison, SelectorNode, WorkSelector};
 
@@ -360,6 +360,7 @@ async fn hydrate_administrative_row<'r>(
         .ok_or_else(|| storage("administrative hydration input bound"))?;
     let input_charge = reservation.buffer(input_bytes)?;
     let mut group = CommitGroup {
+        administration: None,
         request_id: String::new(),
         claimed_updates: vec![],
         state_updates: vec![],
@@ -523,14 +524,8 @@ where
         },
     ))
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "private native provider qualification precedes public activation"
-    )
-)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn plan_native_broad<'r>(
     tx: &Transaction<'_>,
     queue: &QueueRow<'_>,
@@ -558,13 +553,6 @@ async fn plan_native_broad<'r>(
     .await
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "private native scratch qualification precedes public activation"
-    )
-)]
 struct NativeAdministrativePreparation<'r> {
     scratch: fireweed_queue_spool::SealedAdministrativeScratch,
     summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
@@ -576,14 +564,8 @@ struct NativeAdministrativePreparation<'r> {
 /// Preparation retains explicit ordinary authority and returns only bounded
 /// scratch plus compact results. No ordinary ownership clock or SQL write occurs.
 /// Any source/sink error requires whole outer transaction rollback.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "private native scratch qualification precedes public activation"
-    )
-)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn prepare_native_scratch<'r>(
     tx: &Transaction<'_>,
     address: &QueueAddress,
@@ -612,13 +594,6 @@ async fn prepare_native_scratch<'r>(
     )
     .await
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "bounded native preparation precedes public activation"
-    )
-)]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_native_scratch_bounded<'r>(
     tx: &Transaction<'_>,
@@ -732,13 +707,6 @@ impl OwnedScratchDirectory {
 }
 /// Input-bounded ordinary command plus external administrative commands, still
 /// awaiting byte/result limits and atomic application. No publication approval.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "private finalization qualification precedes public activation"
-    )
-)]
 struct NativeProvisionalGroup {
     scratch: fireweed_queue_spool::SealedAdministrativeScratch,
     summary: fireweed_engine::queue_administration::AdmittedAdministrativeScan,
@@ -749,25 +717,11 @@ struct NativeProvisionalGroup {
     max_publication_bytes: u64,
 }
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "native publication qualification precedes public activation"
-    )
-)]
 enum NativePublicationDecision {
     Fits { bytes: u64, commands: u64 },
     TooLarge,
 }
 impl NativeProvisionalGroup {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "native publication qualification precedes public activation"
-        )
-    )]
     fn assess_publication_limit(
         &self,
         address: &QueueAddress,
@@ -849,13 +803,6 @@ impl NativeProvisionalGroup {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "exact native result gate precedes public activation"
-        )
-    )]
     fn assess_result_limit(
         &self,
         group: &CommitGroup,
@@ -873,13 +820,6 @@ impl NativeProvisionalGroup {
         .map_err(|_| storage("exact administrative result measurement failed"))
     }
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "private finalization qualification precedes public activation"
-    )
-)]
 #[allow(clippy::too_many_arguments)]
 async fn finalize_native_semantics(
     prepared: NativeAdministrativePreparation<'_>,
@@ -989,25 +929,11 @@ struct OwnedNativePublicationRequest {
     pin: fireweed_engine::queue_schema_codec::DefinitionPin,
     _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "resolved publication qualification precedes public activation"
-    )
-)]
 struct NativePreparedPublication {
     provisional: NativeProvisionalGroup,
     frame: fireweed_engine::queue_publication::AdministrativePublicationFrame,
 }
 /// None is a fully validated logical TooLarge decision, never a partial frame.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "resolved publication qualification precedes public activation"
-    )
-)]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_native_publication(
     provisional: NativeProvisionalGroup,
@@ -1025,122 +951,8 @@ async fn prepare_native_publication(
     else {
         return Ok(None);
     };
-    let headers = group
-        .claimed_updates
-        .len()
-        .checked_add(group.state_updates.len())
-        .and_then(|n| n.checked_add(group.work_updates.len()))
-        .and_then(|n| n.checked_add(group.work_inserts.len()))
-        .ok_or_else(|| storage("publication input header overflow"))? as u64;
-    let nodes = match &intent.operation {
-        fireweed_core::queue_administration::AdministrativeOperation::Addressed(entries) => {
-            entries.iter().try_fold(0u64, |n, entry| {
-                n.checked_add(entry.precondition.nodes.len() as u64)
-                    .and_then(|n| n.checked_add(4))
-            })
-        }
-        fireweed_core::queue_administration::AdministrativeOperation::SelectFirst(clauses) => {
-            clauses.iter().try_fold(0u64, |n, clause| {
-                n.checked_add(clause.selector.nodes.len() as u64)
-                    .and_then(|n| n.checked_add(clause.precondition.nodes.len() as u64))
-                    .and_then(|n| n.checked_add(4))
-            })
-        }
-    }
-    .ok_or_else(|| storage("publication selector header overflow"))?;
-    let mut containers = 0u64;
-    let mut add_containers = |n: usize| -> QueueResult<()> {
-        containers = containers
-            .checked_add(n as u64)
-            .ok_or_else(|| storage("publication container count overflow"))?;
-        Ok(())
-    };
-    for item in &group.claimed_updates {
-        add_containers(item.patch.fields.len())?;
-    }
-    for item in &group.state_updates {
-        if let StateChange::Put { fields, .. } = &item.change {
-            add_containers(fields.len())?;
-        }
-    }
-    for item in &group.work_inserts {
-        add_containers(item.fields.len())?;
-    }
-    for item in &group.work_updates {
-        match &item.change {
-            UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } => {
-                add_containers(patch.fields.len())?
-            }
-            UnclaimedChange::Replace(work) => add_containers(work.fields.len())?,
-            UnclaimedChange::Delete => {}
-        }
-    }
-    use fireweed_core::queue_administration::{
-        AdministrativeAction, AdministrativeOperation, SelectorNode,
-    };
-    let mut count_selector =
-        |selector: &fireweed_core::queue_administration::WorkSelector| -> QueueResult<()> {
-            for node in &selector.nodes {
-                match node {
-                    SelectorNode::Keys(keys) => add_containers(keys.len())?,
-                    SelectorNode::Field {
-                        predicate: Predicate::In(values),
-                        ..
-                    } => add_containers(values.len())?,
-                    SelectorNode::StoredLifecycleIn(values)
-                    | SelectorNode::EffectiveLifecycleIn(values) => add_containers(values.len())?,
-                    _ => {}
-                }
-            }
-            Ok(())
-        };
-    match &intent.operation {
-        AdministrativeOperation::Addressed(entries) => {
-            for entry in entries {
-                count_selector(&entry.precondition)?;
-            }
-        }
-        AdministrativeOperation::SelectFirst(clauses) => {
-            for clause in clauses {
-                count_selector(&clause.selector)?;
-                count_selector(&clause.precondition)?;
-            }
-        }
-    }
-    let mut count_action = |action: &AdministrativeAction| -> QueueResult<()> {
-        if let AdministrativeAction::Update {
-            patch,
-            remove_field_prefixes,
-            ..
-        } = action
-        {
-            add_containers(patch.fields.len())?;
-            add_containers(remove_field_prefixes.len())?;
-        }
-        Ok(())
-    };
-    match &intent.operation {
-        AdministrativeOperation::Addressed(entries) => {
-            for entry in entries {
-                count_action(&entry.action)?;
-            }
-        }
-        AdministrativeOperation::SelectFirst(clauses) => {
-            for clause in clauses {
-                count_action(&clause.action)?;
-            }
-        }
-    }
-    if let Some(names) = &intent.before_fields {
-        add_containers(names.len())?;
-    }
-    let bytes = encoded_len(&(address, group, intent))?
-        .checked_mul(12)
-        .and_then(|n| headers.checked_mul(1024).and_then(|h| n.checked_add(h)))
-        .and_then(|n| nodes.checked_mul(256).and_then(|h| n.checked_add(h)))
-        .and_then(|n| containers.checked_mul(256).and_then(|h| n.checked_add(h)))
-        .and_then(|n| n.checked_add(65536))
-        .ok_or_else(|| storage("publication input admission overflow"))?;
+    let bytes =
+        fireweed_engine::queue_memory::publication_request_copy_bound(address, group, intent)?;
     let charge = reservation.owned_buffer(bytes)?;
     let request = OwnedNativePublicationRequest {
         address: address.clone(),
@@ -1179,6 +991,207 @@ async fn prepare_native_publication(
         .await
 }
 
+pub(super) struct AdmittedAdministrativeReceipt {
+    pub(super) receipt: CommitReceipt,
+    pub(super) next_sequence: Option<u64>,
+    _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
+}
+impl AdmittedAdministrativeReceipt {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        CommitReceipt,
+        Option<u64>,
+        fireweed_engine::queue_admission::OwnedQueueBufferCharge,
+    ) {
+        (self.receipt, self.next_sequence, self._charge)
+    }
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_administrative_group(
+    tx: &Transaction<'_>,
+    address: &QueueAddress,
+    queue: &QueueRow<'_>,
+    group: &CommitGroup,
+    limits: &QueueLimits,
+    clock: &dyn Clock,
+    reservation: &Arc<QueueReservation>,
+    workers: &fireweed_queue_spool::ScratchWorkers,
+    quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
+    apply: bool,
+) -> QueueResult<AdmittedAdministrativeReceipt> {
+    use fireweed_engine::queue_publication::{
+        AdministrativeReceiptOutcome, measure_complete_administrative_receipt,
+    };
+    let admin = group
+        .administration
+        .as_ref()
+        .ok_or_else(|| storage("administrative job lacks its proposal"))?;
+    let directory = std::env::temp_dir();
+    let prepared = prepare_native_scratch_bounded(
+        tx,
+        address,
+        queue,
+        group,
+        &admin.intent,
+        limits,
+        admin.max_result_bytes,
+        limits.max_group_bytes,
+        reservation,
+        workers,
+        &directory,
+        Arc::clone(&quota),
+    )
+    .await?;
+    let finalized = finalize_native_semantics(
+        prepared,
+        address,
+        group,
+        &admin.intent,
+        queue,
+        || timestamp_nanos(clock.now()),
+        reservation,
+        workers,
+        &directory,
+        quota,
+    )
+    .await?;
+    let finalized = match finalized {
+        Ok(finalized) => finalized,
+        Err(reason) => {
+            let size = measure_complete_administrative_receipt(
+                &group.request_id,
+                &AdministrativeReceiptOutcome::Rejected(&reason),
+            )
+            .map_err(|_| storage("administrative rejection measurement failed"))?;
+            let charge = reservation.owned_buffer(
+                size.checked_mul(4)
+                    .and_then(|n| n.checked_add(1024))
+                    .ok_or_else(|| storage("receipt admission overflow"))?,
+            )?;
+            return Ok(AdmittedAdministrativeReceipt {
+                receipt: CommitReceipt {
+                    request_id: group.request_id.clone(),
+                    outcome: GroupOutcome::Rejected(reason),
+                },
+                next_sequence: None,
+                _charge: charge,
+            });
+        }
+    };
+    let prepared = prepare_native_publication(
+        finalized,
+        address,
+        queue,
+        group,
+        &admin.intent,
+        reservation,
+        workers,
+    )
+    .await?;
+    let Some(NativePreparedPublication { provisional, frame }) = prepared else {
+        let size = measure_complete_administrative_receipt(
+            &group.request_id,
+            &AdministrativeReceiptOutcome::TooLarge,
+        )
+        .map_err(|_| storage("TooLarge receipt measurement failed"))?;
+        let charge = reservation.owned_buffer(
+            size.checked_mul(4)
+                .and_then(|n| n.checked_add(1024))
+                .ok_or_else(|| storage("receipt admission overflow"))?,
+        )?;
+        return Ok(AdmittedAdministrativeReceipt {
+            receipt: CommitReceipt {
+                request_id: group.request_id.clone(),
+                outcome: GroupOutcome::Rejected(Rejection::TooLarge),
+            },
+            next_sequence: None,
+            _charge: charge,
+        });
+    };
+    let NativeProvisionalGroup {
+        scratch,
+        summary,
+        ordinary,
+        initial,
+        ..
+    } = provisional;
+    let GroupOutcome::Committed { versions } = &ordinary.delta().receipt.outcome else {
+        return Err(storage("ordinary result is not committed"));
+    };
+    let result = summary
+        .result()
+        .ok_or_else(|| storage("complete receipt lacks complete result"))?;
+    let size = measure_complete_administrative_receipt(
+        &group.request_id,
+        &AdministrativeReceiptOutcome::Committed {
+            versions,
+            administration: result,
+        },
+    )
+    .map_err(|_| storage("complete receipt measurement failed"))?;
+    let headers = fireweed_engine::queue_memory::administrative_result_headers(result)?
+        .checked_add(
+            (versions.len() as u64)
+                .checked_mul(256)
+                .ok_or(QueueError::TooLarge)?,
+        )
+        .ok_or(QueueError::TooLarge)?;
+    let charge = reservation.owned_buffer(
+        size.checked_mul(4)
+            .and_then(|n| headers.checked_mul(4).and_then(|h| n.checked_add(h)))
+            .and_then(|n| n.checked_add(1024))
+            .ok_or_else(|| storage("receipt admission overflow"))?,
+    )?;
+    let receipt = CommitReceipt {
+        request_id: group.request_id.clone(),
+        outcome: GroupOutcome::AdministrativeCommitted {
+            versions: versions.clone(),
+            administration: result.clone(),
+        },
+    };
+    let next_sequence = ordinary.delta().next_sequence;
+    if apply {
+        let scratch = apply_resolved_administrative_commands(
+            tx,
+            address,
+            queue,
+            scratch,
+            reservation,
+            workers,
+        )
+        .await?;
+        drop(scratch);
+        let mut ids = load_delta_ids(
+            tx,
+            queue,
+            ordinary.delta(),
+            ordinary.initial_authority(),
+            reservation,
+        )
+        .await?;
+        persist_delta(
+            tx,
+            queue,
+            ordinary.delta(),
+            ordinary.initial_authority(),
+            &mut ids,
+        )
+        .await?;
+    } else {
+        drop(scratch);
+    }
+    drop(frame);
+    drop(summary);
+    drop(ordinary);
+    drop(initial);
+    Ok(AdmittedAdministrativeReceipt {
+        receipt,
+        next_sequence: Some(next_sequence),
+        _charge: charge,
+    })
+}
+
 /// Apply a sealed resolved stream under the original queue fence. This private
 /// prerequisite does not create a receipt or establish publication-size approval.
 /// Every command targets an existing record; no physical ID may be allocated.
@@ -1188,13 +1201,6 @@ async fn prepare_native_publication(
 /// Cancelling the owner/application future requires dropping or rolling back
 /// the containing Transaction; cancellation bypasses the result-error block.
 /// Public caller cancellation must leave the admitted backend job running.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "resolved application qualification precedes public activation"
-    )
-)]
 async fn apply_resolved_administrative_commands(
     tx: &Transaction<'_>,
     address: &QueueAddress,
@@ -1280,6 +1286,7 @@ async fn apply_resolved_administrative_commands(
             // Empty patch is only an addressed hydration carrier. No planner or
             // user expectation evaluates it; resolved predecessor checks follow.
             let carrier = CommitGroup {
+                administration: None,
                 request_id: String::new(),
                 claimed_updates: vec![],
                 state_updates: vec![],
@@ -1443,6 +1450,7 @@ mod tests {
             .unwrap()
             .get(0);
         let group = CommitGroup {
+            administration: None,
             request_id: "native-scratch-state-and-next".into(),
             claimed_updates: vec![],
             work_updates: vec![],
@@ -1830,6 +1838,7 @@ mod tests {
             .commit(CommitBatch {
                 queue: address.clone(),
                 groups: vec![CommitGroup {
+                    administration: None,
                     request_id: "delete-tombstone".into(),
                     claimed_updates: vec![],
                     state_updates: vec![],
@@ -1855,6 +1864,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let quota = ScratchDiskQuota::new(8 << 20).unwrap();
         let group = CommitGroup {
+            administration: None,
             request_id: "resolved".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -2111,44 +2121,48 @@ mod tests {
                         ..Default::default()
                     }),
                 });
-                let corrupt = prepare_native_scratch_bounded(
-                    &tx,
-                    &address,
-                    &queue,
-                    &corrupt_group,
-                    &addressed,
-                    &QueueLimits::default(),
-                    1024,
-                    publication_floor,
-                    &job,
-                    &workers,
-                    directory.path(),
-                    Arc::clone(&quota),
-                )
-                .await
-                .unwrap();
-                assert!(corrupt.summary.result_overflowed());
-                let corrupt = finalize_native_semantics(
-                    corrupt,
-                    &address,
-                    &corrupt_group,
-                    &addressed,
-                    &queue,
-                    || Ok(0),
-                    &job,
-                    &workers,
-                    directory.path(),
-                    Arc::clone(&quota),
-                )
-                .await
-                .unwrap()
-                .unwrap_or_else(|reason| {
-                    panic!("unexpected corrupt business rejection {reason:?}")
-                });
-                assert!(
-                    matches!(corrupt.assess_publication_limit(&address, &queue, &corrupt_group, &addressed, &job), Err(QueueError::OutcomeUnknown(ref message)) if message.contains("ordinary command measurement"))
-                );
-                drop(corrupt);
+                // Raw authority must fail before an early CAS rejection or deletion
+                // can conceal an inconsistent pending-row lease hash.
+                for delete in [false, true] {
+                    let mut intent = addressed.clone();
+                    if delete {
+                        corrupt_group.work_updates.clear();
+                        corrupt_group.state_updates[0].expect = StateExpect::Absent;
+                        intent.operation =
+                            AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                                key: "key-2".into(),
+                                expected_version: None,
+                                precondition: WorkSelector::all(vec![]),
+                                action: AdministrativeAction::Delete {
+                                    lease_guard: AdministrativeLeaseGuard::InvalidateActive,
+                                },
+                            }]);
+                    } else {
+                        corrupt_group.state_updates[0].expect = StateExpect::Version(99);
+                    }
+                    match prepare_native_scratch_bounded(
+                        &tx,
+                        &address,
+                        &queue,
+                        &corrupt_group,
+                        &intent,
+                        &QueueLimits::default(),
+                        1024,
+                        publication_floor,
+                        &job,
+                        &workers,
+                        directory.path(),
+                        Arc::clone(&quota),
+                    )
+                    .await
+                    {
+                        Err(QueueError::OutcomeUnknown(message))
+                            if (!delete && message.contains("raw work lease authority"))
+                                || (delete && message == "addressed source failed before EOF") => {}
+                        Err(error) => panic!("delete={delete}: unexpected error {error:?}"),
+                        Ok(_) => panic!("delete={delete}: corrupt authority was accepted"),
+                    }
+                }
                 tx.batch_execute("ROLLBACK TO SAVEPOINT ordinary_corruption; RELEASE SAVEPOINT ordinary_corruption").await.unwrap();
             }
             if !overlap {
@@ -2682,6 +2696,7 @@ mod tests {
         let tx = client.transaction().await.unwrap();
         let fenced = queue_row(&tx, &queue, &job).await.unwrap();
         let ordinary = CommitGroup {
+            administration: None,
             request_id: "control".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -2878,6 +2893,7 @@ mod tests {
                 ..Default::default()
             };
             let group = CommitGroup {
+                administration: None,
                 work_updates: vec![UnclaimedUpdate {
                     key: "c".into(),
                     expect: StateExpect::Version(claimed[0].record.version),
@@ -3643,6 +3659,7 @@ mod tests {
         .unwrap();
         fenced.next_sequence = 5007;
         let ordinary = CommitGroup {
+            administration: None,
             request_id: "native-noops".into(),
             claimed_updates: vec![],
             state_updates: vec![],

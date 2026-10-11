@@ -632,6 +632,7 @@ pub(super) mod tests {
     ) -> QueueResult<AdmittedAdministrativeScan> {
         let schema = schema(unique);
         let group = CommitGroup {
+            administration: None,
             request_id: "operation".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -779,6 +780,7 @@ pub(super) mod tests {
             let job = Arc::new(admission.reserve(0).unwrap());
             let quota = ScratchDiskQuota::new(2 << 20).unwrap();
             let group = CommitGroup {
+                administration: None,
                 request_id: "operation".into(),
                 claimed_updates: vec![],
                 state_updates: vec![],

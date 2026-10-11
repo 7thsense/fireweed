@@ -4,6 +4,7 @@
 //! The native PostgreSQL constructor is available with the `postgres` feature;
 //! S3/Turso construction will use this same handle after its mandatory qualification.
 pub use crate::{Bytes, Clock, ConfigSecret, SystemClock, UtcTimestamp};
+pub use fireweed_core::queue_administration::*;
 pub use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_contract::QueueStore;
 use std::{fmt, sync::Arc};
@@ -38,6 +39,7 @@ queue_methods! {
     insert(request:InsertRequest)->Vec<InsertOutcome>;
     claim(request:ClaimRequest)->Vec<ClaimedWork>;
     commit(request:CommitBatch)->Vec<CommitReceipt>;
+    preview(request:PreviewRequest)->PreviewResult;
     stats(request:StatsRequest)->QueueStats;
     read_state(request:StateReadRequest)->Vec<Option<StateRecord>>;
     query(request:QueryRequest)->QueryPage;

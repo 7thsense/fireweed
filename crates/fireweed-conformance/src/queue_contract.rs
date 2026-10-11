@@ -49,6 +49,7 @@ fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
 }
 fn group(id: &str) -> CommitGroup {
     CommitGroup {
+        administration: None,
         request_id: id.into(),
         claimed_updates: vec![],
         state_updates: vec![],
@@ -2080,4 +2081,465 @@ pub async fn numeric_bucket_stats(store: &dyn QueueStore, clock: &TestClock, que
     assert_eq!(visible.len(), 8);
     assert!(visible.contains(&"n1".into()));
     clock.set(0);
+}
+
+/// Mandatory administration/preview/receipt scenario; every backend runs it.
+pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, queue: QueueAddress) {
+    use fireweed_core::queue_administration::*;
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![
+                item("control", "control", 0, 1),
+                item("worker", "worker", 0, 2),
+            ],
+        })
+        .await
+        .unwrap();
+    let claimed = store.claim(claim(&queue, "lease", "worker")).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let mut transition = group("admin-transition");
+    transition.claimed_updates.push(update(&claimed[0]));
+    transition.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "workflow".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Put {
+            fields: BTreeMap::from([("run".into(), FieldValue::Text("atomic".into()))]),
+            value: vec![7, 8].into(),
+        },
+    });
+    transition.work_inserts.push(item("spawn", "spawn", 0, 3));
+    transition.administration = Some(AdministrativeCommit {
+        max_result_bytes: 4096,
+        intent: AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: Some(BTreeSet::from(["kind".into()])),
+            operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                key: "control".into(),
+                expected_version: Some(1),
+                precondition: WorkSelector::all(vec![]),
+                action: AdministrativeAction::Update {
+                    patch: WorkPatch {
+                        priority: Some(17),
+                        ..Default::default()
+                    },
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    remove_field_prefixes: BTreeSet::new(),
+                },
+            }]),
+        },
+    });
+    let preview = store
+        .preview(PreviewRequest {
+            queue: queue.clone(),
+            group: transition.clone(),
+        })
+        .await
+        .unwrap();
+    let PreviewOutcome::AdministrativeCommitted {
+        versions,
+        administration,
+    } = &preview.outcome
+    else {
+        panic!("{preview:?}")
+    };
+    assert_eq!(
+        versions.iter().map(|v| v.key.as_str()).collect::<Vec<_>>(),
+        vec!["worker", "workflow", "spawn"]
+    );
+    assert_eq!(
+        administration.items[0].outcome,
+        AdministrativeOutcome::Changed { version: 2 }
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![transition.request_id.clone()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Absent]
+    );
+    assert!(
+        store
+            .read_state(StateReadRequest {
+                queue: queue.clone(),
+                collection: "instances".into(),
+                keys: vec!["workflow".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap()[0]
+            .is_none()
+    );
+    let batch = CommitBatch {
+        queue: queue.clone(),
+        groups: vec![transition.clone()],
+    };
+    let receipt = store.commit(batch.clone()).await.unwrap();
+    let GroupOutcome::AdministrativeCommitted {
+        versions: actual_versions,
+        administration: actual_administration,
+    } = &receipt[0].outcome
+    else {
+        panic!("{receipt:?}")
+    };
+    assert_eq!(actual_versions, versions);
+    assert_eq!(actual_administration, administration);
+    assert_eq!(
+        store
+            .read_state(StateReadRequest {
+                queue: queue.clone(),
+                collection: "instances".into(),
+                keys: vec!["workflow".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref(),
+        &[7, 8]
+    );
+    assert_eq!(
+        store
+            .claim(claim(&queue, "claim-spawn", "spawn"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.commit(batch).await.unwrap(), receipt); // Replay ignores now-stale credentials/CAS.
+    let preview = store
+        .preview(PreviewRequest {
+            queue: queue.clone(),
+            group: transition.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        preview.outcome,
+        PreviewOutcome::Rejected(Rejection::StaleLease)
+    ); // Fresh preview ignores retained receipt.
+    transition.administration.as_mut().unwrap().max_result_bytes += 1;
+    assert_eq!(
+        store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![transition]
+            })
+            .await
+            .unwrap()[0]
+            .outcome,
+        GroupOutcome::RequestConflict
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue,
+                request_ids: vec!["admin-transition".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Found(receipt[0].clone())]
+    );
+}
+
+/// A logical oversized middle group has zero effects and an exact retained rejection.
+pub async fn administrative_size_siblings_and_preflight(
+    store: &dyn QueueStore,
+    queue: QueueAddress,
+) {
+    use fireweed_core::queue_administration::*;
+    let mut definition = schema();
+    definition
+        .work
+        .fields
+        .insert("wide".into(), FieldType::Bytes);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: definition,
+        })
+        .await
+        .unwrap();
+    let mut wide = item("wide", "wide", 0, 0);
+    wide.fields
+        .insert("wide".into(), FieldValue::Bytes(vec![9; 32768]));
+    store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![item("first", "first", 0, 0), wide],
+        })
+        .await
+        .unwrap();
+    let proposal =
+        |id: &str, key: &str, version: u64, priority: i64, before: Option<&str>, budget: u64| {
+            let mut group = group(id);
+            group.administration = Some(AdministrativeCommit {
+                max_result_bytes: budget,
+                intent: AdministrativeIntent {
+                    evaluated_at: 0,
+                    before_fields: before.map(|name| BTreeSet::from([name.into()])),
+                    operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                        key: key.into(),
+                        expected_version: Some(version),
+                        precondition: WorkSelector::all(vec![]),
+                        action: AdministrativeAction::Update {
+                            patch: WorkPatch {
+                                priority: Some(priority),
+                                ..Default::default()
+                            },
+                            lifecycle: AdministrativeLifecycle::Keep,
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                            remove_field_prefixes: BTreeSet::new(),
+                        },
+                    }]),
+                },
+            });
+            group
+        };
+    let first = proposal("first", "first", 1, 10, None, 4096);
+    let mut middle = proposal("middle", "wide", 1, 20, Some("wide"), 1024);
+    middle.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "discarded".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Put {
+            fields: Default::default(),
+            value: vec![1].into(),
+        },
+    });
+    middle
+        .work_inserts
+        .push(item("discarded-work", "discarded", 0, 0));
+    let mut last = proposal("last", "first", 2, 30, Some("kind"), 4096);
+    last.work_inserts
+        .push(item("visible-next", "visible", 0, 1));
+    let receipts = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![first.clone(), middle.clone(), last.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipts[0].outcome,
+        GroupOutcome::AdministrativeCommitted { .. }
+    ));
+    assert_eq!(
+        receipts[1].outcome,
+        GroupOutcome::Rejected(Rejection::TooLarge)
+    );
+    let GroupOutcome::AdministrativeCommitted { administration, .. } = &receipts[2].outcome else {
+        panic!("{receipts:?}")
+    };
+    assert_eq!(administration.items[0].before.as_ref().unwrap().version, 2);
+    assert_eq!(
+        administration.items[0].outcome,
+        AdministrativeOutcome::Changed { version: 3 }
+    );
+    assert!(
+        store
+            .read_state(StateReadRequest {
+                queue: queue.clone(),
+                collection: "instances".into(),
+                keys: vec!["discarded".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap()[0]
+            .is_none()
+    );
+    assert!(
+        store
+            .claim(claim(&queue, "discarded-claim", "discarded"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .claim(claim(&queue, "visible-claim", "visible"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let replay = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![last, middle, first],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        replay,
+        vec![
+            receipts[2].clone(),
+            receipts[1].clone(),
+            receipts[0].clone()
+        ]
+    );
+    let wide = proposal("wide-accepted", "wide", 1, 50, Some("wide"), 65536);
+    let wide = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![wide],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        wide[0].outcome,
+        GroupOutcome::AdministrativeCommitted { .. }
+    ));
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec!["wide-accepted".into()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Found(wide[0].clone())]
+    );
+    let valid = proposal("preflight-valid", "first", 3, 40, None, 4096);
+    let invalid = proposal("preflight-invalid", "wide", 1, 40, None, 1);
+    assert_eq!(
+        store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![valid.clone(), invalid]
+            })
+            .await,
+        Err(QueueError::TooLarge)
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![valid.request_id.clone()],
+                max_bytes: 1 << 20
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Absent]
+    );
+    let preview = store
+        .preview(PreviewRequest {
+            queue,
+            group: valid,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        preview.outcome,
+        PreviewOutcome::AdministrativeCommitted { .. }
+    ));
+}
+
+/// Selection is complete beyond an input chunk and returns compact clause stats.
+pub async fn broad_administration_exceeds_input_chunk(store: &dyn QueueStore, queue: QueueAddress) {
+    use fireweed_core::queue_administration::*;
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    for start in (0..5001).step_by(1000) {
+        store
+            .insert(InsertRequest {
+                queue: queue.clone(),
+                request_id: format!("seed-{start}"),
+                mode: InsertMode::InsertOnly,
+                items: (start..(start + 1000).min(5001))
+                    .map(|n| item(&format!("bulk-{n:05}"), "bulk", 0, n))
+                    .collect(),
+            })
+            .await
+            .unwrap();
+    }
+    let mut change = group("bulk-change");
+    change.administration = Some(AdministrativeCommit {
+        max_result_bytes: 4096,
+        intent: AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                id: "all".into(),
+                selector: WorkSelector::all(vec![]),
+                precondition: WorkSelector::all(vec![]),
+                action: AdministrativeAction::Update {
+                    patch: WorkPatch {
+                        priority: Some(123),
+                        ..Default::default()
+                    },
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    remove_field_prefixes: BTreeSet::new(),
+                },
+            }]),
+        },
+    });
+    let receipt = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![change.clone()],
+        })
+        .await
+        .unwrap();
+    let GroupOutcome::AdministrativeCommitted {
+        versions,
+        administration,
+    } = &receipt[0].outcome
+    else {
+        panic!("{receipt:?}")
+    };
+    assert!(versions.is_empty());
+    assert!(administration.items.is_empty());
+    assert_eq!(administration.histogram.matched, 5001);
+    assert_eq!(
+        administration.clauses[0].histogram.outcomes[&AdministrativeOutcomeKind::Changed],
+        5001
+    );
+    assert_eq!(
+        store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![change]
+            })
+            .await
+            .unwrap(),
+        receipt
+    );
+    let mut claim = claim(&queue, "verify-bulk", "bulk");
+    claim.max_records = 3;
+    assert!(
+        store
+            .claim(claim)
+            .await
+            .unwrap()
+            .iter()
+            .all(|work| work.record.version == 3 && work.record.work.priority == 123)
+    );
 }

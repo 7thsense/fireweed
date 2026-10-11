@@ -1486,6 +1486,7 @@ mod tests {
     }
     pub(super) fn ordinary() -> CommitGroup {
         CommitGroup {
+            administration: None,
             request_id: "atomic-admin".into(),
             claimed_updates: vec![],
             state_updates: vec![],

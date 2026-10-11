@@ -172,6 +172,8 @@ struct Inner {
     done: Arc<Notify>,
     clock: Arc<dyn Clock>,
     limits: QueueLimits,
+    scratch_workers: fireweed_queue_spool::ScratchWorkers,
+    scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
 }
 /// Uses real SQL transactions and indexed selection, not the old blocking
 /// PostgreSQL adapter or an in-memory projection. The concrete consumer facade
@@ -266,6 +268,13 @@ impl PostgresQueueStore {
                 done: Arc::new(Notify::new()),
                 clock,
                 limits,
+                scratch_workers: fireweed_queue_spool::ScratchWorkers::new(pool_size, 64)?,
+                scratch_quota: fireweed_queue_spool::ScratchDiskQuota::new(
+                    limits
+                        .max_group_bytes
+                        .checked_mul(16)
+                        .ok_or(QueueError::TooLarge)?,
+                )?,
             }),
         })
     }
@@ -311,13 +320,6 @@ impl PostgresQueueStore {
 struct QueueRow<'a> {
     id: i64,
     schema: QueueSchema,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "exact definition authority retained for forthcoming resolved control frames"
-        )
-    )]
     definition_pin: DefinitionPin,
     next_sequence: u64,
     secret: Vec<u8>,
@@ -377,23 +379,33 @@ async fn receipt<'a, T: DeserializeOwned + PersistedStructure>(
     reservation: &'a QueueReservation,
     charges: &mut Vec<QueueBufferCharge<'a>>,
 ) -> QueueResult<Option<T>> {
-    let rows=tx.query("SELECT identity,fingerprint,expired,outcome FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=$2 AND identity_hash=$3 AND identity=$4",
-        &[&queue,&domain,&probe_hash(id.as_bytes()),&id.as_bytes()]).await.map_err(storage)?;
+    // The queue fence prevents receipt changes between metadata admission and fetch.
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] =
+        &[&queue, &domain, &probe_hash(id.as_bytes()), &id.as_bytes()];
+    let rows = tx.query("SELECT fingerprint,expired,octet_length(outcome)::bigint FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=$2 AND identity_hash=$3 AND identity=$4", params).await.map_err(storage)?;
     if rows.len() > 1 {
         return Err(storage("duplicate receipt authority"));
     }
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    if row.get::<_, Vec<u8>>(1) != fp {
+    if row.get::<_, Vec<u8>>(0) != fp {
         return Err(QueueError::RequestConflict);
     }
-    if row.get::<_, bool>(2) {
+    if row.get::<_, bool>(1) {
         return Err(QueueError::RequestExpired);
     }
-    let raw = row.get::<_, Vec<u8>>(3);
+    let size = u64::try_from(row.get::<_, i64>(2)).map_err(storage)?;
+    charges.push(reservation.buffer(size.checked_mul(4).ok_or(QueueError::TooLarge)?)?);
+    let row = tx.query_one("SELECT outcome FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=$2 AND identity_hash=$3 AND identity=$4", params).await.map_err(storage)?;
+    let raw = row.get::<_, Vec<u8>>(0);
+    if u64::try_from(raw.len()).map_err(storage)? != size {
+        return Err(storage("receipt length changed under queue fence"));
+    }
     charges.push(reservation.buffer(T::stored_headers(&raw)?)?);
-    Ok(Some(decode(&raw)?))
+    let value: T = decode(&raw)?;
+    value.validate_persisted()?;
+    Ok(Some(value))
 }
 async fn save_receipt<T: Serialize>(
     tx: &Transaction<'_>,
@@ -514,7 +526,7 @@ async fn load_bodies<C: GenericClient + Sync>(
 }
 fn record(row: &Row, fields: Fields, body: Vec<u8>) -> QueueResult<StoredWork> {
     let hash_value: Option<Vec<u8>> = row.get(11);
-    Ok(StoredWork {
+    let stored = StoredWork {
         record: WorkRecord {
             work: NewWork {
                 key: key(row.get(2))?,
@@ -535,7 +547,9 @@ fn record(row: &Row, fields: Fields, body: Vec<u8>) -> QueueResult<StoredWork> {
             .transpose()?,
         field_coverage: fireweed_engine::queue_fields::FieldCoverage::Complete,
         body_loaded: true,
-    })
+    };
+    fireweed_engine::queue_planner::validate_raw_work_lease(&stored)?;
+    Ok(stored)
 }
 struct Loaded<'a> {
     // Drop owned payloads before their admission guards on every error path.
@@ -949,10 +963,6 @@ async fn load_unique_authority<'a>(
 /// retained tombstones. A selected row's transient hydration ID must not become
 /// an unbounded retained scan list. The caller keeps the same queue fence through
 /// this read and publication. This function never allocates database sequences.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "resolved administrative publication prerequisite")
-)]
 async fn load_delta_ids<'a>(
     tx: &Transaction<'_>,
     queue: &QueueRow<'_>,
@@ -1402,6 +1412,7 @@ struct GroupBoundaryTest {
     queue_id: i64,
     expected: Vec<Vec<(String, u64, bool, u64)>>,
     visits: usize,
+    receipt_offset: usize,
     fail_at: Option<usize>,
 }
 #[cfg(test)]
@@ -1421,7 +1432,7 @@ async fn check_group_boundary(tx: &Transaction<'_>, queue_id: i64) -> QueueResul
         Some((
             probe.expected.get(visit).cloned(),
             probe.fail_at == Some(visit),
-            visit + 1,
+            visit + 1 + probe.receipt_offset,
         ))
     });
     let Some((expected, fail, receipt_count)) = step else {
@@ -1689,8 +1700,11 @@ impl QueueStore for PostgresQueueStore {
     fn commit(&self, request: CommitBatch) -> QueueFuture<'_, Vec<CommitReceipt>> {
         Box::pin(async move {
             request.preflight(&self.inner.limits)?;
+            administrative_envelope_preflight(&request, &self.inner.limits)?;
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
+            let workers = self.inner.scratch_workers.clone();
+            let quota = Arc::clone(&self.inner.scratch_quota);
             let incoming_headers = incoming_headers(&request)?;
             let charge = encoded_len(&request)?
                 .checked_mul(4)
@@ -1699,10 +1713,12 @@ impl QueueStore for PostgresQueueStore {
                 .ok_or(QueueError::TooLarge)?;
             self.dispatch(charge, move |client, reservation| {
                 Box::pin(async move {
+                    let reservation = Arc::new(reservation);
                     let tx = client.transaction().await.map_err(storage)?;
                     let mut queue = queue_row(&tx, &request.queue, &reservation).await?;
                     request.validate(&queue.schema, &limits)?;
                     let mut receipt_charges = vec![];
+                    let mut fresh_receipt_charges = vec![];
                     let mut out = vec![];
                     let mut known = vec![];
                     for group in &request.groups {
@@ -1740,6 +1756,32 @@ impl QueueStore for PostgresQueueStore {
                             out.push(known);
                             continue;
                         }
+                        if group.administration.is_some() {
+                            let admitted = administration::run_administrative_group(
+                                &tx,
+                                &request.queue,
+                                &queue,
+                                group,
+                                &limits,
+                                clock.as_ref(),
+                                &reservation,
+                                &workers,
+                                Arc::clone(&quota),
+                                true,
+                            )
+                            .await?;
+                            let (receipt, next_sequence, charge) = admitted.into_parts();
+                            fresh_receipt_charges.push(charge);
+                            save_receipt(&tx, queue.id, 2, &group.request_id, &fp, &receipt)
+                                .await?;
+                            #[cfg(test)]
+                            check_group_boundary(&tx, queue.id).await?;
+                            if let Some(next_sequence) = next_sequence {
+                                queue.next_sequence = next_sequence;
+                            }
+                            out.push(receipt);
+                            continue;
+                        }
                         let mut loaded = load_group(&tx, &queue, group, &reservation).await?;
                         let before = loaded.snapshot.clone();
                         let now = timestamp_nanos(clock.now())?;
@@ -1760,8 +1802,102 @@ impl QueueStore for PostgresQueueStore {
                         queue.next_sequence = delta.next_sequence;
                         out.push(delta.receipt);
                     }
+                    if encoded_len(&out)? > limits.max_response_bytes {
+                        return Err(storage(
+                            "complete commit response exceeds admitted envelope",
+                        ));
+                    }
                     tx.commit().await.map_err(storage)?;
                     Ok(out)
+                })
+            })
+            .await
+        })
+    }
+    fn preview(&self, request: PreviewRequest) -> QueueFuture<'_, PreviewResult> {
+        Box::pin(async move {
+            request.preflight(&self.inner.limits)?;
+            administrative_groups_preflight(
+                &request.queue,
+                std::slice::from_ref(&request.group),
+                &self.inner.limits,
+            )?;
+            let limits = self.inner.limits;
+            let clock = Arc::clone(&self.inner.clock);
+            let workers = self.inner.scratch_workers.clone();
+            let quota = Arc::clone(&self.inner.scratch_quota);
+            let charge = encoded_len(&request)?
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(limits.max_response_bytes))
+                .and_then(|n| n.checked_add(incoming_headers(&request).ok()?))
+                .ok_or(QueueError::TooLarge)?;
+            self.dispatch(charge, move |client, reservation| {
+                Box::pin(async move {
+                    let reservation = Arc::new(reservation);
+                    let tx = client.transaction().await.map_err(storage)?;
+                    let queue = queue_row(&tx, &request.queue, &reservation).await?;
+                    request.validate(&queue.schema, &limits)?;
+                    // Preview never consults or writes execution identity receipts.
+                    let mut administrative_charge = None;
+                    let outcome = if request.group.administration.is_some() {
+                        let admitted = administration::run_administrative_group(
+                            &tx,
+                            &request.queue,
+                            &queue,
+                            &request.group,
+                            &limits,
+                            clock.as_ref(),
+                            &reservation,
+                            &workers,
+                            quota,
+                            false,
+                        )
+                        .await?;
+                        let (receipt, _, charge) = admitted.into_parts();
+                        administrative_charge = Some(charge);
+                        receipt.outcome
+                    } else {
+                        let mut loaded =
+                            load_group(&tx, &queue, &request.group, &reservation).await?;
+                        let now = timestamp_nanos(clock.now())?;
+                        load_unique_probes(
+                            &tx,
+                            &queue,
+                            &mut loaded,
+                            &request.group,
+                            now,
+                            &reservation,
+                        )
+                        .await?;
+                        plan_commit_group(&request.group, &mut loaded.snapshot, now, &queue.schema)?
+                            .receipt
+                            .outcome
+                    };
+                    let result = PreviewResult {
+                        outcome: match outcome {
+                            GroupOutcome::Committed { versions } => {
+                                PreviewOutcome::Committed { versions }
+                            }
+                            GroupOutcome::AdministrativeCommitted {
+                                versions,
+                                administration,
+                            } => PreviewOutcome::AdministrativeCommitted {
+                                versions,
+                                administration,
+                            },
+                            GroupOutcome::Rejected(reason) => PreviewOutcome::Rejected(reason),
+                            GroupOutcome::RequestConflict | GroupOutcome::RequestExpired => {
+                                return Err(storage("preview returned execution receipt status"));
+                            }
+                        },
+                    };
+                    if encoded_len(&result)? > limits.max_response_bytes {
+                        return Err(storage("preview response exceeds admitted budget"));
+                    }
+                    // No persist_delta or nextval was called, even speculatively.
+                    tx.rollback().await.map_err(storage)?;
+                    drop(administrative_charge);
+                    Ok(result)
                 })
             })
             .await
@@ -1799,6 +1935,7 @@ impl QueueStore for PostgresQueueStore {
                         return Ok(found);
                     }
                     let read_set = CommitGroup {
+                        administration: None,
                         request_id: "insert-read-set".into(),
                         claimed_updates: vec![],
                         state_updates: vec![],
@@ -1969,7 +2106,7 @@ impl QueueStore for PostgresQueueStore {
                 if size as u64>request.max_bytes{return Err(QueueError::TooLarge);}
                 let rows=tx.query("SELECT identity,expired,CASE WHEN expired THEN NULL ELSE outcome END FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=2 AND identity_hash=ANY($2) AND identity=ANY($3)",&[&queue.id,&hashes,&ids]).await.map_err(storage)?;
                 let mut receipt_charges=vec![];
-                let mut found=BTreeMap::new();for row in rows {let id=key(row.get(0))?;let outcome=if row.get::<_,bool>(1){ReceiptLookup::Expired}else{let raw=row.get::<_,Vec<u8>>(2);receipt_charges.push(_owned_job.buffer(CommitReceipt::stored_headers(&raw)?)?);ReceiptLookup::Found(decode(&raw)?)};
+                let mut found=BTreeMap::new();for row in rows {let id=key(row.get(0))?;let outcome=if row.get::<_,bool>(1){ReceiptLookup::Expired}else{let raw=row.get::<_,Vec<u8>>(2);receipt_charges.push(_owned_job.buffer(CommitReceipt::stored_headers(&raw)?)?);ReceiptLookup::Found({ let receipt: CommitReceipt = decode(&raw)?; receipt.validate_persisted()?; receipt })};
                     if found.insert(id,outcome).is_some(){return Err(storage("duplicate receipt identity"));}}
                 let absent=ReceiptLookup::Absent;let borrowed:Vec<_>=request.request_ids.iter().map(|id|found.get(id).unwrap_or(&absent)).collect();
                 if encoded_len(&borrowed)?>request.max_bytes{return Err(QueueError::TooLarge);}
@@ -1992,6 +2129,7 @@ impl QueueStore for PostgresQueueStore {
                 }
                 notified.await;
             }
+            self.inner.scratch_workers.close_and_drain().await?;
             for client in &self.inner.clients {
                 client.lock().await.take();
             }
@@ -2332,6 +2470,291 @@ mod tests {
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn public_preview_never_allocates_ids_and_late_admin_failure_rolls_back_receipts() {
+        use fireweed_core::queue_administration::*;
+        let _fixture = physical_fixture().await;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                GROUP_BOUNDARY_TEST.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let address = QueueAddress {
+            tenant: "public-admin-atomic".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        store
+            .provision(ProvisionRequest {
+                queue: address.clone(),
+                schema: fireweed_conformance::queue_contract::schema(),
+            })
+            .await
+            .unwrap();
+        store
+            .insert(InsertRequest {
+                queue: address.clone(),
+                request_id: "seed".into(),
+                mode: InsertMode::InsertOnly,
+                items: ["a", "b"]
+                    .into_iter()
+                    .map(|key| NewWork {
+                        key: key.into(),
+                        priority: 0,
+                        available_at: 0,
+                        fields: BTreeMap::from([
+                            ("kind".into(), FieldValue::Text("task".into())),
+                            ("target".into(), FieldValue::Text(key.into())),
+                        ]),
+                        body: Default::default(),
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap();
+        let make = |id: &str, key: &str, version, priority| CommitGroup {
+            request_id: id.into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+            administration: Some(AdministrativeCommit {
+                max_result_bytes: 4096,
+                intent: AdministrativeIntent {
+                    evaluated_at: 0,
+                    before_fields: Some(BTreeSet::from(["kind".into()])),
+                    operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                        key: key.into(),
+                        expected_version: Some(version),
+                        precondition: WorkSelector::all(vec![]),
+                        action: AdministrativeAction::Update {
+                            patch: WorkPatch {
+                                priority: Some(priority),
+                                ..Default::default()
+                            },
+                            lifecycle: AdministrativeLifecycle::Keep,
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                            remove_field_prefixes: Default::default(),
+                        },
+                    }]),
+                },
+            }),
+        };
+        let mut transition = make("preview-then-execute", "a", 1, 17);
+        transition.state_updates.push(StateUpdate {
+            collection: "instances".into(),
+            key: "workflow".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: Default::default(),
+                value: vec![7, 8].into(),
+            },
+        });
+        transition.work_inserts.push(NewWork {
+            key: "next".into(),
+            priority: 0,
+            available_at: 0,
+            fields: BTreeMap::from([("target".into(), FieldValue::Text("next".into()))]),
+            body: Default::default(),
+        });
+        let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let sequence = || async {
+            let row = client
+                .query_one(
+                    "SELECT last_value,is_called FROM fireweed_api007.records_id_seq",
+                    &[],
+                )
+                .await
+                .unwrap();
+            (row.get::<_, i64>(0), row.get::<_, bool>(1))
+        };
+        let before = sequence().await;
+        let preview = store
+            .preview(PreviewRequest {
+                queue: address.clone(),
+                group: transition.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            preview.outcome,
+            PreviewOutcome::AdministrativeCommitted { .. }
+        ));
+        assert_eq!(sequence().await, before);
+        assert_eq!(
+            store
+                .read_commit(ReceiptReadRequest {
+                    queue: address.clone(),
+                    request_ids: vec![transition.request_id.clone()],
+                    max_bytes: 1 << 20
+                })
+                .await
+                .unwrap(),
+            vec![ReceiptLookup::Absent]
+        );
+        let committed = store
+            .commit(CommitBatch {
+                queue: address.clone(),
+                groups: vec![transition.clone()],
+            })
+            .await
+            .unwrap();
+        let after = sequence().await;
+        assert!(after.0 > before.0);
+        let preview = store
+            .preview(PreviewRequest {
+                queue: address.clone(),
+                group: transition,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.outcome,
+            PreviewOutcome::Rejected(Rejection::AlreadyExists)
+        );
+        assert_eq!(sequence().await, after);
+        assert_eq!(
+            store
+                .read_commit(ReceiptReadRequest {
+                    queue: address.clone(),
+                    request_ids: vec!["preview-then-execute".into()],
+                    max_bytes: 1 << 20
+                })
+                .await
+                .unwrap(),
+            vec![ReceiptLookup::Found(committed[0].clone())]
+        );
+        let first = make("late-first", "a", 2, 33);
+        let mut last = make("late-last", "b", 1, 44);
+        last.state_updates.push(StateUpdate {
+            collection: "instances".into(),
+            key: "late".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: Default::default(),
+                value: vec![9].into(),
+            },
+        });
+        let queue_id: i64 = client
+            .query_one(
+                "SELECT id FROM fireweed_api007.queues WHERE tenant=$1 AND name=$2",
+                &[&address.tenant.as_bytes(), &address.queue.as_bytes()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        // A stored before image is independent of the tiny replay request.
+        // Even malformed payload bytes must be rejected by admission before decode.
+        let tx = client.transaction().await.unwrap();
+        let id = "large-before-replay";
+        let fp = [17u8; 32];
+        tx.execute("INSERT INTO fireweed_api007.requests(queue_id,domain,identity_hash,identity,fingerprint,outcome) VALUES($1,2,$2,$3,$4,$5)",
+            &[&queue_id, &probe_hash(id.as_bytes()), &id.as_bytes(), &fp.as_slice(), &vec![255u8; 1 << 20]]).await.unwrap();
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = admission.reserve(0).unwrap();
+        let _fence = queue_row(&tx, &address, &job).await.unwrap();
+        let before_usage = admission.usage().unwrap();
+        let mut charges = vec![];
+        assert!(matches!(
+            receipt::<CommitReceipt>(&tx, queue_id, 2, id, &fp, &job, &mut charges).await,
+            Err(QueueError::OutcomeUnknown(ref message)) if message.contains("admitted buffer capacity exhausted")
+        ));
+        assert_eq!(admission.usage().unwrap(), before_usage);
+        assert!(charges.is_empty());
+        drop(charges);
+        tx.rollback().await.unwrap();
+        GROUP_BOUNDARY_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(GroupBoundaryTest {
+                queue_id,
+                visits: 0,
+                receipt_offset: 1,
+                fail_at: Some(1),
+                expected: vec![
+                    vec![
+                        ("a".into(), 3, true, 1),
+                        ("b".into(), 1, true, 2),
+                        ("next".into(), 1, true, 3),
+                    ],
+                    vec![
+                        ("a".into(), 3, true, 1),
+                        ("b".into(), 2, true, 2),
+                        ("next".into(), 1, true, 3),
+                    ],
+                ],
+            })
+        });
+        assert!(matches!(
+            store
+                .commit(CommitBatch {
+                    queue: address.clone(),
+                    groups: vec![first, last]
+                })
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(
+            GROUP_BOUNDARY_TEST.with(|slot| slot.borrow().as_ref().unwrap().visits),
+            2
+        );
+        GROUP_BOUNDARY_TEST.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(
+            store
+                .read_commit(ReceiptReadRequest {
+                    queue: address.clone(),
+                    request_ids: vec!["late-first".into(), "late-last".into()],
+                    max_bytes: 1 << 20
+                })
+                .await
+                .unwrap(),
+            vec![ReceiptLookup::Absent, ReceiptLookup::Absent]
+        );
+        let state = store
+            .read_state(StateReadRequest {
+                queue: address.clone(),
+                collection: "instances".into(),
+                keys: vec!["late".into()],
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap();
+        assert!(state[0].is_none());
+        let rows = client.query("SELECT r.key,r.version::text,r.priority FROM fireweed_api007.records r JOIN fireweed_api007.queues q ON q.id=r.queue_id WHERE q.tenant=$1 AND q.name=$2 AND r.key=ANY($3::bytea[]) ORDER BY r.key", &[&address.tenant.as_bytes(), &address.queue.as_bytes(), &vec![b"a".to_vec(),b"b".to_vec()]]).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (
+                    row.get::<_, Vec<u8>>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, i64>(2)
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (b"a".to_vec(), "2".into(), 17),
+                (b"b".to_vec(), "1".into(), 0)
+            ]
+        );
+        store.shutdown().await.unwrap();
+        drop(client);
+        driver.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn shutdown_waits_for_final_worker_reservation_after_dispatch_root_returns() {
         let _fixture = physical_fixture().await;
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
@@ -2511,6 +2934,7 @@ mod tests {
             .commit(CommitBatch {
                 queue: queue.clone(),
                 groups: vec![CommitGroup {
+                    administration: None,
                     request_id: "seed-state".into(),
                     claimed_updates: vec![],
                     work_updates: vec![],
@@ -2523,6 +2947,7 @@ mod tests {
         let mut state_update = state_update;
         state_update.expect = StateExpect::Version(1);
         let group = CommitGroup {
+            administration: None,
             request_id: "staged-control".into(),
             claimed_updates: vec![],
             state_updates: vec![state_update],
@@ -2683,6 +3108,7 @@ mod tests {
             }),
         });
         let update_target = |id: &str, key: &str, version, target: &str| CommitGroup {
+            administration: None,
             request_id: id.into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -2701,6 +3127,7 @@ mod tests {
         };
         let rejected_rekey = update_target("rejected-rekey", "a", 3, "new-owner");
         let free_and_create = CommitGroup {
+            administration: None,
             request_id: "free-create".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -2755,6 +3182,7 @@ mod tests {
             .map(|r| (r.get::<_, i64>(0), r.get::<_, String>(1)))
             .collect::<Vec<_>>();
         let noop = CommitGroup {
+            administration: None,
             request_id: "noop".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -2915,6 +3343,7 @@ mod tests {
         );
         drop(output_charge);
         let remove_only = CommitGroup {
+            administration: None,
             request_id: "remove-only".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -3053,6 +3482,7 @@ mod tests {
             1 << 20
         );
         let mut body_group = CommitGroup {
+            administration: None,
             request_id: "empty-body".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -3197,6 +3627,7 @@ mod tests {
             body: Default::default(),
         };
         let group = |id: &str| CommitGroup {
+            administration: None,
             request_id: id.into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -3279,6 +3710,7 @@ mod tests {
                 *slot.borrow_mut() = Some(GroupBoundaryTest {
                     queue_id,
                     expected: expected.clone(),
+                    receipt_offset: 0,
                     visits: 0,
                     fail_at: fail.then_some(2),
                 })
@@ -3405,6 +3837,7 @@ mod tests {
         let fixture_job = fixture_admission.reserve(0).unwrap();
         queue_row(&held, &queue, &fixture_job).await.unwrap();
         let group = CommitGroup {
+            administration: None,
             request_id: "owned-commit".into(),
             claimed_updates: vec![],
             work_updates: vec![],
@@ -3746,6 +4179,16 @@ async fn materialized_headers(
 }
 
 impl PersistedStructure for ClaimReplay {
+    fn validate_persisted(&self) -> QueueResult<()> {
+        if self
+            .items
+            .iter()
+            .any(|(id, token)| *id <= 0 || token.is_empty())
+        {
+            return Err(storage("invalid persisted claim replay"));
+        }
+        Ok(())
+    }
     fn stored_headers(raw: &[u8]) -> QueueResult<u64> {
         Ok(decode::<MeasuredClaimReplay>(raw)?.items.headers)
     }

@@ -66,6 +66,9 @@ impl<'a> PublicationReceipt<'a> {
         group: &'a CommitGroup,
         receipt: &'a CommitReceipt,
     ) -> PublicationResult<Self> {
+        if group.administration.is_some() {
+            return invalid("administration requires version-4 publication");
+        }
         if group.request_id != receipt.request_id
             || matches!(
                 receipt.outcome,
@@ -629,6 +632,7 @@ fn rejection(s: &mut Sink<'_>, r: &Rejection) -> PublicationResult<()> {
         Rejection::Invalid(_) => 5,
         Rejection::UniqueConflict => 6,
         Rejection::Terminal => 7,
+        Rejection::TooLarge => return invalid("TooLarge requires version-4 publication"),
     };
     s.tag(tag)?;
     if let Rejection::Invalid(reason) = r {
@@ -982,6 +986,7 @@ mod tests {
     }
     pub(super) fn group(id: &str) -> CommitGroup {
         CommitGroup {
+            administration: None,
             request_id: id.into(),
             claimed_updates: vec![],
             state_updates: vec![],

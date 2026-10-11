@@ -291,6 +291,7 @@ mod tests {
         for step in 0..4 {
             let before = current.clone();
             let mut group = CommitGroup {
+                administration: None,
                 request_id: format!("step-{step}"),
                 claimed_updates: vec![],
                 state_updates: vec![],
@@ -400,6 +401,7 @@ mod tests {
         let floor = measure_commit_rejection_floor(&q, pin, &id, &reason).unwrap();
         assert!(floor > 160 << 10);
         let group = CommitGroup {
+            administration: None,
             request_id: id.clone(),
             claimed_updates: vec![],
             state_updates: vec![],

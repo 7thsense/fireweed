@@ -70,6 +70,7 @@ pub fn plan_insert_vector(
         let old = snapshot.work.get(&item.key);
         let replaced = old.is_some();
         let mut group = CommitGroup {
+            administration: None,
             request_id: request.request_id.clone(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -211,6 +212,7 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
 /// are expected; never validate or execute this envelope as one atomic group.
 pub fn load_envelope(groups: &[CommitGroup]) -> CommitGroup {
     let mut all = CommitGroup {
+        administration: None,
         request_id: "internal-read-set".into(),
         claimed_updates: vec![],
         state_updates: vec![],
@@ -1278,8 +1280,20 @@ fn merge_delta(
     snapshot.next_sequence = delta.next_sequence;
     Ok(())
 }
+/// Raw durable lease authority is complete even on selective field/body views.
+/// Stored expired leases remain Leased; this check never samples a clock.
+pub fn validate_raw_work_lease(stored: &StoredWork) -> QueueResult<()> {
+    let leased = stored.record.lifecycle == Lifecycle::Leased;
+    if leased != stored.record.lease_expires_at.is_some() || leased != stored.lease_hash.is_some() {
+        return Err(QueueError::OutcomeUnknown(
+            "inconsistent raw work lease authority".into(),
+        ));
+    }
+    Ok(())
+}
 pub(crate) fn validate_snapshot(snapshot: &RecordSnapshot) -> QueueResult<()> {
     for (key, stored) in &snapshot.work {
+        validate_raw_work_lease(stored)?;
         CheckedFields::new(&stored.record.work.fields, &stored.field_coverage)?;
         let id = RecordIdentity {
             collection: None,
@@ -1428,6 +1442,7 @@ mod tests {
     }
     fn group() -> CommitGroup {
         CommitGroup {
+            administration: None,
             request_id: "transition".into(),
             claimed_updates: vec![],
             state_updates: vec![],

@@ -336,6 +336,11 @@ impl IncomingHeaders for InsertRequest {
         })
     }
 }
+impl IncomingHeaders for PreviewRequest {
+    fn headers(&self) -> QueueResult<u64> {
+        self.group.headers()
+    }
+}
 impl IncomingHeaders for CommitBatch {
     fn headers(&self) -> QueueResult<u64> {
         self.groups.iter().try_fold(0u64, |bytes, group| {
@@ -378,8 +383,139 @@ impl IncomingHeaders for CommitGroup {
                 add(record_headers(1, fields)?)?;
             }
         }
+        if let Some(admin) = &group.administration {
+            add(admin.intent.headers()?)?;
+        }
         Ok(bytes)
     }
+}
+
+impl IncomingHeaders for fireweed_core::queue_administration::AdministrativeIntent {
+    fn headers(&self) -> QueueResult<u64> {
+        use fireweed_core::queue_administration::*;
+        let selector = |selector: &WorkSelector| -> QueueResult<u64> {
+            let mut bytes = (selector.nodes.len() as u64)
+                .checked_mul(256)
+                .ok_or(QueueError::TooLarge)?;
+            for node in &selector.nodes {
+                let count = match node {
+                    SelectorNode::Keys(keys) => keys.len(),
+                    SelectorNode::Field {
+                        predicate: Predicate::In(values),
+                        ..
+                    } => values.len(),
+                    SelectorNode::StoredLifecycleIn(values)
+                    | SelectorNode::EffectiveLifecycleIn(values) => values.len(),
+                    _ => 0,
+                };
+                bytes = bytes
+                    .checked_add(
+                        (count as u64)
+                            .checked_mul(256)
+                            .ok_or(QueueError::TooLarge)?,
+                    )
+                    .ok_or(QueueError::TooLarge)?;
+            }
+            Ok(bytes)
+        };
+        let action = |action: &AdministrativeAction| -> QueueResult<u64> {
+            match action {
+                AdministrativeAction::Update {
+                    patch,
+                    remove_field_prefixes,
+                    ..
+                } => record_headers(1, patch.fields.len())?
+                    .checked_add(
+                        (remove_field_prefixes.len() as u64)
+                            .checked_mul(256)
+                            .ok_or(QueueError::TooLarge)?,
+                    )
+                    .ok_or(QueueError::TooLarge),
+                AdministrativeAction::Delete { .. } => Ok(1024),
+            }
+        };
+        let mut bytes = self
+            .before_fields
+            .as_ref()
+            .map_or(0, |fields| fields.len() as u64)
+            .checked_mul(256)
+            .ok_or(QueueError::TooLarge)?;
+        match &self.operation {
+            AdministrativeOperation::Addressed(entries) => {
+                for entry in entries {
+                    bytes = bytes
+                        .checked_add(selector(&entry.precondition)?)
+                        .and_then(|n| n.checked_add(action(&entry.action).ok()?))
+                        .and_then(|n| n.checked_add(1024))
+                        .ok_or(QueueError::TooLarge)?;
+                }
+            }
+            AdministrativeOperation::SelectFirst(clauses) => {
+                for clause in clauses {
+                    bytes = bytes
+                        .checked_add(selector(&clause.selector)?)
+                        .and_then(|n| n.checked_add(selector(&clause.precondition).ok()?))
+                        .and_then(|n| n.checked_add(action(&clause.action).ok()?))
+                        .and_then(|n| n.checked_add(1024))
+                        .ok_or(QueueError::TooLarge)?;
+                }
+            }
+        }
+        Ok(bytes)
+    }
+}
+/// Storage-independent owned publication request copying, including both the
+/// optional group intent and the separately borrowed intent supplied to assembly.
+pub fn publication_request_copy_bound(
+    address: &QueueAddress,
+    group: &CommitGroup,
+    intent: &fireweed_core::queue_administration::AdministrativeIntent,
+) -> QueueResult<u64> {
+    encoded_len(&(address, group, intent))?
+        .checked_mul(12)
+        .and_then(|n| n.checked_add(incoming_headers(group).ok()?))
+        .and_then(|n| n.checked_add(incoming_headers(intent).ok()?))
+        .and_then(|n| n.checked_add(65536))
+        .ok_or(QueueError::TooLarge)
+}
+/// Complete fallback fit for every administrative group, before admission or
+/// any sibling's effects. Pin bytes have fixed length, so no schema read is needed.
+pub fn administrative_envelope_preflight(
+    request: &CommitBatch,
+    limits: &QueueLimits,
+) -> QueueResult<()> {
+    administrative_groups_preflight(&request.queue, &request.groups, limits)
+}
+pub fn administrative_groups_preflight(
+    queue: &QueueAddress,
+    groups: &[CommitGroup],
+    limits: &QueueLimits,
+) -> QueueResult<()> {
+    use crate::queue_publication::{
+        measure_administrative_publication_fallbacks, measure_administrative_receipt_fallbacks,
+    };
+    let pin = crate::queue_schema_codec::DefinitionPin::from_persisted_bytes(&[]);
+    let mut declared = 10u64;
+    for group in groups {
+        if let Some(admin) = &group.administration {
+            if measure_administrative_receipt_fallbacks(&group.request_id)
+                .map_err(|_| QueueError::TooLarge)?
+                > admin.max_result_bytes
+                || measure_administrative_publication_fallbacks(queue, pin, &group.request_id)
+                    .map_err(|_| QueueError::TooLarge)?
+                    > limits.max_group_bytes
+            {
+                return Err(QueueError::TooLarge);
+            }
+            declared = declared
+                .checked_add(admin.max_result_bytes)
+                .ok_or(QueueError::TooLarge)?;
+        }
+    }
+    if declared > limits.max_response_bytes {
+        return Err(QueueError::TooLarge);
+    }
+    Ok(())
 }
 
 // Borrowed scans charge receipt vectors before constructing owned Strings/Vecs.
@@ -447,7 +583,168 @@ enum MeasuredRejection {
     Invalid(MeasuredString),
     UniqueConflict,
     Terminal,
+    TooLarge,
 }
+#[derive(Deserialize)]
+enum MeasuredFieldValue {
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    Text(MeasuredString),
+    Bytes(MeasuredBorrowedBlob),
+}
+struct MeasuredBorrowedBlob;
+impl<'de> Deserialize<'de> for MeasuredBorrowedBlob {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let _ = <&'de [u8]>::deserialize(d)?;
+        Ok(Self)
+    }
+}
+struct MeasuredValueFields(u64);
+impl<'de> Deserialize<'de> for MeasuredValueFields {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = MeasuredValueFields;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("sorted typed before fields")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut headers = 0;
+                let mut previous = None;
+                while let Some(name) = map.next_key::<&'de str>()? {
+                    if previous.is_some_and(|old| old >= name) {
+                        return Err(serde::de::Error::custom("invalid before field order"));
+                    }
+                    previous = Some(name);
+                    let value = map.next_value::<MeasuredFieldValue>()?;
+                    match value {
+                        MeasuredFieldValue::Integer(n) => {
+                            let _ = n;
+                        }
+                        MeasuredFieldValue::Boolean(n) => {
+                            let _ = n;
+                        }
+                        MeasuredFieldValue::Float(n) if !n.is_finite() => {
+                            return Err(serde::de::Error::custom("nonfinite before field"));
+                        }
+                        _ => {}
+                    }
+                    measured_add::<A::Error>(&mut headers, 256)?;
+                }
+                Ok(MeasuredValueFields(headers))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+struct MeasuredHistogram(u64);
+impl<'de> Deserialize<'de> for MeasuredHistogram {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Outcomes;
+        impl<'de> Deserialize<'de> for Outcomes {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct V;
+                impl<'de> serde::de::Visitor<'de> for V {
+                    type Value = Outcomes;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("outcome counts")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Self::Value, A::Error> {
+                        let mut previous = None;
+                        while let Some(kind) = map.next_key::<fireweed_core::queue_administration::AdministrativeOutcomeKind>()? {
+                            if previous.is_some_and(|old| old >= kind) { return Err(serde::de::Error::custom("invalid outcome order")); }
+                            previous = Some(kind);
+                            if map.next_value::<u64>()? == 0 { return Err(serde::de::Error::custom("zero outcome count")); }
+                        }
+                        Ok(Outcomes)
+                    }
+                }
+                d.deserialize_map(V)
+            }
+        }
+        #[derive(Deserialize)]
+        struct H {
+            matched: u64,
+            outcomes: Outcomes,
+        }
+        let h = H::deserialize(d)?;
+        let _ = (h.matched, h.outcomes);
+        Ok(Self(4096))
+    }
+}
+#[derive(Deserialize)]
+struct MeasuredAdministrativeBefore {
+    version: u64,
+    lifecycle: Lifecycle,
+    available_at: i64,
+    eligible_since: i64,
+    attempts: u32,
+    lease_expires_at: Option<i64>,
+    fields: MeasuredValueFields,
+}
+#[derive(Deserialize)]
+struct MeasuredAdministrativeItem {
+    key: MeasuredString,
+    outcome: fireweed_core::queue_administration::AdministrativeOutcome,
+    before: Option<MeasuredAdministrativeBefore>,
+}
+impl MeasuredValue for MeasuredAdministrativeItem {
+    fn headers(&self) -> QueueResult<u64> {
+        let _ = (&self.key, &self.outcome);
+        let before = match &self.before {
+            Some(before) => {
+                let _ = (
+                    before.version,
+                    before.lifecycle,
+                    before.available_at,
+                    before.eligible_since,
+                    before.attempts,
+                    before.lease_expires_at,
+                );
+                before.fields.0
+            }
+            None => 0,
+        };
+        before.checked_add(1024).ok_or(QueueError::TooLarge)
+    }
+}
+#[derive(Deserialize)]
+struct MeasuredAdministrativeClause {
+    id: MeasuredString,
+    histogram: MeasuredHistogram,
+}
+impl MeasuredValue for MeasuredAdministrativeClause {
+    fn headers(&self) -> QueueResult<u64> {
+        let _ = &self.id;
+        self.histogram
+            .0
+            .checked_add(256)
+            .ok_or(QueueError::TooLarge)
+    }
+}
+#[derive(Deserialize)]
+struct MeasuredAdministrativeResult {
+    histogram: MeasuredHistogram,
+    items: MeasuredList<MeasuredAdministrativeItem>,
+    clauses: MeasuredList<MeasuredAdministrativeClause>,
+}
+impl MeasuredAdministrativeResult {
+    fn headers(&self) -> QueueResult<u64> {
+        self.histogram
+            .0
+            .checked_add(self.items.headers)
+            .and_then(|n| n.checked_add(self.clauses.headers))
+            .ok_or(QueueError::TooLarge)
+    }
+}
+
 #[derive(Deserialize)]
 enum MeasuredOutcome {
     RequestConflict,
@@ -456,6 +753,10 @@ enum MeasuredOutcome {
         versions: MeasuredList<MeasuredVersion>,
     },
     Rejected(MeasuredRejection),
+    AdministrativeCommitted {
+        versions: MeasuredList<MeasuredVersion>,
+        administration: MeasuredAdministrativeResult,
+    },
 }
 #[derive(Deserialize)]
 struct MeasuredReceipt {
@@ -467,6 +768,13 @@ impl MeasuredValue for MeasuredReceipt {
         let _ = &self.request_id;
         let size = match &self.outcome {
             MeasuredOutcome::Committed { versions } => versions.headers,
+            MeasuredOutcome::AdministrativeCommitted {
+                versions,
+                administration,
+            } => versions
+                .headers
+                .checked_add(administration.headers()?)
+                .ok_or(QueueError::TooLarge)?,
             MeasuredOutcome::Rejected(reason) => {
                 let _ = reason;
                 64
@@ -526,26 +834,92 @@ impl<'de> Deserialize<'de> for MeasuredBytes {
 }
 pub trait PersistedStructure {
     fn stored_headers(raw: &[u8]) -> QueueResult<u64>;
+    fn validate_persisted(&self) -> QueueResult<()>;
 }
 impl PersistedStructure for CommitReceipt {
+    fn validate_persisted(&self) -> QueueResult<()> {
+        let versions = match &self.outcome {
+            GroupOutcome::Committed { versions }
+            | GroupOutcome::AdministrativeCommitted { versions, .. } => Some(versions),
+            _ => None,
+        };
+        if versions.is_some_and(|versions| versions.iter().any(|version| version.version == 0)) {
+            return Err(QueueError::OutcomeUnknown(
+                "zero persisted receipt version".into(),
+            ));
+        }
+        if let GroupOutcome::AdministrativeCommitted { administration, .. } = &self.outcome {
+            crate::queue_publication::measure_administrative_result(administration).map_err(
+                |_| QueueError::OutcomeUnknown("invalid persisted administrative result".into()),
+            )?;
+        }
+        Ok(())
+    }
     fn stored_headers(raw: &[u8]) -> QueueResult<u64> {
         decode::<MeasuredReceipt>(raw)?.headers()
     }
 }
 impl PersistedStructure for Vec<InsertOutcome> {
+    fn validate_persisted(&self) -> QueueResult<()> {
+        if self.iter().any(|outcome| {
+            matches!(
+                outcome,
+                InsertOutcome::Inserted { version: 0, .. }
+                    | InsertOutcome::Replaced { version: 0, .. }
+            )
+        }) {
+            return Err(QueueError::OutcomeUnknown(
+                "zero persisted insert version".into(),
+            ));
+        }
+        Ok(())
+    }
     fn stored_headers(raw: &[u8]) -> QueueResult<u64> {
         Ok(decode::<MeasuredList<MeasuredInsert>>(raw)?.headers)
     }
 }
 
+pub fn administrative_result_headers(
+    result: &fireweed_core::queue_administration::AdministrativeResult,
+) -> QueueResult<u64> {
+    let mut bytes = 4096u64;
+    for item in &result.items {
+        bytes = bytes
+            .checked_add(1024)
+            .and_then(|n| {
+                n.checked_add(
+                    item.before
+                        .as_ref()
+                        .map_or(0, |before| before.fields.len() as u64)
+                        .checked_mul(256)?,
+                )
+            })
+            .ok_or(QueueError::TooLarge)?;
+    }
+    bytes
+        .checked_add(
+            (result.clauses.len() as u64)
+                .checked_mul(4352)
+                .ok_or(QueueError::TooLarge)?,
+        )
+        .ok_or(QueueError::TooLarge)
+}
 pub fn receipt_headers(receipt: &CommitReceipt) -> QueueResult<u64> {
     let count = match &receipt.outcome {
-        GroupOutcome::Committed { versions } => versions.len(),
+        GroupOutcome::Committed { versions }
+        | GroupOutcome::AdministrativeCommitted { versions, .. } => versions.len(),
+        _ => 0,
+    };
+    let administration = match &receipt.outcome {
+        GroupOutcome::AdministrativeCommitted { administration, .. } => {
+            administrative_result_headers(administration)?
+        }
         _ => 0,
     };
     (count as u64)
         .checked_mul(256)
         .and_then(|n| n.checked_add(256))
+        .and_then(|n| n.checked_add(administration))
         .ok_or(QueueError::TooLarge)
 }
 
@@ -842,6 +1216,7 @@ mod tests {
             max_attempts: 3,
         };
         let group = CommitGroup {
+            administration: None,
             request_id: "r".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -888,6 +1263,7 @@ mod tests {
             body: Default::default(),
         };
         let group = CommitGroup {
+            administration: None,
             request_id: "shrink".into(),
             claimed_updates: vec![],
             state_updates: vec![],

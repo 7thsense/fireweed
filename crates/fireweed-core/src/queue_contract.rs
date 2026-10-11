@@ -178,17 +178,44 @@ pub struct UnclaimedUpdate {
     pub change: UnclaimedChange,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdministrativeCommit {
+    pub intent: crate::queue_administration::AdministrativeIntent,
+    pub max_result_bytes: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitGroup {
     pub request_id: String,
     pub claimed_updates: Vec<ClaimedUpdate>,
     pub state_updates: Vec<StateUpdate>,
     pub work_inserts: Vec<NewWork>,
     pub work_updates: Vec<UnclaimedUpdate>,
+    #[serde(default)]
+    pub administration: Option<AdministrativeCommit>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitBatch {
     pub queue: QueueAddress,
     pub groups: Vec<CommitGroup>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewRequest {
+    pub queue: QueueAddress,
+    pub group: CommitGroup,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PreviewOutcome {
+    Committed {
+        versions: Vec<RecordVersion>,
+    },
+    AdministrativeCommitted {
+        versions: Vec<RecordVersion>,
+        administration: crate::queue_administration::AdministrativeResult,
+    },
+    Rejected(Rejection),
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewResult {
+    pub outcome: PreviewOutcome,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rejection {
@@ -200,6 +227,7 @@ pub enum Rejection {
     Invalid(String),
     UniqueConflict,
     Terminal,
+    TooLarge,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordVersion {
@@ -207,19 +235,25 @@ pub struct RecordVersion {
     pub key: String,
     pub version: u64,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GroupOutcome {
     RequestConflict,
     RequestExpired,
-    Committed { versions: Vec<RecordVersion> },
+    Committed {
+        versions: Vec<RecordVersion>,
+    },
     Rejected(Rejection),
+    AdministrativeCommitted {
+        versions: Vec<RecordVersion>,
+        administration: crate::queue_administration::AdministrativeResult,
+    },
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitReceipt {
     pub request_id: String,
     pub outcome: GroupOutcome,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReceiptLookup {
     Found(CommitReceipt),
     Absent,
@@ -800,153 +834,192 @@ pub(crate) fn patch(
 }
 impl CommitBatch {
     pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
-        self.preflight(limits)?;
-        schema.validate()?;
-        limits.validate()?;
-        if self.groups.is_empty() || self.groups.len() > limits.max_groups as usize {
-            return Err(invalid("invalid commit group count"));
+        validate_commit_groups(&self.queue, &self.groups, schema, limits)
+    }
+}
+impl PreviewRequest {
+    pub fn validate(&self, schema: &QueueSchema, limits: &QueueLimits) -> QueueResult<()> {
+        validate_commit_groups(
+            &self.queue,
+            std::slice::from_ref(&self.group),
+            schema,
+            limits,
+        )
+    }
+}
+fn validate_commit_groups(
+    queue: &QueueAddress,
+    groups: &[CommitGroup],
+    schema: &QueueSchema,
+    limits: &QueueLimits,
+) -> QueueResult<()> {
+    preflight_commit_groups(queue, groups, limits)?;
+    schema.validate()?;
+    limits.validate()?;
+    if groups.is_empty() || groups.len() > limits.max_groups as usize {
+        return Err(invalid("invalid commit group count"));
+    }
+    let mut identities = BTreeSet::new();
+    for group in groups {
+        name(&group.request_id)?;
+        if !identities.insert(&group.request_id) {
+            return Err(invalid("duplicate group identity"));
         }
-        let mut identities = BTreeSet::new();
-        for group in &self.groups {
-            name(&group.request_id)?;
-            if !identities.insert(&group.request_id) {
-                return Err(invalid("duplicate group identity"));
-            }
-            let count = group
-                .claimed_updates
-                .len()
-                .checked_add(group.state_updates.len())
-                .and_then(|n| n.checked_add(group.work_inserts.len()))
-                .and_then(|n| n.checked_add(group.work_updates.len()))
-                .ok_or(QueueError::TooLarge)?;
-            if count == 0 || count > limits.max_records as usize {
-                return Err(invalid("invalid group record count"));
-            }
-            let mut keys = BTreeSet::new();
-            for update in &group.claimed_updates {
-                name(&update.key)?;
-                if !keys.insert((None, update.key.as_str())) {
-                    return Err(invalid("duplicate record in group"));
-                }
-                if update.lease.token.is_empty() || update.expected_version == 0 {
-                    return Err(invalid("invalid claim credential"));
-                }
-                if let Disposition::Retain {
-                    renew_nanos: Some(n),
-                } = update.disposition
-                {
-                    lease_duration(n)?;
-                }
-                if let Disposition::RetryAt(time) = update.disposition
-                    && update
-                        .patch
-                        .available_at
-                        .is_some_and(|patched| patched != time)
-                {
-                    return Err(invalid("conflicting retry times"));
-                }
-                patch(&update.patch, schema, limits)?;
-            }
-            for item in &group.work_inserts {
-                if !keys.insert((None, item.key.as_str())) {
-                    return Err(invalid("duplicate record in group"));
-                }
-                work(item, schema, limits)?;
-            }
-            for update in &group.work_updates {
-                name(&update.key)?;
-                if !keys.insert((None, update.key.as_str())) {
-                    return Err(invalid("duplicate record in group"));
-                }
-                expect(&update.expect)?;
-                if matches!(update.expect, StateExpect::Absent) {
-                    return Err(invalid(
-                        "unclaimed update requires existing version; creation uses work_inserts",
-                    ));
-                }
-                match &update.change {
-                    UnclaimedChange::Patch(value)
-                    | UnclaimedChange::Administrative { patch: value, .. } => {
-                        patch(value, schema, limits)?
-                    }
-                    UnclaimedChange::Replace(value) => {
-                        if value.key != update.key {
-                            return Err(invalid("replacement key mismatch"));
-                        }
-                        work(value, schema, limits)?;
-                    }
-                    UnclaimedChange::Delete => {}
-                }
-            }
-            for update in &group.state_updates {
-                name(&update.key)?;
-                expect(&update.expect)?;
-                let definition = schema
-                    .state
-                    .get(&update.collection)
-                    .ok_or_else(|| invalid("undeclared state collection"))?;
-                if !keys.insert((Some(update.collection.as_str()), update.key.as_str())) {
-                    return Err(invalid("duplicate record in group"));
-                }
-                if let StateChange::Put {
-                    fields: values,
-                    value,
-                } = &update.change
-                {
-                    fields(values, definition)?;
-                    if value.len() as u64 > limits.max_state_bytes {
-                        return Err(QueueError::TooLarge);
-                    }
-                }
-            }
-            byte_limit(&CommitFingerprintV3::from(group), limits.max_group_bytes)?;
+        let count = group
+            .claimed_updates
+            .len()
+            .checked_add(group.state_updates.len())
+            .and_then(|n| n.checked_add(group.work_inserts.len()))
+            .and_then(|n| n.checked_add(group.work_updates.len()))
+            .ok_or(QueueError::TooLarge)?;
+        if (count == 0 && group.administration.is_none()) || count > limits.max_records as usize {
+            return Err(invalid("invalid group record count"));
         }
-        // Bound the complete positional response before any admitted group runs.
-        // u64::MAX reserves maximum version encoding; rejected messages are capped.
-        let mut response_bytes = 10u64;
-        for group in &self.groups {
-            let versions: Vec<RecordVersion> = group
-                .claimed_updates
-                .iter()
-                .map(|u| RecordVersion {
-                    collection: None,
-                    key: u.key.clone(),
-                    version: u64::MAX,
-                })
-                .chain(group.work_inserts.iter().map(|u| RecordVersion {
-                    collection: None,
-                    key: u.key.clone(),
-                    version: u64::MAX,
-                }))
-                .chain(group.work_updates.iter().map(|u| RecordVersion {
-                    collection: None,
-                    key: u.key.clone(),
-                    version: u64::MAX,
-                }))
-                .chain(group.state_updates.iter().map(|u| RecordVersion {
-                    collection: Some(u.collection.clone()),
-                    key: u.key.clone(),
-                    version: u64::MAX,
-                }))
-                .collect();
-            let success = CommitReceipt {
-                request_id: group.request_id.clone(),
-                outcome: GroupOutcome::Committed { versions },
-            };
-            let rejected = CommitReceipt {
-                request_id: group.request_id.clone(),
-                outcome: GroupOutcome::Rejected(Rejection::Invalid("x".repeat(256))),
-            };
+        if let Some(admin) = &group.administration {
+            admin.intent.validate(schema, limits)?;
+        }
+        let mut keys = BTreeSet::new();
+        for update in &group.claimed_updates {
+            name(&update.key)?;
+            if !keys.insert((None, update.key.as_str())) {
+                return Err(invalid("duplicate record in group"));
+            }
+            if update.lease.token.is_empty() || update.expected_version == 0 {
+                return Err(invalid("invalid claim credential"));
+            }
+            if let Disposition::Retain {
+                renew_nanos: Some(n),
+            } = update.disposition
+            {
+                lease_duration(n)?;
+            }
+            if let Disposition::RetryAt(time) = update.disposition
+                && update
+                    .patch
+                    .available_at
+                    .is_some_and(|patched| patched != time)
+            {
+                return Err(invalid("conflicting retry times"));
+            }
+            patch(&update.patch, schema, limits)?;
+        }
+        for item in &group.work_inserts {
+            if !keys.insert((None, item.key.as_str())) {
+                return Err(invalid("duplicate record in group"));
+            }
+            work(item, schema, limits)?;
+        }
+        for update in &group.work_updates {
+            name(&update.key)?;
+            if !keys.insert((None, update.key.as_str())) {
+                return Err(invalid("duplicate record in group"));
+            }
+            expect(&update.expect)?;
+            if matches!(update.expect, StateExpect::Absent) {
+                return Err(invalid(
+                    "unclaimed update requires existing version; creation uses work_inserts",
+                ));
+            }
+            match &update.change {
+                UnclaimedChange::Patch(value)
+                | UnclaimedChange::Administrative { patch: value, .. } => {
+                    patch(value, schema, limits)?
+                }
+                UnclaimedChange::Replace(value) => {
+                    if value.key != update.key {
+                        return Err(invalid("replacement key mismatch"));
+                    }
+                    work(value, schema, limits)?;
+                }
+                UnclaimedChange::Delete => {}
+            }
+        }
+        for update in &group.state_updates {
+            name(&update.key)?;
+            expect(&update.expect)?;
+            let definition = schema
+                .state
+                .get(&update.collection)
+                .ok_or_else(|| invalid("undeclared state collection"))?;
+            if !keys.insert((Some(update.collection.as_str()), update.key.as_str())) {
+                return Err(invalid("duplicate record in group"));
+            }
+            if let StateChange::Put {
+                fields: values,
+                value,
+            } = &update.change
+            {
+                fields(values, definition)?;
+                if value.len() as u64 > limits.max_state_bytes {
+                    return Err(QueueError::TooLarge);
+                }
+            }
+        }
+        if let Some(admin) = &group.administration
+            && (admin.max_result_bytes == 0 || admin.max_result_bytes > limits.max_response_bytes)
+        {
+            return Err(QueueError::TooLarge);
+        }
+        byte_limit(&CommitAccountingGroup(group), limits.max_group_bytes)?;
+    }
+    // Bound the complete positional response before any admitted group runs.
+    // u64::MAX reserves maximum version encoding; rejected messages are capped.
+    let mut response_bytes = 10u64;
+    for group in groups {
+        if let Some(admin) = &group.administration {
             response_bytes = response_bytes
-                .checked_add(encoded_len(&success)?.max(encoded_len(&rejected)?))
+                .checked_add(admin.max_result_bytes)
                 .ok_or(QueueError::TooLarge)?;
             if response_bytes > limits.max_response_bytes {
                 return Err(QueueError::TooLarge);
             }
+            continue;
         }
-        byte_limit(&OrdinaryCommitEnvelope(self), limits.max_request_bytes)
+        let versions: Vec<RecordVersion> = group
+            .claimed_updates
+            .iter()
+            .map(|u| RecordVersion {
+                collection: None,
+                key: u.key.clone(),
+                version: u64::MAX,
+            })
+            .chain(group.work_inserts.iter().map(|u| RecordVersion {
+                collection: None,
+                key: u.key.clone(),
+                version: u64::MAX,
+            }))
+            .chain(group.work_updates.iter().map(|u| RecordVersion {
+                collection: None,
+                key: u.key.clone(),
+                version: u64::MAX,
+            }))
+            .chain(group.state_updates.iter().map(|u| RecordVersion {
+                collection: Some(u.collection.clone()),
+                key: u.key.clone(),
+                version: u64::MAX,
+            }))
+            .collect();
+        let success = CommitReceipt {
+            request_id: group.request_id.clone(),
+            outcome: GroupOutcome::Committed { versions },
+        };
+        let rejected = CommitReceipt {
+            request_id: group.request_id.clone(),
+            outcome: GroupOutcome::Rejected(Rejection::Invalid("x".repeat(256))),
+        };
+        response_bytes = response_bytes
+            .checked_add(encoded_len(&success)?.max(encoded_len(&rejected)?))
+            .ok_or(QueueError::TooLarge)?;
+        if response_bytes > limits.max_response_bytes {
+            return Err(QueueError::TooLarge);
+        }
     }
+    byte_limit(
+        &BorrowedCommitEnvelope { queue, groups },
+        limits.max_request_bytes,
+    )
 }
+
 fn expect(value: &StateExpect) -> QueueResult<()> {
     if matches!(value, StateExpect::Version(0)) {
         return Err(invalid("record versions start at one"));
@@ -1063,8 +1136,42 @@ struct AdministrativeFingerprintValue<'a> {
     intent: &'a crate::queue_administration::AdministrativeIntent,
     max_result_bytes: u64,
 }
+struct CommitAccountingGroup<'a>(&'a CommitGroup);
+impl Serialize for CommitAccountingGroup<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.0.administration {
+            None => CommitFingerprintV3::from(self.0).serialize(serializer),
+            Some(admin) => CommitFingerprintV4 {
+                request_id: &self.0.request_id,
+                claimed_updates: &self.0.claimed_updates,
+                state_updates: &self.0.state_updates,
+                work_inserts: &self.0.work_inserts,
+                work_updates: &self.0.work_updates,
+                administration: AdministrativeFingerprintValue {
+                    intent: &admin.intent,
+                    max_result_bytes: admin.max_result_bytes,
+                },
+            }
+            .serialize(serializer),
+        }
+    }
+}
 /// Borrowed legacy envelope accounting. Serialize each frozen group directly;
 /// neither an added DTO field nor a temporary vector can alter ordinary limits.
+struct BorrowedCommitEnvelope<'a> {
+    queue: &'a QueueAddress,
+    groups: &'a [CommitGroup],
+}
+impl Serialize for BorrowedCommitEnvelope<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut envelope = serializer.serialize_struct("CommitBatch", 2)?;
+        envelope.serialize_field("queue", self.queue)?;
+        envelope.serialize_field("groups", &OrdinaryCommitGroups(self.groups))?;
+        envelope.end()
+    }
+}
+#[cfg(test)]
 struct OrdinaryCommitEnvelope<'a>(&'a CommitBatch);
 struct OrdinaryCommitGroups<'a>(&'a [CommitGroup]);
 impl Serialize for OrdinaryCommitGroups<'_> {
@@ -1072,23 +1179,30 @@ impl Serialize for OrdinaryCommitGroups<'_> {
         use serde::ser::SerializeSeq;
         let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
         for group in self.0 {
-            sequence.serialize_element(&CommitFingerprintV3::from(group))?;
+            sequence.serialize_element(&CommitAccountingGroup(group))?;
         }
         sequence.end()
     }
 }
+#[cfg(test)]
 impl Serialize for OrdinaryCommitEnvelope<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut envelope = serializer.serialize_struct("CommitBatch", 2)?;
-        envelope.serialize_field("queue", &self.0.queue)?;
-        envelope.serialize_field("groups", &OrdinaryCommitGroups(&self.0.groups))?;
-        envelope.end()
+        BorrowedCommitEnvelope {
+            queue: &self.0.queue,
+            groups: &self.0.groups,
+        }
+        .serialize(serializer)
     }
 }
+
 impl CommitGroup {
     pub fn fingerprint(&self, queue: &QueueAddress) -> QueueResult<[u8; 32]> {
-        fingerprint("commit", &(queue, CommitFingerprintV3::from(self)))
+        match &self.administration {
+            None => fingerprint("commit", &(queue, CommitFingerprintV3::from(self))),
+            Some(admin) => {
+                self.administrative_fingerprint(queue, &admin.intent, admin.max_result_bytes)
+            }
+        }
     }
     /// Administrative binding alone uses format 4; ordinary groups, claims and
     /// inserts retain format 3. Storage receipt domain remains commit/domain 2.
@@ -1335,30 +1449,47 @@ impl RequestPreflight for InsertRequest {
 }
 impl RequestPreflight for CommitBatch {
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
-        envelope(&self.queue, &OrdinaryCommitEnvelope(self), limits)?;
-        if self.groups.is_empty() || self.groups.len() > limits.max_groups as usize {
-            return Err(invalid("invalid commit group count"));
-        }
-        let mut ids = BTreeSet::new();
-        for group in &self.groups {
-            name(&group.request_id)?;
-            if !ids.insert(&group.request_id) {
-                return Err(invalid("duplicate group identity"));
-            }
-            let count = group
-                .claimed_updates
-                .len()
-                .checked_add(group.work_updates.len())
-                .and_then(|n| n.checked_add(group.work_inserts.len()))
-                .and_then(|n| n.checked_add(group.state_updates.len()))
-                .ok_or(QueueError::TooLarge)?;
-            if count == 0 || count > limits.max_records as usize {
-                return Err(invalid("invalid group record count"));
-            }
-            byte_limit(&CommitFingerprintV3::from(group), limits.max_group_bytes)?;
-        }
-        Ok(())
+        preflight_commit_groups(&self.queue, &self.groups, limits)
     }
+}
+impl RequestPreflight for PreviewRequest {
+    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
+        preflight_commit_groups(&self.queue, std::slice::from_ref(&self.group), limits)
+    }
+}
+fn preflight_commit_groups(
+    queue: &QueueAddress,
+    groups: &[CommitGroup],
+    limits: &QueueLimits,
+) -> QueueResult<()> {
+    envelope(queue, &BorrowedCommitEnvelope { queue, groups }, limits)?;
+    if groups.is_empty() || groups.len() > limits.max_groups as usize {
+        return Err(invalid("invalid commit group count"));
+    }
+    let mut ids = BTreeSet::new();
+    for group in groups {
+        name(&group.request_id)?;
+        if !ids.insert(&group.request_id) {
+            return Err(invalid("duplicate group identity"));
+        }
+        let count = group
+            .claimed_updates
+            .len()
+            .checked_add(group.work_updates.len())
+            .and_then(|n| n.checked_add(group.work_inserts.len()))
+            .and_then(|n| n.checked_add(group.state_updates.len()))
+            .ok_or(QueueError::TooLarge)?;
+        if (count == 0 && group.administration.is_none()) || count > limits.max_records as usize {
+            return Err(invalid("invalid group record count"));
+        }
+        if let Some(admin) = &group.administration
+            && (admin.max_result_bytes == 0 || admin.max_result_bytes > limits.max_response_bytes)
+        {
+            return Err(QueueError::TooLarge);
+        }
+        byte_limit(&CommitAccountingGroup(group), limits.max_group_bytes)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1398,6 +1529,7 @@ mod tests {
     }
     fn group(id: &str) -> CommitGroup {
         CommitGroup {
+            administration: None,
             request_id: id.into(),
             claimed_updates: vec![],
             state_updates: vec![StateUpdate {
@@ -1562,7 +1694,7 @@ mod tests {
             queue: queue(),
             groups: vec![group("one")],
         };
-        let exact = encoded_len(&batch.groups[0]).unwrap();
+        let exact = encoded_len(&CommitFingerprintV3::from(&batch.groups[0])).unwrap();
         let mut limits = QueueLimits::default();
         limits.max_group_bytes = exact;
         limits.max_body_bytes = 1;
@@ -1669,6 +1801,7 @@ mod tests {
             queue: "q/é".into(),
         };
         let empty = CommitGroup {
+            administration: None,
             request_id: "empty".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -1676,6 +1809,7 @@ mod tests {
             work_updates: vec![],
         };
         let rich = CommitGroup {
+            administration: None,
             request_id: "commit\0/é".into(),
             claimed_updates: vec![ClaimedUpdate {
                 key: "claimed".into(),
@@ -1732,13 +1866,28 @@ mod tests {
                 "f6bffe65f454e14c35943a1438cd252a47bb8dbc74a5641977998ddcb13c419e",
             ),
         ] {
-            let original = postcard::to_allocvec(&(&address, group)).unwrap();
+            #[derive(Serialize)]
+            struct LegacyGroup<'a> {
+                request_id: &'a str,
+                claimed_updates: &'a [ClaimedUpdate],
+                state_updates: &'a [StateUpdate],
+                work_inserts: &'a [NewWork],
+                work_updates: &'a [UnclaimedUpdate],
+            }
+            let legacy = LegacyGroup {
+                request_id: &group.request_id,
+                claimed_updates: &group.claimed_updates,
+                state_updates: &group.state_updates,
+                work_inserts: &group.work_inserts,
+                work_updates: &group.work_updates,
+            };
+            let original = postcard::to_allocvec(&(&address, &legacy)).unwrap();
             let projected =
                 postcard::to_allocvec(&(&address, CommitFingerprintV3::from(group))).unwrap();
             assert_eq!(original, projected);
             assert_eq!(
                 group.fingerprint(&address).unwrap(),
-                fingerprint("commit", &(&address, group)).unwrap()
+                fingerprint("commit", &(&address, &legacy)).unwrap()
             );
             let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
             assert_eq!(hex(&original), wire);
@@ -1748,6 +1897,7 @@ mod tests {
     #[test]
     fn ordinary_envelope_accounting_preserves_exact_legacy_boundaries() {
         let group = CommitGroup {
+            administration: None,
             request_id: "ordinary\0/é".into(),
             claimed_updates: vec![],
             state_updates: vec![],
@@ -1758,9 +1908,35 @@ mod tests {
             queue: queue(),
             groups: vec![group.clone(), group],
         };
+        #[derive(Serialize)]
+        struct LegacyGroup<'a> {
+            request_id: &'a str,
+            claimed_updates: &'a [ClaimedUpdate],
+            state_updates: &'a [StateUpdate],
+            work_inserts: &'a [NewWork],
+            work_updates: &'a [UnclaimedUpdate],
+        }
+        #[derive(Serialize)]
+        struct LegacyEnvelope<'a> {
+            queue: &'a QueueAddress,
+            groups: Vec<LegacyGroup<'a>>,
+        }
+        fn legacy_group(group: &CommitGroup) -> LegacyGroup<'_> {
+            LegacyGroup {
+                request_id: &group.request_id,
+                claimed_updates: &group.claimed_updates,
+                state_updates: &group.state_updates,
+                work_inserts: &group.work_inserts,
+                work_updates: &group.work_updates,
+            }
+        }
+        let legacy = LegacyEnvelope {
+            queue: &batch.queue,
+            groups: batch.groups.iter().map(legacy_group).collect(),
+        };
         let projected = OrdinaryCommitEnvelope(&batch);
         assert_eq!(
-            postcard::to_allocvec(&batch).unwrap(),
+            postcard::to_allocvec(&legacy).unwrap(),
             postcard::to_allocvec(&projected).unwrap()
         );
         let size = encoded_len(&projected).unwrap();
@@ -1769,7 +1945,7 @@ mod tests {
         for group in &batch.groups {
             let projection = CommitFingerprintV3::from(group);
             assert_eq!(
-                postcard::to_allocvec(group).unwrap(),
+                postcard::to_allocvec(&legacy_group(group)).unwrap(),
                 postcard::to_allocvec(&projection).unwrap()
             );
             let size = encoded_len(&projection).unwrap();
@@ -2127,6 +2303,7 @@ mod administrative_fingerprint_tests {
             queue: "q".into(),
         };
         let group = CommitGroup {
+            administration: None,
             request_id: "g".into(),
             claimed_updates: vec![],
             state_updates: vec![],
