@@ -19,6 +19,42 @@ pub fn encode_administrative_work_fragment<'r>(
     delta: &CommitDelta,
     reservation: &'r QueueReservation,
 ) -> PublicationResult<ResolvedWorkFragment<'r>> {
+    let size = measure_administrative_work_fragment(before, delta)?;
+    let charge = reservation
+        .buffer(size.checked_add(128).ok_or(PublicationError::Overflow)?)
+        .map_err(PublicationError::Admission)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(usize::try_from(size).map_err(|_| PublicationError::Overflow)?)
+        .map_err(|_| PublicationError::Overflow)?;
+    write_administrative_work_fragment(&mut Sink::Buffer(&mut bytes), before, delta)?;
+    if bytes.len() as u64 != size {
+        return invalid("work fragment size changed");
+    }
+    parse_administrative_work_fragment(&bytes, before.next_sequence)?;
+    Ok(ResolvedWorkFragment {
+        bytes,
+        _charge: charge,
+    })
+}
+
+/// Exact command validation/counting without retaining its payload bytes.
+pub fn measure_administrative_work_fragment(
+    before: &RecordSnapshot,
+    delta: &CommitDelta,
+) -> PublicationResult<u64> {
+    let mut sink = Sink::Count(0);
+    write_administrative_work_fragment(&mut sink, before, delta)?;
+    let Sink::Count(size) = sink else {
+        unreachable!()
+    };
+    Ok(size)
+}
+fn write_administrative_work_fragment(
+    sink: &mut Sink<'_>,
+    before: &RecordSnapshot,
+    delta: &CommitDelta,
+) -> PublicationResult<()> {
     if before.work.len() != 1
         || before.versions.len() != 1
         || !before.state.is_empty()
@@ -54,32 +90,16 @@ pub fn encode_administrative_work_fragment<'r>(
             &delta.work_bodies[&version.key],
         )
     });
-    let size = measure_work_mutation(version, Some(prior.record.version), highwater, row)?;
-    if size == 0 {
+    if measure_work_mutation(version, Some(prior.record.version), highwater, row)? == 0 {
         return invalid("administrative fragment cannot be a no-op");
     }
-    let charge = reservation
-        .buffer(size.checked_add(128).ok_or(PublicationError::Overflow)?)
-        .map_err(PublicationError::Admission)?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(usize::try_from(size).map_err(|_| PublicationError::Overflow)?)
-        .map_err(|_| PublicationError::Overflow)?;
-    let mut sink = Sink::Buffer(&mut bytes);
-    write_mutation_header(&mut sink, version, Some(prior.record.version), highwater)?;
+    write_mutation_header(sink, version, Some(prior.record.version), highwater)?;
     if let Some((row, fields, body)) = row {
-        write_work_value(&mut sink, row, fields, body)?;
+        write_work_value(sink, row, fields, body)?;
     } else {
         sink.tag(0)?;
     }
-    if bytes.len() as u64 != size {
-        return invalid("work fragment size changed");
-    }
-    parse_administrative_work_fragment(&bytes, before.next_sequence)?;
-    Ok(ResolvedWorkFragment {
-        bytes,
-        _charge: charge,
-    })
+    Ok(())
 }
 
 /// One admitted resolved command. This is not a business decision or receipt:

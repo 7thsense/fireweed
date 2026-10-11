@@ -6,7 +6,8 @@ use fireweed_engine::queue_administration::{
     AdministrativeScanIdentity, AdmittedAdministrativeScan, ResolvedAdministrativeRow,
 };
 use fireweed_engine::queue_publication::{
-    CommandRef, encode_administrative_work_fragment, parse_administrative_work_fragment,
+    CommandRef, encode_administrative_work_fragment, measure_administrative_work_fragment,
+    parse_administrative_work_fragment,
 };
 use fireweed_engine::queue_schema_codec::DefinitionPin;
 use fireweed_engine::queue_unique_stream::{UniqueClaimOrigin, UniqueTupleDecision};
@@ -20,6 +21,10 @@ struct Context {
     initial: u64,
     scan: Option<AdministrativeScanIdentity>,
     delivered: u64,
+    command_count: u64,
+    command_bytes: u64,
+    max_command_bytes: u64,
+    publication_overflow: bool,
     binding: [u8; 32],
     _charge: OwnedQueueBufferCharge,
 }
@@ -47,6 +52,18 @@ impl AdministrativeScratch {
         queue: &QueueAddress,
         pin: DefinitionPin,
         initial: u64,
+    ) -> QueueResult<Self> {
+        Self::new_with_command_limit(directory, quota, reservation, queue, pin, initial, u64::MAX)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_command_limit(
+        directory: &Path,
+        quota: Arc<ScratchDiskQuota>,
+        reservation: &Arc<QueueReservation>,
+        queue: &QueueAddress,
+        pin: DefinitionPin,
+        initial: u64,
+        max_command_bytes: u64,
     ) -> QueueResult<Self> {
         let bytes = add(queue.tenant.len() as u64, queue.queue.len() as u64)?
             .checked_mul(4)
@@ -81,6 +98,10 @@ impl AdministrativeScratch {
                 initial,
                 scan: None,
                 delivered: 0,
+                command_count: 0,
+                command_bytes: 0,
+                max_command_bytes,
+                publication_overflow: false,
                 binding,
                 _charge: charge,
             },
@@ -135,32 +156,46 @@ impl AdministrativeScratch {
             }
         }
         if let Some(delta) = packet.command() {
-            let temporary = self.context._charge.child_buffer(0)?;
-            let fragment =
-                encode_administrative_work_fragment(initial, delta, temporary.reservation())
-                    .map_err(|error| unknown(format!("resolved fragment: {error:?}")))?;
-            let command =
-                parse_administrative_work_fragment(fragment.as_bytes(), self.context.initial)
-                    .map_err(|error| unknown(format!("resolved fragment: {error:?}")))?;
-            let size = add(fragment.as_bytes().len() as u64, (HEADER + TRAILER) as u64)?;
-            let _encoding = self.context._charge.child_buffer(
-                size.checked_mul(4)
-                    .and_then(|n| n.checked_add(8192))
-                    .ok_or_else(|| unknown("command encoding admission overflow"))?,
-            )?;
-            let mut payload = Vec::with_capacity(usize::try_from(size).map_err(unknown)?);
-            payload.extend_from_slice(MAGIC);
-            payload.extend_from_slice(&self.context.initial.to_le_bytes());
-            payload.extend_from_slice(fragment.as_bytes());
-            let digest = checksum(
-                command.identity.key,
-                self.commands.count,
-                &payload,
-                &self.context.binding,
-            );
-            payload.extend_from_slice(&digest);
-            self.commands
-                .append_components(None, "", command.identity.key.as_bytes(), &payload)?;
+            // Even after permanent overflow, validate/count every accepted
+            // command through the same canonical writer without payload copies.
+            let size = measure_administrative_work_fragment(initial, delta)
+                .map_err(|error| unknown(format!("resolved fragment: {error:?}")))?;
+            self.context.command_count = add(self.context.command_count, 1)?;
+            self.context.command_bytes = add(self.context.command_bytes, size)?;
+            self.context.publication_overflow |=
+                self.context.command_bytes > self.context.max_command_bytes;
+            if !self.context.publication_overflow {
+                let temporary = self.context._charge.child_buffer(0)?;
+                let fragment =
+                    encode_administrative_work_fragment(initial, delta, temporary.reservation())
+                        .map_err(|error| unknown(format!("resolved fragment: {error:?}")))?;
+                let command =
+                    parse_administrative_work_fragment(fragment.as_bytes(), self.context.initial)
+                        .map_err(|error| unknown(format!("resolved fragment: {error:?}")))?;
+                let size = add(fragment.as_bytes().len() as u64, (HEADER + TRAILER) as u64)?;
+                let _encoding = self.context._charge.child_buffer(
+                    size.checked_mul(4)
+                        .and_then(|n| n.checked_add(8192))
+                        .ok_or_else(|| unknown("command encoding admission overflow"))?,
+                )?;
+                let mut payload = Vec::with_capacity(usize::try_from(size).map_err(unknown)?);
+                payload.extend_from_slice(MAGIC);
+                payload.extend_from_slice(&self.context.initial.to_le_bytes());
+                payload.extend_from_slice(fragment.as_bytes());
+                let digest = checksum(
+                    command.identity.key,
+                    self.commands.count,
+                    &payload,
+                    &self.context.binding,
+                );
+                payload.extend_from_slice(&digest);
+                self.commands.append_components(
+                    None,
+                    "",
+                    command.identity.key.as_bytes(),
+                    &payload,
+                )?;
+            }
         }
         self.context.delivered = delivered;
         self.poisoned = false;
@@ -178,6 +213,24 @@ impl AdministrativeScratch {
             || summary.packet_count() != self.context.delivered
         {
             return Err(unknown("administrative scratch lacks its complete scan"));
+        }
+        use fireweed_core::queue_administration::AdministrativeOutcomeKind;
+        let expected_commands = add(
+            summary
+                .histogram()
+                .outcomes
+                .get(&AdministrativeOutcomeKind::Changed)
+                .copied()
+                .unwrap_or(0),
+            summary
+                .histogram()
+                .outcomes
+                .get(&AdministrativeOutcomeKind::Deleted)
+                .copied()
+                .unwrap_or(0),
+        )?;
+        if expected_commands != self.context.command_count {
+            return Err(unknown("administrative command/result count mismatch"));
         }
         let scan = summary.scan_identity();
         if self.context.scan.as_ref().is_some_and(|id| id != &scan) {
@@ -226,6 +279,15 @@ pub struct SealedAdministrativeScratch {
     context: Context,
 }
 impl SealedAdministrativeScratch {
+    pub fn publication_overflowed(&self) -> bool {
+        self.context.publication_overflow
+    }
+    pub fn command_bytes(&self) -> u64 {
+        self.context.command_bytes
+    }
+    pub fn command_count(&self) -> u64 {
+        self.context.command_count
+    }
     /// Exhaust command integrity and the administrative/ordinary-authority union
     /// BEFORE overlap, sibling collision or ordinary CAS/lease decisions. Caller
     /// first verifies complete expected prospective ordinary probes under fence.
@@ -241,7 +303,7 @@ impl SealedAdministrativeScratch {
         }
         let result = (|| {
             self.rewind_commands()?;
-            while let Some(command) = self.next_command()? {
+            while let Some(command) = self.next_retained_command()? {
                 drop(command);
             }
             self.rewind_commands()?;
@@ -363,6 +425,13 @@ impl SealedAdministrativeScratch {
     /// Caller must exhaust and validate the entire command source before ACK.
     /// This method never reselects, reruns CAS/lease/time or allocates sequences.
     pub fn next_command(&mut self) -> QueueResult<Option<AdmittedScratchWorkCommand>> {
+        if self.context.publication_overflow {
+            self.poisoned = true;
+            return Err(unknown("overflowed command source cannot be applied"));
+        }
+        self.next_retained_command()
+    }
+    fn next_retained_command(&mut self) -> QueueResult<Option<AdmittedScratchWorkCommand>> {
         if self.poisoned {
             return Err(unknown("poisoned administrative scratch"));
         }
@@ -521,6 +590,19 @@ pub(super) mod tests {
         job: &Arc<QueueReservation>,
         reject_last: bool,
         no_op: bool,
+        sink: impl FnMut(ResolvedAdministrativeRow) -> QueueResult<()>,
+    ) -> QueueResult<AdmittedAdministrativeScan> {
+        run_scan_with_body(count, large, unique, job, reject_last, no_op, 0, sink)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn run_scan_with_body(
+        count: u64,
+        large: usize,
+        unique: bool,
+        job: &Arc<QueueReservation>,
+        reject_last: bool,
+        no_op: bool,
+        body_size: usize,
         mut sink: impl FnMut(ResolvedAdministrativeRow) -> QueueResult<()>,
     ) -> QueueResult<AdmittedAdministrativeScan> {
         let schema = schema(unique);
@@ -549,6 +631,7 @@ pub(super) mod tests {
                     } else {
                         WorkPatch {
                             priority: Some(17),
+                            body: (body_size != 0).then(|| vec![5; body_size].into()),
                             ..Default::default()
                         }
                     },
@@ -661,6 +744,162 @@ pub(super) mod tests {
             Arc::clone(job),
             |packet| futures::future::ready(sink(packet)),
         ))
+    }
+    #[test]
+    fn oversized_body_group_does_not_fill_disk_after_command_overflow() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let quota = ScratchDiskQuota::new(1 << 20).unwrap();
+        let mut scratch = AdministrativeScratch::new_with_command_limit(
+            directory.path(),
+            Arc::clone(&quota),
+            &job,
+            &queue(),
+            pin(),
+            32,
+            300000,
+        )
+        .unwrap();
+        let summary = run_scan_with_body(32, 0, false, &job, false, false, 262144, |packet| {
+            scratch.append(packet)
+        })
+        .unwrap();
+        let mut scratch = scratch.seal(&summary).unwrap();
+        assert_eq!(summary.histogram().matched, 32);
+        assert_eq!(scratch.command_count(), 32);
+        assert!(scratch.command_bytes() > 8 << 20);
+        assert!(scratch.publication_overflowed());
+        assert!(scratch.commands.data_bytes < 300000);
+        assert!(quota.usage().unwrap() < 1 << 20);
+        scratch
+            .validate_before_business(
+                &RecordSnapshot {
+                    next_sequence: 32,
+                    ..Default::default()
+                },
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+            )
+            .unwrap();
+        assert!(scratch.next_command().is_err());
+        drop(scratch);
+        drop(summary);
+        assert_eq!(quota.usage().unwrap(), 0);
+        assert_eq!(admission.usage().unwrap(), (1, 0));
+    }
+    #[test]
+    fn command_capture_limits_are_exact_and_overflow_continues_all_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 2 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let quota = ScratchDiskQuota::new(32 << 20).unwrap();
+        let size = std::cell::Cell::new(0);
+        let summary = run_scan(1, 0, false, &job, |packet| {
+            let measured = measure_administrative_work_fragment(
+                packet.initial_authority(),
+                packet.command().unwrap(),
+            )
+            .unwrap();
+            let encoded = encode_administrative_work_fragment(
+                packet.initial_authority(),
+                packet.command().unwrap(),
+                &job,
+            )
+            .unwrap();
+            assert_eq!(measured, encoded.as_bytes().len() as u64);
+            size.set(measured);
+            Ok(())
+        })
+        .unwrap();
+        drop(summary);
+        for limit in [size.get(), size.get() - 1] {
+            let mut scratch = AdministrativeScratch::new_with_command_limit(
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+                &queue(),
+                pin(),
+                1,
+                limit,
+            )
+            .unwrap();
+            let summary = run_scan(1, 0, false, &job, |packet| scratch.append(packet)).unwrap();
+            let mut scratch = scratch.seal(&summary).unwrap();
+            assert_eq!(scratch.command_count(), 1);
+            assert_eq!(scratch.command_bytes(), size.get());
+            assert_eq!(scratch.publication_overflowed(), limit < size.get());
+            if limit == size.get() {
+                assert!(scratch.next_command().unwrap().is_some());
+                assert!(scratch.next_command().unwrap().is_none());
+            } else {
+                assert_eq!(scratch.commands.data_bytes, 0);
+                assert!(scratch.next_command().is_err());
+            }
+            drop(scratch);
+            drop(summary);
+            assert_eq!(quota.usage().unwrap(), 0);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
+        for corrupt in [false, true] {
+            let mut scratch = AdministrativeScratch::new_with_command_limit(
+                directory.path(),
+                Arc::clone(&quota),
+                &job,
+                &queue(),
+                pin(),
+                5001,
+                256,
+            )
+            .unwrap();
+            let summary = run_scan(5001, 0, true, &job, |packet| scratch.append(packet)).unwrap();
+            let mut scratch = scratch.seal(&summary).unwrap();
+            assert_eq!(scratch.command_count(), 5000); // row 999 already has its target value
+            assert_eq!(summary.histogram().matched, 5001);
+            assert_eq!(summary.packet_count(), 5000);
+            assert!(scratch.publication_overflowed());
+            assert!(scratch.commands.data_bytes < 1024);
+            assert!(scratch.evidence.count > 5001);
+            if corrupt {
+                scratch
+                    .evidence
+                    .data
+                    .set_len(scratch.evidence.data_bytes - 1)
+                    .unwrap();
+                assert!(
+                    scratch
+                        .validate_before_business(
+                            &RecordSnapshot {
+                                next_sequence: 5001,
+                                ..Default::default()
+                            },
+                            directory.path(),
+                            Arc::clone(&quota),
+                            &job
+                        )
+                        .is_err()
+                );
+            } else {
+                let decision = scratch
+                    .validate_before_business(
+                        &RecordSnapshot {
+                            next_sequence: 5001,
+                            ..Default::default()
+                        },
+                        directory.path(),
+                        Arc::clone(&quota),
+                        &job,
+                    )
+                    .unwrap();
+                assert!(decision.administrative_collision); // Complete evidence still finds sibling conflict.
+                assert!(scratch.next_command().is_err()); // Partial stream never applies.
+            }
+            drop(scratch);
+            drop(summary);
+            assert_eq!(quota.usage().unwrap(), 0);
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
     }
     #[test]
     fn physical_command_sink_drains_5001_changes_and_replays_exact_metadata() {

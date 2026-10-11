@@ -103,6 +103,7 @@ struct Setup {
     queue: QueueAddress,
     quota: Arc<ScratchDiskQuota>,
     reservation: Arc<QueueReservation>,
+    max_command_bytes: u64,
     _charge: OwnedQueueBufferCharge,
 }
 /// Clones share one owner, never its files/payloads. A scan awaits each append.
@@ -123,6 +124,29 @@ impl OwnedAdministrativeSink {
         pin: DefinitionPin,
         initial: u64,
     ) -> QueueResult<Self> {
+        Self::new_with_command_limit(
+            workers,
+            directory,
+            quota,
+            reservation,
+            queue,
+            pin,
+            initial,
+            u64::MAX,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_command_limit(
+        workers: ScratchWorkers,
+        directory: &Path,
+        quota: Arc<ScratchDiskQuota>,
+        reservation: &Arc<QueueReservation>,
+        queue: &QueueAddress,
+        pin: DefinitionPin,
+        initial: u64,
+        max_command_bytes: u64,
+    ) -> QueueResult<Self> {
         let names = add(
             add(queue.tenant.len() as u64, queue.queue.len() as u64)?,
             directory.as_os_str().len() as u64,
@@ -138,17 +162,19 @@ impl OwnedAdministrativeSink {
             queue: queue.clone(),
             quota,
             reservation: Arc::clone(reservation),
+            max_command_bytes,
             _charge: charge,
         };
         let inner = workers
             .run(move || {
-                let owner = AdministrativeScratch::new(
+                let owner = AdministrativeScratch::new_with_command_limit(
                     &setup.directory,
                     setup.quota,
                     &setup.reservation,
                     &setup.queue,
                     pin,
                     initial,
+                    setup.max_command_bytes,
                 )?;
                 Ok(Arc::new(Inner {
                     state: Mutex::new(State::Ready(Box::new(owner))),
