@@ -36,6 +36,13 @@ pub(super) async fn load_group_with_fields(
         .chain(group.work_updates.iter().map(|u| u.key.as_str()))
         .chain(group.work_inserts.iter().map(|u| u.key.as_str()))
         .collect();
+    let check_keys: BTreeSet<_> = group
+        .claimed_updates
+        .iter()
+        .filter(|u| u.disposition == Disposition::Check)
+        .map(|u| u.key.as_str())
+        .collect();
+    let empty_names = BTreeSet::new();
     let body_keys:BTreeSet<_>=group.work_updates.iter().filter(|u|matches!(&u.change,UnclaimedChange::Administrative {patch,..} if patch.body.is_some())).map(|u|u.key.as_str()).collect();
     let certificate = names.iter().try_fold(1024u64, |n, name| {
         n.checked_add(name.len() as u64)
@@ -67,30 +74,37 @@ pub(super) async fn load_group_with_fields(
             super::work::WorkAuthority::Present { id, mut work } => {
                 let mut total = 0;
                 let mut exceeded = false;
-                payload::load_payload(
-                    connection,
-                    id,
-                    &schema.work,
-                    payload::PayloadSelection {
-                        fields: if complete_work_fields {
-                            None
-                        } else {
-                            Some(&names)
+                if !check_keys.contains(key) {
+                    payload::load_payload(
+                        connection,
+                        id,
+                        &schema.work,
+                        payload::PayloadSelection {
+                            fields: if complete_work_fields {
+                                None
+                            } else {
+                                Some(&names)
+                            },
+                            include_body: body_keys.contains(key),
+                            max_bytes: u64::MAX,
                         },
-                        include_body: body_keys.contains(key),
-                        max_bytes: u64::MAX,
-                    },
-                    &mut payload::NativePayloadBudget {
-                        job,
-                        charges,
-                        total: &mut total,
-                        response_limit: &mut exceeded,
-                    },
-                    &mut work.record.work.fields,
-                    &mut work.record.work.body,
-                )
-                .await?;
-                work.field_coverage = if complete_work_fields {
+                        &mut payload::NativePayloadBudget {
+                            job,
+                            charges,
+                            total: &mut total,
+                            response_limit: &mut exceeded,
+                        },
+                        &mut work.record.work.fields,
+                        &mut work.record.work.body,
+                    )
+                    .await?;
+                }
+                work.field_coverage = if check_keys.contains(key) {
+                    FieldCoverage::Selected {
+                        names: empty_names.clone(),
+                        prefixes: Default::default(),
+                    }
+                } else if complete_work_fields {
                     FieldCoverage::Complete
                 } else {
                     FieldCoverage::Selected {
@@ -131,25 +145,27 @@ pub(super) async fn load_group_with_fields(
         let mut body = bytes::Bytes::new();
         let mut total = 0;
         let mut exceeded = false;
-        payload::load_payload(
-            connection,
-            id,
-            definition,
-            payload::PayloadSelection {
-                fields: None,
-                include_body: false,
-                max_bytes: u64::MAX,
-            },
-            &mut payload::NativePayloadBudget {
-                job,
-                charges,
-                total: &mut total,
-                response_limit: &mut exceeded,
-            },
-            &mut fields,
-            &mut body,
-        )
-        .await?;
+        if update.change != StateChange::Check {
+            payload::load_payload(
+                connection,
+                id,
+                definition,
+                payload::PayloadSelection {
+                    fields: None,
+                    include_body: false,
+                    max_bytes: u64::MAX,
+                },
+                &mut payload::NativePayloadBudget {
+                    job,
+                    charges,
+                    total: &mut total,
+                    response_limit: &mut exceeded,
+                },
+                &mut fields,
+                &mut body,
+            )
+            .await?;
+        }
         snapshot.state.insert(
             (update.collection.clone(), update.key.clone()),
             StateRecord {

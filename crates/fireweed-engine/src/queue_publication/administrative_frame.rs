@@ -229,42 +229,14 @@ pub fn measure_administrative_success_floor(
     pin: DefinitionPin,
     group: &CommitGroup,
 ) -> PublicationResult<u64> {
-    let count = group
-        .claimed_updates
-        .len()
-        .checked_add(group.state_updates.len())
-        .and_then(|n| n.checked_add(group.work_updates.len()))
-        .and_then(|n| n.checked_add(group.work_inserts.len()))
-        .ok_or(PublicationError::Overflow)?;
+    let count = group.modified_records().count();
     let mut sink = Sink::Count(0);
     write_frame_header_as(&mut sink, queue, pin, 0, 0, 0, MAGIC_V2)?;
     sink.n(1)?;
     write_receipt_header(&mut sink, 2, &group.request_id, 4, &[0; 32])?;
     sink.tag(4)?;
     sink.n(count as u64)?;
-    for (collection, key) in group
-        .claimed_updates
-        .iter()
-        .map(|item| (None, item.key.as_str()))
-        .chain(
-            group
-                .state_updates
-                .iter()
-                .map(|item| (Some(item.collection.as_str()), item.key.as_str())),
-        )
-        .chain(
-            group
-                .work_updates
-                .iter()
-                .map(|item| (None, item.key.as_str())),
-        )
-        .chain(
-            group
-                .work_inserts
-                .iter()
-                .map(|item| (None, item.key.as_str())),
-        )
-    {
+    for (collection, key) in group.modified_records() {
         identity(&mut sink, collection, key)?;
         sink.n(1)?;
     }

@@ -85,7 +85,7 @@ CommitRequest { queue, groups: [CommitGroup] }
 CommitGroup {
   request_id,
   claimed_updates: [{ key, lease, expected_version, patch, disposition }],
-  state_updates: [{ collection, key, expect: Absent | Version(v), value_or_delete }],
+  state_updates: [{ collection, key, expect: Absent | Version(v), change: Put | Delete | Check }],
   work_inserts: [KeyedWork],
   work_updates: [{ key, expect: Version(v), change: Patch | Replace | Delete | Administrative }],
   administration: optional Addressed(targets) | SelectFirst(ordered_clauses)
@@ -93,6 +93,15 @@ CommitGroup {
 ```
 
 Disposition is complete, fail, release, retry-at, or retain/renew the lease.
+`Check` is also permitted: it verifies the claimed record's current version and
+live credential at the operation's fresh lease time, with an empty patch and no
+renewal. State `Check` verifies `Absent` or `Version(v)` without changing the row.
+Checks share the group's atomic publication guard, count toward request and record
+limits, and cannot overlap another operation on the same record. They produce no
+version receipt, payload update, unique-index change or insertion sequence advance.
+A checks-only group still publishes its immutable replay receipt; replay uses that
+original outcome even after checked records or time have changed. A rejected check
+does not by itself identify which predicate of a compound application condition failed.
 An update may change permitted fields/body/priority/eligibility. Delete of active-leased
 work requires its live credential. Patch/Delete reject an active lease; fresh Replace only accepts Pending work.
 Administrative changes carry lifecycle intent Keep/Pending/Completed/Failed and

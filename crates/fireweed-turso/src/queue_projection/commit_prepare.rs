@@ -355,6 +355,217 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn condition_checks_skip_large_payloads_and_keep_checked_unique_owners() {
+        use super::super::tests::apply_group_record;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("condition-checks.db");
+        let admission = QueueAdmission::new(1, 128 << 20).unwrap();
+        let seed_job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 2).unwrap();
+        let (projection, definition) = bootstrap(&path, &seed_job, &workers).await;
+        let mut snapshot = seed(&projection, &definition, &seed_job, &workers, true).await;
+        let mut state = group("wide-state");
+        state.state_updates.push(StateUpdate {
+            collection: "workflow".into(),
+            key: "run".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: [("phase".into(), FieldValue::Text("x".repeat(1 << 20)))].into(),
+                value: vec![7; 1 << 20].into(),
+            },
+        });
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut snapshot,
+            &state,
+            2,
+            &seed_job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        drop(snapshot);
+        let clock = Arc::new(TestClock::default());
+        clock.set(1000);
+        let request = ClaimRequest {
+            queue: address(),
+            request_id: "lease-large-owner".into(),
+            filter: Filter {
+                keys: Some(["a".into()].into()),
+                ..Default::default()
+            },
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 1,
+            max_bytes: 65536,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        let claim_input = |head| ClaimReplayInput {
+            genesis: input(&definition, &seed_job, group("unused"), head, 2).genesis,
+            request: request.clone(),
+            now: 1000,
+            limits: QueueLimits::default(),
+            required_next_offset: head,
+            required_insertion_sequence: 2,
+            required_last_record_epoch: 1,
+        };
+        let prepared = projection
+            .prepare_claim(
+                claim_input(3),
+                1,
+                16 << 20,
+                clock.clone(),
+                &seed_job,
+                &workers,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (record, response, head) = prepared.into_parts();
+        projection
+            .apply(record, head, &seed_job, &workers)
+            .await
+            .unwrap();
+        drop(response);
+        let selected = projection
+            .replay_claim(claim_input(4), &seed_job, &workers)
+            .await
+            .unwrap()
+            .unwrap();
+        let claimed = selected.records()[0].clone();
+        drop(selected);
+        let tight = QueueAdmission::new(1, 512 << 10).unwrap();
+        let job = Arc::new(tight.reserve(0).unwrap());
+        let mut checks = group("metadata-only-checks");
+        checks.claimed_updates.push(ClaimedUpdate {
+            key: "a".into(),
+            lease: claimed.lease.clone(),
+            expected_version: claimed.record.version,
+            patch: WorkPatch::default(),
+            disposition: Disposition::Check,
+        });
+        checks.state_updates.push(StateUpdate {
+            collection: "workflow".into(),
+            key: "run".into(),
+            expect: StateExpect::Version(1),
+            change: StateChange::Check,
+        });
+        let prepared = projection
+            .prepare_ordinary_commit(
+                input(&definition, &job, checks.clone(), 4, 2),
+                1,
+                65536,
+                clock.clone(),
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.receipt().outcome,
+            GroupOutcome::Committed { versions: vec![] }
+        );
+        let original = prepared.receipt().clone();
+        let (record, response, head) = prepared.into_parts();
+        projection
+            .apply(record, head, &job, &workers)
+            .await
+            .unwrap();
+        drop(response);
+        let authority = inspect(&projection,
+            "SELECT applied_next_offset,next_sequence,(SELECT version FROM q7_records WHERE collection=0 AND key=?1),(SELECT version FROM q7_records WHERE collection=1 AND key=?2) FROM q7_queues",
+            vec![blob(b"a"), blob(b"run")], 4).await;
+        assert_eq!(integer(&authority[0]).unwrap(), 5);
+        assert_eq!(unsigned(&authority[1]).unwrap(), 2);
+        assert_eq!(unsigned(&authority[2]).unwrap(), claimed.record.version);
+        assert_eq!(unsigned(&authority[3]).unwrap(), 1);
+        let payloads = inspect(&projection,
+            "SELECT (SELECT value FROM q7_bodies WHERE record_id=(SELECT id FROM q7_records WHERE collection=0 AND key=?1)),(SELECT value FROM q7_fields WHERE field=0 AND record_id=(SELECT id FROM q7_records WHERE collection=0 AND key=?1)),(SELECT value FROM q7_bodies WHERE record_id=(SELECT id FROM q7_records WHERE collection=1 AND key=?2)),(SELECT value FROM q7_fields WHERE field=0 AND record_id=(SELECT id FROM q7_records WHERE collection=1 AND key=?2))",
+            vec![blob(b"a"), blob(b"run")], 4).await;
+        assert_eq!(
+            payloads,
+            vec![
+                blob(&vec![9; 1 << 20]),
+                blob(&encode(&FieldValue::Bytes(vec![7; 1 << 20])).unwrap()),
+                blob(&vec![7; 1 << 20]),
+                blob(&encode(&FieldValue::Text("x".repeat(1 << 20))).unwrap()),
+            ]
+        );
+        let mut conflict = checks.clone();
+        conflict.request_id = "checked-owner-still-unique".into();
+        conflict
+            .work_inserts
+            .push(work("duplicate-owner", 1, false));
+        let rejected = projection
+            .prepare_ordinary_commit(
+                input(&definition, &job, conflict, 5, 2),
+                1,
+                65536,
+                clock.clone(),
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rejected.receipt().outcome,
+            GroupOutcome::Rejected(Rejection::UniqueConflict)
+        );
+        drop(rejected);
+        clock.set(2_000_000);
+        let lookup = projection
+            .read_commit_receipts(
+                ReceiptReadInput {
+                    genesis: input(&definition, &job, checks.clone(), 5, 2).genesis,
+                    request: ReceiptReadRequest {
+                        queue: address(),
+                        request_ids: vec![checks.request_id.clone()],
+                        max_bytes: 65536,
+                    },
+                    limits: QueueLimits::default(),
+                    required_next_offset: 5,
+                    required_insertion_sequence: 2,
+                    required_last_record_epoch: 1,
+                },
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(lookup.receipts(), &[ReceiptLookup::Found(original)]);
+        drop(lookup);
+        checks.request_id = "expired-fresh-check".into();
+        let rejected = projection
+            .prepare_ordinary_commit(
+                input(&definition, &job, checks, 5, 2),
+                1,
+                65536,
+                clock,
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rejected.receipt().outcome,
+            GroupOutcome::Rejected(Rejection::StaleLease)
+        );
+        drop(rejected);
+        drop(job);
+        drop(definition);
+        drop(seed_job);
+        drop(projection);
+        workers.close_and_drain().await.unwrap();
+        assert_eq!(tight.usage().unwrap(), (0, 0));
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+    #[tokio::test]
     async fn ordinary_commit_preparation_is_atomic_for_claim_state_new_work_and_original_receipts()
     {
         let directory = tempfile::tempdir().unwrap();

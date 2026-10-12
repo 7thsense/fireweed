@@ -52,6 +52,21 @@ budget/progress/deadlines, FP4 administration or known-batch cached integrity.
 Its production mapping is documentary and unexecuted. Identical public backend
 trace correspondence and the other required families remain mandatory.
 
+## Atomic condition gate
+
+Run `python3 scripts/formal/check_conditions.py` for the separate positive-Check
+specification. Keep checked row versions and deletion high-water marks, mutation
+versions, insertion sequence and receipt/log progress distinct. Exercise state
+presence/absence, delete/recreate, current claim version/token, exact expiry,
+fresh sampled lease time, stale epoch/head cuts, atomic mixed rejection and
+original replay after checked rows/time change. Checks-only publication retains
+its receipt while leaving all record data, versions and insertion sequence unchanged.
+Require completed witnesses and replayable counterexamples for omitted predicates,
+check-induced mutation, partial rejection, stale publication, missing receipt and
+re-evaluated replay. The gate reuses source-bound exploration and target-only output
+checks; it does not qualify negative claim predicates, Snorri rejection ordering,
+FP4 administration, physical memory/durability or public backend correspondence.
+
 ## Implementation correspondence
 
 Execute independently predicted transitions through the identical public facade on both backends. Compare exact work/state/receipt identities, membership/order, tokens, current versions/expiry, attempts, rejection effects, new work and successful read coverage. Include concurrency, lost replies, expiry, renewal, cancellation, clock delay, collision/ABA, original-genesis corruption, S3 stale head/epoch, commit crash/reopen and interrupted projection apply. Record intended and actually matched edges separately. Primitive/internal diagnostics cannot substitute for successful public-path observations.

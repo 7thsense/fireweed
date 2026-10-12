@@ -110,8 +110,13 @@ pub struct StateRecord {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StateChange {
-    Put { fields: Fields, value: Bytes },
+    Put {
+        fields: Fields,
+        value: Bytes,
+    },
     Delete,
+    /// Test StateExpect atomically without changing the row or its version.
+    Check,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateUpdate {
@@ -133,8 +138,13 @@ pub enum Disposition {
     Fail,
     Release,
     RetryAt(i64),
-    Retain { renew_nanos: Option<u64> },
+    Retain {
+        renew_nanos: Option<u64>,
+    },
     Delete,
+    /// Test current lease and version atomically; requires an empty patch and
+    /// neither renews the lease nor changes the work or its version.
+    Check,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaimedUpdate {
@@ -874,6 +884,22 @@ impl PreviewRequest {
     }
 }
 impl CommitGroup {
+    /// Identities in successful receipt order. Condition-only checks have no
+    /// output version because they do not modify a record.
+    pub fn modified_records(&self) -> impl Iterator<Item = (Option<&str>, &str)> {
+        self.claimed_updates
+            .iter()
+            .filter(|u| u.disposition != Disposition::Check)
+            .map(|u| (None, u.key.as_str()))
+            .chain(
+                self.state_updates
+                    .iter()
+                    .filter(|u| u.change != StateChange::Check)
+                    .map(|u| (Some(u.collection.as_str()), u.key.as_str())),
+            )
+            .chain(self.work_updates.iter().map(|u| (None, u.key.as_str())))
+            .chain(self.work_inserts.iter().map(|u| (None, u.key.as_str())))
+    }
     /// The same borrowed one-group envelope checks used by batch commit/preview.
     pub fn preflight_for(&self, queue: &QueueAddress, limits: &QueueLimits) -> QueueResult<()> {
         preflight_commit_groups(queue, std::slice::from_ref(self), limits)
@@ -1016,28 +1042,12 @@ fn validate_commit_groups(
             continue;
         }
         let versions: Vec<RecordVersion> = group
-            .claimed_updates
-            .iter()
-            .map(|u| RecordVersion {
-                collection: None,
-                key: u.key.clone(),
+            .modified_records()
+            .map(|(collection, key)| RecordVersion {
+                collection: collection.map(str::to_owned),
+                key: key.to_owned(),
                 version: u64::MAX,
             })
-            .chain(group.work_inserts.iter().map(|u| RecordVersion {
-                collection: None,
-                key: u.key.clone(),
-                version: u64::MAX,
-            }))
-            .chain(group.work_updates.iter().map(|u| RecordVersion {
-                collection: None,
-                key: u.key.clone(),
-                version: u64::MAX,
-            }))
-            .chain(group.state_updates.iter().map(|u| RecordVersion {
-                collection: Some(u.collection.clone()),
-                key: u.key.clone(),
-                version: u64::MAX,
-            }))
             .collect();
         let success = CommitReceipt {
             request_id: group.request_id.clone(),
@@ -1528,6 +1538,29 @@ fn preflight_commit_groups(
         {
             return Err(QueueError::TooLarge);
         }
+        for update in &group.claimed_updates {
+            if update.disposition == Disposition::Check && update.patch != WorkPatch::default() {
+                return Err(invalid("claim check requires an empty patch"));
+            }
+        }
+        let mut keys = BTreeSet::new();
+        for key in group
+            .claimed_updates
+            .iter()
+            .map(|u| (None, u.key.as_str()))
+            .chain(group.work_updates.iter().map(|u| (None, u.key.as_str())))
+            .chain(group.work_inserts.iter().map(|u| (None, u.key.as_str())))
+            .chain(
+                group
+                    .state_updates
+                    .iter()
+                    .map(|u| (Some(u.collection.as_str()), u.key.as_str())),
+            )
+        {
+            if !keys.insert(key) {
+                return Err(invalid("duplicate record in group"));
+            }
+        }
         byte_limit(&CommitAccountingGroup(group), limits.max_group_bytes)?;
     }
     Ok(())
@@ -1536,6 +1569,143 @@ fn preflight_commit_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn check_variants_append_wire_tags_and_reject_nonempty_claim_patches() {
+        for (value, bytes) in [
+            (Disposition::Complete, vec![0]),
+            (Disposition::Fail, vec![1]),
+            (Disposition::Release, vec![2]),
+            (Disposition::RetryAt(-1), vec![3, 1]),
+            (Disposition::Retain { renew_nanos: None }, vec![4, 0]),
+            (
+                Disposition::Retain {
+                    renew_nanos: Some(1),
+                },
+                vec![4, 1, 1],
+            ),
+            (Disposition::Delete, vec![5]),
+            (Disposition::Check, vec![6]),
+        ] {
+            assert_eq!(postcard::to_stdvec(&value).unwrap(), bytes);
+        }
+        assert_eq!(
+            postcard::to_stdvec(&StateChange::Put {
+                fields: Fields::new(),
+                value: Bytes::new()
+            })
+            .unwrap(),
+            [0, 0, 0]
+        );
+        assert_eq!(postcard::to_stdvec(&StateChange::Delete).unwrap(), [1]);
+        assert_eq!(postcard::to_stdvec(&StateChange::Check).unwrap(), [2]);
+        let mut group = CommitGroup {
+            request_id: "check".into(),
+            claimed_updates: vec![ClaimedUpdate {
+                key: "work".into(),
+                lease: LeaseCredential { token: vec![1] },
+                expected_version: u64::MAX,
+                patch: WorkPatch::default(),
+                disposition: Disposition::Check,
+            }],
+            state_updates: vec![StateUpdate {
+                collection: "instance".into(),
+                key: "state".into(),
+                expect: StateExpect::Version(u64::MAX),
+                change: StateChange::Check,
+            }],
+            work_inserts: vec![],
+            work_updates: vec![],
+            administration: None,
+        };
+        assert_eq!(group.modified_records().count(), 0);
+        let limits = QueueLimits::default();
+        group.validate_for(&queue(), &schema(), &limits).unwrap();
+        for patch in [
+            WorkPatch {
+                priority: Some(0),
+                ..Default::default()
+            },
+            WorkPatch {
+                available_at: Some(0),
+                ..Default::default()
+            },
+            WorkPatch {
+                fields: BTreeMap::from([("kind".into(), Some(FieldValue::Text("x".into())))]),
+                ..Default::default()
+            },
+            WorkPatch {
+                body: Some(Bytes::new()),
+                ..Default::default()
+            },
+        ] {
+            group.claimed_updates[0].patch = patch;
+            assert!(matches!(
+                group.preflight_for(&queue(), &limits),
+                Err(QueueError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn check_receipt_bounds_exclude_guard_keys_but_keep_record_and_duplicate_limits() {
+        let mut group = CommitGroup {
+            request_id: "check".into(),
+            claimed_updates: vec![],
+            state_updates: vec![StateUpdate {
+                collection: "instance".into(),
+                key: "x".repeat(4096),
+                expect: StateExpect::Absent,
+                change: StateChange::Check,
+            }],
+            work_inserts: vec![],
+            work_updates: vec![],
+            administration: None,
+        };
+        let success = CommitReceipt {
+            request_id: group.request_id.clone(),
+            outcome: GroupOutcome::Committed { versions: vec![] },
+        };
+        let rejected = CommitReceipt {
+            request_id: group.request_id.clone(),
+            outcome: GroupOutcome::Rejected(Rejection::Invalid("x".repeat(256))),
+        };
+        let mut limits = QueueLimits {
+            max_response_bytes: 10
+                + encoded_len(&success)
+                    .unwrap()
+                    .max(encoded_len(&rejected).unwrap()),
+            ..Default::default()
+        };
+        group.validate_for(&queue(), &schema(), &limits).unwrap();
+        limits.max_response_bytes -= 1;
+        assert_eq!(
+            group.validate_for(&queue(), &schema(), &limits),
+            Err(QueueError::TooLarge)
+        );
+        limits = QueueLimits::default();
+        let mut mutation = group.state_updates[0].clone();
+        mutation.change = StateChange::Put {
+            fields: Fields::new(),
+            value: Bytes::new(),
+        };
+        group.state_updates.push(mutation);
+        assert!(matches!(
+            group.preflight_for(&queue(), &limits),
+            Err(QueueError::Invalid(_))
+        ));
+        assert!(matches!(
+            group.validate_for(&queue(), &schema(), &limits),
+            Err(QueueError::Invalid(_))
+        ));
+        group.state_updates[1].key = "other".into();
+        group.state_updates[1].change = StateChange::Check;
+        limits.max_records = 1;
+        assert!(matches!(
+            group.preflight_for(&queue(), &limits),
+            Err(QueueError::Invalid(_))
+        ));
+    }
+
     fn schema() -> QueueSchema {
         let definition = CollectionDefinition {
             additional_field_prefixes: BTreeSet::new(),

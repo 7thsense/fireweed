@@ -2519,10 +2519,17 @@ async fn native_port_identical_contract(s3: bool) {
     let primary = address("contract");
     eprintln!("native contract {s3}: run");
     suite::run(&queue, primary.clone()).await;
+    let original_ids = || {
+        vec![
+            "transition".into(),
+            "claim-and-absence-checks".into(),
+            "present-and-absent-state-checks".into(),
+        ]
+    };
     let expected = queue
         .read_commit(ReceiptReadRequest {
             queue: primary.clone(),
-            request_ids: vec!["transition".into()],
+            request_ids: original_ids(),
             max_bytes: 1 << 20,
         })
         .await
@@ -2581,7 +2588,7 @@ async fn native_port_identical_contract(s3: bool) {
     other.shutdown().await.unwrap();
     assert_eq!(
         clone
-            .read_commit(receipts("contract", vec!["transition".into()]))
+            .read_commit(receipts("contract", original_ids()))
             .await,
         Err(QueueError::Busy)
     );
@@ -2589,7 +2596,7 @@ async fn native_port_identical_contract(s3: bool) {
     let reopened = native_port_fixture(&root, "cold-rebuild.db", prefix.as_deref(), clock).await;
     assert_eq!(
         reopened
-            .read_commit(receipts("contract", vec!["transition".into()]))
+            .read_commit(receipts("contract", original_ids()))
             .await
             .unwrap(),
         expected
@@ -2632,6 +2639,75 @@ async fn native_store_runs_identical_contract_local() {
 #[tokio::test]
 async fn native_store_runs_identical_contract_real_s3() {
     native_port_identical_contract(true).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn native_condition_checks_contract(s3: bool) {
+    use fireweed_conformance::queue_contract::{self as suite, TestClock};
+    use fireweed_engine::queue_contract::QueueStore;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-check-contract-{s3}-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let prefix = s3.then(|| format!("api007-check-contract-{nonce}"));
+    let clock = Arc::new(TestClock::default());
+    let queue = native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+    let address = QueueAddress {
+        tenant: "api007-check-contract".into(),
+        queue: nonce.to_string(),
+    };
+    let original = suite::run(&queue, address.clone()).await;
+    let receipts = ReceiptReadRequest {
+        queue: address.clone(),
+        request_ids: vec![
+            original.groups[0].request_id.clone(),
+            "present-and-absent-state-checks".into(),
+            "transition".into(),
+        ],
+        max_bytes: 65536,
+    };
+    let expected = queue.read_commit(receipts.clone()).await.unwrap();
+    let ReceiptLookup::Found(original_receipt) = &expected[0] else {
+        panic!("missing original Check")
+    };
+    clock.set(2_000_000_000);
+    assert_eq!(
+        queue.commit(original.clone()).await.unwrap(),
+        vec![original_receipt.clone()]
+    );
+    suite::atomic_administration_preview_and_replay(
+        &queue,
+        QueueAddress {
+            tenant: address.tenant.clone(),
+            queue: format!("{nonce}-administration"),
+        },
+    )
+    .await;
+    queue.shutdown().await.unwrap();
+    let rebuilt = native_port_fixture(&root, "cold-rebuild.db", prefix.as_deref(), clock).await;
+    assert_eq!(rebuilt.read_commit(receipts).await.unwrap(), expected);
+    assert_eq!(
+        rebuilt.commit(original).await.unwrap(),
+        vec![original_receipt.clone()]
+    );
+    rebuilt.shutdown().await.unwrap();
+    drop(rebuilt);
+    drop(queue);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_store_condition_checks_replay_and_rebuild_local() {
+    native_condition_checks_contract(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_store_condition_checks_replay_and_rebuild_real_s3() {
+    native_condition_checks_contract(true).await;
 }
 
 #[cfg(target_os = "linux")]

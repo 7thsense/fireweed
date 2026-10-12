@@ -167,25 +167,8 @@ pub(crate) fn validate_commit_result_versions(
     group: &CommitGroup,
     versions: &[RecordVersion],
 ) -> PublicationResult<()> {
-    let expected = group
-        .claimed_updates
-        .iter()
-        .map(|u| (None, u.key.as_str()))
-        .chain(
-            group
-                .state_updates
-                .iter()
-                .map(|u| (Some(u.collection.as_str()), u.key.as_str())),
-        )
-        .chain(group.work_updates.iter().map(|u| (None, u.key.as_str())))
-        .chain(group.work_inserts.iter().map(|u| (None, u.key.as_str())));
-    let count = group
-        .claimed_updates
-        .len()
-        .checked_add(group.state_updates.len())
-        .and_then(|n| n.checked_add(group.work_updates.len()))
-        .and_then(|n| n.checked_add(group.work_inserts.len()))
-        .ok_or(PublicationError::Overflow)?;
+    let expected = group.modified_records();
+    let count = group.modified_records().count();
     if count != versions.len()
         || expected
             .zip(versions)

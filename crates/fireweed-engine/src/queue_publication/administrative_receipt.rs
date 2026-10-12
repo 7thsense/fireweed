@@ -73,38 +73,10 @@ fn checked(request_id: &str, outcome: &AdministrativeReceiptOutcome<'_>) -> Publ
 pub fn measure_administrative_receipt_base_lower_bound(
     group: &CommitGroup,
 ) -> PublicationResult<u64> {
-    let count = group
-        .claimed_updates
-        .len()
-        .checked_add(group.state_updates.len())
-        .and_then(|n| n.checked_add(group.work_updates.len()))
-        .and_then(|n| n.checked_add(group.work_inserts.len()))
-        .ok_or(PublicationError::Overflow)?;
+    let count = group.modified_records().count();
     let mut bytes = encoded_len(&(&group.request_id, 4u32, count as u64))
         .map_err(PublicationError::Admission)?;
-    for (collection, key) in group
-        .claimed_updates
-        .iter()
-        .map(|item| (None, item.key.as_str()))
-        .chain(
-            group
-                .state_updates
-                .iter()
-                .map(|item| (Some(item.collection.as_str()), item.key.as_str())),
-        )
-        .chain(
-            group
-                .work_updates
-                .iter()
-                .map(|item| (None, item.key.as_str())),
-        )
-        .chain(
-            group
-                .work_inserts
-                .iter()
-                .map(|item| (None, item.key.as_str())),
-        )
-    {
+    for (collection, key) in group.modified_records() {
         bytes = bytes
             .checked_add(
                 encoded_len(&(collection, key, 1u64)).map_err(PublicationError::Admission)?,

@@ -96,7 +96,8 @@ fn committed(receipt: &CommitReceipt) {
     );
 }
 
-pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
+/// Returns the original checks-only request for later expiry/rebuild replay stimuli.
+pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
     store
         .provision(ProvisionRequest {
             queue: queue.clone(),
@@ -154,6 +155,55 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
         vec!["low", "high"]
     );
     assert_eq!(store.claim(request.clone()).await.unwrap(), selected);
+    let mut checks = group("claim-and-absence-checks");
+    checks.claimed_updates = selected
+        .iter()
+        .map(|work| {
+            let mut check = update(work);
+            check.disposition = Disposition::Check;
+            check
+        })
+        .collect();
+    checks.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "instance".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Check,
+    });
+    assert_eq!(
+        store
+            .preview(PreviewRequest {
+                queue: queue.clone(),
+                group: checks.clone(),
+            })
+            .await
+            .unwrap()
+            .outcome,
+        PreviewOutcome::Committed { versions: vec![] }
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![checks.request_id.clone()],
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Absent]
+    );
+    let checked = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![checks.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        checked[0].outcome,
+        GroupOutcome::Committed { versions: vec![] }
+    );
+    assert_eq!(store.claim(request.clone()).await.unwrap(), selected);
     let mut renewal = group("renew-first-claim");
     renewal.claimed_updates = selected
         .iter()
@@ -184,6 +234,9 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
     let selected = renewed;
     let mut transition = group("transition");
     transition.claimed_updates.push(update(&selected[0]));
+    let mut guard = update(&selected[1]);
+    guard.disposition = Disposition::Check;
+    transition.claimed_updates.push(guard);
     transition.state_updates.push(StateUpdate {
         collection: "instances".into(),
         key: "instance".into(),
@@ -202,6 +255,13 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
         .await
         .unwrap();
     committed(&receipt[0]);
+    let GroupOutcome::Committed { versions } = &receipt[0].outcome else {
+        unreachable!()
+    };
+    assert_eq!(
+        versions.iter().map(|v| v.key.as_str()).collect::<Vec<_>>(),
+        vec!["low", "instance", "next"]
+    );
     let reads = store
         .read_state(StateReadRequest {
             queue: queue.clone(),
@@ -215,6 +275,56 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
     assert_eq!(reads[0], reads[2]);
     assert_eq!(reads[1], None);
     assert_eq!(reads[0].as_ref().unwrap().value.as_ref(), &[7, 8]);
+    // Retained success is authoritative after both the checked claim version
+    // and the checked absent state have changed.
+    assert_eq!(
+        store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![checks.clone()],
+            })
+            .await
+            .unwrap(),
+        checked
+    );
+    let mut state_checks = group("present-and-absent-state-checks");
+    state_checks.state_updates = vec![
+        StateUpdate {
+            collection: "instances".into(),
+            key: "instance".into(),
+            expect: StateExpect::Version(reads[0].as_ref().unwrap().version),
+            change: StateChange::Check,
+        },
+        StateUpdate {
+            collection: "instances".into(),
+            key: "missing".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Check,
+        },
+    ];
+    let state_checked = store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![state_checks],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state_checked[0].outcome,
+        GroupOutcome::Committed { versions: vec![] }
+    );
+    assert_eq!(
+        store
+            .read_state(StateReadRequest {
+                queue: queue.clone(),
+                collection: "instances".into(),
+                keys: vec!["instance".into(), "missing".into(), "instance".into()],
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap(),
+        reads
+    );
     assert_eq!(store.claim(request).await, Err(QueueError::ClaimExpired));
     let mut independent = group("independent");
     independent
@@ -263,7 +373,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
         collection: "instances".into(),
         key: "instance".into(),
         expect: StateExpect::Version(999),
-        change: StateChange::Delete,
+        change: StateChange::Check,
     });
     rejected
         .work_inserts
@@ -309,6 +419,12 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
         .await
         .unwrap();
     assert_eq!(next.len(), 2);
+    assert_eq!(
+        next.iter()
+            .map(|w| (w.record.work.key.as_str(), w.record.insertion_sequence))
+            .collect::<Vec<_>>(),
+        vec![("next", 4), ("independent", 5)]
+    );
     assert!(!next.iter().any(|w| w.record.work.key == "must-not-exist"));
     let query = QueryRequest {
         queue: queue.clone(),
@@ -333,6 +449,12 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
         panic!("work query")
     };
     assert_eq!(high.work.key, "high");
+    assert_eq!(high.version, selected[1].record.version);
+    assert_eq!(high.lease_expires_at, selected[1].record.lease_expires_at);
+    assert_eq!(
+        high.insertion_sequence,
+        selected[1].record.insertion_sequence
+    );
     if let Some(cursor) = page.cursor {
         second.cursor = Some(cursor);
         assert!(store.query(second).await.unwrap().records.is_empty());
@@ -414,6 +536,10 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) {
             ..
         }
     ));
+    CommitBatch {
+        queue,
+        groups: vec![checks],
+    }
 }
 
 /// Identical injected ownership clock fixture for every new binding adapter.
@@ -2165,6 +2291,12 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
     assert_eq!(claimed.len(), 1);
     let mut transition = group("admin-transition");
     transition.claimed_updates.push(update(&claimed[0]));
+    transition.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "read-only-guard".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Check,
+    });
     transition.state_updates.push(StateUpdate {
         collection: "instances".into(),
         key: "workflow".into(),

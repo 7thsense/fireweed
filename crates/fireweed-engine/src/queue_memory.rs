@@ -378,7 +378,7 @@ impl IncomingHeaders for CommitGroup {
             for u in &group.state_updates {
                 let fields = match &u.change {
                     StateChange::Put { fields, .. } => fields.len(),
-                    StateChange::Delete => 0,
+                    StateChange::Delete | StateChange::Check => 0,
                 };
                 add(record_headers(1, fields)?)?;
             }

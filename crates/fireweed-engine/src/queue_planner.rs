@@ -385,11 +385,7 @@ pub(crate) fn apply_group(
         },
     };
     for update in &group.claimed_updates {
-        let mut stored = snapshot
-            .work
-            .get(&update.key)
-            .cloned()
-            .ok_or(Rejection::NotFound)?;
+        let stored = snapshot.work.get(&update.key).ok_or(Rejection::NotFound)?;
         if stored.record.lifecycle != Lifecycle::Leased
             || stored
                 .record
@@ -404,6 +400,10 @@ pub(crate) fn apply_group(
         if stored.record.version != update.expected_version {
             return Err(Rejection::VersionConflict);
         }
+        if update.disposition == Disposition::Check {
+            continue;
+        }
+        let mut stored = stored.clone();
         patch_work(&mut stored, &update.patch);
         let version = next_version(snapshot, None, &update.key)?;
         stored.record.version = version;
@@ -424,6 +424,7 @@ pub(crate) fn apply_group(
                 renew_nanos: Some(duration),
             } => stored.record.lease_expires_at = Some(checked_expiry(now, duration)?),
             Disposition::Retain { renew_nanos: None } => {}
+            Disposition::Check => unreachable!("checks return before mutation planning"),
             Disposition::Delete => {
                 snapshot.work.remove(&update.key);
                 delta.deleted_work.push(update.key.clone());
@@ -453,6 +454,9 @@ pub(crate) fn apply_group(
             snapshot.state.get(&id).map(|record| record.version),
             &update.expect,
         )?;
+        if update.change == StateChange::Check {
+            continue;
+        }
         let version = next_version(snapshot, Some(update.collection.clone()), &update.key)?;
         match &update.change {
             StateChange::Put { fields, value } => {
@@ -466,6 +470,7 @@ pub(crate) fn apply_group(
                 snapshot.state.insert(id, record.clone());
                 delta.state.push(record);
             }
+            StateChange::Check => unreachable!("checks return before mutation planning"),
             StateChange::Delete => {
                 snapshot.state.remove(&id);
                 delta.deleted_state.push(id);
@@ -769,6 +774,9 @@ pub fn prospective_unique_probes(
     }
     let mut probes = BTreeSet::new();
     for update in &group.claimed_updates {
+        if update.disposition == Disposition::Check {
+            continue;
+        }
         if let Some(old) = snapshot.work.get(&update.key) {
             if matches!(update.disposition, Disposition::Delete) {
                 let view = CheckedFields::new(&old.record.work.fields, &old.field_coverage)?;
@@ -805,6 +813,9 @@ pub fn prospective_unique_probes(
         probes.extend(record_unique_keys(None, &work.fields, &schema.work)?);
     }
     for update in &group.state_updates {
+        if update.change == StateChange::Check {
+            continue;
+        }
         let definition = schema.state.get(&update.collection).ok_or_else(|| {
             QueueError::OutcomeUnknown("missing prospective state collection".into())
         })?;
@@ -1538,6 +1549,108 @@ mod tests {
             disposition: Disposition::Complete,
         }
     }
+    #[test]
+    fn condition_checks_preserve_max_versions_and_rollback_late_failure() {
+        let mut snapshot = claimed_snapshot();
+        snapshot.work.get_mut("input").unwrap().record.version = u64::MAX;
+        snapshot.versions.insert(
+            RecordIdentity {
+                collection: None,
+                key: "input".into(),
+            },
+            u64::MAX,
+        );
+        let id = ("instance".into(), "existing".into());
+        snapshot.state.insert(
+            id.clone(),
+            StateRecord {
+                collection: "instance".into(),
+                key: "existing".into(),
+                version: u64::MAX,
+                fields: Fields::new(),
+                value: vec![9].into(),
+            },
+        );
+        snapshot.versions.insert(
+            RecordIdentity {
+                collection: Some("instance".into()),
+                key: "existing".into(),
+            },
+            u64::MAX,
+        );
+        snapshot.versions.insert(
+            RecordIdentity {
+                collection: Some("instance".into()),
+                key: "deleted".into(),
+            },
+            u64::MAX,
+        );
+        let before = snapshot.clone();
+        let mut request = group();
+        let mut claim = update();
+        claim.expected_version = u64::MAX;
+        claim.disposition = Disposition::Check;
+        request.claimed_updates.push(claim);
+        request.state_updates = vec![
+            StateUpdate {
+                collection: "instance".into(),
+                key: "existing".into(),
+                expect: StateExpect::Version(u64::MAX),
+                change: StateChange::Check,
+            },
+            StateUpdate {
+                collection: "instance".into(),
+                key: "deleted".into(),
+                expect: StateExpect::Absent,
+                change: StateChange::Check,
+            },
+        ];
+        let delta = plan_commit_group(&request, &mut snapshot, 99, &schema()).unwrap();
+        assert_eq!(
+            delta.receipt.outcome,
+            GroupOutcome::Committed { versions: vec![] }
+        );
+        assert!(
+            delta.work.is_empty()
+                && delta.state.is_empty()
+                && delta.deleted_work.is_empty()
+                && delta.deleted_state.is_empty()
+        );
+        assert_eq!(delta.next_sequence, 1);
+        assert_eq!(snapshot.work["input"].record, before.work["input"].record);
+        assert_eq!(snapshot.state, before.state);
+        assert_eq!(snapshot.versions, before.versions);
+        request
+            .state_updates
+            .insert(0, state("would-write", StateExpect::Absent));
+        request.state_updates[1].expect = StateExpect::Version(7);
+        request.work_inserts.push(work("new-work"));
+        let delta = plan_commit_group(&request, &mut snapshot, 99, &schema()).unwrap();
+        assert_eq!(
+            delta.receipt.outcome,
+            GroupOutcome::Rejected(Rejection::VersionConflict)
+        );
+        assert!(delta.work.is_empty() && delta.state.is_empty() && delta.versions.is_empty());
+        assert_eq!(snapshot.state, before.state);
+        assert_eq!(snapshot.versions, before.versions);
+        assert_eq!(snapshot.next_sequence, 1);
+        request = group();
+        let mut check = update();
+        check.disposition = Disposition::Check;
+        check.expected_version = u64::MAX;
+        request.claimed_updates.push(check);
+        for (time, token) in [(100, b"token".to_vec()), (99, b"wrong".to_vec())] {
+            request.claimed_updates[0].lease.token = token;
+            assert_eq!(
+                plan_commit_group(&request, &mut snapshot, time, &schema())
+                    .unwrap()
+                    .receipt
+                    .outcome,
+                GroupOutcome::Rejected(Rejection::StaleLease)
+            );
+        }
+    }
+
     #[test]
     fn state_and_emitted_work_commit_with_claim() {
         let mut snapshot = claimed_snapshot();

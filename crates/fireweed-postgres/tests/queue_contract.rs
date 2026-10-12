@@ -10,6 +10,240 @@ impl Clock for FixedClock {
 }
 #[tokio::test]
 #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+async fn condition_checks_use_metadata_admission_and_preserve_unique_owners() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+    let queue = QueueAddress {
+        tenant: "api007-check-admission".into(),
+        queue: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string(),
+    };
+    let mut schema = fireweed_conformance::queue_contract::schema();
+    schema.work.fields.insert("opaque".into(), FieldType::Bytes);
+    let state = schema.state.get_mut("instances").unwrap();
+    state.fields.insert("opaque".into(), FieldType::Bytes);
+    state.unique_indexes.insert("by_run".into());
+    let seed = PostgresQueueStore::connect(&url, Arc::new(FixedClock), QueueLimits::default(), 1)
+        .await
+        .unwrap();
+    seed.provision(ProvisionRequest {
+        queue: queue.clone(),
+        schema,
+    })
+    .await
+    .unwrap();
+    let mut group = CommitGroup {
+        request_id: "wide-seed".into(),
+        claimed_updates: vec![],
+        state_updates: vec![StateUpdate {
+            collection: "instances".into(),
+            key: "owner".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: BTreeMap::from([
+                    ("run".into(), FieldValue::Text("owner".into())),
+                    ("opaque".into(), FieldValue::Bytes(vec![7; 1 << 20])),
+                ]),
+                value: vec![8; 1 << 20].into(),
+            },
+        }],
+        work_inserts: vec![NewWork {
+            key: "owner".into(),
+            priority: 0,
+            available_at: 0,
+            fields: BTreeMap::from([
+                ("target".into(), FieldValue::Text("owner".into())),
+                ("opaque".into(), FieldValue::Bytes(vec![9; 1 << 20])),
+            ]),
+            body: vec![10; 1 << 20].into(),
+        }],
+        work_updates: vec![],
+        administration: None,
+    };
+    assert!(matches!(
+        seed.commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![group.clone()]
+        })
+        .await
+        .unwrap()[0]
+            .outcome,
+        GroupOutcome::Committed { .. }
+    ));
+    let claimed = seed
+        .claim(ClaimRequest {
+            queue: queue.clone(),
+            request_id: "lease".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 1,
+            max_bytes: 65536,
+            fields: Some(BTreeSet::new()),
+            include_body: false,
+        })
+        .await
+        .unwrap()
+        .remove(0);
+    seed.shutdown().await.unwrap();
+    let tight = PostgresQueueStore::connect_with_runtime(
+        &url,
+        Arc::new(FixedClock),
+        QueueLimits {
+            max_response_bytes: 65536,
+            ..Default::default()
+        },
+        1,
+        fireweed_core::queue_runtime::QueueRuntimeOptions {
+            retained_bytes: Some(512 << 10),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    group.request_id = "metadata-only-checks".into();
+    group.work_inserts.clear();
+    group.claimed_updates.push(ClaimedUpdate {
+        key: "owner".into(),
+        lease: claimed.lease.clone(),
+        expected_version: claimed.record.version,
+        patch: WorkPatch::default(),
+        disposition: Disposition::Check,
+    });
+    group.state_updates[0].expect = StateExpect::Version(1);
+    group.state_updates[0].change = StateChange::Check;
+    let original = tight
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![group.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        original[0].outcome,
+        GroupOutcome::Committed { versions: vec![] }
+    );
+    let observer =
+        PostgresQueueStore::connect(&url, Arc::new(FixedClock), QueueLimits::default(), 1)
+            .await
+            .unwrap();
+    let state = observer
+        .read_state(StateReadRequest {
+            queue: queue.clone(),
+            collection: "instances".into(),
+            keys: vec!["owner".into()],
+            max_bytes: 8 << 20,
+        })
+        .await
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    assert_eq!(state.version, 1);
+    assert_eq!(state.fields["opaque"], FieldValue::Bytes(vec![7; 1 << 20]));
+    assert_eq!(state.value.as_ref(), vec![8; 1 << 20]);
+    let page = observer
+        .query(QueryRequest {
+            queue: queue.clone(),
+            source: RecordSource::Work,
+            index: "$key".into(),
+            filter: Filter::default(),
+            descending: false,
+            cursor: None,
+            max_records: 1,
+            max_bytes: 8 << 20,
+        })
+        .await
+        .unwrap();
+    let QueryRecord::Work(work) = &page.records[0] else {
+        panic!("expected seeded work")
+    };
+    assert_eq!(work.version, claimed.record.version);
+    assert_eq!(
+        work.work.fields["opaque"],
+        FieldValue::Bytes(vec![9; 1 << 20])
+    );
+    assert_eq!(work.work.body.as_ref(), vec![10; 1 << 20]);
+    observer.shutdown().await.unwrap();
+    let mut work_conflict = group.clone();
+    work_conflict.request_id = "checked-work-owner-still-unique".into();
+    work_conflict.work_inserts.push(NewWork {
+        key: "duplicate".into(),
+        priority: 0,
+        available_at: 0,
+        fields: BTreeMap::from([("target".into(), FieldValue::Text("owner".into()))]),
+        body: vec![1].into(),
+    });
+    assert_eq!(
+        tight
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![work_conflict]
+            })
+            .await
+            .unwrap()[0]
+            .outcome,
+        GroupOutcome::Rejected(Rejection::UniqueConflict)
+    );
+    let mut conflict = group.clone();
+    conflict.request_id = "checked-state-owner-still-unique".into();
+    conflict.state_updates.push(StateUpdate {
+        collection: "instances".into(),
+        key: "duplicate".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Put {
+            fields: BTreeMap::from([("run".into(), FieldValue::Text("owner".into()))]),
+            value: vec![1].into(),
+        },
+    });
+    assert_eq!(
+        tight
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: vec![conflict]
+            })
+            .await
+            .unwrap()[0]
+            .outcome,
+        GroupOutcome::Rejected(Rejection::UniqueConflict)
+    );
+    let mut complete = group.clone();
+    complete.request_id = "same-credential-still-valid".into();
+    complete.claimed_updates[0].disposition = Disposition::Complete;
+    let result = tight
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![complete],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        result[0].outcome,
+        GroupOutcome::Committed {
+            versions: vec![RecordVersion {
+                collection: None,
+                key: "owner".into(),
+                version: claimed.record.version + 1,
+            }]
+        }
+    );
+    assert_eq!(
+        tight
+            .commit(CommitBatch {
+                queue,
+                groups: vec![group]
+            })
+            .await
+            .unwrap(),
+        original
+    );
+    tight.shutdown().await.unwrap();
+}
+#[tokio::test]
+#[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
 async fn mandatory_shared_queue_contract_and_reopen() {
     let url =
         std::env::var("FIREWEED_API007_PG_TEST_URL").expect("isolated PostgreSQL fixture URL");

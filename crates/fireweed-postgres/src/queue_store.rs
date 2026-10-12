@@ -604,6 +604,33 @@ async fn load_group_with_fields<'a>(
     reservation: &'a QueueReservation,
     selected_work: Option<&BTreeSet<String>>,
 ) -> QueueResult<Loaded<'a>> {
+    let check_work: BTreeSet<_> = group
+        .claimed_updates
+        .iter()
+        .filter(|u| u.disposition == Disposition::Check)
+        .map(|u| u.key.as_bytes())
+        .collect();
+    let check_state: BTreeSet<_> = group
+        .state_updates
+        .iter()
+        .filter(|u| u.change == StateChange::Check)
+        .map(|u| {
+            (
+                collection(&queue.schema, Some(&u.collection)),
+                u.key.as_bytes(),
+            )
+        })
+        .map(|(col, key)| col.map(|col| (col, key)))
+        .collect::<QueueResult<_>>()?;
+    let field_needed = |row: &Row| {
+        let col: i32 = row.get(1);
+        let key: &[u8] = row.get(2);
+        if col == 0 {
+            !check_work.contains(key)
+        } else {
+            !check_state.contains(&(col, key))
+        }
+    };
     let mut identities = BTreeSet::new();
     for key in group
         .claimed_updates
@@ -655,7 +682,7 @@ async fn load_group_with_fields<'a>(
         })?;
         let count = rows
             .iter()
-            .filter(|row| row.get::<_, i32>(1) == 0 && row.get::<_, bool>(4))
+            .filter(|row| row.get::<_, i32>(1) == 0 && row.get::<_, bool>(4) && field_needed(row))
             .count() as u64;
         let retained = name_bytes.checked_mul(count).ok_or(QueueError::TooLarge)?;
         let scratch = name_bytes.checked_add(4096).ok_or(QueueError::TooLarge)?;
@@ -692,7 +719,7 @@ async fn load_group_with_fields<'a>(
     {
         let col_ids: Vec<i64> = rows
             .iter()
-            .filter(|row| row.get::<_, i32>(1) == col && row.get::<_, bool>(4))
+            .filter(|row| row.get::<_, i32>(1) == col && row.get::<_, bool>(4) && field_needed(row))
             .map(|row| row.get(0))
             .collect();
         let def = definition(&queue.schema, col)?;
@@ -807,7 +834,12 @@ async fn load_group_with_fields<'a>(
             };
             let mut stored = record(&row, fields.remove(&id).unwrap_or_default(), body)?;
             stored.body_loaded = materialized;
-            if let Some(names) = selected_work {
+            if check_work.contains(record_key.as_bytes()) {
+                stored.field_coverage = fireweed_engine::queue_fields::FieldCoverage::Selected {
+                    names: BTreeSet::new(),
+                    prefixes: BTreeSet::new(),
+                };
+            } else if let Some(names) = selected_work {
                 stored.field_coverage = fireweed_engine::queue_fields::FieldCoverage::Selected {
                     names: names.clone(),
                     prefixes: BTreeSet::new(),
