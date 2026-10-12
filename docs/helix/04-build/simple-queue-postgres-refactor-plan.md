@@ -103,6 +103,11 @@ required before public qualification. Authority-side `typeof` and `length`
 reads can materialize complete overflow records inside the stock SDK before
 a later per-key charge; shallow corruption guards and selector checks establish
 correctness, not a hard native-reader allocation bound.
+Shared infrastructure owns final-reservation admission and drain notification;
+PostgreSQL uses it before worker drain and connection cleanup. The internal
+native pipeline takes explicit validated operation capacities and retains
+separate outer-operation and recovery-stage permits even at capacity one.
+Object-log provisioning task capacities still require constructor integration.
 PostgreSQL resolves and probes its typed scratch root once before network
 access; cloned handles share that immutable root and administration never rereads
 process temporary-directory configuration.

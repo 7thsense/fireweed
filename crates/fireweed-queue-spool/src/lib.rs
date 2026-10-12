@@ -1,5 +1,5 @@
-//! Disposable operation-local external grouping. This is not a durable log.
-//! Synchronous I/O must run inside a backend's owned blocking execution boundary.
+//! Owned-operation infrastructure and disposable external grouping.
+//! Synchronous scratch I/O runs inside a backend's owned physical boundary.
 use fireweed_core::queue_contract::{QueueError, QueueResult};
 use fireweed_engine::queue_admission::{OwnedQueueBufferCharge, QueueReservation};
 use fireweed_engine::queue_planner::UniqueIdentity;
@@ -18,6 +18,8 @@ fn add(left: u64, right: u64) -> QueueResult<u64> {
     left.checked_add(right)
         .ok_or_else(|| unknown("offset overflow"))
 }
+mod operation_runtime;
+pub use operation_runtime::QueueOperationRuntime;
 mod quota;
 pub use quota::{OwnedScratchDiskCharge, ScratchDiskQuota};
 /// presence; collection offset/length; index offset/length; tuple offset/length;

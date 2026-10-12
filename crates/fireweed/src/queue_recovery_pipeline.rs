@@ -26,6 +26,28 @@ fn unknown(message: &str) -> QueueError {
 }
 #[cfg(test)]
 type StagePause = std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+/// Process-local pipeline capacities. Validate before a factory constructs its
+/// store/projection resources; these are not durable queue policy.
+#[derive(Debug, Clone, Copy)]
+pub struct QueuePipelineOptions {
+    pub operations: usize,
+    pub metadata_bytes: usize,
+    pub hard_record_bytes: u64,
+}
+impl QueuePipelineOptions {
+    pub fn validate(&self) -> QueueResult<()> {
+        if self.operations == 0
+            || self.operations > Semaphore::MAX_PERMITS
+            || self.metadata_bytes == 0
+            || self.hard_record_bytes == 0
+        {
+            return Err(QueueError::Invalid(
+                "invalid queue pipeline capacities".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 /// An owned orchestrator has no blocking worker while awaiting individual stages.
 pub struct QueueRecoveryPipeline {
     store: Arc<ObjectLogEngineStore>,
@@ -84,26 +106,21 @@ impl QueueRecoveryPipeline {
         store: Arc<ObjectLogEngineStore>,
         projection: Arc<QueueProjection>,
         workers: ScratchWorkers,
-        metadata_bytes: usize,
-        hard_record_bytes: u64,
+        options: QueuePipelineOptions,
         scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
         scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
     ) -> QueueResult<Arc<Self>> {
-        if metadata_bytes == 0 || hard_record_bytes == 0 {
-            return Err(QueueError::Invalid(
-                "recovery budgets must be positive".into(),
-            ));
-        }
+        options.validate()?;
         Ok(Arc::new(Self {
             store,
             projection,
             workers,
             scratch_root,
             scratch_quota,
-            slots: Arc::new(Semaphore::new(64)),
-            operation_slots: Arc::new(Semaphore::new(64)),
-            metadata_bytes,
-            hard_record_bytes,
+            slots: Arc::new(Semaphore::new(options.operations)),
+            operation_slots: Arc::new(Semaphore::new(options.operations)),
+            metadata_bytes: options.metadata_bytes,
+            hard_record_bytes: options.hard_record_bytes,
             #[cfg(test)]
             before_acquire: std::sync::Mutex::new(None),
             #[cfg(test)]

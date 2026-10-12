@@ -1,6 +1,8 @@
 //! Native asynchronous PostgreSQL baseline for API-007. Complete operation jobs
 //! retain admission and connection ownership after caller cancellation.
 use fireweed_core::queue_contract::*;
+#[cfg(test)]
+use fireweed_engine::queue_admission::QueueAdmission;
 use fireweed_engine::queue_body::ResolvedBody;
 use fireweed_engine::queue_claim::{
     ClaimContext, ClaimOwnership, ClaimResponseBudget, checked_lease_hash, claim_expiry, plan_claim,
@@ -20,7 +22,7 @@ use fireweed_engine::queue_storage_layout::{
 };
 use fireweed_engine::{
     Clock,
-    queue_admission::{QueueAdmission, QueueBufferCharge, QueueReservation},
+    queue_admission::{QueueBufferCharge, QueueReservation},
     queue_contract::{QueueFuture, QueueStore},
     queue_index::{ordered_key, scalar_type_prefix},
     queue_planner::{
@@ -29,6 +31,7 @@ use fireweed_engine::{
         prospective_unique_probes, required_unique_probes, required_work_fields,
     },
 };
+use fireweed_queue_spool::QueueOperationRuntime;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,7 +39,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 use tokio_postgres::{Client, GenericClient, Row, Transaction, types::ToSql};
 
 const DDL: &str = r#"
@@ -110,10 +113,9 @@ fn key(raw: Vec<u8>) -> QueueResult<String> {
 struct Inner {
     clients: Vec<Mutex<Option<Client>>>,
     drivers: Mutex<Vec<tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>>>,
-    admission: Arc<QueueAdmission>,
+    runtime: Arc<QueueOperationRuntime>,
     slots: Arc<Semaphore>,
     next: AtomicUsize,
-    done: Arc<Notify>,
     clock: Arc<dyn Clock>,
     limits: QueueLimits,
     scratch_workers: fireweed_queue_spool::ScratchWorkers,
@@ -171,7 +173,7 @@ impl PostgresQueueStore {
         let scratch_path = runtime.resolve_scratch_root(std::env::temp_dir)?;
         // Every fallible resource/configuration check precedes TLS, DNS, socket
         // creation and schema DDL. No late arithmetic can fail after publication.
-        let admission = QueueAdmission::new(operations, retained_bytes)?;
+        let runtime = QueueOperationRuntime::new(operations, retained_bytes)?;
         let scratch_quota = fireweed_queue_spool::ScratchDiskQuota::new(scratch_bytes)?;
         let scratch_workers = fireweed_queue_spool::ScratchWorkers::new(workers, operations)?;
         let scratch_root =
@@ -244,10 +246,9 @@ impl PostgresQueueStore {
             inner: Arc::new(Inner {
                 clients,
                 drivers: Mutex::new(drivers),
-                admission,
+                runtime,
                 slots: Arc::new(Semaphore::new(pool_size)),
                 next: AtomicUsize::new(0),
-                done: Arc::new(Notify::new()),
                 clock,
                 limits,
                 scratch_workers,
@@ -261,12 +262,7 @@ impl PostgresQueueStore {
         T: Send + 'static,
         F: for<'a> FnOnce(&'a mut Client, QueueReservation) -> QueueFuture<'a, T> + Send + 'static,
     {
-        let done = Arc::clone(&self.inner.done);
-        let reservation = self
-            .inner
-            .admission
-            .reserve(bytes)?
-            .with_terminal_callback(move || done.notify_waiters())?;
+        let reservation = self.inner.runtime.reserve(bytes)?;
         let inner = Arc::clone(&self.inner);
         let task = tokio::spawn(async move {
             let permit = Arc::clone(&inner.slots)
@@ -2109,16 +2105,7 @@ impl QueueStore for PostgresQueueStore {
     }
     fn shutdown(&self) -> QueueFuture<'_, ()> {
         Box::pin(async move {
-            self.inner.admission.close()?;
-            loop {
-                let notified = self.inner.done.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self.inner.admission.usage()?.0 == 0 {
-                    break;
-                }
-                notified.await;
-            }
+            self.inner.runtime.close_and_drain().await?;
             self.inner.scratch_workers.close_and_drain().await?;
             for client in &self.inner.clients {
                 client.lock().await.take();
@@ -3179,7 +3166,7 @@ mod tests {
             .await
             .unwrap();
         held.await.unwrap();
-        assert_eq!(store.inner.admission.usage().unwrap(), (1, 128 + 4096));
+        assert_eq!(store.inner.runtime.usage().unwrap(), (1, 128 + 4096));
         let shutdown = store.shutdown();
         tokio::pin!(shutdown);
         assert!(matches!(
@@ -3191,7 +3178,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(store.inner.admission.usage().unwrap(), (0, 0));
+        assert_eq!(store.inner.runtime.usage().unwrap(), (0, 0));
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
@@ -4273,7 +4260,7 @@ mod tests {
                 .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while store.inner.admission.usage().unwrap().0 != 1 {
+            while store.inner.runtime.usage().unwrap().0 != 1 {
                 tokio::task::yield_now().await;
             }
         })
@@ -4281,7 +4268,7 @@ mod tests {
         .unwrap();
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
-        assert_eq!(store.inner.admission.usage().unwrap().0, 1);
+        assert_eq!(store.inner.runtime.usage().unwrap().0, 1);
         assert_eq!(
             store
                 .clone()
@@ -4299,7 +4286,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(store.inner.admission.usage().unwrap(), (0, 0));
+        assert_eq!(store.inner.runtime.usage().unwrap(), (0, 0));
         drop(blocker);
         driver.await.unwrap().unwrap();
         let reopened = PostgresQueueStore::connect(&url, clock, QueueLimits::default(), 1)
@@ -4493,7 +4480,7 @@ mod tests {
             .await
             .unwrap();
         let charges: Vec<_> = (0..64)
-            .map(|_| store.inner.admission.reserve(0).unwrap())
+            .map(|_| store.inner.runtime.reserve(0).unwrap())
             .collect();
         let mut request = QueryRequest {
             queue: QueueAddress {
@@ -4547,7 +4534,7 @@ mod tests {
         stats.buckets.as_mut().unwrap().buckets.pop();
         assert_eq!(store.stats(stats).await, Err(QueueError::Busy));
         drop(charges);
-        let byte_charge = store.inner.admission.reserve(65_536).unwrap();
+        let byte_charge = store.inner.runtime.reserve(65_536).unwrap();
         // An otherwise-valid 50-bin request fits its wire/result allowance but
         // its SQL scratch cannot fit the remaining 64 KiB. Reject before lookup.
         let stats = StatsRequest {

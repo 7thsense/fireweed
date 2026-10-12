@@ -16,18 +16,32 @@ async fn test_pipeline(
     hard_record_bytes: u64,
     directory: &std::path::Path,
 ) -> QueueResult<Arc<QueueRecoveryPipeline>> {
-    let root = fireweed_queue_spool::ScratchRoot::open(directory.join("scratch"), &workers).await?;
-    let quota = fireweed_queue_spool::ScratchDiskQuota::new(64 << 20)?;
-    QueueRecoveryPipeline::new(
+    test_pipeline_options(
         store,
         projection,
         workers,
-        metadata_bytes,
-        hard_record_bytes,
-        root,
-        quota,
+        QueuePipelineOptions {
+            operations: 64,
+            metadata_bytes,
+            hard_record_bytes,
+        },
+        directory,
     )
+    .await
 }
+async fn test_pipeline_options(
+    store: Arc<ObjectLogEngineStore>,
+    projection: Arc<QueueProjection>,
+    workers: ScratchWorkers,
+    options: QueuePipelineOptions,
+    directory: &std::path::Path,
+) -> QueueResult<Arc<QueueRecoveryPipeline>> {
+    options.validate()?;
+    let root = fireweed_queue_spool::ScratchRoot::open(directory.join("scratch"), &workers).await?;
+    let quota = fireweed_queue_spool::ScratchDiskQuota::new(64 << 20)?;
+    QueueRecoveryPipeline::new(store, projection, workers, options, root, quota)
+}
+
 fn schema() -> QueueSchema {
     QueueSchema {
         work: CollectionDefinition {
@@ -493,12 +507,15 @@ async fn owned_claim_publishes_then_replays_original_identity_and_expiry() {
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline = test_pipeline(
+    let pipeline = test_pipeline_options(
         store.clone(),
         projection,
         workers.clone(),
-        65536,
-        1 << 20,
+        QueuePipelineOptions {
+            operations: 1,
+            metadata_bytes: 65536,
+            hard_record_bytes: 1 << 20,
+        },
         &root,
     )
     .await
@@ -594,9 +611,19 @@ async fn owned_claim_publishes_then_replays_original_identity_and_expiry() {
     let projection = QueueProjection::open(&root.join("rebuild.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline = test_pipeline(store, projection, workers.clone(), 65536, 1 << 20, &root)
-        .await
-        .unwrap();
+    let pipeline = test_pipeline_options(
+        store,
+        projection,
+        workers.clone(),
+        QueuePipelineOptions {
+            operations: 1,
+            metadata_bytes: 65536,
+            hard_record_bytes: 1 << 20,
+        },
+        &root,
+    )
+    .await
+    .unwrap();
     let replay = pipeline
         .claim(
             request.clone(),
@@ -2330,3 +2357,23 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
 }
 
 mod administrative_commit;
+
+#[test]
+fn pipeline_configuration_rejects_semaphore_overflow_before_resource_construction() {
+    let mut options = QueuePipelineOptions {
+        operations: 1,
+        metadata_bytes: 65536,
+        hard_record_bytes: 1 << 20,
+    };
+    options.validate().unwrap();
+    for operations in [0, Semaphore::MAX_PERMITS + 1] {
+        options.operations = operations;
+        assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+    }
+    options.operations = 1;
+    options.metadata_bytes = 0;
+    assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+    options.metadata_bytes = 65536;
+    options.hard_record_bytes = 0;
+    assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+}

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-# Shared disposable physical scratch adapter. The domain remains I/O-free.
+# Shared owned-operation lifecycle and physical scratch. The domain stays I/O-free.
 [dependencies]
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
