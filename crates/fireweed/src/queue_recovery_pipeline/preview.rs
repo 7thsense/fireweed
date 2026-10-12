@@ -11,14 +11,14 @@ use fireweed_engine::{
     queue_memory::{IncomingHeaders, administrative_groups_preflight},
 };
 use fireweed_queue_spool::ScratchDiskQuota;
+use fireweed_queue_spool::ScratchRoot;
 use fireweed_turso::queue_projection::{
     AdministrativePreparationInput, AdmittedQueuePreview, CommitPreparationInput,
 };
-use std::path::PathBuf;
 struct PreviewRead {
     request: PreviewRequest,
     clock: Arc<dyn Clock>,
-    directory: PathBuf,
+    root: Arc<ScratchRoot>,
     quota: Arc<ScratchDiskQuota>,
 }
 impl IncomingHeaders for PreviewRead {
@@ -26,7 +26,7 @@ impl IncomingHeaders for PreviewRead {
         self.request
             .headers()?
             .checked_add(
-                (self.directory.as_os_str().len() as u64)
+                (self.root.path().as_os_str().len() as u64)
                     .checked_mul(4)
                     .and_then(|n| n.checked_add(4096))
                     .ok_or(QueueError::TooLarge)?,
@@ -40,16 +40,14 @@ impl QueueRecoveryPipeline {
         request: PreviewRequest,
         limits: QueueLimits,
         clock: Arc<dyn Clock>,
-        directory: PathBuf,
-        quota: Arc<ScratchDiskQuota>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedQueuePreview> {
         self.covered_read(
             PreviewRead {
                 request,
                 clock,
-                directory,
-                quota,
+                root: Arc::clone(&self.scratch_root),
+                quota: Arc::clone(&self.scratch_quota),
             },
             limits,
             job,
@@ -114,7 +112,7 @@ impl CoveredRead for PreviewRead {
                     .preview_addressed_administration(
                         AdministrativePreparationInput {
                             commit: input,
-                            scratch_directory: self.directory.clone(),
+                            scratch_directory: self.root.path().to_path_buf(),
                             scratch_quota: self.quota.clone(),
                         },
                         self.clock.clone(),

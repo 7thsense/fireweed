@@ -8,6 +8,26 @@ use fireweed_engine::{
     queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
 };
 use fireweed_objectlog::{Api007GenesisRequest, FlushConfig};
+async fn test_pipeline(
+    store: Arc<ObjectLogEngineStore>,
+    projection: Arc<QueueProjection>,
+    workers: ScratchWorkers,
+    metadata_bytes: usize,
+    hard_record_bytes: u64,
+    directory: &std::path::Path,
+) -> QueueResult<Arc<QueueRecoveryPipeline>> {
+    let root = fireweed_queue_spool::ScratchRoot::open(directory.join("scratch"), &workers).await?;
+    let quota = fireweed_queue_spool::ScratchDiskQuota::new(64 << 20)?;
+    QueueRecoveryPipeline::new(
+        store,
+        projection,
+        workers,
+        metadata_bytes,
+        hard_record_bytes,
+        root,
+        quota,
+    )
+}
 fn schema() -> QueueSchema {
     QueueSchema {
         work: CollectionDefinition {
@@ -183,9 +203,16 @@ async fn competing_same_identity_claims_never_acknowledge_losing_tokens() {
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let clock = Arc::new(TestClock::default());
     clock.set(100);
     let request = ClaimRequest {
@@ -302,9 +329,16 @@ async fn replay_discards_stale_expiry_after_concurrent_durable_renewal() {
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let clock = Arc::new(TestClock::default());
     clock.set(100);
     let request = ClaimRequest {
@@ -459,9 +493,16 @@ async fn owned_claim_publishes_then_replays_original_identity_and_expiry() {
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let clock = Arc::new(TestClock::default());
     clock.set(100);
     let request = ClaimRequest {
@@ -553,8 +594,9 @@ async fn owned_claim_publishes_then_replays_original_identity_and_expiry() {
     let projection = QueueProjection::open(&root.join("rebuild.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store, projection, workers.clone(), 65536, 1 << 20).unwrap();
+    let pipeline = test_pipeline(store, projection, workers.clone(), 65536, 1 << 20, &root)
+        .await
+        .unwrap();
     let replay = pipeline
         .claim(
             request.clone(),
@@ -672,9 +714,16 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let first = pipeline.recover(address(), job.clone()).await.unwrap();
     assert_eq!(
         (first.target_next_offset, first.history.insertion_sequence()),
@@ -730,13 +779,15 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
             )
             .await
             .unwrap();
-        let bad_pipeline = QueueRecoveryPipeline::new(
+        let bad_pipeline = test_pipeline(
             store.clone(),
             bad_projection.clone(),
             workers.clone(),
             65536,
             1 << 20,
+            &root,
         )
+        .await
         .unwrap();
         assert!(
             matches!(bad_pipeline.recover(address(),job.clone()).await,Err(QueueError::OutcomeUnknown(message)) if message.contains("disagrees with authoritative prefix"))
@@ -754,13 +805,15 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
         );
         drop(definition);
     }
-    let limited = QueueRecoveryPipeline::new(
+    let limited = test_pipeline(
         store.clone(),
         pipeline.projection.clone(),
         workers.clone(),
         65536,
         1,
+        &root,
     )
+    .await
     .unwrap();
     assert!(matches!(
         limited.recover(address(), job.clone()).await,
@@ -914,13 +967,15 @@ async fn legacy_record_below_cached_cursor_never_establishes_coverage() {
         .apply(checked_publication, 1, &job, &workers)
         .await
         .unwrap();
-    let pipeline = QueueRecoveryPipeline::new(
+    let pipeline = test_pipeline(
         store.clone(),
         projection.clone(),
         workers.clone(),
         65536,
         1 << 20,
+        &root,
     )
+    .await
     .unwrap();
     assert!(
         matches!(pipeline.recover(address(),job.clone()).await,Err(QueueError::OutcomeUnknown(message)) if message.contains("checksum policy"))
@@ -970,9 +1025,16 @@ async fn receipt_read_discards_stale_absence_and_confirms_current_errors() {
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     *pipeline.after_receipt_read.lock().unwrap() = Some((entered.clone(), release.clone()));
@@ -1079,9 +1141,16 @@ async fn owned_insert_publishes_original_results_rebuilds_and_survives_caller_dr
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let clock = Arc::new(TestClock::default());
     clock.set(100);
     let item = |key: &str, priority: i64| NewWork {
@@ -1224,9 +1293,16 @@ async fn owned_insert_publishes_original_results_rebuilds_and_survives_caller_dr
     let projection = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
         .await
         .unwrap();
-    let rebuilt =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let rebuilt = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let replay = rebuilt
         .insert(request, QueueLimits::default(), clock, job.clone())
         .await
@@ -1265,9 +1341,16 @@ async fn losing_insert_fence_resolves_winner_without_replanning_or_extra_publica
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     *pipeline.before_insert_append.lock().unwrap() = Some((entered.clone(), release.clone()));
@@ -1369,9 +1452,16 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let clock = Arc::new(TestClock::default());
     clock.set(100);
     let work = |key: &str| NewWork {
@@ -1900,9 +1990,16 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     let rebuilt = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
         .await
         .unwrap();
-    let rebuilt =
-        QueueRecoveryPipeline::new(store.clone(), rebuilt, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let rebuilt = test_pipeline(
+        store.clone(),
+        rebuilt,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let state = rebuilt
         .read_state(state_request, QueueLimits::default(), job.clone())
         .await
@@ -1944,7 +2041,6 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
         AdministrativeAction, AdministrativeEntry, AdministrativeIntent, AdministrativeOperation,
         AdministrativeOutcome, WorkSelector,
     };
-    use fireweed_queue_spool::ScratchDiskQuota;
     let root = std::env::temp_dir().join(format!(
         "fireweed-api007-preview-{}-{}",
         std::process::id(),
@@ -1967,9 +2063,16 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
     let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
         .await
         .unwrap();
-    let pipeline =
-        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
-            .unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
     let clock = Arc::new(TestClock::default());
     let request = PreviewRequest {
         queue: address(),
@@ -2005,24 +2108,14 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     *pipeline.after_preview_read.lock().unwrap() = Some((entered.clone(), release.clone()));
-    let quota = ScratchDiskQuota::new(64 << 20).unwrap();
     let caller = tokio::spawn({
         let pipeline = pipeline.clone();
         let request = request.clone();
         let clock = clock.clone();
-        let directory = root.clone();
-        let quota = quota.clone();
         let job = job.clone();
         async move {
             pipeline
-                .preview(
-                    request,
-                    QueueLimits::default(),
-                    clock,
-                    directory,
-                    quota,
-                    job,
-                )
+                .preview(request, QueueLimits::default(), clock, job)
                 .await
         }
     });
@@ -2115,19 +2208,10 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
     let caller = tokio::spawn({
         let pipeline = pipeline.clone();
         let clock = clock.clone();
-        let directory = root.clone();
-        let quota = quota.clone();
         let job = job.clone();
         async move {
             pipeline
-                .preview(
-                    ordinary,
-                    QueueLimits::default(),
-                    clock,
-                    directory,
-                    quota,
-                    job,
-                )
+                .preview(ordinary, QueueLimits::default(), clock, job)
                 .await
         }
     });
@@ -2217,18 +2301,9 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
         let pipeline = pipeline.clone();
         let request = request.clone();
         let clock = clock.clone();
-        let directory = root.clone();
-        let quota = quota.clone();
         async move {
             pipeline
-                .preview(
-                    request,
-                    QueueLimits::default(),
-                    clock,
-                    directory,
-                    quota,
-                    read_job,
-                )
+                .preview(request, QueueLimits::default(), clock, read_job)
                 .await
         }
     });
@@ -2253,3 +2328,5 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+mod administrative_commit;

@@ -31,6 +31,8 @@ pub struct QueueRecoveryPipeline {
     store: Arc<ObjectLogEngineStore>,
     projection: Arc<QueueProjection>,
     workers: ScratchWorkers,
+    scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
+    scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
     slots: Arc<Semaphore>,
     operation_slots: Arc<Semaphore>,
     metadata_bytes: usize,
@@ -84,6 +86,8 @@ impl QueueRecoveryPipeline {
         workers: ScratchWorkers,
         metadata_bytes: usize,
         hard_record_bytes: u64,
+        scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
+        scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
     ) -> QueueResult<Arc<Self>> {
         if metadata_bytes == 0 || hard_record_bytes == 0 {
             return Err(QueueError::Invalid(
@@ -94,6 +98,8 @@ impl QueueRecoveryPipeline {
             store,
             projection,
             workers,
+            scratch_root,
+            scratch_quota,
             slots: Arc::new(Semaphore::new(64)),
             operation_slots: Arc::new(Semaphore::new(64)),
             metadata_bytes,

@@ -1,9 +1,15 @@
 //! Owned commit publication. Only covered immutable original-receipt replay
 //! returns an outcome; provisional planning never crosses the completion edge.
 use super::*;
+use fireweed_core::queue_administration::AdministrativeOperation;
 use fireweed_core::queue_contract::{CommitGroup, QueueLimits, ReceiptLookup, encoded_len};
-use fireweed_engine::{Clock, queue_memory::incoming_headers};
-use fireweed_turso::queue_projection::{AdmittedCommitReceipts, CommitPreparationInput};
+use fireweed_engine::{
+    Clock,
+    queue_memory::{administrative_groups_preflight, incoming_headers},
+};
+use fireweed_turso::queue_projection::{
+    AdministrativePreparationInput, AdmittedCommitReceipts, CommitPreparationInput,
+};
 
 struct CommitTask {
     _slot: OwnedSemaphorePermit,
@@ -27,14 +33,21 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedCommitReceipts> {
         group.preflight_for(&queue, &limits)?;
-        if group.administration.is_some() {
+        administrative_groups_preflight(&queue, std::slice::from_ref(&group), &limits)?;
+        if matches!(
+            group.administration.as_ref().map(|a| &a.intent.operation),
+            Some(AdministrativeOperation::SelectFirst(_))
+        ) {
             return Err(QueueError::Invalid(
-                "ordinary commit requires ordinary group".into(),
+                "broad administrative commit not assembled".into(),
             ));
         }
         // Admit both input owners before native-stage cloning or any I/O.
         let headers = incoming_headers(&group)?
             .checked_mul(2)
+            .and_then(|n| {
+                n.checked_add((self.scratch_root.path().as_os_str().len() as u64).checked_mul(4)?)
+            })
             .ok_or(QueueError::TooLarge)?;
         let input = job.owned_buffer(
             encoded_len(&(&queue, &group))?
@@ -148,18 +161,36 @@ impl CommitTask {
             .pipeline
             .recover(self.queue.clone(), self.job.clone())
             .await?;
-        let prepared = self
-            .pipeline
-            .projection
-            .prepare_ordinary_commit(
-                self.input(&recovered)?,
-                recovered.acquired_epoch,
-                self.pipeline.hard_record_bytes,
-                self.clock.clone(),
-                &self.job,
-                &self.pipeline.workers,
-            )
-            .await?;
+        let input = self.input(&recovered)?;
+        let prepared = if input.group.administration.is_some() {
+            self.pipeline
+                .projection
+                .prepare_addressed_administration(
+                    AdministrativePreparationInput {
+                        commit: input,
+                        scratch_directory: self.pipeline.scratch_root.path().to_path_buf(),
+                        scratch_quota: Arc::clone(&self.pipeline.scratch_quota),
+                    },
+                    recovered.acquired_epoch,
+                    self.pipeline.hard_record_bytes,
+                    self.clock.clone(),
+                    &self.job,
+                    &self.pipeline.workers,
+                )
+                .await?
+        } else {
+            self.pipeline
+                .projection
+                .prepare_ordinary_commit(
+                    input,
+                    recovered.acquired_epoch,
+                    self.pipeline.hard_record_bytes,
+                    self.clock.clone(),
+                    &self.job,
+                    &self.pipeline.workers,
+                )
+                .await?
+        };
         let Some(prepared) = prepared else {
             return self.resolve(Some(recovered)).await;
         };

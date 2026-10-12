@@ -16751,6 +16751,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target",
           "--",
           "--exact"
@@ -82498,6 +82518,34 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target",
         "--",
         "--exact"
@@ -92018,7 +92066,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "9b1bd82c9a0b4372eb64de0c811aa89cf50f51ddc934cd2edb1f705c296bca2d",
+  "source_inventory_sha256": "be701eb12c25bf1810a9f91011c156544d0e2bbc7178c79bc8b820745de5443c",
   "workspaces": [
     {
       "listing_error_sha256": "",
