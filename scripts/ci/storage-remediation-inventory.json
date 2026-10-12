@@ -16717,6 +16717,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target",
           "--",
           "--exact"
@@ -77231,6 +77251,34 @@
         "-p",
         "fireweed-turso",
         "--lib",
+        "queue_projection::administrative_prepare::preview_tests::preview_bypasses_original_conflicting_expired_and_malformed_receipts_without_effects",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::administrative_prepare::preview_tests::preview_bypasses_original_conflicting_expired_and_malformed_receipts_without_effects",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::administrative_prepare::preview_tests::preview_bypasses_original_conflicting_expired_and_malformed_receipts_without_effects",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
         "queue_projection::administrative_prepare::tests::addressed_preparation_one_worker_publishes_atomic_state_and_original_positional_results",
         "--",
         "--exact"
@@ -82191,6 +82239,34 @@
       "expected_ran": 1,
       "harness_id": "active_scope_selector_unit_tests::routing_score_length_frames_every_identity_component",
       "id": "Cargo.toml::fireweed::fireweed::test::active_scope_selector_unit_tests::routing_score_length_frames_every_identity_component",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -91732,7 +91808,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "e003a6dbec5619cb10e4beb8586bd09f255ff01be978eb74b9350253e502c199",
+  "source_inventory_sha256": "20aacd0f9ccc7b0e21e73c5c04a0f9f666a84d1a6b3f96aab528bde2544e554c",
   "workspaces": [
     {
       "listing_error_sha256": "",

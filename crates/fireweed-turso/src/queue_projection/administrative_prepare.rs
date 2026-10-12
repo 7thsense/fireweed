@@ -43,11 +43,37 @@ impl AdministrativeOrdinaryAuthority for Authority {
         &self.image
     }
 }
+pub struct AdmittedAdministrativePreview {
+    result: PreviewResult,
+    _charges: Vec<OwnedQueueBufferCharge>,
+}
+impl AdmittedAdministrativePreview {
+    pub fn result(&self) -> &PreviewResult {
+        &self.result
+    }
+}
+#[derive(Clone, Copy)]
+enum Mode {
+    Publish { epoch: u64, max_record_bytes: u64 },
+    Preview,
+}
+enum Parts {
+    Publication {
+        record: OwnedQueueLogRecord,
+        receipt: CommitReceipt,
+        head: u64,
+        epoch: u64,
+    },
+    Preview(PreviewResult),
+}
+struct Completed {
+    parts: Parts,
+    charges: Vec<OwnedQueueBufferCharge>,
+}
 struct Worker {
     projection: Arc<QueueProjection>,
     input: AdministrativePreparationInput,
-    epoch: u64,
-    max_record_bytes: u64,
+    mode: Mode,
     clock: Arc<dyn Clock>,
     workers: ScratchWorkers,
     job: Arc<QueueReservation>,
@@ -65,6 +91,69 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<Option<PreparedOrdinaryCommit>> {
+        let result = self
+            .dispatch_administration(
+                input,
+                Mode::Publish {
+                    epoch,
+                    max_record_bytes,
+                },
+                clock,
+                job,
+                workers,
+            )
+            .await?;
+        match result {
+            None => Ok(None),
+            Some(Completed {
+                parts:
+                    Parts::Publication {
+                        record,
+                        receipt,
+                        head,
+                        epoch,
+                    },
+                charges,
+            }) => Ok(Some(PreparedOrdinaryCommit::new(
+                record,
+                AdmittedCommitReceipt::new(receipt, charges),
+                head,
+                epoch,
+            ))),
+            Some(_) => Err(unknown("publication returned preview mode")),
+        }
+    }
+    /// Same canonical proposal checks, without consulting execution identities
+    /// or exposing any publishable record. Covered orchestration checks freshness.
+    pub async fn preview_addressed_administration(
+        self: &Arc<Self>,
+        input: AdministrativePreparationInput,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedAdministrativePreview> {
+        match self
+            .dispatch_administration(input, Mode::Preview, clock, job, workers)
+            .await?
+        {
+            Some(Completed {
+                parts: Parts::Preview(result),
+                charges,
+            }) => Ok(AdmittedAdministrativePreview {
+                result,
+                _charges: charges,
+            }),
+            _ => Err(unknown("preview did not return a complete preview")),
+        }
+    }
+    async fn dispatch_administration(
+        self: &Arc<Self>,
+        input: AdministrativePreparationInput,
+        mode: Mode,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<Completed>> {
         let commit = &input.commit;
         if !commit.genesis.belongs_to(job) {
             return Err(unknown(
@@ -85,9 +174,14 @@ impl QueueProjection {
         if !matches!(
             admin.intent.operation,
             AdministrativeOperation::Addressed(_)
-        ) || epoch == 0
-            || max_record_bytes == 0
-        {
+        ) || matches!(
+            mode,
+            Mode::Publish { epoch: 0, .. }
+                | Mode::Publish {
+                    max_record_bytes: 0,
+                    ..
+                }
+        ) {
             return Err(QueueError::Invalid(
                 "invalid addressed preparation authority/shape".into(),
             ));
@@ -104,8 +198,7 @@ impl QueueProjection {
         let mut worker = Worker {
             projection: self.clone(),
             input,
-            epoch,
-            max_record_bytes,
+            mode,
             clock,
             workers: workers.clone(),
             job: job.clone(),
@@ -121,16 +214,9 @@ impl QueueProjection {
                         &mut worker,
                     )
                     .await?;
-                    Ok(parts.map(|(record, receipt, head, epoch)| {
-                        PreparedOrdinaryCommit::new(
-                            record,
-                            AdmittedCommitReceipt::new(
-                                receipt,
-                                std::mem::take(&mut worker.charges),
-                            ),
-                            head,
-                            epoch,
-                        )
+                    Ok(parts.map(|parts| Completed {
+                        parts,
+                        charges: std::mem::take(&mut worker.charges),
                     }))
                 }))
             })
@@ -209,7 +295,7 @@ async fn hydrate(
     })
 }
 impl NativeTransactionWork for Worker {
-    type Output = Option<(OwnedQueueLogRecord, CommitReceipt, u64, u64)>;
+    type Output = Option<Parts>;
     async fn before_commit(&mut self) {
         #[cfg(test)]
         {
@@ -237,26 +323,28 @@ impl NativeTransactionWork for Worker {
                 input.required_last_record_epoch,
             ),
         )?;
-        if self.epoch < native.last_record_epoch {
+        if matches!(self.mode, Mode::Publish { epoch, .. } if epoch < native.last_record_epoch) {
             return Err(unknown("administrative epoch precedes history"));
         }
         let schema = native.definition.schema();
         let group = &input.group;
         group.validate_for(&input.queue, schema, &input.limits)?;
-        match super::receipt_metadata::read_receipt_metadata(
-            connection,
-            native.queue_id,
-            super::receipt_metadata::ReceiptDomain::Commit,
-            &group.request_id,
-            Some((4, group.fingerprint(&input.queue)?)),
-        )
-        .await?
-        {
-            super::receipt_metadata::ReceiptMetadata::Absent => {}
-            super::receipt_metadata::ReceiptMetadata::Expired => {
-                return Err(QueueError::RequestExpired);
+        if matches!(self.mode, Mode::Publish { .. }) {
+            match super::receipt_metadata::read_receipt_metadata(
+                connection,
+                native.queue_id,
+                super::receipt_metadata::ReceiptDomain::Commit,
+                &group.request_id,
+                Some((4, group.fingerprint(&input.queue)?)),
+            )
+            .await?
+            {
+                super::receipt_metadata::ReceiptMetadata::Absent => {}
+                super::receipt_metadata::ReceiptMetadata::Expired => {
+                    return Err(QueueError::RequestExpired);
+                }
+                super::receipt_metadata::ReceiptMetadata::Present { .. } => return Ok(None),
             }
-            super::receipt_metadata::ReceiptMetadata::Present { .. } => return Ok(None),
         }
         self.charges.push(
             self.job.owned_buffer(
@@ -476,13 +564,50 @@ impl NativeTransactionWork for Worker {
             }
         };
         self.charges.push(receipt_charge);
-        let record = encode_checked_publication_record(
-            self.epoch,
-            frame.as_bytes(),
-            self.max_record_bytes,
-            &self.job,
-        )?;
-        Ok(Some((record, receipt, native.next_offset, self.epoch)))
+        match self.mode {
+            Mode::Publish {
+                epoch,
+                max_record_bytes,
+            } => {
+                let record = encode_checked_publication_record(
+                    epoch,
+                    frame.as_bytes(),
+                    max_record_bytes,
+                    &self.job,
+                )?;
+                Ok(Some(Parts::Publication {
+                    record,
+                    receipt,
+                    head: native.next_offset,
+                    epoch,
+                }))
+            }
+            Mode::Preview => {
+                drop(frame);
+                let result = PreviewResult {
+                    outcome: match receipt.outcome {
+                        GroupOutcome::Committed { versions } => {
+                            PreviewOutcome::Committed { versions }
+                        }
+                        GroupOutcome::AdministrativeCommitted {
+                            versions,
+                            administration,
+                        } => PreviewOutcome::AdministrativeCommitted {
+                            versions,
+                            administration,
+                        },
+                        GroupOutcome::Rejected(reason) => PreviewOutcome::Rejected(reason),
+                        GroupOutcome::RequestConflict | GroupOutcome::RequestExpired => {
+                            return Err(unknown("preview consulted execution identity"));
+                        }
+                    },
+                };
+                if encoded_len(&result)? > input.limits.max_response_bytes {
+                    return Err(QueueError::TooLarge);
+                }
+                Ok(Some(Parts::Preview(result)))
+            }
+        }
     }
 }
 fn fallback(
@@ -556,3 +681,6 @@ fn fallback(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod preview_tests;

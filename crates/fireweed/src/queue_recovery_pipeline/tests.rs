@@ -1936,3 +1936,208 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     assert_eq!(admission.usage().unwrap(), (0, 0));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt() {
+    use fireweed_conformance::queue_contract::TestClock;
+    use fireweed_core::queue_administration::{
+        AdministrativeAction, AdministrativeEntry, AdministrativeIntent, AdministrativeOperation,
+        AdministrativeOutcome, WorkSelector,
+    };
+    use fireweed_queue_spool::ScratchDiskQuota;
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-api007-preview-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let admission = QueueAdmission::new(2, 64 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    provision(&store, &job, &workers).await;
+    append_insert(&store, &job, &workers).await;
+    let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+        .await
+        .unwrap();
+    let pipeline =
+        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+            .unwrap();
+    let clock = Arc::new(TestClock::default());
+    let request = PreviewRequest {
+        queue: address(),
+        group: CommitGroup {
+            request_id: "preview-id".into(),
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![],
+            administration: Some(AdministrativeCommit {
+                max_result_bytes: 65536,
+                intent: AdministrativeIntent {
+                    evaluated_at: 0,
+                    before_fields: Some(Default::default()),
+                    operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                        key: "a".into(),
+                        expected_version: Some(1),
+                        precondition: WorkSelector::all(vec![]),
+                        action: AdministrativeAction::Update {
+                            patch: WorkPatch {
+                                priority: Some(17),
+                                ..Default::default()
+                            },
+                            lifecycle: AdministrativeLifecycle::Keep,
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                            remove_field_prefixes: Default::default(),
+                        },
+                    }]),
+                },
+            }),
+        },
+    };
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_preview_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let quota = ScratchDiskQuota::new(64 << 20).unwrap();
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = request.clone();
+        let clock = clock.clone();
+        let directory = root.clone();
+        let quota = quota.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .preview_addressed_administration(
+                    request,
+                    QueueLimits::default(),
+                    clock,
+                    directory,
+                    quota,
+                    job,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let update = CommitGroup {
+        request_id: "advance-preview-cut".into(),
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![],
+        administration: None,
+        work_updates: vec![UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Patch(WorkPatch {
+                priority: Some(20),
+                ..Default::default()
+            }),
+        }],
+    };
+    drop(
+        pipeline
+            .commit(
+                address(),
+                update,
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    release.notify_one();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), caller)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let PreviewOutcome::AdministrativeCommitted { administration, .. } = &result.result().outcome
+    else {
+        panic!("not administrative preview")
+    };
+    assert_eq!(
+        administration.items[0].outcome,
+        AdministrativeOutcome::Conflict { actual_version: 2 }
+    );
+    assert_eq!(administration.items[0].before.as_ref().unwrap().version, 2);
+    drop(result);
+    let receipt = pipeline
+        .read_commit(
+            ReceiptReadRequest {
+                queue: address(),
+                request_ids: vec!["preview-id".into()],
+                max_bytes: 65536,
+            },
+            QueueLimits::default(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.receipts(), &[ReceiptLookup::Absent]);
+    drop(receipt);
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 3);
+    drop(recovered);
+    let terminal = Arc::new(tokio::sync::Notify::new());
+    let notification = terminal.clone();
+    let read_job = Arc::new(
+        admission
+            .reserve(0)
+            .unwrap()
+            .with_terminal_callback(move || notification.notify_one())
+            .unwrap(),
+    );
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_preview_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = request.clone();
+        let clock = clock.clone();
+        let directory = root.clone();
+        let quota = quota.clone();
+        async move {
+            pipeline
+                .preview_addressed_administration(
+                    request,
+                    QueueLimits::default(),
+                    clock,
+                    directory,
+                    quota,
+                    read_job,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let retained = admission.usage().unwrap();
+    assert_eq!(retained.0, 2);
+    assert!(retained.1 > 1000);
+    caller.abort();
+    assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+    assert_eq!(admission.usage().unwrap(), retained);
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(30), terminal.notified())
+        .await
+        .unwrap();
+    assert_eq!(admission.usage().unwrap().0, 1);
+    drop(pipeline);
+    workers.close_and_drain().await.unwrap();
+    drop(job);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}

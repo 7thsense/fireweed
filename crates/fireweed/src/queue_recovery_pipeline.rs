@@ -4,6 +4,7 @@ use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 mod claim;
 mod commit;
 mod insert;
+mod preview;
 mod publication;
 mod query;
 mod read;
@@ -52,6 +53,8 @@ pub struct QueueRecoveryPipeline {
     after_query_read: StagePause,
     #[cfg(test)]
     after_stats_read: StagePause,
+    #[cfg(test)]
+    after_preview_read: StagePause,
     #[cfg(test)]
     before_commit_append: StagePause,
     #[cfg(test)]
@@ -113,6 +116,8 @@ impl QueueRecoveryPipeline {
             after_query_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_stats_read: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_preview_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             before_commit_append: std::sync::Mutex::new(None),
             #[cfg(test)]

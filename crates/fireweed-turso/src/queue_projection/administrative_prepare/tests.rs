@@ -5,7 +5,7 @@ use fireweed_core::queue_administration::{
     AdministrativeEntry, AdministrativeIntent, WorkSelector,
 };
 use fireweed_engine::{queue_admission::QueueAdmission, queue_log_record::encode_checked_genesis};
-fn input(
+pub(super) fn input(
     definition: &AdmittedQueueDefinition,
     job: &Arc<QueueReservation>,
     group: CommitGroup,
@@ -347,31 +347,53 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     drop(job);
     assert_eq!(admission.usage().unwrap(), (0, 0));
 }
+async fn run_mode(
+    preview: bool,
+    projection: &Arc<QueueProjection>,
+    input: AdministrativePreparationInput,
+    clock: Arc<dyn Clock>,
+    job: &Arc<QueueReservation>,
+    workers: &ScratchWorkers,
+) -> QueueResult<()> {
+    if preview {
+        projection
+            .preview_addressed_administration(input, clock, job, workers)
+            .await
+            .map(drop)
+    } else {
+        projection
+            .prepare_addressed_administration(input, 1, 16 << 20, clock, job, workers)
+            .await
+            .map(drop)
+    }
+}
 #[tokio::test]
 async fn precommit_panic_and_caller_cancellation_release_only_after_physical_completion() {
-    let directory = tempfile::tempdir().unwrap();
-    let admission = QueueAdmission::new(2, 128 << 20).unwrap();
-    let seed_job = Arc::new(admission.reserve(0).unwrap());
-    let workers = ScratchWorkers::new(1, 1).unwrap();
-    let (projection, definition) =
-        bootstrap(&directory.path().join("cancel.db"), &seed_job, &workers).await;
-    seed(&projection, &definition, &seed_job, &workers, false).await;
-    let terminal = Arc::new(tokio::sync::Notify::new());
-    let notification = terminal.clone();
-    let job = Arc::new(
-        admission
-            .reserve(0)
-            .unwrap()
-            .with_terminal_callback(move || notification.notify_one())
-            .unwrap(),
-    );
-    let clock = Arc::new(TestClock::default());
-    projection
-        .panic_after_command
-        .store(true, std::sync::atomic::Ordering::Release);
-    assert!(matches!(
+    for preview in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(2, 128 << 20).unwrap();
+        let seed_job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) =
+            bootstrap(&directory.path().join("cancel.db"), &seed_job, &workers).await;
+        seed(&projection, &definition, &seed_job, &workers, false).await;
+        let terminal = Arc::new(tokio::sync::Notify::new());
+        let notification = terminal.clone();
+        let job = Arc::new(
+            admission
+                .reserve(0)
+                .unwrap()
+                .with_terminal_callback(move || notification.notify_one())
+                .unwrap(),
+        );
+        let clock = Arc::new(TestClock::default());
         projection
-            .prepare_addressed_administration(
+            .panic_after_command
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            run_mode(
+                preview,
+                &projection,
                 input(
                     &definition,
                     &job,
@@ -380,64 +402,59 @@ async fn precommit_panic_and_caller_cancellation_release_only_after_physical_com
                     2,
                     2
                 ),
-                1,
-                16 << 20,
                 clock.clone(),
                 &job,
                 &workers
             )
             .await,
-        Err(QueueError::OutcomeUnknown(_))
-    ));
-    let call_input = input(
-        &definition,
-        &job,
-        transition("cancel-original"),
-        directory.path(),
-        2,
-        2,
-    );
-    drop(definition);
-    drop(seed_job);
-    let pause = Arc::new(ApplyPause {
-        after_commit: false,
-        fail_reply: false,
-        entered: tokio::sync::Notify::new(),
-        release: tokio::sync::watch::channel(false).0,
-    });
-    *projection.pause.lock().await = Some(pause.clone());
-    let call = tokio::spawn({
-        let projection = projection.clone();
-        let workers = workers.clone();
-        async move {
-            projection
-                .prepare_addressed_administration(call_input, 1, 16 << 20, clock, &job, &workers)
-                .await
-        }
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
-        .await
-        .unwrap();
-    let retained = admission.usage().unwrap();
-    assert!(retained.1 > 1000);
-    call.abort();
-    assert!(matches!(call.await, Err(error) if error.is_cancelled()));
-    assert_eq!(admission.usage().unwrap(), retained);
-    let mut drain = Box::pin(workers.close_and_drain());
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(10), &mut drain)
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let call_input = input(
+            &definition,
+            &job,
+            transition("cancel-original"),
+            directory.path(),
+            2,
+            2,
+        );
+        drop(definition);
+        drop(seed_job);
+        let pause = Arc::new(ApplyPause {
+            after_commit: false,
+            fail_reply: false,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(false).0,
+        });
+        *projection.pause.lock().await = Some(pause.clone());
+        let call = tokio::spawn({
+            let projection = projection.clone();
+            let workers = workers.clone();
+            async move { run_mode(preview, &projection, call_input, clock, &job, &workers).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
             .await
-            .is_err()
-    );
-    pause.release.send(true).unwrap();
-    drain.await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), terminal.notified())
-        .await
-        .unwrap();
-    assert_eq!(admission.usage().unwrap(), (0, 0));
-    *projection.pause.lock().await = None;
-    assert_eq!(inspect(&projection,"SELECT applied_next_offset,(SELECT COUNT(*) FROM q7_requests WHERE domain=2),(SELECT COUNT(*) FROM q7_records WHERE active=1) FROM q7_queues",vec![],3).await,
+            .unwrap();
+        let retained = admission.usage().unwrap();
+        assert!(retained.1 > 1000);
+        call.abort();
+        assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+        assert_eq!(admission.usage().unwrap(), retained);
+        let mut drain = Box::pin(workers.close_and_drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut drain)
+                .await
+                .is_err()
+        );
+        pause.release.send(true).unwrap();
+        drain.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), terminal.notified())
+            .await
+            .unwrap();
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        *projection.pause.lock().await = None;
+        assert_eq!(inspect(&projection,"SELECT applied_next_offset,(SELECT COUNT(*) FROM q7_requests WHERE domain=2),(SELECT COUNT(*) FROM q7_records WHERE active=1) FROM q7_queues",vec![],3).await,
         vec![Value::Integer(2),Value::Integer(0),Value::Integer(2)]);
+    }
 }
 #[tokio::test]
 async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_authority() {

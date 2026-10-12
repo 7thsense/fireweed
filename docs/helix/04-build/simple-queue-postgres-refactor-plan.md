@@ -84,7 +84,9 @@ commit publication with fingerprint-bound original-receipt resolution are
 internal primitives. Addressed administrative preparation shares PostgreSQL's
 row proxy, prefix resolution, positional source, scan/finalization and complete
 publication decision. It prepares atomic FWQP2 effects or a zero-effect rejection,
-with immutable FP4 replay; broad native selectors and preview remain required.
+with immutable FP4 replay. Addressed preview shares this canonical preparation,
+bypasses execution receipts and uses covered-read freshness without publication.
+Broad native selectors and ordinary preview remain required.
 Covered owned state reads share complete payload hydration
 and addressed-state metadata validation with commit planning. Receipt/state
 reads and native indexed queries use one owned completion, admission and
