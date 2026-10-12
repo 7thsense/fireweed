@@ -38,3 +38,26 @@ Real PostgreSQL process/server faults, live S3 capability/fault qualification an
 The existing scripts/formal/check.py and unittest corpus may continue as regression controls. Earlier recovery/batching/replay models permitted stale empty observations or expired request reuse and the old trace corpus used paused apply, ephemeral control-plane sessions and leased-tail exclusion. Their green results do not qualify API-007. Update affected models and correspondence before readiness claims, preserving explicit positive/negative controls and bounds rather than carrying historical counts into the new contract.
 
 Run model and replay tools into run-owned target directories or declared evidence storage, outside active Helix documents. Documentation contains property/assumption/acceptance requirements; runtime graphs, trace captures and review journals remain run artifacts.
+
+## Legacy scheduled regression tooling
+
+The legacy interpreter supports `schedule-smoke` and `exhaustive` profiles.
+Selection is regenerated solely from its independent finite model. Scheduled
+cases retain every oracle alternative and compatible predecessor; first polling
+is a stimulus, and actual backend polls/Pending/completion must demonstrate
+overlap. Per-case observed paths must realize the requested schedule. Reconcile
+case/base/schedule identities and per-step witnesses; require witnessed-edge set
+equality with the independently reconstructed legacy graph for its exhaustive
+profile. Counts or intended targets alone cannot qualify even that legacy model.
+
+The local fixture wrapper accepts `--fixture-parent` on a filesystem with sufficient
+inode and byte headroom. It preflights conservative capacity, uses one private
+root with sibling S3/world directories and child TMPDIR, retains S3 worlds through
+qualification, and verifies owned cleanup. These operational guards do not change
+the oracle or substitute for current API-007 public-path obligations.
+
+Historical source-bound execution, closure indices and reviews are preserved under
+[legacy replay artifacts](../../../artifacts/formal/legacy-replay/edge-closure-evidence.md).
+Those results apply to their recorded revisions and legacy backend fixture; merging
+the tooling does not qualify the current API-007 implementation. Run new outputs
+into run-owned target/evidence directories, outside active Helix documents.

@@ -1,0 +1,141 @@
+{
+  "status": "PASS",
+  "purpose": "same-trace fixture latency comparison, not performance qualification",
+  "old_progress_sha256": "fe23ad6df28ab2deb41b17c8c2c1c3039f79354793d5dff32ae3f7440075a593",
+  "new_progress_snapshot_sha256": "55f7fb4a8b646c5d783c92a5e7b190bf73abe3ca7dcd3054c8308e7151a767d8",
+  "new_progress_snapshot_bytes": 367572,
+  "new_progress_completed_at_snapshot": 2059,
+  "unchanged_corpus_sha256": "8607c14f44998fc96b6ded416ab6d03a1e26ba3d9c186d04ce9fb7a329825f30",
+  "rows": [
+    {
+      "trace_indices": [
+        0,
+        199
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 1276.5,
+      "new_median_ms": 902.5,
+      "old_max_ms": 2192,
+      "new_max_ms": 1279,
+      "step_lengths": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "trace_indices": [
+        200,
+        399
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 1998.0,
+      "new_median_ms": 1002.5,
+      "old_max_ms": 2925,
+      "new_max_ms": 1336,
+      "step_lengths": [
+        3,
+        4
+      ]
+    },
+    {
+      "trace_indices": [
+        400,
+        599
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 2606.0,
+      "new_median_ms": 1027.0,
+      "old_max_ms": 4188,
+      "new_max_ms": 1384,
+      "step_lengths": [
+        4
+      ]
+    },
+    {
+      "trace_indices": [
+        600,
+        799
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 4100.5,
+      "new_median_ms": 1126.5,
+      "old_max_ms": 4692,
+      "new_max_ms": 1327,
+      "step_lengths": [
+        4,
+        5
+      ]
+    },
+    {
+      "trace_indices": [
+        800,
+        999
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 4757.5,
+      "new_median_ms": 1150.0,
+      "old_max_ms": 5686,
+      "new_max_ms": 1417,
+      "step_lengths": [
+        5
+      ]
+    },
+    {
+      "trace_indices": [
+        1000,
+        1199
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 5662.0,
+      "new_median_ms": 1157.5,
+      "old_max_ms": 6539,
+      "new_max_ms": 1496,
+      "step_lengths": [
+        5
+      ]
+    },
+    {
+      "trace_indices": [
+        1200,
+        1399
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 6398.5,
+      "new_median_ms": 1073.5,
+      "old_max_ms": 7418,
+      "new_max_ms": 1410,
+      "step_lengths": [
+        5
+      ]
+    },
+    {
+      "trace_indices": [
+        1400,
+        1599
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 7333.0,
+      "new_median_ms": 1150.0,
+      "old_max_ms": 8364,
+      "new_max_ms": 1359,
+      "step_lengths": [
+        5
+      ]
+    },
+    {
+      "trace_indices": [
+        1600,
+        1799
+      ],
+      "matched_trace_ids": 200,
+      "old_median_ms": 8527.0,
+      "new_median_ms": 1164.5,
+      "old_max_ms": 13011,
+      "new_max_ms": 1463,
+      "step_lengths": [
+        5
+      ]
+    }
+  ]
+}

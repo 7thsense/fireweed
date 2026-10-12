@@ -1,0 +1,33 @@
+{
+  "all_witness_schedules": "request-1-first",
+  "audit_script_sha256": "2768bb6b59ad0e16d1164a2a7cbce149a2d581233a89d670931d0f5c37995bcf",
+  "closed": 3918,
+  "closed_action_counts": {
+    "ConcurrentClaims": 26,
+    "DrainApply": 152,
+    "Handoff": 184,
+    "LoseResponse:0": 340,
+    "LoseResponse:1": 340,
+    "Reaffirm": 604,
+    "Reopen": 200,
+    "Replay:0": 528,
+    "Replay:1": 528,
+    "StaleClaim:0": 584,
+    "StaleClaim:1": 432
+  },
+  "concurrent_edges_closed": 26,
+  "current_graph_edges_reconstructed": 20913,
+  "current_report_sha256": "1d291ecbd628ce8385236243123f9be1b5b82d70227b57c2365ee492e1fa7c75",
+  "disposition": "All 3918 prior unwitnessed edges independently tied to actual current case/step observations",
+  "downstream_edges_closed": 3892,
+  "independent_final_audit_sha256": "5acdca13d5cb69d74ac8985c88af0e678766d567ea166287223157dde482d109",
+  "index_sha256": "d0e000831ca51dbc8119a49e4278bc2bef456c66b479db78796b73b60e3779b0",
+  "model_sha256": "980ecc848792ead1da674a2334ace465966fe90169bed5b2f98c0574e0beeb82",
+  "observations_sha256": "fc9124500cb978bbf774ebfa251fee538b32b71555e84006b8f8569e9570b006",
+  "previous_compressed_and_original_hashes_verified": true,
+  "previous_report_sha256": "a83979c040ce45fceb591c5f818644d937b73e35c90032128b404d9e84fb798f",
+  "previously_witnessed": 16995,
+  "remaining": 0,
+  "schema": "fireweed-independent-closure-index-audit-v1",
+  "status": "PASS"
+}

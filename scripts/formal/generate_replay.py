@@ -56,12 +56,29 @@ REQUIRED = [
 ]
 
 
+def scheduled_edges(trace, schedule):
+    """Predict one stimulus path without removing oracle alternatives."""
+    current, witnessed = 0, set()
+    for step in trace['steps']:
+        choices = [edge for edge in step['transitions'] if edge['before'] == current]
+        if step['action'] == 'ConcurrentClaims':
+            item = 0 if schedule == 'request-0-first' else 1
+            choices = [edge for edge in choices if edge['result']['responses'][0]['item'] == item]
+        if len(choices) != 1:
+            raise ValueError('ambiguous schedule-derived path')
+        edge = choices[0]
+        witnessed.add(f'{current}|{step["action"]}|{edge["after"]}')
+        current = edge['after']
+    return witnessed
+
+
 def generate(profile='smoke', limit=50000):
     states, ids, parent, edges = graph(limit)
+    base_profile = 'edges' if profile == 'exhaustive' else ('smoke' if profile == 'schedule-smoke' else profile)
     selected, classes = {}, set()
     for source, action, dest, _ in edges:
         key = semantic_class(states[source], action)
-        if profile == 'edges' or key not in classes:
+        if base_profile == 'edges' or key not in classes:
             sequence = tuple(path(parent, source) + [action])
             selected.setdefault(sequence, set()).add((source, action, dest))
             classes.add(key)
@@ -87,6 +104,26 @@ def generate(profile='smoke', limit=50000):
         target_ids = [f'{a}|{b}|{c}' for a, b, c in sorted(targets)]
         intended.update(target_ids)
         traces.append({'id': trace_id, 'steps': steps, 'intended_edges': target_ids})
+    if profile in ('exhaustive', 'schedule-smoke'):
+        # Selection comes solely from the independent complete model, never SUT
+        # observations. Preserve all alternatives in each scheduled trace.
+        witnessed = set()
+        for trace in traces:
+            trace['base_trace'] = trace['id']
+            trace['schedule'] = 'request-0-first'
+            witnessed.update(scheduled_edges(trace, 'request-0-first'))
+        additions = []
+        for trace in traces:
+            reverse = scheduled_edges(trace, 'request-1-first')
+            if reverse - witnessed:
+                extra = dict(trace, schedule='request-1-first')
+                extra['id'] = hashlib.sha256((trace['id'] + '|request-1-first').encode()).hexdigest()[:16]
+                additions.append(extra)
+                witnessed.update(reverse)
+        traces.extend(additions)
+        graph_edges = {f'{a}|{b}|{c}' for a, b, c, _ in edges}
+        if profile == 'exhaustive' and witnessed != graph_edges:
+            raise ValueError('schedule selection cannot cover the complete graph')
     for node in sorted(used):
         exported[str(node)] = {'model': asdict(states[node]), 'observation': observation(states[node])}
     return {'schema': SCHEMA, 'model_sha256': hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest(),
@@ -145,7 +182,7 @@ def validate_corpus(corpus):
     # selection as well as transitions so forged coverage metadata, state IDs,
     # omitted cases and extra unreachable states cannot pass validation.
     profile = corpus['selection']['profile']
-    if profile not in ('smoke', 'edges'):
+    if profile not in ('smoke', 'edges', 'exhaustive', 'schedule-smoke'):
         raise ValueError('unknown selection profile')
     if json.loads(json.dumps(corpus)) != json.loads(json.dumps(generate(profile))):
         raise ValueError('corpus differs from canonical complete model selection')
@@ -156,7 +193,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--validate', type=Path)
-    parser.add_argument('--profile', choices=('smoke', 'edges'), default='smoke')
+    parser.add_argument('--profile', choices=('smoke', 'edges', 'exhaustive', 'schedule-smoke'), default='smoke')
     parser.add_argument('--max-states', type=int, default=50000)
     args = parser.parse_args()
     try:

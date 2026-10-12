@@ -35,3 +35,26 @@ Each executable analysis declares finite domains, time/request/version/frontier 
 Exhaustive finite graph exploration differs from selected semantic replay and edge replay. Reports distinguish intended edges from actually matched edges. Finite safety results do not establish unbounded refinement, provider durability, liveness or production numeric progress. TP-004 real backend faults and TP-002/005 numeric/settled qualification remain required.
 
 The former paused-apply/ephemeral-CP/leased-tail corpus is superseded for API-007 correspondence. It may run as legacy regression coverage; its green result is not new-contract qualification. Updated models, correspondence and negative controls are required before readiness claims.
+
+## Legacy scheduled regression tooling
+
+The legacy interpreter supports `schedule-smoke` and `exhaustive` profiles.
+Selection is regenerated solely from its independent finite model. Scheduled
+cases retain every oracle alternative and compatible predecessor; first polling
+is a stimulus, and actual backend polls/Pending/completion must demonstrate
+overlap. Per-case observed paths must realize the requested schedule. Reconcile
+case/base/schedule identities and per-step witnesses; require witnessed-edge set
+equality with the independently reconstructed legacy graph for its exhaustive
+profile. Counts or intended targets alone cannot qualify even that legacy model.
+
+The local fixture wrapper accepts `--fixture-parent` on a filesystem with sufficient
+inode and byte headroom. It preflights conservative capacity, uses one private
+root with sibling S3/world directories and child TMPDIR, retains S3 worlds through
+qualification, and verifies owned cleanup. These operational guards do not change
+the oracle or substitute for current API-007 public-path obligations.
+
+Historical source-bound execution, closure indices and reviews are preserved under
+[legacy replay artifacts](../../../../artifacts/formal/legacy-replay/edge-closure-evidence.md).
+Those results apply to their recorded revisions and legacy backend fixture; merging
+the tooling does not qualify the current API-007 implementation. Run new outputs
+into run-owned target/evidence directories, outside active Helix documents.

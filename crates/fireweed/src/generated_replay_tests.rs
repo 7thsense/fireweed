@@ -1,14 +1,16 @@
-//! CONTRACT-007: generated independent predictions against actual S3 × Turso.
+//! Legacy bounded backend regression: independent predictions against S3 × Turso.
+//! This paused-apply/ephemeral-CP fixture does not qualify current API-007 correspondence.
 use super::*;
 use fireweed_core::{OwnerId, WorkerId};
 use fireweed_engine::{
     ControlPlaneConfig, InMemoryControlPlane, OwnedSession, OwnershipOutcome, QueueControlPlane,
     acquire_and_fence,
 };
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
+use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -88,6 +90,17 @@ fn validate_corpus(corpus: &Json) -> Result<(), String> {
     }
     let mut names = HashSet::new();
     for trace in traces {
+        if !trace["schedule"].is_null()
+            && !matches!(
+                trace["schedule"].as_str(),
+                Some("request-0-first" | "request-1-first")
+            )
+        {
+            return Err("unknown claim schedule".into());
+        }
+        if corpus["selection"]["profile"] == "exhaustive" && trace["schedule"].is_null() {
+            return Err("missing exhaustive claim schedule".into());
+        }
         if !names.insert(string(&trace["id"])?) || array(&trace["steps"])?.is_empty() {
             return Err("duplicate trace ID or empty trace".into());
         }
@@ -177,20 +190,45 @@ impl Drop for World {
     }
 }
 
+fn fixture_storage_prefixes(namespace: &str) -> (String, String) {
+    // Canonical suffixes keep storage-generation scans inside this world.
+    (
+        format!("{namespace}/fwlog/"),
+        format!("{namespace}/fwmeta/"),
+    )
+}
+
+#[test]
+fn generated_replay_storage_generation_scan_is_world_scoped() {
+    let (data, meta) = fixture_storage_prefixes("owned-world");
+    assert_eq!(
+        fireweed_objectlog::storage_generation::generation_scan_prefix(&data, &meta),
+        "owned-world/"
+    );
+    assert_eq!(
+        fireweed_objectlog::storage_generation::generation_scan_prefix(
+            "owned-world/log/",
+            "owned-world/meta/"
+        ),
+        ""
+    );
+}
+
 impl World {
     async fn open(
         root: &std::path::Path,
         namespace: &str,
     ) -> Result<DerivedObjectLogTursoBackend, String> {
         let s3 = fireweed_objectlog::shared_s3_test_env();
+        let (data_prefix, meta_prefix) = fixture_storage_prefixes(namespace);
         let log = ObjectLogEngineStore::open_s3_with_prefixes(
             &s3.endpoint,
             &s3.region,
             &s3.bucket,
             &s3.access_key,
             &s3.secret_key,
-            format!("{namespace}/log/"),
-            format!("{namespace}/meta/"),
+            data_prefix,
+            meta_prefix,
             flush_config_from_segment(256 * 1024, 5),
         )
         .await
@@ -307,7 +345,12 @@ impl World {
             "expiry": item.lease_expires_at.seconds, "version":item.item_version, "attempts":item.attempt_count}),
         )
     }
-    async fn execute(&mut self, action: &str, diagnostics: &mut Vec<Json>) -> Result<Json, String> {
+    async fn execute(
+        &mut self,
+        action: &str,
+        schedule: &str,
+        diagnostics: &mut Vec<Json>,
+    ) -> Result<Json, String> {
         let epoch = self.sessions.last().unwrap().fence_epoch;
         if let Some(index) = action
             .strip_prefix("Claim:")
@@ -337,10 +380,28 @@ impl World {
         }
         match action {
             "ConcurrentClaims" => {
-                let (a, b) = tokio::join!(
+                let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let a = tracked_claim(
                     self.backend().claim(self.request(0, epoch, false)),
-                    self.backend().claim(self.request(1, epoch, false))
+                    0,
+                    events.clone(),
                 );
+                let b = tracked_claim(
+                    self.backend().claim(self.request(1, epoch, false)),
+                    1,
+                    events.clone(),
+                );
+                let (a, b) = if schedule == "request-1-first" {
+                    let (b, a) = tokio::join!(biased; b, a);
+                    (a, b)
+                } else {
+                    tokio::join!(biased; a, b)
+                };
+                let events = events.lock().unwrap().clone();
+                diagnostics.push(
+                    json!({"operation":"ConcurrentSchedule","schedule":schedule,"events":events}),
+                );
+                validate_overlap(&events, schedule)?;
                 Ok(json!({"status":"concurrent_claims","responses":[
                     self.normalize_claim(0,a.map_err(|e|e.to_string())?)?,
                     self.normalize_claim(1,b.map_err(|e|e.to_string())?)?]}))
@@ -705,6 +766,118 @@ impl World {
     }
 }
 
+async fn tracked_claim<F>(
+    future: F,
+    request: usize,
+    events: std::sync::Arc<std::sync::Mutex<Vec<Json>>>,
+) -> EngineResult<Claimed>
+where
+    F: std::future::Future<Output = EngineResult<Claimed>>,
+{
+    let mut future = std::pin::pin!(future);
+    let mut first = true;
+    let mut pending = false;
+    std::future::poll_fn(|cx| {
+        if first {
+            events
+                .lock()
+                .unwrap()
+                .push(json!({"request":request,"event":"first_poll"}));
+            first = false;
+        }
+        match future.as_mut().poll(cx) {
+            std::task::Poll::Pending => {
+                if !pending {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(json!({"request":request,"event":"pending"}));
+                    pending = true;
+                }
+                std::task::Poll::Pending
+            }
+            std::task::Poll::Ready(result) => {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(json!({"request":request,"event":"completed"}));
+                std::task::Poll::Ready(result)
+            }
+        }
+    })
+    .await
+}
+
+fn validate_overlap(events: &[Json], schedule: &str) -> Result<(), String> {
+    let first: Vec<_> = events
+        .iter()
+        .filter(|e| e["event"] == "first_poll")
+        .map(|e| e["request"].as_u64())
+        .collect();
+    let expected = if schedule == "request-1-first" {
+        vec![Some(1), Some(0)]
+    } else {
+        vec![Some(0), Some(1)]
+    };
+    let completion = events
+        .iter()
+        .position(|e| e["event"] == "completed")
+        .ok_or("missing claim completion")?;
+    if events.len() != 6
+        || first != expected
+        || events[..completion]
+            .iter()
+            .filter(|e| e["event"] == "first_poll")
+            .count()
+            != 2
+        || (0..2).any(|req| {
+            !events[..completion]
+                .iter()
+                .any(|e| e["request"] == req && e["event"] == "pending")
+                || events
+                    .iter()
+                    .filter(|e| e["request"] == req && e["event"] == "completed")
+                    .count()
+                    != 1
+        })
+    {
+        return Err("claim invocations did not overlap in the declared first-poll order".into());
+    }
+    for request in 0..2 {
+        let poll = events
+            .iter()
+            .position(|e| e["request"] == request && e["event"] == "first_poll")
+            .unwrap();
+        let pending = events
+            .iter()
+            .position(|e| e["request"] == request && e["event"] == "pending")
+            .unwrap();
+        if poll >= pending {
+            return Err("Pending preceded actual backend invocation".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_replay_schedule_rejects_sequential_or_wrong_order_claims() {
+    let good = json!([{"request":1,"event":"first_poll"},{"request":1,"event":"pending"},
+        {"request":0,"event":"first_poll"},{"request":0,"event":"pending"},
+        {"request":1,"event":"completed"},{"request":0,"event":"completed"}]);
+    assert!(validate_overlap(good.as_array().unwrap(), "request-1-first").is_ok());
+    assert!(validate_overlap(good.as_array().unwrap(), "request-0-first").is_err());
+    let sequential = json!([{"request":1,"event":"first_poll"},{"request":1,"event":"pending"},
+        {"request":1,"event":"completed"},{"request":0,"event":"first_poll"},
+        {"request":0,"event":"pending"},{"request":0,"event":"completed"}]);
+    assert!(validate_overlap(sequential.as_array().unwrap(), "request-1-first").is_err());
+    let immediate = json!([{"request":1,"event":"first_poll"},{"request":1,"event":"completed"},
+        {"request":0,"event":"first_poll"},{"request":0,"event":"pending"},{"request":0,"event":"completed"}]);
+    assert!(validate_overlap(immediate.as_array().unwrap(), "request-1-first").is_err());
+    let mut duplicate = good.as_array().unwrap().clone();
+    duplicate.push(json!({"request":1,"event":"completed"}));
+    assert!(validate_overlap(&duplicate, "request-1-first").is_err());
+}
+
 async fn run_trace(
     corpus: &Json,
     trace: &Json,
@@ -725,7 +898,11 @@ async fn run_trace(
         observations.push(json!({"step":index,"action":step["action"],
             "compatible_before":current,"status":"attempted"}));
         let result = match world
-            .execute(string(&step["action"])?, &mut diagnostics)
+            .execute(
+                string(&step["action"])?,
+                trace["schedule"].as_str().unwrap_or("request-0-first"),
+                &mut diagnostics,
+            )
             .await
         {
             Ok(result) => result,
@@ -788,25 +965,51 @@ async fn generated_s3_turso_model_traces_match_every_observation() {
         "corpus_sha256":digest_hex(input.as_bytes()),"model_sha256":corpus["model_sha256"],
         "model_graph":corpus["graph"],"selection":corpus["selection"],"attempted":0,"passed":0,"cases":[],
         "attribution":"real local-S3/Turso; one-process ephemeral CP; graceful reopen; simulated client nonreceipt"});
+    let workers = std::env::var("FIREWEED_REPLAY_WORKERS")
+        .map_or(Ok(1usize), |value| value.parse())
+        .expect("workers must be an integer");
+    assert!((1..=16).contains(&workers), "workers must be in 1..=16");
+    report["workers"] = json!(workers);
+    let progress_path = std::env::var("FIREWEED_REPLAY_PROGRESS").ok();
+    let mut progress =
+        progress_path.map(|path| std::fs::File::create(path).expect("create fresh progress"));
+    let traces = array(&corpus["traces"]).unwrap();
+    let execute = |index: usize| {
+        let corpus = &corpus;
+        let trace = &traces[index];
+        async move {
+            let started = std::time::Instant::now();
+            let mut observations = Vec::new();
+            let result = AssertUnwindSafe(tokio::time::timeout(
+                Duration::from_secs(20),
+                run_trace(corpus, trace, &mut observations),
+            ))
+            .catch_unwind()
+            .await;
+            let result = match result {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("trace execution timed out".into()),
+                Err(panic) => Err(panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or("trace panicked".into())),
+            };
+            (index, observations, result, started.elapsed().as_millis())
+        }
+    };
+    let mut pending = futures::stream::FuturesUnordered::new();
+    let mut next = 0;
+    for _ in 0..workers.min(traces.len()) {
+        pending.push(execute(next));
+        next += 1;
+    }
     let mut matched = BTreeSet::new();
-    for trace in array(&corpus["traces"]).unwrap() {
-        let mut observations = Vec::new();
-        let result = AssertUnwindSafe(tokio::time::timeout(
-            Duration::from_secs(20),
-            run_trace(&corpus, trace, &mut observations),
-        ))
-        .catch_unwind()
-        .await;
+    let mut cases = std::collections::BTreeMap::new();
+    let mut failed = false;
+    while let Some((index, observations, result, elapsed_ms)) = pending.next().await {
+        let trace = &traces[index];
         report["attempted"] = json!(number(&report["attempted"]).unwrap() + 1);
-        let result = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("trace execution timed out".into()),
-            Err(panic) => Err(panic
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                .unwrap_or("trace panicked".into())),
-        };
         let error = match result {
             Ok(edges) => {
                 matched.extend(edges);
@@ -814,24 +1017,44 @@ async fn generated_s3_turso_model_traces_match_every_observation() {
             }
             Err(error) => Some(error),
         };
-        report["cases"].as_array_mut().unwrap().push(
-            json!({"trace":trace["id"],"status":if error.is_some(){"FAIL"}else{"PASS"},
-            "intended_edges":trace["intended_edges"],"steps":observations,"error":error}),
-        );
         if error.is_some() {
+            failed = true;
             report["status"] = json!("FAIL");
-            break;
+        } else {
+            report["passed"] = json!(number(&report["passed"]).unwrap() + 1);
         }
-        report["passed"] = json!(number(&report["passed"]).unwrap() + 1);
+        let status = if error.is_some() { "FAIL" } else { "PASS" };
+        let event = json!({"schema":"fireweed-replay-progress-v1","index":index,"trace":trace["id"],
+            "status":status,"completed":report["attempted"],"passed":report["passed"],
+            "total":traces.len(),"elapsed_ms":elapsed_ms,"matched_edges":matched.len(),
+            "base_trace":trace["base_trace"],"schedule":trace["schedule"]});
+        if let Some(progress) = &mut progress {
+            serde_json::to_writer(&mut *progress, &event).expect("write progress event");
+            writeln!(progress).expect("write progress newline");
+            progress.flush().expect("flush progress");
+        }
+        cases.insert(index,json!({"index":index,"trace":trace["id"],"status":status,
+            "base_trace":trace["base_trace"],"schedule":trace["schedule"],
+            "intended_edges":trace["intended_edges"],"steps":observations,"error":error,"elapsed_ms":elapsed_ms}));
+        // After a failure launch nothing further, but drain already-owned traces.
+        if !failed && next < traces.len() {
+            pending.push(execute(next));
+            next += 1;
+        }
     }
+    report["cases"] = json!(cases.into_values().collect::<Vec<_>>());
+    report["started"] = json!(next);
     report["matched_edges"] = json!(matched);
     report["sut_graph_edge_exhaustive"] =
         json!(matched.len() == number(&corpus["graph"]["edges"]).unwrap() as usize);
     report["all_selected_traces_executed"] =
         json!(number(&report["passed"]).unwrap() == array(&corpus["traces"]).unwrap().len() as u64);
     if let Ok(path) = std::env::var("FIREWEED_REPLAY_EVIDENCE") {
-        std::fs::write(path, serde_json::to_string_pretty(&report).unwrap() + "\n")
-            .expect("write replay evidence");
+        let mut output =
+            std::io::BufWriter::new(std::fs::File::create(path).expect("create replay evidence"));
+        serde_json::to_writer(&mut output, &report).expect("write replay evidence");
+        writeln!(output).expect("write evidence newline");
+        output.flush().expect("flush replay evidence");
     }
     assert_eq!(
         report["status"],

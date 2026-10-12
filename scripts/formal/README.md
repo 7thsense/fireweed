@@ -1,6 +1,10 @@
-# Fireweed bounded formal analysis
+# Fireweed legacy bounded formal regression analysis
 
-Authority: CONTRACT-006 / TP-006 / build-formal-analysis. Run from repository root:
+The current CONTRACT-006/007 and TP-006 require API-007 public-facade correspondence.
+These existing models and the paused-apply/ephemeral-CP backend interpreter are
+legacy regression controls; their results do not qualify the current contract.
+Historical exact-source results are retained in `artifacts/formal/legacy-replay/`.
+Write new runtime evidence outside active Helix documents. Run from repository root:
 
 ```sh
 python3 -m unittest discover -s scripts/formal -p 'test_*.py'
@@ -45,7 +49,7 @@ The service-envelope fixture does not discharge the numeric PRD progress bound.
 
 ## Generated model-to-S3/Turso replay
 
-CONTRACT-007 adds an independent combined model: 6,386 reachable states and
+The legacy interpreter uses an independent combined model: 6,386 reachable states and
 20,913 edges. The smoke selection contains 91 traces targeting 83 semantic edge
 classes plus required compositions. Every selected trace executes against real
 local S3 and Turso; both concurrent serial outcomes remain permitted. Reports
@@ -57,9 +61,9 @@ python3 scripts/formal/generate_replay.py --validate target/replay-corpus.json
 CARGO_INCREMENTAL=0 python3 scripts/formal/with_rustfs.py \
   --binary /absolute/path/to/rustfs --replay-profile smoke \
   --output target/model-replay.json
-# Deeper, potentially lengthy: prefixes intended for every modeled edge.
+# Full corpus: 17,002 prefixes / 127,208 steps, intended for all 20,913 edges.
 CARGO_INCREMENTAL=0 python3 scripts/formal/with_rustfs.py \
-  --binary /absolute/path/to/rustfs --replay-profile edges \
+  --binary /absolute/path/to/rustfs --replay-profile edges --workers 8 \
   --output target/model-replay-edges.json
 ```
 
@@ -70,3 +74,42 @@ transitions and selection metadata. A search cap, changed source, stale corpus,
 zero/ignored cases or missing evidence fails closed. Execution covers one process
 with an ephemeral CP kernel, graceful reopen and simulated client nonreceipt;
 it does not qualify cloud S3 or process-kill recovery.
+
+`--workers` accepts 1–16 (default1); worlds have independent S3/Turso/CP state.
+The `*-progress.jsonl` file records each completed trace and elapsed milliseconds,
+with immediate flush; it is progress rather than final qualification. On failure
+no new traces start and already-running traces drain. The final report reconciles
+all corpus identities and action counts, and records intended/matched/unwitnessed
+edge coverage. Eight-world smoke is qualified before deeper execution. Compact
+reports retain all observations; evidence may be gzip-compressed with original
+and compressed SHA-256 hashes. Concurrent prefixes permit either order, so a full
+corpus pass alone cannot witness both mutually exclusive targeted edges.
+
+For complete **witnessed** bounded graph coverage, use `--replay-profile
+schedule-smoke --workers 8` before `--replay-profile exhaustive --workers 8` with
+`with_rustfs.py`. Exhaustive selects 20,920 cases / 153,819 steps from the complete
+independent model, adding 3,918 reverse polling cases to canonical forward paths.
+Backend polling telemetry must prove overlapping calls, observed paths must realize
+the requested schedules, and actual per-step edge witnesses must set-equal all
+20,913 graph edges. Missing edges or forged aggregate coverage fail closed. Full
+oracle alternatives remain intact; schedule prediction only defines the stimulus
+coverage obligation. This is bounded backend graph coverage, not universal refinement.
+
+
+The isolated RustFS wrapper accepts `--fixture-parent /absolute/disk/path`.
+Complete replay must choose a filesystem with sufficient inode and byte headroom;
+free bytes alone do not establish capacity. Before launching, require conservative
+operational headroom of 64 inodes and 64KiB per selected case plus 8,192 inodes and
+128MiB reserve. This is a fixture capacity guard, not a formal footprint theorem.
+Filesystems reporting no fixed inode total are not rejected merely for reporting
+zero available inodes. Record device identity, parent, unique owned root, sibling
+`s3/` and `worlds/` directories, child TMPDIR, and filesystem statistics before,
+after execution and after confirmed cleanup. Every world's S3 objects remain
+available until final qualification and owned fixture cleanup. The wrapper must
+preserve the oracle, model and per-trace deadline when changing fixture placement.
+
+For example, run the schedule-smoke and exhaustive commands with
+`--fixture-parent /mnt/scratch/Projects/fireweed/target/formal-fixtures` on this host.
+The /tmp tmpfs has a one-million-inode ceiling; accumulating independent worlds can
+exhaust that limit despite many free gigabytes. A resource-failed run with missing
+detailed observations is unqualified and contributes no final edge witnesses.

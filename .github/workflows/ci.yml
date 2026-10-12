@@ -65,10 +65,10 @@ jobs:
         timeout-minutes: 3
         run: echo "FIREWEED_RUSTFS_BIN=$(bash scripts/ci/s3-qualification-endpoint.sh install)" >> "$GITHUB_ENV"
 
-      - name: Generated model-to-S3/Turso replay
+      - name: Legacy model-to-S3/Turso regression replay
         run: |
           python3 scripts/formal/with_rustfs.py \
-            --binary "$FIREWEED_RUSTFS_BIN" --replay-profile smoke \
+            --binary "$FIREWEED_RUSTFS_BIN" --replay-profile schedule-smoke --workers 8 \
             --output target/model-replay.json
 
       - name: Retain generated replay evidence
@@ -80,6 +80,7 @@ jobs:
             target/replay-corpus.json
             target/model-replay*.json
             target/model-replay.log
+            target/model-replay-progress.jsonl
           if-no-files-found: error
 
       - name: Public release validation gate

@@ -1,0 +1,11 @@
+{
+  "cases": 96,
+  "command": "with_rustfs.py --replay-profile schedule-smoke --workers 8",
+  "execution_source_hash_scope": "workflow is separately bound outside399 source hashes",
+  "policy_log_sha256": "aea6a1acae486a2a7599dc0fb9bf068af6c7c2480b6ffca7e6facc56b9afd641",
+  "qualification": "exact local command qualified by disk-smoke; GitHub Actions wiring policy validated; no hosted CI execution claimed",
+  "repository_file": ".github/workflows/ci.yml",
+  "schema": "fireweed-scheduled-ci-wiring-v1",
+  "sha256": "22e9fc59b37d91749f92d7fd150ce0edf108fb52fabbff06829d89a3afc3f34a",
+  "steps": 296
+}
