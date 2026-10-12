@@ -12,6 +12,22 @@ pub(super) async fn load_group(
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,
 ) -> QueueResult<RecordSnapshot> {
+    load_group_with_fields(
+        connection, queue_id, schema, group, sequence, job, charges, false,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn load_group_with_fields(
+    connection: &Connection,
+    queue_id: i64,
+    schema: &QueueSchema,
+    group: &CommitGroup,
+    sequence: u64,
+    job: &Arc<QueueReservation>,
+    charges: &mut Vec<OwnedQueueBufferCharge>,
+    complete_work_fields: bool,
+) -> QueueResult<RecordSnapshot> {
     let names = required_work_fields(group, schema)?;
     let work_keys: BTreeSet<_> = group
         .claimed_updates
@@ -56,7 +72,11 @@ pub(super) async fn load_group(
                     id,
                     &schema.work,
                     payload::PayloadSelection {
-                        fields: Some(&names),
+                        fields: if complete_work_fields {
+                            None
+                        } else {
+                            Some(&names)
+                        },
                         include_body: body_keys.contains(key),
                         max_bytes: u64::MAX,
                     },
@@ -70,9 +90,13 @@ pub(super) async fn load_group(
                     &mut work.record.work.body,
                 )
                 .await?;
-                work.field_coverage = FieldCoverage::Selected {
-                    names: names.clone(),
-                    prefixes: Default::default(),
+                work.field_coverage = if complete_work_fields {
+                    FieldCoverage::Complete
+                } else {
+                    FieldCoverage::Selected {
+                        names: names.clone(),
+                        prefixes: Default::default(),
+                    }
                 };
                 work.body_loaded = body_keys.contains(key);
                 snapshot.versions.insert(identity, work.record.version);

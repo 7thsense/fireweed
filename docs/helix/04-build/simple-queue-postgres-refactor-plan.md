@@ -81,7 +81,11 @@ replay, selective shared-planner insert preparation, owned conditional insert
 publication with original-receipt resolution and covered owned commit-receipt
 lookup, atomic ordinary claim-group commit preparation and owned conditional
 commit publication with fingerprint-bound original-receipt resolution are
-internal primitives. Covered owned state reads share complete payload hydration
+internal primitives. Addressed administrative preparation shares PostgreSQL's
+row proxy, prefix resolution, positional source, scan/finalization and complete
+publication decision. It prepares atomic FWQP2 effects or a zero-effect rejection,
+with immutable FP4 replay; broad native selectors and preview remain required.
+Covered owned state reads share complete payload hydration
 and addressed-state metadata validation with commit planning. Receipt/state
 reads and native indexed queries use one owned completion, admission and
 fresh-coverage orchestrator. Query cursors share the PostgreSQL format; native

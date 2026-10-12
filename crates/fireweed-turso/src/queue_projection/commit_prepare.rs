@@ -23,6 +23,12 @@ pub struct AdmittedCommitReceipt {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedCommitReceipt {
+    pub(super) fn new(receipt: CommitReceipt, charges: Vec<OwnedQueueBufferCharge>) -> Self {
+        Self {
+            receipt,
+            _charges: charges,
+        }
+    }
     pub fn receipt(&self) -> &CommitReceipt {
         &self.receipt
     }

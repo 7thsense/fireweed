@@ -349,6 +349,8 @@ fn propose_target_view(
 }
 
 mod addressed;
+mod hydration;
+pub use hydration::*;
 mod ordinary;
 pub use addressed::*;
 mod stream;

@@ -325,32 +325,8 @@ async fn hydrate_administrative_row<'r>(
         .and_then(|n| n.checked_add(65536))
         .ok_or_else(|| storage("administrative hydration input bound"))?;
     let input_charge = reservation.buffer(input_bytes)?;
-    let mut group = CommitGroup {
-        administration: None,
-        request_id: String::new(),
-        claimed_updates: vec![],
-        state_updates: vec![],
-        work_inserts: vec![],
-        work_updates: vec![UnclaimedUpdate {
-            key: record_key.to_owned(),
-            expect: StateExpect::Version(1),
-            change: match action {
-                fireweed_core::queue_administration::AdministrativeAction::Delete { .. } => {
-                    UnclaimedChange::Delete
-                }
-                fireweed_core::queue_administration::AdministrativeAction::Update {
-                    patch,
-                    lifecycle,
-                    lease_guard,
-                    ..
-                } => UnclaimedChange::Administrative {
-                    patch: patch.clone(),
-                    lifecycle: *lifecycle,
-                    lease_guard: *lease_guard,
-                },
-            },
-        }],
-    };
+    let mut group =
+        fireweed_engine::queue_administration::administrative_hydration_group(record_key, action);
     // Full field authority for ONE server-selected row; opaque bodies are
     // loaded only for an explicit comparison. Selective field hydration is
     // a later performance gate, not a whole-queue/client filtering fallback.
@@ -365,35 +341,16 @@ async fn hydrate_administrative_row<'r>(
     if loaded.snapshot.work.len() != 1 || loaded.snapshot.versions.len() != 1 {
         return Err(storage("native hydration is not one row"));
     }
-    group.work_updates[0].expect =
-        StateExpect::Version(loaded.snapshot.work[record_key].record.version);
-    if let fireweed_core::queue_administration::AdministrativeAction::Update {
-        patch,
-        remove_field_prefixes,
-        ..
-    } = action
-    {
-        let target = &loaded.snapshot.work[record_key];
-        let view = CheckedFields::new(&target.record.work.fields, &target.field_coverage)?;
-        let resolved = fireweed_engine::queue_fields::resolve_edits(
-            &view,
-            &patch.fields,
-            remove_field_prefixes,
-            &queue.schema.work,
-        )?;
-        let UnclaimedChange::Administrative { patch, .. } = &mut group.work_updates[0].change
-        else {
-            unreachable!("update proxy")
-        };
-        patch.fields = match resolved {
-            ResolvedFields::Preserve => Default::default(),
-            ResolvedFields::Edit(edits) => edits,
-            ResolvedFields::Replace(_) => {
-                return Err(storage(
-                    "administrative prefix unexpectedly replaced fields",
-                ));
-            }
-        };
+    fireweed_engine::queue_administration::resolve_administrative_hydration(
+        &mut group,
+        action,
+        &loaded.snapshot,
+        &queue.schema,
+    )?;
+    if matches!(
+        action,
+        fireweed_core::queue_administration::AdministrativeAction::Update { .. }
+    ) {
         // The shared probe planner clones before/after identities across
         // indexes. Admit that transient amplification before generating any
         // tuples; retained owner coverage is charged by the native loader.
@@ -448,47 +405,46 @@ where
     let AdministrativeOperation::Addressed(entries) = &intent.operation else {
         return Err(storage("addressed source lacks addressed intent"));
     };
-    Ok(futures::stream::try_unfold(
-        0usize,
-        move |position| async move {
-            let Some(entry) = entries.get(position) else {
-                return Ok(None);
-            };
-            let loaded = hydrate_administrative_row(
-                tx,
-                queue,
-                &entry.key,
-                &entry.action,
-                intent.evaluated_at,
-                true,
-                reservation,
-            )
-            .await?;
-            let Loaded {
-                snapshot,
-                ids,
-                _charge,
-                _selection_charge,
-                _probe_charges,
-            } = loaded;
-            drop(ids);
-            let mut hydration = _charge;
-            if let Some(charge) = _selection_charge {
-                hydration = hydration.merge(charge)?;
-            }
-            for charge in _probe_charges {
-                hydration = hydration.merge(charge)?;
-            }
-            let input =
+    Ok(
+        fireweed_engine::queue_administration::addressed_administrative_source(
+            entries,
+            move |position, entry| async move {
+                let loaded = hydrate_administrative_row(
+                    tx,
+                    queue,
+                    &entry.key,
+                    &entry.action,
+                    intent.evaluated_at,
+                    true,
+                    reservation,
+                )
+                .await?;
+                let Loaded {
+                    snapshot,
+                    ids,
+                    _charge,
+                    _selection_charge,
+                    _probe_charges,
+                } = loaded;
+                drop(ids);
+                let mut hydration = _charge;
+                if let Some(charge) = _selection_charge {
+                    hydration = hydration.merge(charge)?;
+                }
+                for charge in _probe_charges {
+                    hydration = hydration.merge(charge)?;
+                }
+                let input =
                 fireweed_engine::queue_administration::AddressedAdministrativeInput::OwnedOneRow {
                     position,
                     key: entry.key.clone(),
                     image: snapshot,
                     hydration,
                 };
-            Ok(Some((input, position + 1)))
-        },
-    ))
+                Ok(input)
+            },
+        ),
+    )
 }
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
