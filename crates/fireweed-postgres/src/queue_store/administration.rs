@@ -698,11 +698,7 @@ struct NativeProvisionalGroup {
     max_result_bytes: u64,
     max_publication_bytes: u64,
 }
-#[derive(Debug, PartialEq, Eq)]
-enum NativePublicationDecision {
-    Fits { bytes: u64, commands: u64 },
-    TooLarge,
-}
+use fireweed_engine::queue_publication::AdministrativePublicationDecision as NativePublicationDecision;
 impl NativeProvisionalGroup {
     fn assess_publication_limit(
         &self,
@@ -719,72 +715,27 @@ impl NativeProvisionalGroup {
             queue.next_sequence,
             reservation,
         )?;
-        if group.administrative_fingerprint(address, intent, self.max_result_bytes)?
-            != self.request_fingerprint
-        {
-            return Err(storage(
-                "publication decision belongs to a different request",
-            ));
-        }
-        let floor = measure_administrative_success_floor(address, queue.definition_pin, group)
-            .map_err(|_| storage("publication floor measurement failed"))?;
-        if self.scratch.command_limit() != self.max_publication_bytes.saturating_sub(floor) {
-            return Err(storage("publication command allowance context mismatch"));
-        }
-        let ordinary =
-            measure_resolved_commands(self.ordinary.initial_authority(), self.ordinary.delta())
-                .map_err(|_| storage("ordinary command measurement failed"))?;
-        if matches!(
-            self.assess_result_limit(group, self.max_result_bytes)?,
-            AdministrativeResultLimit::TooLarge
-        ) || self.scratch.publication_overflowed()
-        {
-            return Ok(NativePublicationDecision::TooLarge);
-        }
-        let GroupOutcome::Committed { versions } = &self.ordinary.delta().receipt.outcome else {
-            return Err(storage("provisional ordinary result is not committed"));
-        };
-        let administration = self
-            .summary
-            .result()
-            .ok_or_else(|| storage("complete publication lacks complete result"))?;
-        let outcome = AdministrativeReceiptOutcome::Committed {
-            versions,
-            administration,
-        };
-        let receipt = AdministrativePublicationReceipt::new(
-            address,
-            group,
-            intent,
-            self.max_result_bytes,
-            &outcome,
-            reservation,
-        )
-        .map_err(|_| storage("publication receipt binding failed"))?;
-        let command_bytes = self
-            .scratch
-            .command_bytes()
-            .checked_add(ordinary.bytes)
-            .ok_or_else(|| storage("publication command bytes overflow"))?;
-        let commands = self
-            .scratch
-            .command_count()
-            .checked_add(ordinary.count)
-            .ok_or_else(|| storage("publication command count overflow"))?;
-        let bytes = measure_administrative_publication(
+        assess_administrative_publication(
             address,
             queue.definition_pin,
-            command_bytes,
-            &receipt,
+            group,
+            intent,
+            &self.ordinary,
+            &self.summary,
+            AdministrativeCommandMeasurement {
+                command_limit: self.scratch.command_limit(),
+                command_bytes: self.scratch.command_bytes(),
+                command_count: self.scratch.command_count(),
+                overflowed: self.scratch.publication_overflowed(),
+            },
+            self.request_fingerprint,
+            self.max_result_bytes,
+            self.max_publication_bytes,
+            reservation,
         )
-        .map_err(|_| storage("complete publication measurement failed"))?;
-        Ok(if bytes > self.max_publication_bytes {
-            NativePublicationDecision::TooLarge
-        } else {
-            NativePublicationDecision::Fits { bytes, commands }
-        })
     }
 
+    #[cfg(test)]
     fn assess_result_limit(
         &self,
         group: &CommitGroup,

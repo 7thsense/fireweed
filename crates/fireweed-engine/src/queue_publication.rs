@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 mod insert_binding;
 pub use insert_binding::validate_insert_receipt;
+mod administrative_decision;
+pub use administrative_decision::*;
 mod administrative_frame;
 mod administrative_receipt;
 pub use administrative_frame::*;
