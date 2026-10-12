@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct NativeQueueSnapshot {
     pub definition: AdmittedQueueDefinition,
     pub queue_id: i64,
+    pub cursor_secret: [u8; 32],
     pub next_offset: u64,
     pub insertion_sequence: u64,
     pub last_record_epoch: u64,
@@ -76,6 +77,7 @@ pub(super) async fn read_snapshot(
     Ok(Some(NativeQueueSnapshot {
         definition,
         queue_id: integer(&row[0])?,
+        cursor_secret: *genesis.cursor_secret(),
         next_offset,
         insertion_sequence: unsigned(&row[2])?,
         last_record_epoch,

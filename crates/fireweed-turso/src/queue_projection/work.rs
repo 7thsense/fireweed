@@ -57,6 +57,12 @@ pub(super) async fn load_work_authority(
         _ => Some(bytes(&row[9])?.try_into().map_err(unknown)?),
     };
 
+    fireweed_engine::queue_claim::ClaimOwnership {
+        lifecycle,
+        expires_at: expiry,
+        token_hash: hash,
+    }
+    .validate_metadata()?;
     let insertion_sequence = unsigned(&row[10])?;
     if insertion_sequence == 0 || insertion_sequence > insertion_head {
         return Err(unknown("invalid current work metadata"));

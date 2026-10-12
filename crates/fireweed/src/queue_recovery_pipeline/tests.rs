@@ -1778,6 +1778,73 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
         .await
         .unwrap()
         .unwrap();
+    // Indexed queries share the same fresh-cut completion protocol and must
+    // discard a decoded old workflow value after an atomic transition.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_query_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let query_request = QueryRequest {
+        queue: address(),
+        source: RecordSource::State("workflow".into()),
+        index: "$key".into(),
+        filter: Filter::default(),
+        descending: false,
+        cursor: None,
+        max_records: 1,
+        max_bytes: 65536,
+    };
+    let query = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = query_request.clone();
+        let clock = clock.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .query(request, QueueLimits::default(), clock, job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let update = CommitGroup {
+        request_id: "workflow-query-advance".into(),
+        claimed_updates: vec![],
+        state_updates: vec![StateUpdate {
+            collection: "workflow".into(),
+            key: "run".into(),
+            expect: StateExpect::Version(2),
+            change: StateChange::Put {
+                fields: Default::default(),
+                value: vec![11].into(),
+            },
+        }],
+        work_inserts: vec![],
+        work_updates: vec![],
+        administration: None,
+    };
+    drop(
+        pipeline
+            .commit(
+                address(),
+                update,
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    release.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), query)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&response.page().records[..],[QueryRecord::State(state)] if state.version==3&&state.value.as_ref()==[11])
+    );
+    drop(response);
     // Rebuild into a fresh derived projection through original genesis/history.
     let rebuilt = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
         .await
@@ -1789,8 +1856,8 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
         .read_state(state_request, QueueLimits::default(), job.clone())
         .await
         .unwrap();
-    assert_eq!(state.records()[0].as_ref().unwrap().value.as_ref(), [9, 10]);
-    assert_eq!(state.records()[0].as_ref().unwrap().version, 2);
+    assert_eq!(state.records()[0].as_ref().unwrap().value.as_ref(), [11]);
+    assert_eq!(state.records()[0].as_ref().unwrap().version, 3);
     drop(state);
     let result = rebuilt
         .commit(address(), group, QueueLimits::default(), clock, job.clone())

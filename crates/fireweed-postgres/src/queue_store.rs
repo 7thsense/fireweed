@@ -5,6 +5,9 @@ use fireweed_engine::queue_body::ResolvedBody;
 use fireweed_engine::queue_claim::{
     ClaimContext, ClaimOwnership, ClaimResponseBudget, checked_lease_hash, claim_expiry, plan_claim,
 };
+#[cfg(test)]
+use fireweed_engine::queue_cursor::cursor_mac as mac;
+use fireweed_engine::queue_cursor::{QueryCursor as Cursor, make_cursor, read_cursor};
 use fireweed_engine::queue_fields::{CheckedFields, FieldEdits, IndexEffect, ResolvedFields};
 use fireweed_engine::queue_memory::*;
 use fireweed_engine::queue_schema_codec::{
@@ -2331,45 +2334,6 @@ async fn payload_budget(
     } else {
         Ok(())
     }
-}
-#[derive(Serialize, Deserialize)]
-struct Cursor {
-    scope: [u8; 32],
-    sort: Vec<u8>,
-    key: Vec<u8>,
-}
-fn mac(secret: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut key = [0u8; 64];
-    if secret.len() > 64 {
-        key[..32].copy_from_slice(&Sha256::digest(secret));
-    } else {
-        key[..secret.len()].copy_from_slice(secret);
-    }
-    let mut inner = Sha256::new();
-    inner.update(key.map(|b| b ^ 0x36));
-    inner.update(message);
-    let digest = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(key.map(|b| b ^ 0x5c));
-    outer.update(digest);
-    outer.finalize().into()
-}
-fn make_cursor(cursor: Cursor, secret: &[u8]) -> QueueResult<Vec<u8>> {
-    let bytes = encode(&(1u8, cursor))?;
-    encode(&(mac(secret, &bytes), bytes))
-}
-fn read_cursor(raw: &[u8], secret: &[u8], scope: [u8; 32]) -> QueueResult<Cursor> {
-    let invalid = || QueueError::Invalid("invalid or mismatched query cursor".into());
-    let (tag, bytes): ([u8; 32], Vec<u8>) = decode(raw).map_err(|_| invalid())?;
-    let expected = mac(secret, &bytes);
-    if tag.iter().zip(expected).fold(0u8, |d, (a, b)| d | (a ^ b)) != 0 {
-        return Err(invalid());
-    }
-    let (version, cursor): (u8, Cursor) = decode(&bytes).map_err(|_| invalid())?;
-    if version != 1 || cursor.scope != scope {
-        return Err(invalid());
-    }
-    Ok(cursor)
 }
 
 struct FieldSelection {

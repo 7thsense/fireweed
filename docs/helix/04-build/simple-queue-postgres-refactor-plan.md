@@ -83,7 +83,10 @@ lookup, atomic ordinary claim-group commit preparation and owned conditional
 commit publication with fingerprint-bound original-receipt resolution are
 internal primitives. Covered owned state reads share complete payload hydration
 and addressed-state metadata validation with commit planning. Receipt/state
-reads use one owned completion, admission and fresh-coverage orchestrator.
+reads and native indexed queries use one owned completion, admission and
+fresh-coverage orchestrator. Query cursors share the PostgreSQL format; native
+filters share bounded SQL construction with claims. Scan/sort cost still requires
+the settled density and performance qualification below.
 Claim completion validates fresh current ownership and a subsequent authoritative
 head cut; provisional tokens cannot become a response. These local checks are
 not a public S3/Turso qualification. The full constructor/QueueStore, remaining

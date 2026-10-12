@@ -50,6 +50,7 @@ pub mod queue_claim;
 pub mod queue_claim_publication;
 pub mod queue_claim_receipt;
 pub mod queue_contract;
+pub mod queue_cursor;
 pub mod queue_fields;
 pub mod queue_index;
 pub mod queue_log_record;

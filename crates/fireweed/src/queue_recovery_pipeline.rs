@@ -5,6 +5,7 @@ mod claim;
 mod commit;
 mod insert;
 mod publication;
+mod query;
 mod read;
 mod receipts;
 mod state;
@@ -46,6 +47,8 @@ pub struct QueueRecoveryPipeline {
     after_receipt_read: StagePause,
     #[cfg(test)]
     after_state_read: StagePause,
+    #[cfg(test)]
+    after_query_read: StagePause,
     #[cfg(test)]
     before_commit_append: StagePause,
     #[cfg(test)]
@@ -103,6 +106,8 @@ impl QueueRecoveryPipeline {
             after_receipt_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_state_read: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_query_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             before_commit_append: std::sync::Mutex::new(None),
             #[cfg(test)]

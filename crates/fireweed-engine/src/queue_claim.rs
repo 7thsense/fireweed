@@ -74,11 +74,16 @@ pub struct ClaimOwnership {
     pub token_hash: Option<[u8; 32]>,
 }
 impl ClaimOwnership {
-    pub fn validate(&self, token: &[u8], now: i64) -> QueueResult<()> {
+    pub fn validate_metadata(&self) -> QueueResult<()> {
         let leased = self.lifecycle == Lifecycle::Leased;
         if leased != self.expires_at.is_some() || leased != self.token_hash.is_some() {
             return Err(authority("inconsistent raw replay lease"));
         }
+        Ok(())
+    }
+    pub fn validate(&self, token: &[u8], now: i64) -> QueueResult<()> {
+        self.validate_metadata()?;
+        let leased = self.lifecycle == Lifecycle::Leased;
         if !leased
             || self.expires_at.is_none_or(|expiry| expiry <= now)
             || self.token_hash != Some(lease_hash(token))

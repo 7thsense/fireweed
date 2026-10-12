@@ -1,12 +1,14 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
 mod commit_prepare;
+mod filter_sql;
 mod group_authority;
 mod insert_prepare;
 mod insert_replay;
 mod payload;
 mod preparation;
 mod prepare;
+mod query_read;
 mod receipt_metadata;
 mod receipts;
 mod replay;
@@ -39,6 +41,7 @@ use fireweed_queue_spool::ScratchWorkers;
 pub use insert_prepare::PreparedInsert;
 pub use insert_replay::{AdmittedInsertReplay, InsertReplayInput};
 pub use prepare::PreparedClaim;
+pub use query_read::{AdmittedQueryPage, QueryReadInput};
 pub use receipts::{AdmittedCommitReceipts, ReceiptReadInput};
 pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 pub use selection::AdmittedClaimSelection;
