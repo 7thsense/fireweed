@@ -836,6 +836,7 @@ pub(super) async fn run_administrative_group(
     reservation: &Arc<QueueReservation>,
     workers: &fireweed_queue_spool::ScratchWorkers,
     quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
+    directory: &std::path::Path,
     apply: bool,
 ) -> QueueResult<AdmittedAdministrativeReceipt> {
     use fireweed_engine::queue_publication::{
@@ -845,7 +846,6 @@ pub(super) async fn run_administrative_group(
         .administration
         .as_ref()
         .ok_or_else(|| storage("administrative job lacks its proposal"))?;
-    let directory = std::env::temp_dir();
     let prepared = prepare_native_scratch_bounded(
         tx,
         address,
@@ -857,7 +857,7 @@ pub(super) async fn run_administrative_group(
         limits.max_group_bytes,
         reservation,
         workers,
-        &directory,
+        directory,
         Arc::clone(&quota),
     )
     .await?;
@@ -870,7 +870,7 @@ pub(super) async fn run_administrative_group(
         || timestamp_nanos(clock.now()),
         reservation,
         workers,
-        &directory,
+        directory,
         quota,
     )
     .await?;

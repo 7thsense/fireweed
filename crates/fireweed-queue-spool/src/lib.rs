@@ -897,3 +897,6 @@ pub use finalization::{
     AdministrativeOrdinaryAuthority, FinalizedAdministrativeSemantics,
     finalize_administrative_semantics,
 };
+
+mod root;
+pub use root::ScratchRoot;

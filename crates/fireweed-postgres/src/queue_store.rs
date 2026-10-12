@@ -118,6 +118,7 @@ struct Inner {
     limits: QueueLimits,
     scratch_workers: fireweed_queue_spool::ScratchWorkers,
     scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
+    scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
 }
 /// Uses real SQL transactions and indexed selection, not the old blocking
 /// PostgreSQL adapter or an in-memory projection. The concrete consumer facade
@@ -161,14 +162,20 @@ impl PostgresQueueStore {
         let config: tokio_postgres::Config = url
             .parse()
             .map_err(|_| QueueError::Invalid("invalid PostgreSQL URL".into()))?;
+        let (operations, retained_bytes, scratch_bytes, workers) = (
+            runtime.operations(),
+            runtime.retained_bytes(),
+            runtime.scratch_bytes(),
+            runtime.scratch_workers(),
+        );
+        let scratch_path = runtime.resolve_scratch_root(std::env::temp_dir)?;
         // Every fallible resource/configuration check precedes TLS, DNS, socket
         // creation and schema DDL. No late arithmetic can fail after publication.
-        let admission = QueueAdmission::new(runtime.operations(), runtime.retained_bytes())?;
-        let scratch_quota = fireweed_queue_spool::ScratchDiskQuota::new(runtime.scratch_bytes())?;
-        let scratch_workers = fireweed_queue_spool::ScratchWorkers::new(
-            runtime.scratch_workers(),
-            runtime.operations(),
-        )?;
+        let admission = QueueAdmission::new(operations, retained_bytes)?;
+        let scratch_quota = fireweed_queue_spool::ScratchDiskQuota::new(scratch_bytes)?;
+        let scratch_workers = fireweed_queue_spool::ScratchWorkers::new(workers, operations)?;
+        let scratch_root =
+            fireweed_queue_spool::ScratchRoot::open(scratch_path, &scratch_workers).await?;
         let mut clients = vec![];
         let mut drivers = vec![];
         for connection_index in 0..pool_size {
@@ -245,6 +252,7 @@ impl PostgresQueueStore {
                 limits,
                 scratch_workers,
                 scratch_quota,
+                scratch_root,
             }),
         })
     }
@@ -1695,6 +1703,7 @@ impl QueueStore for PostgresQueueStore {
             let clock = Arc::clone(&self.inner.clock);
             let workers = self.inner.scratch_workers.clone();
             let quota = Arc::clone(&self.inner.scratch_quota);
+            let scratch_root = Arc::clone(&self.inner.scratch_root);
             let incoming_headers = incoming_headers(&request)?;
             let charge = encoded_len(&request)?
                 .checked_mul(4)
@@ -1764,6 +1773,7 @@ impl QueueStore for PostgresQueueStore {
                                 &reservation,
                                 &workers,
                                 Arc::clone(&quota),
+                                scratch_root.path(),
                                 true,
                             )
                             .await?;
@@ -1822,6 +1832,7 @@ impl QueueStore for PostgresQueueStore {
             let clock = Arc::clone(&self.inner.clock);
             let workers = self.inner.scratch_workers.clone();
             let quota = Arc::clone(&self.inner.scratch_quota);
+            let scratch_root = Arc::clone(&self.inner.scratch_root);
             let charge = encoded_len(&request)?
                 .checked_mul(4)
                 .and_then(|n| n.checked_add(limits.max_response_bytes))
@@ -1846,6 +1857,7 @@ impl QueueStore for PostgresQueueStore {
                             &reservation,
                             &workers,
                             quota,
+                            scratch_root.path(),
                             false,
                         )
                         .await?;
@@ -2412,6 +2424,38 @@ async fn physical_fixture() -> tokio::sync::OwnedMutexGuard<()> {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn invalid_scratch_configuration_precedes_postgres_network_access() {
+        let parent = tempfile::tempdir().unwrap();
+        let file = parent.path().join("private-host-file");
+        std::fs::write(&file, b"keep").unwrap();
+        for (path, expected) in [
+            (
+                std::path::PathBuf::from("relative"),
+                "scratch root must be absolute",
+            ),
+            (file.clone(), "scratch root cannot be created"),
+        ] {
+            let result = PostgresQueueStore::connect_with_runtime(
+                "postgresql://127.0.0.1:1/postgres",
+                Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+                QueueLimits::default(),
+                1,
+                fireweed_core::queue_runtime::QueueRuntimeOptions {
+                    scratch_root: Some(path),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(QueueError::Invalid(message)) if message == expected),
+                "unexpected construction error: {:?}",
+                result.err()
+            );
+        }
+        assert_eq!(std::fs::read(file).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority() {
         let _fixture = physical_fixture().await;
@@ -2777,14 +2821,29 @@ mod tests {
         }
         let _reset = Reset;
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
-        let store = PostgresQueueStore::connect(
+        let scratch = tempfile::tempdir().unwrap();
+        let sentinel = scratch.path().join("host-owned");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        let store = PostgresQueueStore::connect_with_runtime(
             &url,
             Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
             QueueLimits::default(),
             1,
+            fireweed_core::queue_runtime::QueueRuntimeOptions {
+                scratch_root: Some(scratch.path().to_path_buf()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+        assert_eq!(
+            store.inner.scratch_root.path(),
+            std::fs::canonicalize(scratch.path()).unwrap()
+        );
+        assert!(Arc::ptr_eq(
+            &store.inner.scratch_root,
+            &store.clone().inner.scratch_root
+        ));
         let address = QueueAddress {
             tenant: "public-admin-atomic".into(),
             queue: std::time::SystemTime::now()
@@ -2881,13 +2940,51 @@ mod tests {
             (row.get::<_, i64>(0), row.get::<_, bool>(1))
         };
         let before = sequence().await;
-        let preview = store
-            .preview(PreviewRequest {
-                queue: address.clone(),
-                group: transition.clone(),
-            })
+        let pause = Arc::new(UniqueAuthorityPause {
+            request_id: String::new(),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *unique_authority_pause().lock().unwrap() = Some(pause.clone());
+        let preview_task = tokio::spawn({
+            let store = store.clone();
+            let queue = address.clone();
+            let group = transition.clone();
+            async move { store.preview(PreviewRequest { queue, group }).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
             .await
             .unwrap();
+        // Scratch files are anonymous: directory entries cannot prove placement.
+        #[cfg(target_os = "linux")]
+        {
+            let canonical = std::fs::canonicalize(scratch.path()).unwrap();
+            let opened_here = std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|path| path.starts_with(&canonical))
+                .count();
+            assert!(
+                opened_here >= 6,
+                "administrative spool must use configured root"
+            );
+        }
+        pause.release.notify_one();
+        let preview = preview_task.await.unwrap().unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|path| path.starts_with(store.inner.scratch_root.path()))
+                .count(),
+            0,
+            "completed preview must close anonymous scratch files"
+        );
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
         assert!(matches!(
             preview.outcome,
             PreviewOutcome::AdministrativeCommitted { .. }
@@ -4114,6 +4211,7 @@ mod tests {
             fireweed_core::queue_runtime::QueueRuntimeOptions {
                 operations: 1,
                 scratch_workers: Some(1),
+                scratch_root: None,
                 ..Default::default()
             },
         )

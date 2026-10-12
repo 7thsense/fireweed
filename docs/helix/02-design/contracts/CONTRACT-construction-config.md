@@ -11,7 +11,7 @@ ddx:
       to: api-queue-claim-commit-contract
 ---
 
-This is the target design and its acceptance contract. The public PostgreSQL path validates interface limits, pool size, checked admission/scratch multipliers and the required parsed URL before connection or DDL; configuration and connection-setup errors redact credentials. Typed custom operation, retained-byte, scratch-byte and scratch-worker capacities reach PostgreSQL admission and scratch execution. S3/Turso assembly and the single Snorri adapter cutover remain pending. Existing code is not qualified merely by this specification.
+This is the target design and its acceptance contract. The public PostgreSQL path validates interface limits, pool size, checked admission/scratch multipliers and the required parsed URL before connection or DDL; configuration and connection-setup errors redact credentials. Typed custom operation, retained-byte, scratch-byte and scratch-worker capacities reach PostgreSQL admission and scratch execution; its typed scratch root is resolved and probed once before backing-service access. S3/Turso assembly and the single Snorri adapter cutover remain pending. Existing code is not qualified merely by this specification.
 
 
 # Queue construction and configuration
@@ -38,7 +38,7 @@ and database sessions MUST NOT become consumer workflow state or operation DTOs.
 | PostgreSQL URL | Host secret; required | Nonempty; all displays redact credentials; connection failures do not expose it |
 | PostgreSQL pool size | Host; 2 | Integer 1..32; no connection before validation |
 | S3 endpoint/bucket/region/credential provider | Host; required qualified backing service | Validate endpoint/bucket/credential-source shape without exposing secrets; endpoint qualification remains explicit |
-| Projection and scratch roots | Host; explicit local paths for S3/Turso | Validate writable/layout ownership during construction; raw tenant/queue names never form unsafe path components |
+| Projection and scratch roots | Host; explicit local paths for S3/Turso; PostgreSQL typed `scratch_root`, with `None` resolving the OS temporary directory once | Require absolute resolved paths and validate writable/layout ownership during construction before backing-service access; clones share the canonical immutable root and operations never reread process configuration; raw tenant/queue names never form unsafe path components |
 | Queue limits | Shared defaults below | Checked arithmetic, positive counts/bytes and consistent nesting; same settings on both adapters |
 | Operational clock | Host; production system clock, test clock explicitly injected | Fresh sampling at claim/commit authority linearization; operator evaluated_at is a separate classification input |
 | Admission | Shared runtime; QueueRuntimeOptions; 64 operations and 8×request-byte retained budget by default | Checked multiplication before I/O; all clones share capacity; ownership survives caller cancellation |

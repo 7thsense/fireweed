@@ -217,6 +217,7 @@ async fn explicit_retained_capacity_is_enforced_through_public_clones() {
         retained_bytes: Some(1),
         scratch_bytes: Some(1),
         scratch_workers: Some(1),
+        scratch_root: None,
     };
     let queue = Queue::postgres(options, Arc::new(TestClock::default()))
         .await

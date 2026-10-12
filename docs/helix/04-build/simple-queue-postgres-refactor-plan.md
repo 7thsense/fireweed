@@ -88,7 +88,9 @@ with immutable FP4 replay. Ordinary and addressed preview share guarded result
 ownership, bypass execution receipts and use covered-read freshness without
 publication. Ordinary commit/preview sample the operational clock after
 prospective unique authority on both native paths. Broad native selectors remain
-required.
+required. PostgreSQL resolves and probes its typed scratch root once before network
+access; cloned handles share that immutable root and administration never rereads
+process temporary-directory configuration.
 Covered owned state reads share complete payload hydration
 and addressed-state metadata validation with commit planning. Receipt/state
 reads and native indexed queries use one owned completion, admission and
