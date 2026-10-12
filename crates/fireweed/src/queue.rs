@@ -6,6 +6,10 @@
 pub use crate::{Bytes, Clock, ConfigSecret, SystemClock, UtcTimestamp};
 pub use fireweed_core::queue_administration::*;
 pub use fireweed_core::queue_contract::*;
+pub use fireweed_core::queue_json::{
+    JsonEqualityEncoding, JsonNumberEquality, current_json_equality_encoding,
+    encode_json_equality_for, json_attribute_name,
+};
 pub use fireweed_core::queue_runtime::QueueRuntimeOptions;
 use fireweed_engine::queue_contract::QueueStore;
 use std::{fmt, sync::Arc};
@@ -86,5 +90,39 @@ impl Queue {
         Ok(Self {
             store: Arc::new(store),
         })
+    }
+}
+
+#[cfg(test)]
+mod equality_facade_tests {
+    #[test]
+    fn consumer_equality_codec_pins_namespace_and_rejects_drift() {
+        use crate::queue::{
+            JsonEqualityEncoding, JsonNumberEquality, QueueError, current_json_equality_encoding,
+            encode_json_equality_for, json_attribute_name,
+        };
+        let pin: JsonEqualityEncoding = current_json_equality_encoding();
+        assert!(matches!(
+            pin.numbers,
+            JsonNumberEquality::NumericVariants | JsonNumberEquality::LiteralRepresentations
+        ));
+        assert_eq!(
+            json_attribute_name("snorri.state", "a/b~c"),
+            "snorri.state/a~1b~0c"
+        );
+        let left = serde_json::json!({"a/b~c": [null, {"雪": true}], "n": 1});
+        let right = serde_json::json!({"n": 1, "a/b~c": [null, {"雪": true}]});
+        assert_eq!(
+            encode_json_equality_for(&left, pin, 4096).unwrap(),
+            encode_json_equality_for(&right, pin, 4096).unwrap()
+        );
+        let wrong = JsonEqualityEncoding {
+            version: pin.version + 1,
+            ..pin
+        };
+        assert!(matches!(
+            encode_json_equality_for(&left, wrong, 4096),
+            Err(QueueError::Invalid(_))
+        ));
     }
 }

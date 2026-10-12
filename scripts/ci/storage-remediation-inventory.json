@@ -16731,6 +16731,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue::equality_facade_tests::consumer_equality_codec_pins_namespace_and_rejects_drift",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue::equality_facade_tests::consumer_equality_codec_pins_namespace_and_rejects_drift",
+        "target": "fireweed",
+        "test_id": "queue::equality_facade_tests::consumer_equality_codec_pins_namespace_and_rejects_drift"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::store::tests::abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership",
           "--",
           "--exact"
@@ -83146,6 +83166,34 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue::equality_facade_tests::consumer_equality_codec_pins_namespace_and_rejects_drift",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue::equality_facade_tests::consumer_equality_codec_pins_namespace_and_rejects_drift",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue::equality_facade_tests::consumer_equality_codec_pins_namespace_and_rejects_drift",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::store::tests::abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership",
         "--",
         "--exact"
@@ -92974,7 +93022,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "296088d4c8ed955fc9d270be690ce56ffdb557f77a67df58a6779afabef89caa",
+  "source_inventory_sha256": "7a6a9b5e7f6158b0bafd15bbbf2d2b16c53364bc5ec6dd844c5a0177ff3d8cda",
   "workspaces": [
     {
       "listing_error_sha256": "",
