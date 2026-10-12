@@ -85,7 +85,9 @@ internal primitives. Covered owned state reads share complete payload hydration
 and addressed-state metadata validation with commit planning. Receipt/state
 reads and native indexed queries use one owned completion, admission and
 fresh-coverage orchestrator. Query cursors share the PostgreSQL format; native
-filters share bounded SQL construction with claims. Scan/sort cost still requires
+filters share bounded SQL construction with claims. Native stats aggregate totals,
+ordered numeric bins and bounded representative grouping values in one covered
+snapshot, with shared typed field hydration and raw-authority checks. Scan/sort cost still requires
 the settled density and performance qualification below.
 Claim completion validates fresh current ownership and a subsequent authoritative
 head cut; provisional tokens cannot become a response. These local checks are

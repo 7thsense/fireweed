@@ -9,6 +9,7 @@ mod query;
 mod read;
 mod receipts;
 mod state;
+mod stats;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::{QueueLogFormat, encode_checked_genesis},
@@ -49,6 +50,8 @@ pub struct QueueRecoveryPipeline {
     after_state_read: StagePause,
     #[cfg(test)]
     after_query_read: StagePause,
+    #[cfg(test)]
+    after_stats_read: StagePause,
     #[cfg(test)]
     before_commit_append: StagePause,
     #[cfg(test)]
@@ -108,6 +111,8 @@ impl QueueRecoveryPipeline {
             after_state_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_query_read: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_stats_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             before_commit_append: std::sync::Mutex::new(None),
             #[cfg(test)]

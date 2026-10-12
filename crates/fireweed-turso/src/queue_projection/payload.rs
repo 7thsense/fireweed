@@ -109,67 +109,17 @@ pub(super) async fn load_payload(
         if fields.contains_key(name.as_ref()) {
             return Err(unknown("duplicate native field"));
         }
-        let no = field_number(definition, &name)?;
-        let (metadata_sql, value_sql, params) = if no >= 0 {
-            (
-                "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_fields WHERE record_id=?1 AND field=?2",
-                "SELECT value FROM q7_fields WHERE record_id=?1 AND field=?2",
-                vec![Value::Integer(id), Value::Integer(i64::from(no))],
-            )
-        } else {
-            (
-                "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
-                "SELECT value FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
-                vec![
-                    Value::Integer(id),
-                    blob(&discovery_digest(name.as_bytes())),
-                    blob(name.as_bytes()),
-                ],
-            )
-        };
-        if let Some(metadata) = one(connection, metadata_sql, params.clone(), 1).await? {
-            add_payload(
-                budget.total,
-                integer(&metadata[0])?,
-                selection.max_bytes,
-                budget.response_limit,
-            )?;
-            if !counted_name {
-                add_payload(
-                    budget.total,
-                    i64::try_from(name.len()).map_err(unknown)?,
-                    selection.max_bytes,
-                    budget.response_limit,
-                )?;
-            }
-            budget.charges.push(
-                budget.job.owned_buffer(
-                    (name.len() as u64)
-                        .checked_mul(4)
-                        .and_then(|n| n.checked_add(256))
-                        .ok_or(QueueError::TooLarge)?,
-                )?,
-            );
-            let raw_length = u64::try_from(integer(&metadata[0])?).map_err(unknown)?;
-            budget.charges.push(
-                budget.job.owned_buffer(
-                    raw_length
-                        .checked_mul(4)
-                        .and_then(|n| n.checked_add(4096))
-                        .ok_or(QueueError::TooLarge)?,
-                )?,
-            );
-            let value = one(connection, value_sql, params, 1)
-                .await?
-                .ok_or_else(|| unknown("field disappeared"))?;
-            let raw = bytes(&value[0])?;
-            if raw.len() as i64 != integer(&metadata[0])? {
-                return Err(unknown("field length changed"));
-            }
-            let value: FieldValue = decode(raw)?;
-            definition
-                .validate_value(&name, &value)
-                .map_err(|error| unknown(format!("{error:?}")))?;
+        if let Some(value) = load_field_value(
+            connection,
+            id,
+            definition,
+            &name,
+            selection.max_bytes,
+            Some(if counted_name { 0 } else { name.len() as u64 }),
+            budget,
+        )
+        .await?
+        {
             fields.insert(name.into_owned(), value);
         }
     }
@@ -203,4 +153,83 @@ pub(super) async fn load_payload(
         *body = bytes::Bytes::copy_from_slice(bytes(&raw_body[0])?);
     }
     Ok(())
+}
+
+/// The same metadata-first typed cell decoder serves complete record hydration
+/// and value-only stats output. None means the caller never owns field names.
+pub(super) async fn load_field_value(
+    connection: &Connection,
+    id: i64,
+    definition: &CollectionDefinition,
+    name: &str,
+    max_bytes: u64,
+    name_response_bytes: Option<u64>,
+    budget: &mut NativePayloadBudget<'_>,
+) -> QueueResult<Option<FieldValue>> {
+    let no = field_number(definition, name)?;
+    let (metadata_sql, value_sql, params) = if no >= 0 {
+        (
+            "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_fields WHERE record_id=?1 AND field=?2",
+            "SELECT value FROM q7_fields WHERE record_id=?1 AND field=?2",
+            vec![Value::Integer(id), Value::Integer(i64::from(no))],
+        )
+    } else {
+        (
+            "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
+            "SELECT value FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
+            vec![
+                Value::Integer(id),
+                blob(&discovery_digest(name.as_bytes())),
+                blob(name.as_bytes()),
+            ],
+        )
+    };
+    if let Some(metadata) = one(connection, metadata_sql, params.clone(), 1).await? {
+        add_payload(
+            budget.total,
+            integer(&metadata[0])?,
+            max_bytes,
+            budget.response_limit,
+        )?;
+        if let Some(length) = name_response_bytes {
+            add_payload(
+                budget.total,
+                i64::try_from(length).map_err(unknown)?,
+                max_bytes,
+                budget.response_limit,
+            )?;
+        }
+        if name_response_bytes.is_some() {
+            budget.charges.push(
+                budget.job.owned_buffer(
+                    (name.len() as u64)
+                        .checked_mul(4)
+                        .and_then(|n| n.checked_add(256))
+                        .ok_or(QueueError::TooLarge)?,
+                )?,
+            );
+        }
+        let raw_length = u64::try_from(integer(&metadata[0])?).map_err(unknown)?;
+        budget.charges.push(
+            budget.job.owned_buffer(
+                raw_length
+                    .checked_mul(4)
+                    .and_then(|n| n.checked_add(4096))
+                    .ok_or(QueueError::TooLarge)?,
+            )?,
+        );
+        let value = one(connection, value_sql, params, 1)
+            .await?
+            .ok_or_else(|| unknown("field disappeared"))?;
+        let raw = bytes(&value[0])?;
+        if raw.len() as i64 != integer(&metadata[0])? {
+            return Err(unknown("field length changed"));
+        }
+        let value: FieldValue = decode(raw)?;
+        definition
+            .validate_value(name, &value)
+            .map_err(|error| unknown(format!("{error:?}")))?;
+        return Ok(Some(value));
+    }
+    Ok(None)
 }

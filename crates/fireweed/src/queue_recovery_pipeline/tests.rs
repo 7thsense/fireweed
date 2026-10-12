@@ -1845,6 +1845,55 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
         matches!(&response.page().records[..],[QueryRecord::State(state)] if state.version==3&&state.value.as_ref()==[11])
     );
     drop(response);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_stats_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let stats_request = StatsRequest {
+        queue: address(),
+        filter: Filter::default(),
+        group_by: vec![],
+        eligible_at: 0,
+        buckets: None,
+    };
+    let read = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = stats_request.clone();
+        let clock = clock.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .stats(request, QueueLimits::default(), clock, job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    drop(
+        pipeline
+            .insert(
+                InsertRequest {
+                    queue: address(),
+                    request_id: "stats-advance".into(),
+                    mode: InsertMode::InsertOnly,
+                    items: vec![work("stats-next")],
+                },
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    release.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.stats().totals.pending, 5);
+    assert_eq!(response.stats().totals.completed, 1);
+    drop(response);
     // Rebuild into a fresh derived projection through original genesis/history.
     let rebuilt = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
         .await
@@ -1859,6 +1908,18 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     assert_eq!(state.records()[0].as_ref().unwrap().value.as_ref(), [11]);
     assert_eq!(state.records()[0].as_ref().unwrap().version, 3);
     drop(state);
+    let stats = rebuilt
+        .stats(
+            stats_request,
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.stats().totals.pending, 5);
+    assert_eq!(stats.stats().totals.completed, 1);
+    drop(stats);
     let result = rebuilt
         .commit(address(), group, QueueLimits::default(), clock, job.clone())
         .await
