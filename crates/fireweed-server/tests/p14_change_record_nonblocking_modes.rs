@@ -1,4 +1,6 @@
 //! P14 change-record mode nonblocking proofs [ddx-61324c64].
+// The native asynchronous query future needs depth 130 on Rust 1.99.
+#![recursion_limit = "256"]
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
