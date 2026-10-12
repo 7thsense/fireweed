@@ -2214,7 +2214,7 @@ impl QueueStore for PostgresQueueStore {
                         buckets.push(BucketCounts { label: label.clone(), counts: counts(&row, i * 5)? });
                     }
                 }
-                let result=QueueStats {totals,groups,buckets};if encoded_len(&result)?>limits.max_response_bytes{return Err(QueueError::TooLarge);}Ok(result)
+                let result=QueueStats {totals,groups,buckets,as_of:now};if encoded_len(&result)?>limits.max_response_bytes{return Err(QueueError::TooLarge);}Ok(result)
             })).await
         })
     }

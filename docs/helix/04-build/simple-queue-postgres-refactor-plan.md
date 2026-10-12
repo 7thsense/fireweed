@@ -96,7 +96,7 @@ reads/mutations and public parity must still land. Full-manifest memory/rewrite
 growth remains unqualified.
 
 The single Snorri adapter and matched settled release workloads remain required.
-Stats as_of and negative-epoch hourly grouping must satisfy the consumer binding.
+Stats exposes the exact operational classification sample as signed Unix nanoseconds on both native paths. Snorri as_of conversion and negative-epoch hourly grouping must satisfy the consumer binding at adapter cutover.
 Old formal models/corpora that permit stale empty claims or expired identity reuse
 are superseded for changed properties; revised correspondence is mandatory.
 No completion claim is permitted while any of these required gates is absent.

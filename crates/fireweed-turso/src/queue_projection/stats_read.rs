@@ -159,6 +159,7 @@ impl NativeTransactionWork for Worker {
             totals,
             groups,
             buckets,
+            as_of: now,
         };
         if encoded_len(&stats)? > self.input.limits.max_response_bytes {
             return Err(QueueError::TooLarge);
@@ -333,6 +334,8 @@ mod tests {
             )
             .await
             .unwrap();
+        let response_bytes = encoded_len(result.stats()).unwrap();
+        assert_eq!(result.stats().as_of, 100);
         assert_eq!(result.stats().totals.pending, 2);
         assert_eq!(result.stats().totals.oldest_eligible_since, Some(10));
         assert_eq!(
@@ -346,6 +349,50 @@ mod tests {
         );
         assert!(result.stats().groups.is_empty());
         drop(result);
+        for shorter in [false, true] {
+            let mut bounded = input(&definition, &tiny, request());
+            bounded.limits.max_response_bytes = response_bytes - u64::from(shorter);
+            let response = projection
+                .read_queue_stats(bounded, clock.clone(), &tiny, &workers)
+                .await;
+            if shorter {
+                assert!(matches!(response, Err(QueueError::TooLarge)));
+            } else {
+                assert_eq!(response.as_ref().unwrap().stats().as_of, 100);
+            }
+            drop(response);
+        }
+        clock.set(-1);
+        let negative = projection
+            .read_queue_stats(
+                input(&definition, &tiny, request()),
+                clock.clone(),
+                &tiny,
+                &workers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(negative.stats().as_of, -1);
+        drop(negative);
+        clock.set(100);
+        let held = projection.writer.lock().await;
+        let mut waiting = Box::pin(projection.read_queue_stats(
+            input(&definition, &tiny, request()),
+            clock.clone(),
+            &tiny,
+            &workers,
+        ));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(waiting.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        clock.set(200);
+        drop(held);
+        let fresh = waiting.await.unwrap();
+        assert_eq!(fresh.stats().as_of, 200);
+        drop(fresh);
+        clock.set(100);
         let mut grouped = request();
         grouped.group_by = vec!["u".into(), "meta/missing".into()];
         let result = projection

@@ -389,6 +389,9 @@ pub struct QueueStats {
     pub buckets: Vec<BucketCounts>,
     pub totals: Counts,
     pub groups: Vec<StatsGroup>,
+    /// Signed Unix nanoseconds from the operational clock sampled under this
+    /// result's authority. The same sample classifies current lease expiry.
+    pub as_of: i64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordSource {

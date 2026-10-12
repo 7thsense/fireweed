@@ -1869,6 +1869,7 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
         .await
         .unwrap();
+    clock.set(3_000_000);
     drop(
         pipeline
             .insert(
@@ -1891,6 +1892,7 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
         .unwrap()
         .unwrap()
         .unwrap();
+    assert_eq!(response.stats().as_of, 3_000_000);
     assert_eq!(response.stats().totals.pending, 5);
     assert_eq!(response.stats().totals.completed, 1);
     drop(response);

@@ -2013,6 +2013,14 @@ pub async fn numeric_bucket_stats(store: &dyn QueueStore, clock: &TestClock, que
         eligible_at: 0,
     };
     let result = store.stats(request.clone()).await.unwrap();
+    assert_eq!(result.as_of, 0);
+    clock.set(-1);
+    let negative = store.stats(request.clone()).await.unwrap();
+    assert_eq!(negative.as_of, -1);
+    assert_eq!(negative.totals, result.totals);
+    assert_eq!(negative.groups, result.groups);
+    assert_eq!(negative.buckets, result.buckets);
+    clock.set(0);
     assert_eq!(result.totals.pending, 8);
     assert_eq!(result.groups.len(), 1);
     assert_eq!(result.groups[0].counts, result.totals);

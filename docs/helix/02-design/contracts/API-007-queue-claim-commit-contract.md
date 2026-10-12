@@ -22,7 +22,7 @@ One concrete asynchronous Fireweed handle, selected at construction, provides:
 | `insert` | Queue, request id, keyed work batch; insert-only or upsert mode | Input-correlated ids, versions and outcomes |
 | `claim` | Queue, request id, filter, priority order, eligibility time, lease duration, maximum count/bytes | Ordered work records and lease credentials |
 | `commit` | Queue, batch of independently identified commit groups | Input-correlated committed/rejected group receipts |
-| `stats` | Queue, filter, requested grouping | Pending, leased, completed, failed counts and oldest eligible age |
+| `stats` | Queue, filter, requested grouping | Pending, leased, completed, failed counts, oldest eligible age and operational as_of |
 | `read_state` | Queue, typed collection and keys | Input-correlated state values and versions |
 | `query` | Queue, declared work/state index, filter, order, opaque cursor, limits | Bounded page of records and next cursor |
 | `read_commit` | Queue and group request ids | Recorded outcomes or explicit absent/expired outcomes |
@@ -152,8 +152,9 @@ per item. Packing/logging groups together never changes their independence.
 - Success means every reported effect and its replay receipt survives process
   loss. Acknowledged state and work must be recovered together, never partly.
 - An operation issued after success observes those effects, including claim,
-  read_state, query and stats. Concurrent writes need not make stats a globally
-  atomic snapshot, but acknowledged prior writes cannot be hidden by apply debt.
+  read_state, query and stats. Stats totals, groups and bins share one covered
+  per-queue snapshot; no cross-queue global snapshot is implied. Acknowledged
+  prior writes cannot be hidden by apply debt.
   S3/Turso may apply asynchronously internally; it must wait for coverage or use
   an equally proven committed read path. Snorri never polls projection positions.
 - Known rejection means definitely not applied. Infrastructure failure after
@@ -312,3 +313,13 @@ mapping, caller-owned export and bounded capture/retrieval. Instrumentation must
 not alter durability, replay, selection, admission or atomic state semantics.
 The [formal contract](CONTRACT-006-formal-queue-semantics.md) defines named
 properties and the bounds on any executable assurance.
+
+### Stats classification time
+
+QueueStats.as_of is required signed Unix nanoseconds from the operational clock
+sampled after native authority acquisition. It is the same sample used for lease
+expiry classification across totals, groups and bins, independent of eligible_at.
+It is not a projection watermark or durable sequence. The injected/system clock
+may move backward; as_of records its actual sample rather than imposing monotonicity.
+The complete live response budget includes this field. Consumer conversion and
+negative-epoch UTC-hour grouping remain adapter cutover obligations.
