@@ -14,6 +14,9 @@ mod projection;
 mod query;
 #[cfg(feature = "local")]
 pub mod queue_projection;
+#[cfg(all(feature = "local", target_os = "linux"))]
+#[doc(hidden)]
+pub mod queue_scratch;
 #[cfg(feature = "local")]
 mod rebuildable_io;
 #[cfg(feature = "local")]

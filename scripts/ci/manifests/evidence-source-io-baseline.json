@@ -1061,9 +1061,9 @@
         "evidence"
       ],
       "lines": [
-        877,
-        878,
-        879
+        833,
+        834,
+        835
       ],
       "path": "crates/fireweed-queue-spool/src/lib.rs",
       "symbol": "memory_admission_failure_creates_no_files_or_disk_charge"
@@ -4683,7 +4683,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "bdc831eb41605de1182d9b7aa9f1826c8aca1f667e80720245175b5f6ed798b6",
+  "scan_sha256": "fa2ba4524436c261bd085539e7ee86aeed770b63621b599cc1950be7dc16cb0e",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -7769,12 +7769,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 886,
+      "first_match_line": 842,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 886,
-      "line": 872,
+      "last_match_line": 842,
+      "line": 828,
       "markers": [
         "evidence"
       ],
@@ -16756,7 +16756,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 91750,
+      "last_match_line": 92030,
       "line": 1,
       "markers": [
         "e3",

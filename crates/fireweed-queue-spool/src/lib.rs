@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const WINDOW: usize = 4096;
 const INDEX_BYTES: u64 = 80;
@@ -18,52 +18,8 @@ fn add(left: u64, right: u64) -> QueueResult<u64> {
     left.checked_add(right)
         .ok_or_else(|| unknown("offset overflow"))
 }
-/// Independent scratch-space quota; it is never a semantic publication limit.
-pub struct ScratchDiskQuota {
-    limit: u64,
-    used: Mutex<u64>,
-}
-impl ScratchDiskQuota {
-    pub fn new(limit: u64) -> QueueResult<Arc<Self>> {
-        if limit == 0 {
-            return Err(unknown("zero disk quota"));
-        }
-        Ok(Arc::new(Self {
-            limit,
-            used: Mutex::new(0),
-        }))
-    }
-    pub fn usage(&self) -> QueueResult<u64> {
-        Ok(*self.used.lock().map_err(unknown)?)
-    }
-}
-struct DiskCharge {
-    quota: Arc<ScratchDiskQuota>,
-    bytes: u64,
-}
-impl DiskCharge {
-    fn grow(&mut self, bytes: u64) -> QueueResult<()> {
-        let mut used = self.quota.used.lock().map_err(unknown)?;
-        let next = add(*used, bytes)?;
-        let owned = add(self.bytes, bytes)?;
-        if next > self.quota.limit {
-            return Err(unknown("disk quota exhausted"));
-        }
-        *used = next;
-        self.bytes = owned;
-        Ok(())
-    }
-}
-impl Drop for DiskCharge {
-    fn drop(&mut self) {
-        let mut used = self
-            .quota
-            .used
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *used -= self.bytes;
-    }
-}
+mod quota;
+pub use quota::{OwnedScratchDiskCharge, ScratchDiskQuota};
 /// presence; collection offset/length; index offset/length; tuple offset/length;
 /// payload offset/length; producer ordinal. Fixed-width descriptors stay on disk.
 #[derive(Clone, Copy)]
@@ -198,7 +154,7 @@ pub struct QueueSpool {
     data_bytes: u64,
     count: u64,
     poisoned: bool,
-    disk: DiskCharge,
+    disk: OwnedScratchDiskCharge,
     #[cfg(test)]
     fault: Option<TestFault>,
     _memory: OwnedQueueBufferCharge,
@@ -219,7 +175,7 @@ impl QueueSpool {
             data_bytes: 0,
             count: 0,
             poisoned: false,
-            disk: DiskCharge { quota, bytes: 0 },
+            disk: quota.reserve(0)?,
             #[cfg(test)]
             fault: None,
             _memory: memory,
@@ -450,7 +406,7 @@ pub struct SortedSpool {
     position: u64,
     previous: Option<Descriptor>,
     poisoned: bool,
-    _disk: DiskCharge,
+    _disk: OwnedScratchDiskCharge,
     _memory: OwnedQueueBufferCharge,
 }
 impl SortedSpool {
@@ -705,7 +661,7 @@ mod tests {
                 let ready = Arc::clone(&ready);
                 let release = Arc::clone(&release);
                 scope.spawn(move || {
-                    let mut charge = DiskCharge { quota, bytes: 0 };
+                    let mut charge = quota.reserve(0).unwrap();
                     let _ = charge.grow(64);
                     ready.wait();
                     release.wait();

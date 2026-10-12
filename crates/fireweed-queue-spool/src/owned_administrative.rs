@@ -6,6 +6,7 @@ use fireweed_engine::queue_administration::{
 };
 use fireweed_engine::queue_schema_codec::DefinitionPin;
 use std::path::PathBuf;
+use std::sync::Mutex;
 enum State {
     Ready(Box<AdministrativeScratch>),
     InFlight,

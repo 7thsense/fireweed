@@ -91,7 +91,13 @@ previews. Ordinary and addressed preview share guarded result
 ownership, bypass execution receipts and use covered-read freshness without
 publication. Ordinary commit/preview sample the operational clock after
 prospective unique authority on both native paths. Broad native selectors remain
-required. PostgreSQL resolves and probes its typed scratch root once before network
+required. A private Linux scratch-main owner uses configured-root anonymous
+files, shared precharged file/WAL highwater, one-row autocommit and separate
+indexed Boolean-set tables. Exact stock SDK opcode controls exclude hidden
+materialization; ownership, cancellation, identity failure and wider-target tests
+qualify these primitives. Complete SDK memory-peak correspondence and authoritative
+selector integration remain required before broad/public qualification.
+PostgreSQL resolves and probes its typed scratch root once before network
 access; cloned handles share that immutable root and administration never rereads
 process temporary-directory configuration.
 Covered owned state reads share complete payload hydration

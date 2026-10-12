@@ -42,6 +42,12 @@ impl ScratchRoot {
             })
             .await?
     }
+    /// Create disposable bytes under this root. Call only inside an owned
+    /// physical execution; retain the file until its disk-capacity owner can drop.
+    pub fn anonymous_file(&self) -> QueueResult<std::fs::File> {
+        tempfile::tempfile_in(&self.path)
+            .map_err(|_| QueueError::OutcomeUnknown("scratch file creation failed".into()))
+    }
     pub fn path(&self) -> &Path {
         &self.path
     }
