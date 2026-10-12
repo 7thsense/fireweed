@@ -80,7 +80,10 @@ impl<'a> PublicationReceipt<'a> {
         if group.request_id != receipt.request_id
             || matches!(
                 receipt.outcome,
-                GroupOutcome::RequestConflict | GroupOutcome::RequestExpired
+                GroupOutcome::RequestConflict
+                    | GroupOutcome::RequestExpired
+                    | GroupOutcome::AdministrativeCommitted { .. }
+                    | GroupOutcome::Rejected(Rejection::TooLarge)
             )
         {
             return invalid("not a fresh commit receipt");
@@ -118,6 +121,46 @@ impl<'a> PublicationReceipt<'a> {
             self.id,
         )
     }
+}
+
+/// Bind an immutable retained disposition to its original complete group.
+/// Metadata fingerprint/expiry resolution must precede this outcome validation.
+pub fn validate_original_commit_receipt(
+    queue: &QueueAddress,
+    group: &CommitGroup,
+    receipt: &CommitReceipt,
+    reservation: &QueueReservation,
+) -> PublicationResult<()> {
+    let Some(admin) = &group.administration else {
+        PublicationReceipt::commit(queue, group, receipt)?;
+        return Ok(());
+    };
+    if receipt.request_id != group.request_id {
+        return invalid("administrative receipt identity");
+    }
+    let outcome = match &receipt.outcome {
+        GroupOutcome::AdministrativeCommitted {
+            versions,
+            administration,
+        } => AdministrativeReceiptOutcome::Committed {
+            versions,
+            administration,
+        },
+        GroupOutcome::Rejected(reason) => AdministrativeReceiptOutcome::Rejected(reason),
+        _ => return invalid("administrative receipt has another disposition domain"),
+    };
+    let binding = AdministrativePublicationReceipt::new(
+        queue,
+        group,
+        &admin.intent,
+        admin.max_result_bytes,
+        &outcome,
+        reservation,
+    )?;
+    if binding.result_budget_exceeded()? {
+        return invalid("administrative receipt exceeds original result bound");
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_commit_result_versions(
@@ -979,6 +1022,107 @@ mod tests {
             work_updates: vec![],
             work_inserts: vec![],
         }
+    }
+    #[test]
+    fn retained_receipt_binding_preserves_fp3_and_fp4_disposition_domains() {
+        use fireweed_core::queue_administration::*;
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = admission.reserve(0).unwrap();
+        let mut original = group("original");
+        let receipt = CommitReceipt {
+            request_id: original.request_id.clone(),
+            outcome: GroupOutcome::Rejected(Rejection::TooLarge),
+        };
+        assert!(PublicationReceipt::commit(&queue(), &original, &receipt).is_err());
+        assert!(validate_original_commit_receipt(&queue(), &original, &receipt, &job).is_err());
+        original.administration = Some(AdministrativeCommit {
+            intent: AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation: AdministrativeOperation::SelectFirst(vec![]),
+            },
+            max_result_bytes: 1024,
+        });
+        validate_original_commit_receipt(&queue(), &original, &receipt, &job).unwrap();
+        let mut wrong_id = receipt.clone();
+        wrong_id.request_id = "another".into();
+        assert!(validate_original_commit_receipt(&queue(), &original, &wrong_id, &job).is_err());
+        let ordinary = CommitReceipt {
+            request_id: "original".into(),
+            outcome: GroupOutcome::Committed { versions: vec![] },
+        };
+        assert!(validate_original_commit_receipt(&queue(), &original, &ordinary, &job).is_err());
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: Some(BTreeSet::from(["text".into()])),
+            operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                key: "a".into(),
+                expected_version: Some(1),
+                precondition: WorkSelector::all(vec![]),
+                action: AdministrativeAction::Update {
+                    patch: WorkPatch::default(),
+                    lifecycle: AdministrativeLifecycle::Keep,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    remove_field_prefixes: Default::default(),
+                },
+            }]),
+        };
+        let mut histogram = AdministrativeHistogram::default();
+        histogram.record(&AdministrativeOutcome::NoChange).unwrap();
+        let result = AdministrativeResult {
+            histogram,
+            clauses: vec![],
+            items: vec![AdministrativeItemResult {
+                key: "a".into(),
+                outcome: AdministrativeOutcome::NoChange,
+                before: Some(AdministrativeBefore {
+                    version: 1,
+                    lifecycle: Lifecycle::Pending,
+                    available_at: 0,
+                    eligible_since: 0,
+                    attempts: 0,
+                    lease_expires_at: None,
+                    fields: BTreeMap::from([("text".into(), FieldValue::Text("x".repeat(512)))]),
+                }),
+            }],
+        };
+        let complete = measure_complete_administrative_receipt(
+            &original.request_id,
+            &AdministrativeReceiptOutcome::Committed {
+                versions: &[],
+                administration: &result,
+            },
+        )
+        .unwrap();
+        original.administration = Some(AdministrativeCommit {
+            intent,
+            max_result_bytes: complete,
+        });
+        original
+            .validate_for(&queue(), &schema(), &QueueLimits::default())
+            .unwrap();
+        let mut committed = CommitReceipt {
+            request_id: original.request_id.clone(),
+            outcome: GroupOutcome::AdministrativeCommitted {
+                versions: vec![],
+                administration: result,
+            },
+        };
+        validate_original_commit_receipt(&queue(), &original, &committed, &job).unwrap();
+        original.administration.as_mut().unwrap().max_result_bytes -= 1;
+        assert!(matches!(
+            validate_original_commit_receipt(&queue(), &original, &committed, &job),
+            Err(PublicationError::Invalid(
+                "administrative receipt exceeds original result bound"
+            ))
+        ));
+        original.administration.as_mut().unwrap().max_result_bytes += 1;
+        if let GroupOutcome::AdministrativeCommitted { administration, .. } = &mut committed.outcome
+        {
+            administration.items[0].key = "b".into();
+        }
+        assert!(validate_original_commit_receipt(&queue(), &original, &committed, &job).is_err());
+        assert_eq!(admission.usage().unwrap().1, 0);
     }
     pub(super) fn seed() -> CommitGroup {
         let mut g = group("a-seed");

@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(lookups.receipts(), [ReceiptLookup::Found(expected.clone())]);
         drop(lookups);
         let replay = projection
-            .replay_ordinary_commit(
+            .replay_commit(
                 input(&definition, &job, transition.clone(), 4, 3),
                 &job,
                 &workers,
@@ -459,7 +459,7 @@ mod tests {
         changed_replay.work_inserts[0].priority += 1;
         assert!(matches!(
             projection
-                .replay_ordinary_commit(
+                .replay_commit(
                     input(&definition, &job, changed_replay, 4, 3),
                     &job,
                     &workers
@@ -468,7 +468,7 @@ mod tests {
             Err(QueueError::RequestConflict)
         ));
         let expired = projection
-            .replay_ordinary_commit(
+            .replay_commit(
                 input(&definition, &job, transition.clone(), 4, 3),
                 &job,
                 &workers,
@@ -485,7 +485,7 @@ mod tests {
         .await;
         assert!(matches!(
             projection
-                .replay_ordinary_commit(
+                .replay_commit(
                     input(&definition, &job, transition.clone(), 4, 3),
                     &job,
                     &workers
@@ -520,7 +520,7 @@ mod tests {
         let held_writer = projection.writer.lock().await;
         let rejection = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            projection.replay_ordinary_commit(
+            projection.replay_commit(
                 input(&definition, &tight_job, compact, 4, 3),
                 &tight_job,
                 &workers,

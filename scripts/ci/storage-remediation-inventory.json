@@ -82,9 +82,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "430d2220d7001cee0a9f",
+        "id": "4986f078287fa16b8f81",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2390,
+        "line": 2397,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -96,9 +96,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "de412bb8fc15a0444b66",
+        "id": "2b126edb17ec56d03cd2",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2491,
+        "line": 2470,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -110,9 +110,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "9d7efbdf97fc256fbf62",
+        "id": "420fdabe430c4444b05a",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2776,
+        "line": 2571,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -124,9 +124,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a2c3f7f734ae7cc56c43",
+        "id": "c6a6d07f423dc6e2667a",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2823,
+        "line": 2856,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -138,9 +138,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c496d24aaf766ce00db2",
+        "id": "57f617c670837ecb2e71",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2828,
+        "line": 2903,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -152,9 +152,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ad48b24e84262e4670a5",
+        "id": "f8a3ff276ed43ed835cd",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3614,
+        "line": 2908,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -166,9 +166,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "f2b142de2587ed9572d3",
+        "id": "ed98a8dc55a4e39a25ab",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3827,
+        "line": 3694,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -180,9 +180,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "3a18579d470c2a67648f",
+        "id": "a0d6fa84d8c26d2c5c50",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3976,
+        "line": 3907,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -194,9 +194,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "5a5541d1e12ffe55942a",
+        "id": "c54f0126e4eb57e79862",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4058,
+        "line": 4056,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -208,9 +208,23 @@
           "P2f"
         ],
         "detail": "",
-        "id": "df01a17be9790504b2db",
+        "id": "4fc23bb50505cf815804",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4103,
+        "line": 4138,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/queue_store.rs",
+        "status": "debt"
+      },
+      {
+        "category": "ignored_test",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "b349a159193c392cc417",
+        "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
+        "line": 4183,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -10703,9 +10717,9 @@
           "P15",
           "P2f"
         ],
-        "detail": "error: no matching package named `ctrlc` found; help: if this error is too confusing you may wish to retry without `--offline`",
-        "id": "39ee317b6864f0e0cc2e",
-        "identity": "0015fae4e7b93c76db0c7e5563cf9a1cc56e9db27eb22d7b08a29bdecc3f0fa0",
+        "detail": "error: cannot update the lock file /tmp/fireweed-api007-refactor-continuation/crates/fireweed-bench/Cargo.lock because --locked was passed to prevent this; help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.",
+        "id": "8a2b0fcd492ff0b6c29d",
+        "identity": "3ab0821ae3332449fdb9b07257330ad134aa87ad20adf2881dd9ee44621af6f0",
         "line": 1,
         "owner": "P15",
         "path": "crates/fireweed-bench/Cargo.toml",
@@ -42625,6 +42639,34 @@
         "-p",
         "fireweed-engine",
         "--lib",
+        "queue_publication::tests::retained_receipt_binding_preserves_fp3_and_fp4_disposition_domains",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_publication::tests::retained_receipt_binding_preserves_fp3_and_fp4_disposition_domains",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_publication::tests::retained_receipt_binding_preserves_fp3_and_fp4_disposition_domains",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
         "queue_publication::work_fragment::tests::absent_coverage_certificates_are_admitted_before_copying",
         "--",
         "--exact"
@@ -54928,6 +54970,34 @@
       "expected_ran": 1,
       "harness_id": "queue_store::tests::replay_rejects_oversized_raw_lease_hash_before_payload_hydration",
       "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::queue_store::tests::replay_rejects_oversized_raw_lease_hash_before_payload_hydration",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "fireweed_postgres",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--lib",
+        "queue_store::tests::retained_ordinary_receipt_rejects_administrative_only_disposition",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_store::tests::retained_ordinary_receipt_rejects_administrative_only_disposition",
+      "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::queue_store::tests::retained_ordinary_receipt_rejects_administrative_only_disposition",
       "listed_kind": "test",
       "package": "fireweed-postgres",
       "target": "fireweed_postgres",
@@ -91550,7 +91620,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "c938f508b0732dab82358cb394b5caa7e6b24992a0be36e505270fbc6649730f",
+  "source_inventory_sha256": "8f981b13783499d2be5409769e49f9929f144b219d5dd40a4407a030bf5a2d8f",
   "workspaces": [
     {
       "listing_error_sha256": "",
@@ -91559,7 +91629,7 @@
       "routing": "root"
     },
     {
-      "listing_error_sha256": "0015fae4e7b93c76db0c7e5563cf9a1cc56e9db27eb22d7b08a29bdecc3f0fa0",
+      "listing_error_sha256": "3ab0821ae3332449fdb9b07257330ad134aa87ad20adf2881dd9ee44621af6f0",
       "listing_status": "compile_failure_debt",
       "manifest": "crates/fireweed-bench/Cargo.toml",
       "routing": "independent"

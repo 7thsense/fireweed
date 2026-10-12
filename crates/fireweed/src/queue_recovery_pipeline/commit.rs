@@ -83,7 +83,7 @@ impl CommitTask {
     async fn replay(&self, recovered: &RecoveredQueue) -> QueueResult<AdmittedCommitReceipts> {
         self.pipeline
             .projection
-            .replay_ordinary_commit(self.input(recovered)?, &self.job, &self.pipeline.workers)
+            .replay_commit(self.input(recovered)?, &self.job, &self.pipeline.workers)
             .await
     }
     async fn replay_covered(

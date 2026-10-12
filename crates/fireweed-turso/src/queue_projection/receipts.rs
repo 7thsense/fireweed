@@ -52,20 +52,15 @@ impl QueueProjection {
             .await
     }
 
-    /// Resolve one original ordinary group. Fingerprint comparison shares the
+    /// Resolve one original ordinary or administrative group. Fingerprint comparison shares the
     /// same native snapshot as expiry and immutable outcome decoding.
-    pub async fn replay_ordinary_commit(
+    pub async fn replay_commit(
         self: &Arc<Self>,
         input: super::commit_prepare::CommitPreparationInput,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<AdmittedCommitReceipts> {
         input.group.preflight_for(&input.queue, &input.limits)?;
-        if input.group.administration.is_some() {
-            return Err(QueueError::Invalid(
-                "ordinary replay requires ordinary group".into(),
-            ));
-        }
         // Own the group and the lookup identity clone before allocation or SDK
         // dispatch; retain this charge through binding validation and return.
         let headers = incoming_headers(&input.group)?;
@@ -80,6 +75,11 @@ impl QueueProjection {
             queue: input.queue,
             group: input.group,
             _charge: charge,
+        };
+        let format = if original.group.administration.is_some() {
+            4
+        } else {
+            3
         };
         let fingerprint = original.group.fingerprint(&original.queue)?;
         let lookup_queue = original.queue.clone();
@@ -97,7 +97,7 @@ impl QueueProjection {
                 required_insertion_sequence: input.required_insertion_sequence,
                 required_last_record_epoch: input.required_last_record_epoch,
             },
-            Some((3, fingerprint)),
+            Some((format, fingerprint)),
             Some(original),
             job,
             workers,
@@ -291,10 +291,11 @@ impl NativeTransactionWork for ReceiptWorker {
         if let (Some(original), Some(ReceiptLookup::Found(receipt))) =
             (&self.original, receipts.first())
         {
-            fireweed_engine::queue_publication::PublicationReceipt::commit(
+            fireweed_engine::queue_publication::validate_original_commit_receipt(
                 &original.queue,
                 &original.group,
                 receipt,
+                &self.job,
             )
             .map_err(publication_error)?;
         }
@@ -663,7 +664,11 @@ mod tests {
                 },
             }]),
         };
-        let admin_group = group("large-before");
+        let mut admin_group = group("large-before");
+        admin_group.administration = Some(AdministrativeCommit {
+            intent: intent.clone(),
+            max_result_bytes: 1 << 20,
+        });
         let queue = address();
         let mut unchanged = snapshot.clone();
         let ordinary =
@@ -750,6 +755,51 @@ mod tests {
             .unwrap();
         assert_eq!(healthy.receipts(), &expected[..1]);
         drop(healthy);
+        let original_input = |request: CommitGroup| {
+            let read = input(&definition, &job, vec![], 1 << 20, 4);
+            super::super::commit_prepare::CommitPreparationInput {
+                genesis: read.genesis,
+                queue: address(),
+                group: request,
+                limits: QueueLimits::default(),
+                required_next_offset: read.required_next_offset,
+                required_insertion_sequence: read.required_insertion_sequence,
+                required_last_record_epoch: read.required_last_record_epoch,
+            }
+        };
+        let replay = projection
+            .replay_commit(original_input(admin_group.clone()), &job, &workers)
+            .await
+            .unwrap();
+        assert_eq!(replay.receipts(), &expected[..1]);
+        drop(replay);
+        let mut changed = admin_group.clone();
+        changed.administration.as_mut().unwrap().max_result_bytes += 1;
+        assert!(matches!(
+            projection
+                .replay_commit(original_input(changed.clone()), &job, &workers)
+                .await,
+            Err(QueueError::RequestConflict)
+        ));
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET expired=1,outcome=X'ff' WHERE identity=?1",
+            vec![blob(b"large-before")],
+        )
+        .await;
+        let expired = projection
+            .replay_commit(original_input(admin_group), &job, &workers)
+            .await
+            .unwrap();
+        assert_eq!(expired.receipts(), &[ReceiptLookup::Expired]);
+        drop(expired);
+        assert!(matches!(
+            projection
+                .replay_commit(original_input(changed), &job, &workers)
+                .await,
+            Err(QueueError::RequestConflict)
+        ));
+
         workers.close_and_drain().await.unwrap();
     }
 }

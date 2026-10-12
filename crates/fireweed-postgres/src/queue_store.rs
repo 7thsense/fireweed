@@ -1720,7 +1720,14 @@ impl QueueStore for PostgresQueueStore {
                         )
                         .await
                         {
-                            Ok(value) => value,
+                            Ok(value) => {
+                                if let Some(receipt) = &value {
+                                    fireweed_engine::queue_publication::validate_original_commit_receipt(
+                                        &request.queue, group, receipt, &reservation,
+                                    ).map_err(|error| storage(format!("original receipt binding: {error:?}")))?;
+                                }
+                                value
+                            },
                             Err(QueueError::RequestConflict) => Some(CommitReceipt {
                                 request_id: group.request_id.clone(),
                                 outcome: GroupOutcome::RequestConflict,
@@ -2386,6 +2393,79 @@ async fn physical_fixture() -> tokio::sync::OwnedMutexGuard<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn retained_ordinary_receipt_rejects_administrative_only_disposition() {
+        let _fixture = physical_fixture().await;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let store = PostgresQueueStore::connect(
+            &url,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+            QueueLimits::default(),
+            1,
+        )
+        .await
+        .unwrap();
+        let address = QueueAddress {
+            tenant: "original-domain".into(),
+            queue: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string(),
+        };
+        store
+            .provision(ProvisionRequest {
+                queue: address.clone(),
+                schema: fireweed_conformance::queue_contract::schema(),
+            })
+            .await
+            .unwrap();
+        let request = CommitBatch {
+            queue: address.clone(),
+            groups: vec![CommitGroup {
+                request_id: "original".into(),
+                claimed_updates: vec![],
+                state_updates: vec![],
+                work_updates: vec![],
+                work_inserts: vec![NewWork {
+                    key: "a".into(),
+                    priority: 0,
+                    available_at: 0,
+                    fields: BTreeMap::from([
+                        ("kind".into(), FieldValue::Text("task".into())),
+                        ("target".into(), FieldValue::Text("a".into())),
+                    ]),
+                    body: Default::default(),
+                }],
+                administration: None,
+            }],
+        };
+        let legitimate = store.commit(request.clone()).await.unwrap();
+        assert!(matches!(
+            legitimate[0].outcome,
+            GroupOutcome::Committed { .. }
+        ));
+        let raw = encode(&CommitReceipt {
+            request_id: "original".into(),
+            outcome: GroupOutcome::Rejected(Rejection::TooLarge),
+        })
+        .unwrap();
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let changed = client.execute("UPDATE fireweed_api007.requests r SET outcome=$1 FROM fireweed_api007.queues q WHERE r.queue_id=q.id AND q.tenant=$2 AND q.name=$3 AND r.domain=2 AND r.identity=$4",
+            &[&raw,&address.tenant.as_bytes(),&address.queue.as_bytes(),&b"original".as_slice()]).await.unwrap();
+        assert_eq!(changed, 1);
+        assert!(matches!(
+            store.commit(request).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        drop(client);
+        driver.abort();
+        store.shutdown().await.unwrap();
+    }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn replay_rejects_oversized_raw_lease_hash_before_payload_hydration() {
