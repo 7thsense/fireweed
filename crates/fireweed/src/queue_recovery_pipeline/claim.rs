@@ -62,14 +62,9 @@ impl QueueRecoveryPipeline {
 impl ClaimTask {
     fn input(&self, recovered: &RecoveredQueue) -> QueueResult<ClaimReplayInput> {
         Ok(ClaimReplayInput {
-            genesis: encode_checked_genesis(
-                recovered.original_genesis_epoch,
-                &self.request.queue,
-                recovered.history.definition()?,
-                recovered.history.cursor_secret()?,
-                self.pipeline.hard_record_bytes,
-                &self.job,
-            )?,
+            genesis: self
+                .pipeline
+                .original_genesis(&self.request.queue, recovered, &self.job)?,
             request: self.request.clone(),
             now: 0,
             limits: self.limits,

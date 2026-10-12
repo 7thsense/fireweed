@@ -5,6 +5,7 @@ mod claim;
 mod commit;
 mod insert;
 mod publication;
+mod read;
 mod receipts;
 mod state;
 use fireweed_engine::{
@@ -107,6 +108,21 @@ impl QueueRecoveryPipeline {
             #[cfg(test)]
             after_commit_replay: std::sync::Mutex::new(None),
         }))
+    }
+    pub(super) fn original_genesis(
+        &self,
+        address: &QueueAddress,
+        recovered: &RecoveredQueue,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<fireweed_engine::queue_log_record::OwnedQueueLogRecord> {
+        encode_checked_genesis(
+            recovered.original_genesis_epoch,
+            address,
+            recovered.history.definition()?,
+            recovered.history.cursor_secret()?,
+            self.hard_record_bytes,
+            job,
+        )
     }
     async fn head_matches(
         &self,

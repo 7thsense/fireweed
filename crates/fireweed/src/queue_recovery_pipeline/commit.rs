@@ -69,14 +69,9 @@ impl QueueRecoveryPipeline {
 impl CommitTask {
     fn input(&self, recovered: &RecoveredQueue) -> QueueResult<CommitPreparationInput> {
         Ok(CommitPreparationInput {
-            genesis: encode_checked_genesis(
-                recovered.original_genesis_epoch,
-                &self.queue,
-                recovered.history.definition()?,
-                recovered.history.cursor_secret()?,
-                self.pipeline.hard_record_bytes,
-                &self.job,
-            )?,
+            genesis: self
+                .pipeline
+                .original_genesis(&self.queue, recovered, &self.job)?,
             queue: self.queue.clone(),
             group: self.group.clone(),
             limits: self.limits,
