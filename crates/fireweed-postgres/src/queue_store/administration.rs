@@ -42,7 +42,6 @@ fn lifecycle_set(expression: &str, values: &[Lifecycle]) -> String {
         .join(",");
     format!("({expression} IN ({values}))")
 }
-use fireweed_engine::queue_sql::balanced_boolean as balanced;
 fn selector_sql(
     selector: &WorkSelector,
     definition: &CollectionDefinition,
@@ -50,22 +49,8 @@ fn selector_sql(
 ) -> QueueResult<String> {
     selector.validate(definition)?;
     let active = "(r.lifecycle=1 AND COALESCE(r.lease_until>$3::bigint,FALSE))";
-    let mut stack = Vec::new();
-    for node in &selector.nodes {
-        let sql = match node {
-            SelectorNode::All(arity) | SelectorNode::Any(arity) => {
-                let start = stack
-                    .len()
-                    .checked_sub(*arity as usize)
-                    .ok_or_else(|| storage("invalid selector arity"))?;
-                balanced(stack.split_off(start), matches!(node, SelectorNode::All(_)))
-            }
-            SelectorNode::Not => format!(
-                "(NOT {})",
-                stack
-                    .pop()
-                    .ok_or_else(|| storage("invalid selector negation"))?
-            ),
+    fireweed_engine::queue_sql::administrative_selector_sql(selector, |node| {
+        Ok(match node {
             SelectorNode::Field { name, predicate } => {
                 let (table, identity) = field_identity_sql(name, definition, pool)?;
                 let predicate = field_predicate_sql(predicate, pool)?;
@@ -107,14 +92,13 @@ fn selector_sql(
                     format!("(NOT {active})")
                 }
             }
-        };
-        stack.push(sql);
-    }
-    if stack.len() != 1 {
-        return Err(storage("invalid selector roots"));
-    }
-    Ok(stack.pop().expect("one root"))
+            SelectorNode::All(_) | SelectorNode::Any(_) | SelectorNode::Not => {
+                return Err(storage("boolean selector reached leaf emitter"));
+            }
+        })
+    })
 }
+
 struct NativeSelection<'r> {
     sql: String,
     params: Parameters,
