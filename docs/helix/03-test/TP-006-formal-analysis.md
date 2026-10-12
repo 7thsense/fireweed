@@ -27,6 +27,31 @@ Finite exhaustive results apply only to declared domains and assumptions. They a
 
 Every safety property has a positive reachable witness and an intentional negative control producing a reproducible counterexample. Liveness controls require a fairness-qualified nonprogress cycle, not arbitrary provider outages. Timed deadline fixtures state finite workload/service bounds; eventual application is insufficient evidence for numeric progress.
 
+## API-007 publication gate
+
+Run `python3 scripts/formal/check_api007.py`. Its independent finite specification
+covers original resolution, a distinct-identity background publisher, and
+unavailable-authority refusal with interrupted projection apply/reopen. Attempts
+become publishable only after dispatch. Accepted stale CAS operations still
+reject at the publication frontier. Equal, changed and expired replay requests
+pass through a fresh witnessed cut; a separate history-based oracle checks their
+classification, including missing cached originals and changed-before-expired
+precedence.
+
+Qualification requires complete graphs, completed reachable outcome witnesses,
+and shortest negative traces replayed against the exact transition relation.
+The runner fails incomplete searches, missing witnesses, damaged transitions,
+source changes and output-path escapes. Reports bind configuration, graphs,
+traces, source revision/dirty state and Python version. Outputs remain under
+`target/api007-formal/`. The reported frontier count is actual coverage; zero
+reachable frontiers does not establish frontier execution.
+
+This family does not model catalog/process/cache evidence arbitration,
+independent concurrent same-identity callers, lease/clock/ABA/key collisions,
+budget/progress/deadlines, FP4 administration or known-batch cached integrity.
+Its production mapping is documentary and unexecuted. Identical public backend
+trace correspondence and the other required families remain mandatory.
+
 ## Implementation correspondence
 
 Execute independently predicted transitions through the identical public facade on both backends. Compare exact work/state/receipt identities, membership/order, tokens, current versions/expiry, attempts, rejection effects, new work and successful read coverage. Include concurrency, lost replies, expiry, renewal, cancellation, clock delay, collision/ABA, original-genesis corruption, S3 stale head/epoch, commit crash/reopen and interrupted projection apply. Record intended and actually matched edges separately. Primitive/internal diagnostics cannot substitute for successful public-path observations.
