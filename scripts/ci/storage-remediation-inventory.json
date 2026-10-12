@@ -1162,9 +1162,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "fad197faa7259967988e",
+        "id": "e9dfd4e528e816a6174a",
         "identity": "// Overlap has already been checked, including skipped and absent targets.",
-        "line": 927,
+        "line": 951,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/queue_administration/stream.rs",
         "status": "discovery_negative"
@@ -10704,8 +10704,8 @@
           "P2f"
         ],
         "detail": "error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "0a8d3291e857f6bb0bcb",
-        "identity": "0d9130e0121b744dd7b7fbfa95364c5632778993e660ad3337f053c41545b052",
+        "id": "af3f01f06bcb7565cbc5",
+        "identity": "cc01e79265e44536bdeccec27be65b8adfa8631a79baf9fed9066504509d2cec",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -24512,10 +24512,10 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "55102e15ef9603017fd58c09018c66c9573d9cbb4b0ede51fb48a281c79614c3",
+  "source_inventory_sha256": "e72285a7769f7b4090c2c46e47e4da846771bccba80b2ba006b9c14b5e284ba4",
   "workspaces": [
     {
-      "listing_error_sha256": "0d9130e0121b744dd7b7fbfa95364c5632778993e660ad3337f053c41545b052",
+      "listing_error_sha256": "cc01e79265e44536bdeccec27be65b8adfa8631a79baf9fed9066504509d2cec",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"

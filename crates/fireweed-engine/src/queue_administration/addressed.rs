@@ -5,7 +5,7 @@ use super::stream::{
     work_keys,
 };
 use super::*;
-use crate::queue_admission::{QueueBufferCharge, QueueReservation};
+use crate::queue_admission::{OwnedQueueBufferCharge, QueueBufferCharge, QueueReservation};
 use crate::queue_planner::{RecordIdentity, RecordSnapshot, validate_snapshot};
 use std::sync::Arc;
 
@@ -24,7 +24,34 @@ pub enum AddressedAdministrativeInput<'s, 'r> {
         image: RecordSnapshot,
         hydration: QueueBufferCharge<'r>,
     },
+    /// Same-job worker hydration for an exact live/absent/tombstone lookup.
+    OwnedAdmittedOneRow {
+        position: usize,
+        key: String,
+        image: RecordSnapshot,
+        hydration: Vec<OwnedQueueBufferCharge>,
+    },
 }
+impl AddressedAdministrativeInput<'_, '_> {
+    fn validate_ownership(&self, reservation: &QueueReservation) -> QueueResult<()> {
+        let valid = match self {
+            Self::BorrowedFullImage { .. } => true,
+            Self::OwnedOneRow { hydration, .. } => hydration.belongs_to(reservation),
+            Self::OwnedAdmittedOneRow { hydration, .. } => {
+                !hydration.is_empty()
+                    && hydration
+                        .iter()
+                        .all(|charge| std::ptr::eq(charge.reservation(), reservation))
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(unknown("invalid addressed one-row ownership"))
+        }
+    }
+}
+
 fn retained_result_bound(
     key: &str,
     row: Option<&StoredWork>,
@@ -146,6 +173,7 @@ where
     futures::pin_mut!(inputs);
     while let Some(input) = inputs.next().await {
         let input = input.map_err(|_| unknown("addressed source failed before EOF"))?;
+        input.validate_ownership(&reservation)?;
         let (position, key, image) = match &input {
             AddressedAdministrativeInput::BorrowedFullImage {
                 position,
@@ -156,13 +184,15 @@ where
                 position,
                 key,
                 image,
-                hydration,
+                ..
+            }
+            | AddressedAdministrativeInput::OwnedAdmittedOneRow {
+                position,
+                key,
+                image,
+                ..
             } => {
-                if !hydration.belongs_to(&reservation)
-                    || image.work.len() > 1
-                    || image.versions.len() > 1
-                    || !image.state.is_empty()
-                {
+                if image.work.len() > 1 || image.versions.len() > 1 || !image.state.is_empty() {
                     return Err(unknown("invalid addressed one-row ownership"));
                 }
                 if image.work.keys().any(|actual| actual != key)
@@ -910,6 +940,66 @@ mod tests {
             assert_eq!(value.len(), 262144);
             drop(summary);
             assert_eq!(admission.usage().unwrap(), (1, 0));
+        });
+    }
+    #[test]
+    fn owned_worker_absence_rows_require_complete_same_job_hydration() {
+        futures::executor::block_on(async {
+            for mode in 0..3 {
+                let admission = QueueAdmission::new(2, 8 << 20).unwrap();
+                let job = Arc::new(admission.reserve(0).unwrap());
+                let foreign = Arc::new(admission.reserve(0).unwrap());
+                let hydration = match mode {
+                    0 => vec![job.owned_buffer(4096).unwrap()],
+                    1 => vec![
+                        job.owned_buffer(4096).unwrap(),
+                        foreign.owned_buffer(4096).unwrap(),
+                    ],
+                    _ => vec![],
+                };
+                let input = AddressedAdministrativeInput::OwnedAdmittedOneRow {
+                    position: 0,
+                    key: "missing".into(),
+                    image: RecordSnapshot {
+                        next_sequence: 1,
+                        ..Default::default()
+                    },
+                    hydration,
+                };
+                let deliveries = std::cell::Cell::new(0);
+                let result = scan_addressed_group_to_sink(
+                    &ordinary(),
+                    &intent(&["missing"]),
+                    futures::stream::iter([Ok(input)]),
+                    &RecordSnapshot {
+                        next_sequence: 1,
+                        ..Default::default()
+                    },
+                    &schema(),
+                    &QueueLimits::default(),
+                    Arc::clone(&job),
+                    |_| {
+                        deliveries.set(deliveries.get() + 1);
+                        std::future::ready(Ok(()))
+                    },
+                )
+                .await;
+                if mode == 0 {
+                    assert_eq!(
+                        result.as_ref().unwrap().result().unwrap().items[0].outcome,
+                        AdministrativeOutcome::NotFound
+                    );
+                    assert_eq!(deliveries.get(), 0);
+                } else {
+                    assert!(
+                        matches!(result, Err(QueueError::OutcomeUnknown(ref message))
+                    if message == "invalid addressed one-row ownership")
+                    );
+                    assert_eq!(deliveries.get(), 0);
+                }
+                drop(result);
+                assert_eq!(admission.usage().unwrap().1, 0);
+            }
         });
     }
     #[test]

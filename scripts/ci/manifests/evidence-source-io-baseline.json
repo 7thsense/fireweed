@@ -538,14 +538,14 @@
         "evidence"
       ],
       "lines": [
-        2089,
-        2090,
-        2093,
-        2095,
-        2105,
-        2106,
-        2107,
-        2108
+        2174,
+        2175,
+        2178,
+        2180,
+        2190,
+        2191,
+        2192,
+        2193
       ],
       "path": "crates/fireweed-engine/src/queue_administration/stream.rs",
       "symbol": "sink_receives_rejected_authority_after_overlap_and_detects_late_contradiction"
@@ -4683,7 +4683,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "d5034406458a9ea95af81af82cd60af3ab0f10820eb669f83617a2fe0f275733",
+  "scan_sha256": "3589fada6356595ca3b2714a3f92d596173d3683058798e8c1aa3c5c56d26bd5",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -6395,12 +6395,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2042,
+      "first_match_line": 2127,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2101,
-      "line": 2040,
+      "last_match_line": 2186,
+      "line": 2125,
       "markers": [
         "evidence"
       ],
@@ -6413,12 +6413,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2250,
+      "first_match_line": 2335,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2250,
-      "line": 2240,
+      "last_match_line": 2335,
+      "line": 2325,
       "markers": [
         "evidence"
       ],
@@ -6431,12 +6431,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2366,
+      "first_match_line": 2451,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2366,
-      "line": 2359,
+      "last_match_line": 2451,
+      "line": 2444,
       "markers": [
         "evidence"
       ],

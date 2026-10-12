@@ -1,7 +1,7 @@
 //! Internal admitted administrative planning. Sources own fenced completeness;
 //! this driver finishes only after successful EOF. No durable control API yet.
 use super::*;
-use crate::queue_admission::{QueueBufferCharge, QueueReservation};
+use crate::queue_admission::{OwnedQueueBufferCharge, QueueBufferCharge, QueueReservation};
 use crate::queue_planner::*;
 use std::collections::BTreeMap;
 
@@ -19,7 +19,33 @@ pub enum SelectedAdministrativeInput<'s, 'r> {
         image: RecordSnapshot,
         hydration: QueueBufferCharge<'r>,
     },
+    /// Owned worker hydration keeps every same-job charge through row planning.
+    OwnedAdmittedOneRow {
+        clause: usize,
+        image: RecordSnapshot,
+        hydration: Vec<OwnedQueueBufferCharge>,
+    },
 }
+impl SelectedAdministrativeInput<'_, '_> {
+    fn validate_ownership(&self, reservation: &QueueReservation) -> QueueResult<()> {
+        let valid = match self {
+            Self::BorrowedFullImage { .. } => true,
+            Self::OwnedOneRow { hydration, .. } => hydration.belongs_to(reservation),
+            Self::OwnedAdmittedOneRow { hydration, .. } => {
+                !hydration.is_empty()
+                    && hydration
+                        .iter()
+                        .all(|charge| std::ptr::eq(charge.reservation(), reservation))
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(unknown("invalid selected one-row ownership"))
+        }
+    }
+}
+
 #[derive(Default)]
 struct ChargeList<'r> {
     head: Option<Box<ChargeNode<'r>>>,
@@ -723,15 +749,13 @@ impl Accumulator<'_, '_> {
             return Err(unknown("administrative scan is permanently poisoned"));
         }
         self.poisoned = true;
+        input.validate_ownership(self.reservation)?;
         let result = match &input {
             SelectedAdministrativeInput::BorrowedFullImage { key, clause, image } => {
                 self.visit_broad(key, *clause, image)
             }
-            SelectedAdministrativeInput::OwnedOneRow {
-                clause,
-                image,
-                hydration: _,
-            } => {
+            SelectedAdministrativeInput::OwnedOneRow { clause, image, .. }
+            | SelectedAdministrativeInput::OwnedAdmittedOneRow { clause, image, .. } => {
                 if image.work.len() != 1 || image.versions.len() != 1 || !image.state.is_empty() {
                     Err(unknown(
                         "streamed administrative authority is not one live row",
@@ -1262,6 +1286,67 @@ mod tests {
         drop(future);
         assert_eq!(calls.get(), 0);
         assert_eq!(admission.usage().unwrap().1, 0);
+    }
+    #[test]
+    fn owned_worker_rows_bind_all_hydration_to_the_planning_job() {
+        for mode in 0..4 {
+            let admission = QueueAdmission::new(2, 8 << 20).unwrap();
+            let job = std::sync::Arc::new(admission.reserve(0).unwrap());
+            let foreign = std::sync::Arc::new(admission.reserve(0).unwrap());
+            let input = if mode == 3 {
+                SelectedAdministrativeInput::OwnedOneRow {
+                    clause: 0,
+                    image: one_row(row(), "row", 1),
+                    hydration: foreign.buffer(4096).unwrap(),
+                }
+            } else {
+                let hydration = match mode {
+                    0 => vec![
+                        job.owned_buffer(4096).unwrap(),
+                        job.owned_buffer(4096).unwrap(),
+                    ],
+                    1 => vec![
+                        job.owned_buffer(4096).unwrap(),
+                        foreign.owned_buffer(4096).unwrap(),
+                    ],
+                    _ => vec![],
+                };
+                SelectedAdministrativeInput::OwnedAdmittedOneRow {
+                    clause: 0,
+                    image: one_row(row(), "row", 1),
+                    hydration,
+                }
+            };
+            let clocks = Cell::new(0);
+            let result = plan_broad_group(
+                &ordinary(),
+                &intent(update()),
+                [Ok(input)],
+                &RecordSnapshot {
+                    next_sequence: 1,
+                    ..Default::default()
+                },
+                || {
+                    clocks.set(clocks.get() + 1);
+                    Ok(0)
+                },
+                &schema(),
+                &QueueLimits::default(),
+                &job,
+            );
+            if mode == 0 {
+                assert!(result.is_ok());
+                assert_eq!(clocks.get(), 1);
+            } else {
+                assert!(
+                    matches!(result, Err(QueueError::OutcomeUnknown(ref message))
+                if message == "invalid selected one-row ownership")
+                );
+                assert_eq!(clocks.get(), 0);
+            }
+            drop(result);
+            assert_eq!(admission.usage().unwrap().1, 0);
+        }
     }
     #[test]
     fn sparse_absence_certificates_are_charged_before_proposal_clones() {
@@ -2420,11 +2505,13 @@ where
     futures::pin_mut!(targets);
     while let Some(input) = targets.next().await {
         let input = input.map_err(|_| unknown("administrative source failed before EOF"))?;
+        input.validate_ownership(&reservation)?;
         let (key, clause, image) = match &input {
             SelectedAdministrativeInput::BorrowedFullImage { key, clause, image } => {
                 (*key, *clause, *image)
             }
-            SelectedAdministrativeInput::OwnedOneRow { clause, image, .. } => {
+            SelectedAdministrativeInput::OwnedOneRow { clause, image, .. }
+            | SelectedAdministrativeInput::OwnedAdmittedOneRow { clause, image, .. } => {
                 if image.work.len() != 1 || image.versions.len() != 1 || !image.state.is_empty() {
                     return Err(unknown(
                         "streamed administrative authority is not one live row",
