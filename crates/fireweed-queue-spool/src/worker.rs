@@ -3,6 +3,31 @@
 use super::{QueueError, QueueResult, unknown};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
+thread_local! {
+    static PHYSICAL_POOL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+struct PhysicalScope(Option<usize>);
+impl PhysicalScope {
+    fn enter(inner: &Arc<Inner>) -> Self {
+        Self(PHYSICAL_POOL.replace(Some(Arc::as_ptr(inner) as usize)))
+    }
+    fn owns(inner: &Arc<Inner>) -> bool {
+        PHYSICAL_POOL.get() == Some(Arc::as_ptr(inner) as usize)
+    }
+}
+impl Drop for PhysicalScope {
+    fn drop(&mut self) {
+        PHYSICAL_POOL.set(self.0);
+    }
+}
+fn execute<T>(operation: impl FnOnce() -> QueueResult<T>) -> QueueResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error @ QueueError::OutcomeUnknown(_))) => Err(error),
+        Ok(Err(_)) => Err(unknown("physical scratch operation failed")),
+        Err(_) => Err(unknown("scratch worker panicked")),
+    }
+}
 struct State {
     owned: usize,
     closed: bool,
@@ -133,13 +158,9 @@ impl ScratchWorkers {
             else {
                 return;
             };
-            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                work.operation.take().expect("one owned operation")()
-            })) {
-                Ok(Ok(value)) => Ok(value),
-                Ok(Err(error @ QueueError::OutcomeUnknown(_))) => Err(error),
-                Ok(Err(_)) => Err(unknown("physical scratch operation failed")),
-                Err(_) => Err(unknown("scratch worker panicked")),
+            let result = {
+                let _scope = PhysicalScope::enter(&work._completion.inner);
+                execute(|| work.operation.take().expect("one owned operation")())
             };
             drop(permit);
             drop(work);
@@ -178,9 +199,28 @@ impl ScratchWorkers {
             }
         }
     }
+    /// Known synchronous scratch stages may reuse this exact pool's current
+    /// physical owner. There is no new task, registration, permit or await gap.
+    /// Never use this for a native stage that enters another async runtime.
+    pub(crate) async fn run_or_inline<T, F>(&self, operation: F) -> QueueResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QueueResult<T> + Send + 'static,
+    {
+        if PhysicalScope::owns(&self.inner) {
+            if self.inner.state.lock().map_err(unknown)?.poisoned {
+                return Err(unknown("scratch dispatcher poisoned"));
+            }
+            return execute(operation);
+        }
+        self.run(operation).await
+    }
     /// Reject new registration but allow all already registered waiters to run.
     /// This drains physical execution, not resources returned to their callers.
     pub async fn close_and_drain(&self) -> QueueResult<()> {
+        if PhysicalScope::owns(&self.inner) {
+            return Err(unknown("scratch worker cannot drain its own execution"));
+        }
         self.inner.state.lock().map_err(unknown)?.closed = true;
         loop {
             let notified = self.inner.done.notified();
@@ -213,6 +253,189 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    #[tokio::test]
+    async fn inline_stage_preserves_parent_drain_through_caller_cancellation() {
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let admission = QueueAdmission::new(1, 65536).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let charge = job.owned_buffer(4096).unwrap();
+        let (ready, started) = oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let parent = workers.clone();
+        let nested = workers.clone();
+        let continued = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&continued);
+        let caller = tokio::spawn(async move {
+            parent
+                .run(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        nested
+                            .run_or_inline(move || {
+                                let _charge = charge;
+                                ready.send(()).unwrap();
+                                held.recv().unwrap();
+                                Ok(())
+                            })
+                            .await?;
+                        let inner = Arc::clone(&nested.inner);
+                        nested
+                            .run_or_inline(move || {
+                                assert!(inner.state.lock().unwrap().closed);
+                                mark.store(true, Ordering::SeqCst);
+                                Ok(())
+                            })
+                            .await
+                    })
+                })
+                .await
+        });
+        started.await.unwrap();
+        assert_eq!(workers.owned(), 1);
+        caller.abort();
+        let _ = caller.await;
+        let closing = workers.clone();
+        let mut drain = tokio::spawn(async move { closing.close_and_drain().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut drain)
+                .await
+                .is_err()
+        );
+        assert_eq!(workers.owned(), 1);
+        assert!(workers.inner.state.lock().unwrap().closed);
+        assert_eq!(admission.usage().unwrap().1, 4096);
+        release.send(()).unwrap();
+        drain.await.unwrap().unwrap();
+        assert_eq!(workers.owned(), 0);
+        assert!(continued.load(Ordering::SeqCst));
+        assert_eq!(admission.usage().unwrap().1, 0);
+    }
+    #[tokio::test]
+    async fn inline_scope_preserves_error_policy_and_rejects_self_drain() {
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let nested = workers.clone();
+        workers.run(move || tokio::runtime::Handle::current().block_on(async move {
+            assert!(matches!(nested.close_and_drain().await,
+                Err(QueueError::OutcomeUnknown(message)) if message.contains("own execution")));
+            assert!(matches!(nested.run_or_inline(|| Err::<(),_>(QueueError::Invalid("bad".into()))).await,
+                Err(QueueError::OutcomeUnknown(message)) if message.contains("physical scratch operation failed")));
+            assert!(matches!(nested.run_or_inline::<(), _>(|| panic!("nested failure")).await,
+                Err(QueueError::OutcomeUnknown(message)) if message.contains("worker panicked")));
+            assert_eq!(nested.run_or_inline(|| Ok(7)).await?, 7);
+            Ok(())
+        })).await.unwrap();
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn physical_panic_restores_scope_before_later_closed_admission() {
+        struct Immediate;
+        impl BlockingDispatcher for Immediate {
+            fn dispatch(&self, _: &tokio::runtime::Handle, work: BlockingOperation) {
+                work();
+            }
+        }
+        let workers = ScratchWorkers::with_dispatcher(1, 1, Arc::new(Immediate)).unwrap();
+        assert!(
+            workers
+                .run::<(), _>(|| panic!("physical failure"))
+                .await
+                .is_err()
+        );
+        workers.close_and_drain().await.unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&ran);
+        assert!(
+            workers
+                .run_or_inline(move || {
+                    mark.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .is_err()
+        );
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn dispatch_poison_rejects_inline_continuation_of_active_parent() {
+        struct FailSecond(std::sync::atomic::AtomicUsize);
+        impl BlockingDispatcher for FailSecond {
+            fn dispatch(&self, runtime: &tokio::runtime::Handle, work: BlockingOperation) {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    TokioDispatcher.dispatch(runtime, work);
+                } else {
+                    panic!("second dispatch fails");
+                }
+            }
+        }
+        let workers = ScratchWorkers::with_dispatcher(
+            2,
+            2,
+            Arc::new(FailSecond(std::sync::atomic::AtomicUsize::new(0))),
+        )
+        .unwrap();
+        let (ready, started) = oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let parent = workers.clone();
+        let nested = workers.clone();
+        let ran = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&ran);
+        let active = tokio::spawn(async move {
+            parent
+                .run(move || {
+                    ready.send(()).unwrap();
+                    held.recv().unwrap();
+                    let result = tokio::runtime::Handle::current().block_on(nested.run_or_inline(
+                        move || {
+                            mark.store(true, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    ));
+                    assert!(matches!(result, Err(QueueError::OutcomeUnknown(message))
+                if message.contains("dispatcher poisoned")));
+                    Ok(())
+                })
+                .await
+        });
+        started.await.unwrap();
+        assert!(workers.run(|| Ok(())).await.is_err());
+        assert_eq!(workers.owned(), 1);
+        release.send(()).unwrap();
+        active.await.unwrap().unwrap();
+        assert!(!ran.load(Ordering::SeqCst));
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn another_pool_retains_its_registration_capacity() {
+        let parent = ScratchWorkers::new(1, 1).unwrap();
+        let other = ScratchWorkers::new(1, 1).unwrap();
+        let (ready, started) = oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let occupied = other.clone();
+        let busy = tokio::spawn(async move {
+            occupied
+                .run(move || {
+                    ready.send(()).unwrap();
+                    held.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        started.await.unwrap();
+        let nested = other.clone();
+        let ran = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&ran);
+        parent.run(move || {
+            let result = tokio::runtime::Handle::current().block_on(nested.run_or_inline(move || {
+                mark.store(true, Ordering::SeqCst); Ok(())
+            }));
+            assert!(matches!(result, Err(QueueError::OutcomeUnknown(message)) if message.contains("admission unavailable")));
+            Ok(())
+        }).await.unwrap();
+        assert!(!ran.load(Ordering::SeqCst));
+        release.send(()).unwrap();
+        busy.await.unwrap().unwrap();
+        other.close_and_drain().await.unwrap();
+        parent.close_and_drain().await.unwrap();
     }
     #[tokio::test]
     async fn bounds_and_registered_capacity_fail_as_unknown_before_execution() {

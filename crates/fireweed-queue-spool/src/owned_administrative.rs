@@ -166,7 +166,7 @@ impl OwnedAdministrativeSink {
             _charge: charge,
         };
         let inner = workers
-            .run(move || {
+            .run_or_inline(move || {
                 let owner = AdministrativeScratch::new_with_command_limit(
                     &setup.directory,
                     setup.quota,
@@ -186,7 +186,10 @@ impl OwnedAdministrativeSink {
     }
     pub async fn append(&self, packet: ResolvedAdministrativeRow) -> QueueResult<()> {
         let taken = self.inner.take(false)?;
-        let result = self.workers.run(move || taken.append_packet(packet)).await;
+        let result = self
+            .workers
+            .run_or_inline(move || taken.append_packet(packet))
+            .await;
         if result.is_err() {
             self.inner.poison();
         }
@@ -201,7 +204,7 @@ impl OwnedAdministrativeSink {
         let mut taken = self.inner.take(true)?;
         let result = self
             .workers
-            .run(move || {
+            .run_or_inline(move || {
                 let owner = taken.take_owner();
                 let sealed = (*owner).seal(&summary)?;
                 taken.finish_seal()?;
@@ -222,6 +225,54 @@ mod tests {
     use fireweed_engine::queue_admission::QueueAdmission;
     use std::task::Poll;
     use tokio::sync::oneshot;
+    #[tokio::test]
+    async fn owned_database_stage_uses_one_worker_for_complete_scratch_delivery() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 8 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let quota = ScratchDiskQuota::new(8 << 20).unwrap();
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let nested = workers.clone();
+        let retained = Arc::clone(&job);
+        let disk = Arc::clone(&quota);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            workers.run(move || {
+                tokio::runtime::Handle::current().block_on(async move {
+                    let sink = OwnedAdministrativeSink::new(
+                        nested.clone(),
+                        directory.path(),
+                        disk,
+                        &retained,
+                        &queue(),
+                        pin(),
+                        2,
+                    )
+                    .await?;
+                    let _headers = retained.buffer(4096)?;
+                    let mut packets = Vec::with_capacity(2);
+                    let summary = run_scan(2, 0, false, &retained, |packet| {
+                        packets.push(packet);
+                        Ok(())
+                    })?;
+                    for packet in packets {
+                        sink.append(packet).await?;
+                    }
+                    let (sealed, summary) = sink.seal(summary).await?;
+                    assert_eq!(sealed.command_count(), 2);
+                    assert_eq!(summary.result().unwrap().histogram.matched, 2);
+                    drop((sealed, summary));
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+        result.unwrap();
+        workers.close_and_drain().await.unwrap();
+        assert_eq!(admission.usage().unwrap(), (1, 0));
+        assert_eq!(quota.usage().unwrap(), 0);
+    }
     #[tokio::test]
     async fn queued_append_cancel_and_concurrent_use_poison_and_release_taken_owner() {
         for concurrent in [false, true] {

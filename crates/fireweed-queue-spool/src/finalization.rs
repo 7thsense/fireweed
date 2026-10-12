@@ -62,7 +62,7 @@ pub async fn finalize_administrative_semantics<A: AdministrativeOrdinaryAuthorit
     let run_quota = Arc::clone(&quota);
     let run_job = Arc::clone(reservation);
     let (mut scratch, ordinary, decision, path) = workers
-        .run(move || {
+        .run_or_inline(move || {
             let decision = scratch.validate_before_business(
                 ordinary.snapshot(),
                 path.as_path(),
@@ -92,7 +92,7 @@ pub async fn finalize_administrative_semantics<A: AdministrativeOrdinaryAuthorit
     };
     let run_job = Arc::clone(reservation);
     let (scratch, mut proposal, decision) = workers
-        .run(move || {
+        .run_or_inline(move || {
             let decision = scratch.reduce_with_ordinary_effects(
                 proposal.initial_authority(),
                 proposal.unique_effects(),
