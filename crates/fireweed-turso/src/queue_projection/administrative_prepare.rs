@@ -1,4 +1,4 @@
-//! Private addressed administrative producer. Selection/planning never mutates
+//! Private administrative producer. Selection/planning never mutates
 //! projection authority; only replay of the conditional durable publication does.
 use super::*;
 use fireweed_core::queue_administration::{AdministrativeAction, AdministrativeOperation};
@@ -23,16 +23,46 @@ use fireweed_engine::{
     },
     queue_schema_codec::DefinitionPin,
 };
+use fireweed_queue_spool::ScratchRoot;
 use fireweed_queue_spool::{
     AdministrativeOrdinaryAuthority, OwnedAdministrativeSink,
     ResolvedAdministrativePublicationInput, ScratchDiskQuota, finalize_administrative_semantics,
 };
-use std::path::PathBuf;
 
 pub struct AdministrativePreparationInput {
     pub commit: CommitPreparationInput,
-    pub scratch_directory: PathBuf,
+    pub scratch_root: Arc<ScratchRoot>,
     pub scratch_quota: Arc<ScratchDiskQuota>,
+}
+/// The key allocation is destroyed before its same-job admission guard.
+#[cfg(target_os = "linux")]
+struct CursorKey {
+    bytes: Vec<u8>,
+    _charge: Option<OwnedQueueBufferCharge>,
+}
+#[cfg(target_os = "linux")]
+impl CursorKey {
+    fn empty() -> Self {
+        Self {
+            bytes: Vec::new(),
+            _charge: None,
+        }
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+    fn copy(key: &[u8], job: &Arc<QueueReservation>) -> QueueResult<Self> {
+        let charge = job.owned_buffer(
+            (key.len() as u64)
+                .checked_mul(8)
+                .and_then(|n| n.checked_add(4096))
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        Ok(Self {
+            bytes: key.to_vec(),
+            _charge: Some(charge),
+        })
+    }
 }
 struct Authority {
     image: RecordSnapshot,
@@ -71,9 +101,9 @@ struct Worker {
     charges: Vec<OwnedQueueBufferCharge>,
 }
 impl QueueProjection {
-    /// Private prerequisite for addressed commits. Existing identities resolve
+    /// Private prerequisite for administrative commits. Existing identities resolve
     /// through replay_commit. This does not activate a partial public backend.
-    pub async fn prepare_addressed_administration(
+    pub async fn prepare_administration(
         self: &Arc<Self>,
         input: AdministrativePreparationInput,
         epoch: u64,
@@ -116,7 +146,7 @@ impl QueueProjection {
     }
     /// Same canonical proposal checks, without consulting execution identities
     /// or exposing any publishable record. Covered orchestration checks freshness.
-    pub async fn preview_addressed_administration(
+    pub async fn preview_administration(
         self: &Arc<Self>,
         input: AdministrativePreparationInput,
         clock: Arc<dyn Clock>,
@@ -154,15 +184,12 @@ impl QueueProjection {
             std::slice::from_ref(&commit.group),
             &commit.limits,
         )?;
-        let admin = commit
+        let _admin = commit
             .group
             .administration
             .as_ref()
             .ok_or_else(|| QueueError::Invalid("administration required".into()))?;
-        if !matches!(
-            admin.intent.operation,
-            AdministrativeOperation::Addressed(_)
-        ) || matches!(
+        if matches!(
             mode,
             Mode::Publish { epoch: 0, .. }
                 | Mode::Publish {
@@ -171,7 +198,16 @@ impl QueueProjection {
                 }
         ) {
             return Err(QueueError::Invalid(
-                "invalid addressed preparation authority/shape".into(),
+                "invalid administrative preparation authority".into(),
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        if matches!(
+            _admin.intent.operation,
+            AdministrativeOperation::SelectFirst(_)
+        ) {
+            return Err(QueueError::Invalid(
+                "native broad administration requires Linux".into(),
             ));
         }
         let headers = incoming_headers(&commit.group)?;
@@ -179,7 +215,7 @@ impl QueueProjection {
             .checked_mul(16)
             .and_then(|n| n.checked_add(headers))
             .and_then(|n| {
-                n.checked_add((input.scratch_directory.as_os_str().len() as u64).checked_mul(4)?)
+                n.checked_add((input.scratch_root.path().as_os_str().len() as u64).checked_mul(4)?)
             })
             .and_then(|n| n.checked_add(65536))
             .ok_or(QueueError::TooLarge)?;
@@ -346,9 +382,6 @@ impl NativeTransactionWork for Worker {
             .administration
             .as_ref()
             .ok_or_else(|| unknown("administration disappeared"))?;
-        let AdministrativeOperation::Addressed(entries) = &admin.intent.operation else {
-            return Err(unknown("addressed intent disappeared"));
-        };
         let logical_max = input.limits.max_group_bytes;
         let floor =
             measure_administrative_success_floor(&input.queue, native.definition.pin(), group)
@@ -385,7 +418,7 @@ impl NativeTransactionWork for Worker {
         initial.unique_probes_loaded = probes;
         let sink = OwnedAdministrativeSink::new_with_command_limit(
             self.workers.clone(),
-            &self.input.scratch_directory,
+            self.input.scratch_root.path(),
             self.input.scratch_quota.clone(),
             &self.job,
             &input.queue,
@@ -395,44 +428,131 @@ impl NativeTransactionWork for Worker {
         )
         .await?;
         let job = &self.job;
-        let source = fireweed_engine::queue_administration::addressed_administrative_source(
-            entries,
-            |position, entry| async move {
-                let row = hydrate(
+        let summary = match &admin.intent.operation {
+            AdministrativeOperation::Addressed(entries) => {
+                let source = fireweed_engine::queue_administration::addressed_administrative_source(
+                    entries,
+                    |position, entry| async move {
+                        let row = hydrate(
+                            connection,
+                            native.queue_id,
+                            schema,
+                            native.insertion_sequence,
+                            &entry.key,
+                            &entry.action,
+                            admin.intent.evaluated_at,
+                            job,
+                        )
+                        .await?;
+                        Ok(AddressedAdministrativeInput::OwnedAdmittedOneRow {
+                            position,
+                            key: entry.key.clone(),
+                            image: row.image,
+                            hydration: row._charges,
+                        })
+                    },
+                );
+                let delivery = sink.clone();
+                scan_addressed_group_to_sink_bounded(
+                    group,
+                    &admin.intent,
+                    source,
+                    &initial,
+                    schema,
+                    &input.limits,
+                    self.job.clone(),
+                    admin.max_result_bytes,
+                    move |packet| {
+                        let sink = delivery.clone();
+                        async move { sink.append(packet).await }
+                    },
+                )
+                .await?
+            }
+            #[cfg(target_os = "linux")]
+            AdministrativeOperation::SelectFirst(clauses) => {
+                let selection = Box::pin(super::administrative_selection::Selection::prepare(
                     connection,
                     native.queue_id,
                     schema,
                     native.insertion_sequence,
-                    &entry.key,
-                    &entry.action,
+                    clauses,
                     admin.intent.evaluated_at,
+                    self.input.scratch_root.clone(),
+                    self.input.scratch_quota.clone(),
                     job,
-                )
+                ))
                 .await?;
-                Ok(AddressedAdministrativeInput::OwnedAdmittedOneRow {
-                    position,
-                    key: entry.key.clone(),
-                    image: row.image,
-                    hydration: row._charges,
-                })
-            },
-        );
-        let delivery = sink.clone();
-        let summary = scan_addressed_group_to_sink_bounded(
-            group,
-            &admin.intent,
-            source,
-            &initial,
-            schema,
-            &input.limits,
-            self.job.clone(),
-            admin.max_result_bytes,
-            move |packet| {
-                let sink = delivery.clone();
-                async move { sink.append(packet).await }
-            },
-        )
-        .await?;
+                let source = fireweed_engine::queue_administration::selected_administrative_source(
+                    (selection, CursorKey::empty()),
+                    move |(mut selection, after)| async move {
+                        let selected = selection.next(after.as_slice()).await?;
+                        drop(after);
+                        let Some(selected) = selected else {
+                            return Ok(None);
+                        };
+                        let clause = usize::try_from(selected.clause()).map_err(unknown)?;
+                        let action = &clauses
+                            .get(clause)
+                            .ok_or_else(|| unknown("selected clause missing"))?
+                            .action;
+                        let key = std::str::from_utf8(selected.key()).map_err(unknown)?;
+                        let identity = super::one(connection,
+                            "SELECT key,version FROM q7_records WHERE id=? AND queue_id=? AND collection=0 AND active=1",
+                            vec![Value::Integer(selected.id()), Value::Integer(native.queue_id)], 2).await?
+                            .ok_or_else(|| unknown("selected identity disappeared"))?;
+                        if identity
+                            != vec![
+                                blob(selected.key()),
+                                blob(&selected.version().to_be_bytes()),
+                            ]
+                        {
+                            return Err(unknown("selected physical identity changed"));
+                        }
+                        let row = hydrate(
+                            connection,
+                            native.queue_id,
+                            schema,
+                            native.insertion_sequence,
+                            key,
+                            action,
+                            admin.intent.evaluated_at,
+                            job,
+                        )
+                        .await?;
+                        if row.image.work.get(key).map(|w| w.record.version)
+                            != Some(selected.version())
+                        {
+                            return Err(unknown("selected hydrated version changed"));
+                        }
+                        let after = CursorKey::copy(selected.key(), job)?;
+                        let hydration = row._charges;
+                        Ok(Some((fireweed_engine::queue_administration::SelectedAdministrativeInput::OwnedAdmittedOneRow {
+                            clause, image: row.image, hydration,
+                        }, (selection, after))))
+                    },
+                );
+                let delivery = sink.clone();
+                fireweed_engine::queue_administration::scan_broad_group_to_sink(
+                    group,
+                    &admin.intent,
+                    source,
+                    &initial,
+                    schema,
+                    &input.limits,
+                    self.job.clone(),
+                    move |packet| {
+                        let sink = delivery.clone();
+                        async move { sink.append(packet).await }
+                    },
+                )
+                .await?
+            }
+            #[cfg(not(target_os = "linux"))]
+            AdministrativeOperation::SelectFirst(_) => {
+                return Err(unknown("native broad administration requires Linux"));
+            }
+        };
         let (mut scratch, summary) = sink.seal(summary).await?;
         scratch.verify_context(
             &input.queue,
@@ -452,7 +572,7 @@ impl NativeTransactionWork for Worker {
             || timestamp_nanos(self.clock.now()),
             &self.job,
             &self.workers,
-            &self.input.scratch_directory,
+            self.input.scratch_root.path(),
             self.input.scratch_quota.clone(),
         )
         .await?;

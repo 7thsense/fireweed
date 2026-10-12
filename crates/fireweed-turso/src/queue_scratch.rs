@@ -11,8 +11,8 @@ use std::sync::{
 };
 use turso::{Builder, Connection, Database, Value, params_from_iter};
 
-const INSERT_RECORD: &str = "INSERT OR IGNORE INTO records(id,key) VALUES(?1,?2)";
-const CHECK_RECORD: &str = "SELECT key=?2 FROM records WHERE id=?1";
+const INSERT_RECORD: &str = "INSERT OR IGNORE INTO records(id,key,version) VALUES(?1,?2,?3)";
+const CHECK_RECORD: &str = "SELECT key=?2 AND version=?3 FROM records WHERE id=?1";
 const FIND_RECORD: &str = "SELECT 1 FROM records WHERE id=?1";
 const FIND_OWNER: &str = "SELECT clause FROM owners WHERE record=?1";
 const INSERT_SET: &str = "INSERT OR IGNORE INTO sets(node,record) VALUES(?1,?2)";
@@ -20,13 +20,12 @@ const INSERT_EDGE: &str = "INSERT OR IGNORE INTO edges(parent,child) VALUES(?1,?
 const UNION: &str = "INSERT OR IGNORE INTO accumulator(node,record) SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM sets WHERE node=?3 AND record=?2)";
 const INTERSECTION: &str = "INSERT OR IGNORE INTO accumulator(node,record) SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM edges e WHERE e.parent=?1 AND NOT EXISTS(SELECT 1 FROM sets r WHERE r.node=e.child AND r.record=?2))";
 const COMPLEMENT: &str = "INSERT OR IGNORE INTO accumulator(node,record) SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM sets WHERE node=?3 AND record=?2)";
-const INSERT_OWNER: &str =
-    "INSERT OR IGNORE INTO owners(record,clause,key) SELECT id,?2,key FROM records WHERE id=?1";
+const INSERT_OWNER: &str = "INSERT OR IGNORE INTO owners(record,clause,key,version) SELECT id,?2,key,version FROM records WHERE id=?1";
 const NEXT_ACCUMULATOR: &str =
     "SELECT record FROM accumulator WHERE node=?1 AND record>?2 ORDER BY record LIMIT 1";
 const NEXT_SET: &str =
     "SELECT record FROM sets WHERE node=?1 AND record>?2 ORDER BY record LIMIT 1";
-const NEXT_OWNER: &str = "SELECT record,clause,length(key) FROM owners INDEXED BY owners_key WHERE key>?1 ORDER BY key LIMIT 1";
+const NEXT_OWNER: &str = "SELECT record,clause,length(key),version FROM owners INDEXED BY owners_key WHERE key>?1 ORDER BY key LIMIT 1";
 const READ_OWNER_KEY: &str = "SELECT key FROM owners WHERE record=?1";
 fn unknown() -> QueueError {
     QueueError::OutcomeUnknown("native scratch operation failed".into())
@@ -52,6 +51,7 @@ pub struct NativeScratchDatabase {
 pub struct SelectedScratchRow {
     id: i64,
     clause: i64,
+    version: u64,
     key: Vec<u8>,
     _charge: OwnedQueueBufferCharge,
 }
@@ -61,6 +61,9 @@ impl SelectedScratchRow {
     }
     pub fn clause(&self) -> i64 {
         self.clause
+    }
+    pub fn version(&self) -> u64 {
+        self.version
     }
     pub fn key(&self) -> &[u8] {
         &self.key
@@ -121,12 +124,12 @@ impl NativeScratchDatabase {
             "PRAGMA synchronous=OFF",
             "PRAGMA cache_size=-1024",
             "PRAGMA cache_spill=ON",
-            "CREATE TABLE records(id INTEGER PRIMARY KEY,key BLOB NOT NULL)",
+            "CREATE TABLE records(id INTEGER PRIMARY KEY,key BLOB NOT NULL,version BLOB NOT NULL)",
             "CREATE UNIQUE INDEX records_key ON records(key)",
             "CREATE TABLE sets(node INTEGER NOT NULL,record INTEGER NOT NULL,PRIMARY KEY(node,record))",
             "CREATE TABLE accumulator(node INTEGER NOT NULL,record INTEGER NOT NULL,PRIMARY KEY(node,record))",
             "CREATE TABLE edges(parent INTEGER NOT NULL,child INTEGER NOT NULL,PRIMARY KEY(parent,child))",
-            "CREATE TABLE owners(record INTEGER PRIMARY KEY,clause INTEGER NOT NULL,key BLOB NOT NULL)",
+            "CREATE TABLE owners(record INTEGER PRIMARY KEY,clause INTEGER NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL)",
             "CREATE UNIQUE INDEX owners_key ON owners(key)",
         ] {
             owner.execute(sql, vec![]).await?;
@@ -237,18 +240,26 @@ impl NativeScratchDatabase {
         .await;
         self.accept(result)
     }
-    pub async fn record(&mut self, id: i64, key: &[u8]) -> QueueResult<()> {
-        self.require(id > 0 && !key.is_empty())?;
+    pub async fn record(&mut self, id: i64, key: &[u8], version: u64) -> QueueResult<()> {
+        self.require(id > 0 && !key.is_empty() && version > 0)?;
         self.admit_key(key.len())?;
         self.execute(
             INSERT_RECORD,
-            vec![Value::Integer(id), Value::Blob(key.to_vec())],
+            vec![
+                Value::Integer(id),
+                Value::Blob(key.to_vec()),
+                Value::Blob(version.to_be_bytes().to_vec()),
+            ],
         )
         .await?;
         let bound = self
             .one(
                 CHECK_RECORD,
-                vec![Value::Integer(id), Value::Blob(key.to_vec())],
+                vec![
+                    Value::Integer(id),
+                    Value::Blob(key.to_vec()),
+                    Value::Blob(version.to_be_bytes().to_vec()),
+                ],
             )
             .await?;
         self.require(bound.as_deref() == Some(&[Value::Integer(1)]))
@@ -363,6 +374,7 @@ impl NativeScratchDatabase {
                 Value::Integer(id),
                 Value::Integer(clause),
                 Value::Integer(bytes),
+                Value::Blob(version),
             ],
         ) = metadata.as_deref()
         else {
@@ -372,7 +384,8 @@ impl NativeScratchDatabase {
                 Err(unknown())
             };
         };
-        self.require(*id > 0 && *clause >= 0 && *bytes > 0)?;
+        let version = u64::from_be_bytes(version.as_slice().try_into().map_err(|_| unknown())?);
+        self.require(*id > 0 && *clause >= 0 && *bytes > 0 && version > 0)?;
         self.admit_key(usize::try_from(*bytes).map_err(|_| unknown())?)?;
         let charge = self._memory.child_buffer(
             u64::try_from(*bytes)
@@ -388,6 +401,7 @@ impl NativeScratchDatabase {
                     Ok(Some(SelectedScratchRow {
                         id: *id,
                         clause: *clause,
+                        version,
                         key,
                         _charge: charge,
                     }))

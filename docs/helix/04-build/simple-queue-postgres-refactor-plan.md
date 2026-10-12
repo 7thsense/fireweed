@@ -87,16 +87,22 @@ publication decision. It prepares atomic FWQP2 effects or a zero-effect rejectio
 with immutable FP4 replay. Addressed commits use the same owned conditional
 publication and original-only receipt resolution as ordinary groups. The internal
 pipeline retains constructor-owned scratch root/quota resources for commits and
-previews. Ordinary and addressed preview share guarded result
+previews. Ordinary and administrative preview share guarded result
 ownership, bypass execution receipts and use covered-read freshness without
 publication. Ordinary commit/preview sample the operational clock after
-prospective unique authority on both native paths. Broad native selectors remain
-required. A private Linux scratch-main owner uses configured-root anonymous
+prospective unique authority on both native paths. Private Linux broad selectors use postfix disk sets and fixed native scalar
+leaves in the original authority snapshot. Earliest-clause ownership precedes
+precondition evaluation; selected full key, physical identity and unsigned
+version are revalidated before shared one-row hydration and EOF-only
+finalization. A private Linux scratch-main owner uses configured-root anonymous
 files, shared precharged file/WAL highwater, one-row autocommit and separate
-indexed Boolean-set tables. Exact stock SDK opcode controls exclude hidden
-materialization; ownership, cancellation, identity failure and wider-target tests
-qualify these primitives. Complete SDK memory-peak correspondence and authoritative
-selector integration remain required before broad/public qualification.
+indexed Boolean-set tables. Exact stock SDK opcode controls reject listed
+collection-materialization opcodes; ownership, cancellation, identity failure and wider-target tests
+qualify these primitives. Complete SDK memory-peak correspondence remains
+required before public qualification. Authority-side `typeof` and `length`
+reads can materialize complete overflow records inside the stock SDK before
+a later per-key charge; shallow corruption guards and selector checks establish
+correctness, not a hard native-reader allocation bound.
 PostgreSQL resolves and probes its typed scratch root once before network
 access; cloned handles share that immutable root and administration never rereads
 process temporary-directory configuration.

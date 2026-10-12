@@ -1,6 +1,7 @@
 //! Owned commit publication. Only covered immutable original-receipt replay
 //! returns an outcome; provisional planning never crosses the completion edge.
 use super::*;
+#[cfg(not(target_os = "linux"))]
 use fireweed_core::queue_administration::AdministrativeOperation;
 use fireweed_core::queue_contract::{CommitGroup, QueueLimits, ReceiptLookup, encoded_len};
 use fireweed_engine::{
@@ -34,6 +35,7 @@ impl QueueRecoveryPipeline {
     ) -> QueueResult<AdmittedCommitReceipts> {
         group.preflight_for(&queue, &limits)?;
         administrative_groups_preflight(&queue, std::slice::from_ref(&group), &limits)?;
+        #[cfg(not(target_os = "linux"))]
         if matches!(
             group.administration.as_ref().map(|a| &a.intent.operation),
             Some(AdministrativeOperation::SelectFirst(_))
@@ -165,10 +167,10 @@ impl CommitTask {
         let prepared = if input.group.administration.is_some() {
             self.pipeline
                 .projection
-                .prepare_addressed_administration(
+                .prepare_administration(
                     AdministrativePreparationInput {
                         commit: input,
-                        scratch_directory: self.pipeline.scratch_root.path().to_path_buf(),
+                        scratch_root: self.pipeline.scratch_root.clone(),
                         scratch_quota: Arc::clone(&self.pipeline.scratch_quota),
                     },
                     recovered.acquired_epoch,

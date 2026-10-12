@@ -96,3 +96,23 @@ where
         },
     )
 }
+
+/// A storage-owned fallible selected-row cursor. Completion remains EOF-only in
+/// the shared scanner; this helper adds no filtering or planning policy.
+pub fn selected_administrative_source<'s, 'r: 's, S, F, Fut>(
+    state: S,
+    next: F,
+) -> impl futures::Stream<Item = QueueResult<SelectedAdministrativeInput<'s, 'r>>> + 's
+where
+    S: 's,
+    F: FnMut(S) -> Fut + 's,
+    Fut: std::future::Future<Output = QueueResult<Option<(SelectedAdministrativeInput<'s, 'r>, S)>>>
+        + 's,
+{
+    futures::stream::try_unfold((state, next), move |(state, mut next)| async move {
+        let Some((row, state)) = next(state).await? else {
+            return Ok(None);
+        };
+        Ok(Some((row, (state, next))))
+    })
+}

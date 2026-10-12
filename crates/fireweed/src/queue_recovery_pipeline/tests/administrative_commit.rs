@@ -3,6 +3,14 @@ use super::*;
 #[tokio::test]
 async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild()
 {
+    administrative_commit_case(false).await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn broad_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild() {
+    administrative_commit_case(true).await;
+}
+async fn administrative_commit_case(broad_mode: bool) {
     use fireweed_conformance::queue_contract::TestClock;
     let root = std::env::temp_dir().join(format!(
         "fireweed-api007-admin-commit-{}-{}",
@@ -82,33 +90,50 @@ async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_f
             .unwrap(),
     );
     use fireweed_core::queue_administration::*;
-    let make = |id: &str, key: &str, version: u64, priority: i64| CommitGroup {
-        request_id: id.into(),
-        claimed_updates: vec![],
-        work_updates: vec![],
-        state_updates: vec![],
-        work_inserts: vec![],
-        administration: Some(AdministrativeCommit {
-            max_result_bytes: 65536,
-            intent: AdministrativeIntent {
-                evaluated_at: 0,
-                before_fields: Some(Default::default()),
-                operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
-                    key: key.into(),
-                    expected_version: Some(version),
-                    precondition: WorkSelector::all(vec![]),
-                    action: AdministrativeAction::Update {
-                        patch: WorkPatch {
-                            priority: Some(priority),
-                            ..Default::default()
+    let make = |id: &str, key: &str, version: u64, priority: i64| {
+        let mut group = CommitGroup {
+            request_id: id.into(),
+            claimed_updates: vec![],
+            work_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            administration: Some(AdministrativeCommit {
+                max_result_bytes: 65536,
+                intent: AdministrativeIntent {
+                    evaluated_at: 0,
+                    before_fields: Some(Default::default()),
+                    operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                        key: key.into(),
+                        expected_version: Some(version),
+                        precondition: WorkSelector::all(vec![]),
+                        action: AdministrativeAction::Update {
+                            patch: WorkPatch {
+                                priority: Some(priority),
+                                ..Default::default()
+                            },
+                            lifecycle: AdministrativeLifecycle::Keep,
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                            remove_field_prefixes: Default::default(),
                         },
-                        lifecycle: AdministrativeLifecycle::Keep,
-                        lease_guard: AdministrativeLeaseGuard::RejectActive,
-                        remove_field_prefixes: Default::default(),
-                    },
-                }]),
-            },
-        }),
+                    }]),
+                },
+            }),
+        };
+        if broad_mode {
+            let admin = group.administration.as_mut().unwrap();
+            admin.intent.before_fields = None;
+            let AdministrativeOperation::Addressed(entries) = &admin.intent.operation else {
+                unreachable!()
+            };
+            admin.intent.operation =
+                AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                    id: "selected".into(),
+                    selector: WorkSelector::leaf(SelectorNode::Keys([key.into()].into())),
+                    precondition: WorkSelector::all(vec![]),
+                    action: entries[0].action.clone(),
+                }]);
+        }
+        group
     };
     let mut group = make("atomic-admin", "a", 1, 17);
     group.state_updates.push(StateUpdate {
@@ -135,9 +160,19 @@ async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_f
                 .await
         }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+    if tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
         .await
-        .unwrap();
+        .is_err()
+    {
+        assert!(
+            first.is_finished(),
+            "commit did not reach append or terminate"
+        );
+        panic!(
+            "commit terminated before append: {:?}",
+            first.await.unwrap().err()
+        );
+    }
     let winner = pipeline
         .commit(
             address(),
@@ -161,6 +196,39 @@ async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_f
     let loser = first.await.unwrap().unwrap();
     assert_eq!(loser.receipts(), original);
     drop(loser);
+    let preview = pipeline
+        .preview(
+            PreviewRequest {
+                queue: address(),
+                group: make("preview-only", "a", 2, 23),
+            },
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        preview.result().outcome,
+        PreviewOutcome::AdministrativeCommitted { .. }
+    ));
+    drop(preview);
+    assert_eq!(
+        pipeline
+            .read_commit(
+                ReceiptReadRequest {
+                    queue: address(),
+                    request_ids: vec!["preview-only".into()],
+                    max_bytes: 65536,
+                },
+                QueueLimits::default(),
+                job.clone()
+            )
+            .await
+            .unwrap()
+            .receipts(),
+        &[ReceiptLookup::Absent]
+    );
     let mut changed = group.clone();
     changed.administration.as_mut().unwrap().max_result_bytes -= 1;
     assert!(matches!(
@@ -235,16 +303,26 @@ async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_f
     let mut oversized = make("logical-admin-too-large", "missing", 1, 43);
     let administration = oversized.administration.as_mut().unwrap();
     administration.max_result_bytes = 512;
-    let AdministrativeOperation::Addressed(entries) = &mut administration.intent.operation else {
-        unreachable!()
-    };
-    let entry = entries[0].clone();
-    *entries = (0..8)
-        .map(|i| AdministrativeEntry {
-            key: format!("missing-{i}-{}", "x".repeat(1024)),
-            ..entry.clone()
-        })
-        .collect();
+    match &mut administration.intent.operation {
+        AdministrativeOperation::Addressed(entries) => {
+            let entry = entries[0].clone();
+            *entries = (0..8)
+                .map(|i| AdministrativeEntry {
+                    key: format!("missing-{i}-{}", "x".repeat(1024)),
+                    ..entry.clone()
+                })
+                .collect();
+        }
+        AdministrativeOperation::SelectFirst(clauses) => {
+            let clause = clauses[0].clone();
+            *clauses = (0..8)
+                .map(|i| AdministrativeClause {
+                    id: format!("empty-{i}-{}", "x".repeat(1024)),
+                    ..clause.clone()
+                })
+                .collect();
+        }
+    }
     oversized
         .work_inserts
         .push(work("too-large-must-not-exist"));
@@ -435,21 +513,6 @@ async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_f
             .await,
         Err(QueueError::TooLarge)
     ));
-    let mut broad = make("broad-before-closed-workers", "a", 3, 47);
-    let admin = broad.administration.as_mut().unwrap();
-    let AdministrativeOperation::Addressed(entries) = &admin.intent.operation else {
-        unreachable!()
-    };
-    admin.intent.operation = AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
-        id: "all".into(),
-        selector: WorkSelector::all(vec![]),
-        precondition: WorkSelector::all(vec![]),
-        action: entries[0].action.clone(),
-    }]);
-    assert!(
-        matches!(pipeline.commit(address(), broad, QueueLimits::default(), clock.clone(), job.clone()).await,
-        Err(QueueError::Invalid(message)) if message == "broad administrative commit not assembled")
-    );
     drop(pipeline);
     drop(job);
     drop(store);

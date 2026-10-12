@@ -202,107 +202,110 @@ async fn native_broad_source<'s, 'r: 's>(
     let AdministrativeOperation::SelectFirst(clauses) = &intent.operation else {
         unreachable!("validated broad selection")
     };
-    let source = futures::stream::try_unfold((prepared, cursor_charge), move |state| async move {
-        let rows = tx
-            .query("FETCH FORWARD 1 FROM fw_api007_admin", &[])
-            .await
-            .map_err(storage)?;
-        if rows.is_empty() {
-            tx.batch_execute("CLOSE fw_api007_admin")
+    let source = fireweed_engine::queue_administration::selected_administrative_source(
+        (prepared, cursor_charge),
+        move |state| async move {
+            let rows = tx
+                .query("FETCH FORWARD 1 FROM fw_api007_admin", &[])
                 .await
                 .map_err(storage)?;
-            return Ok(None);
-        }
-        if rows.len() != 1 {
-            return Err(storage("native administrative fetch is not one row"));
-        }
-        let metadata = &rows[0];
-        let id: i64 = metadata.get(0);
-        let key_bytes = u64::try_from(metadata.get::<_, i32>(1)).map_err(storage)?;
-        let clause = usize::try_from(metadata.get::<_, i32>(2)).map_err(storage)?;
-        let action = &clauses
-            .get(clause)
-            .ok_or_else(|| storage("invalid native clause ordinal"))?
-            .action;
-        let hydration = reservation.buffer(
-            key_bytes
-                .checked_mul(32)
-                .and_then(|bytes| bytes.checked_add(65536))
-                .ok_or(QueueError::TooLarge)?,
-        )?;
-        let row = tx.query_one("SELECT key,version::text FROM fireweed_api007.records WHERE id=$1 AND queue_id=$2 AND collection=0 AND active", &[&id,&queue.id]).await.map_err(storage)?;
-        let record_key = key(row.get(0))?;
-        if record_key.len() as u64 != key_bytes {
-            return Err(storage("native administrative key length changed"));
-        }
-        let highwater = version(row.get(1))?;
-        let loaded = hydrate_administrative_row(
-            tx,
-            queue,
-            &record_key,
-            action,
-            intent.evaluated_at,
-            false,
-            reservation,
-        )
-        .await?;
-        if loaded.snapshot.work[&record_key].record.version != highwater
-            || loaded.ids.get(&RecordIdentity {
-                collection: None,
-                key: record_key.clone(),
-            }) != Some(&id)
-        {
-            return Err(storage("native selected physical identity changed"));
-        }
-        let Loaded {
-            _charge,
-            _selection_charge,
-            _probe_charges,
-            snapshot,
-            ids,
-        } = loaded;
-        drop(ids);
-        let mut hydration = hydration.merge(_charge)?;
-        if let Some(charge) = _selection_charge {
-            hydration = hydration.merge(charge)?;
-        }
-        for charge in _probe_charges {
-            hydration = hydration.merge(charge)?;
-        }
-        let input =
-            fireweed_engine::queue_administration::SelectedAdministrativeInput::OwnedOneRow {
-                clause,
-                image: snapshot,
-                hydration,
-            };
-        #[cfg(test)]
-        ROW_BOUNDARY.with(|hook| {
-            if let Some((id, callback)) = &*hook.borrow()
-                && *id == queue.id
-            {
-                callback(&record_key);
+            if rows.is_empty() {
+                tx.batch_execute("CLOSE fw_api007_admin")
+                    .await
+                    .map_err(storage)?;
+                return Ok(None);
             }
-        });
-        #[cfg(test)]
-        if SQL_FAILURE_AFTER.with(|failure| {
-            if let Some((id, remaining)) = failure.get()
-                && id == queue.id
+            if rows.len() != 1 {
+                return Err(storage("native administrative fetch is not one row"));
+            }
+            let metadata = &rows[0];
+            let id: i64 = metadata.get(0);
+            let key_bytes = u64::try_from(metadata.get::<_, i32>(1)).map_err(storage)?;
+            let clause = usize::try_from(metadata.get::<_, i32>(2)).map_err(storage)?;
+            let action = &clauses
+                .get(clause)
+                .ok_or_else(|| storage("invalid native clause ordinal"))?
+                .action;
+            let hydration = reservation.buffer(
+                key_bytes
+                    .checked_mul(32)
+                    .and_then(|bytes| bytes.checked_add(65536))
+                    .ok_or(QueueError::TooLarge)?,
+            )?;
+            let row = tx.query_one("SELECT key,version::text FROM fireweed_api007.records WHERE id=$1 AND queue_id=$2 AND collection=0 AND active", &[&id,&queue.id]).await.map_err(storage)?;
+            let record_key = key(row.get(0))?;
+            if record_key.len() as u64 != key_bytes {
+                return Err(storage("native administrative key length changed"));
+            }
+            let highwater = version(row.get(1))?;
+            let loaded = hydrate_administrative_row(
+                tx,
+                queue,
+                &record_key,
+                action,
+                intent.evaluated_at,
+                false,
+                reservation,
+            )
+            .await?;
+            if loaded.snapshot.work[&record_key].record.version != highwater
+                || loaded.ids.get(&RecordIdentity {
+                    collection: None,
+                    key: record_key.clone(),
+                }) != Some(&id)
             {
-                if remaining == 1 {
-                    failure.set(None);
-                    true
+                return Err(storage("native selected physical identity changed"));
+            }
+            let Loaded {
+                _charge,
+                _selection_charge,
+                _probe_charges,
+                snapshot,
+                ids,
+            } = loaded;
+            drop(ids);
+            let mut hydration = hydration.merge(_charge)?;
+            if let Some(charge) = _selection_charge {
+                hydration = hydration.merge(charge)?;
+            }
+            for charge in _probe_charges {
+                hydration = hydration.merge(charge)?;
+            }
+            let input =
+                fireweed_engine::queue_administration::SelectedAdministrativeInput::OwnedOneRow {
+                    clause,
+                    image: snapshot,
+                    hydration,
+                };
+            #[cfg(test)]
+            ROW_BOUNDARY.with(|hook| {
+                if let Some((id, callback)) = &*hook.borrow()
+                    && *id == queue.id
+                {
+                    callback(&record_key);
+                }
+            });
+            #[cfg(test)]
+            if SQL_FAILURE_AFTER.with(|failure| {
+                if let Some((id, remaining)) = failure.get()
+                    && id == queue.id
+                {
+                    if remaining == 1 {
+                        failure.set(None);
+                        true
+                    } else {
+                        failure.set(Some((id, remaining - 1)));
+                        false
+                    }
                 } else {
-                    failure.set(Some((id, remaining - 1)));
                     false
                 }
-            } else {
-                false
+            }) {
+                tx.query_one("SELECT 1 / 0", &[]).await.map_err(storage)?;
             }
-        }) {
-            tx.query_one("SELECT 1 / 0", &[]).await.map_err(storage)?;
-        }
-        Ok(Some((input, state)))
-    });
+            Ok(Some((input, state)))
+        },
+    );
     Ok(source)
 }
 

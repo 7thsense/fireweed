@@ -94,3 +94,7 @@ pub(super) async fn load_work_authority(
         }),
     })
 }
+
+pub(super) fn raw_valid_authority() -> &'static str {
+    "typeof(r.lifecycle)='integer' AND r.lifecycle IN (0,1,2,3) AND typeof(r.available_at)='integer' AND typeof(r.eligible_since)='integer' AND ((r.lifecycle=1 AND typeof(r.lease_until)='integer' AND typeof(r.lease_hash)='blob' AND length(r.lease_hash)=32) OR (r.lifecycle<>1 AND r.lease_until IS NULL AND r.lease_hash IS NULL))"
+}

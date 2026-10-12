@@ -1,10 +1,9 @@
-//! Addressed preview uses the common owned fresh-coverage read protocol.
+//! Administrative preview uses the common owned fresh-coverage read protocol.
 use super::read::CoveredRead;
 use super::*;
-use fireweed_core::{
-    queue_administration::AdministrativeOperation,
-    queue_contract::{PreviewRequest, QueueLimits, RequestPreflight, encoded_len},
-};
+#[cfg(not(target_os = "linux"))]
+use fireweed_core::queue_administration::AdministrativeOperation;
+use fireweed_core::queue_contract::{PreviewRequest, QueueLimits, RequestPreflight, encoded_len};
 use fireweed_engine::{
     Clock,
     queue_contract::QueueFuture,
@@ -70,6 +69,7 @@ impl CoveredRead for PreviewRead {
             std::slice::from_ref(&self.request.group),
             limits,
         )?;
+        #[cfg(not(target_os = "linux"))]
         if matches!(
             self.request
                 .group
@@ -109,10 +109,10 @@ impl CoveredRead for PreviewRead {
             } else {
                 pipeline
                     .projection
-                    .preview_addressed_administration(
+                    .preview_administration(
                         AdministrativePreparationInput {
                             commit: input,
-                            scratch_directory: self.root.path().to_path_buf(),
+                            scratch_root: self.root.clone(),
                             scratch_quota: self.quota.clone(),
                         },
                         self.clock.clone(),

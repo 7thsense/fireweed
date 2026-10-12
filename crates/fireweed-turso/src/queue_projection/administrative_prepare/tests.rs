@@ -5,13 +5,14 @@ use fireweed_core::queue_administration::{
     AdministrativeEntry, AdministrativeIntent, WorkSelector,
 };
 use fireweed_engine::{queue_admission::QueueAdmission, queue_log_record::encode_checked_genesis};
-pub(super) fn input(
+pub(super) async fn input(
     definition: &AdmittedQueueDefinition,
     job: &Arc<QueueReservation>,
     group: CommitGroup,
     directory: &Path,
     head: u64,
     sequence: u64,
+    workers: &ScratchWorkers,
 ) -> AdministrativePreparationInput {
     let definition = AdmittedQueueDefinition::from_raw(definition.raw(), job).unwrap();
     AdministrativePreparationInput {
@@ -25,7 +26,7 @@ pub(super) fn input(
             required_insertion_sequence: sequence,
             required_last_record_epoch: 1,
         },
-        scratch_directory: directory.into(),
+        scratch_root: ScratchRoot::open(directory.into(), workers).await.unwrap(),
         scratch_quota: ScratchDiskQuota::new(128 << 20).unwrap(),
     }
 }
@@ -89,8 +90,17 @@ async fn addressed_preparation_one_worker_publishes_atomic_state_and_original_po
     clock.set(1000);
     let original = transition("addressed-original");
     let prepared = projection
-        .prepare_addressed_administration(
-            input(&definition, &job, original.clone(), directory.path(), 2, 2),
+        .prepare_administration(
+            input(
+                &definition,
+                &job,
+                original.clone(),
+                directory.path(),
+                2,
+                2,
+                &workers,
+            )
+            .await,
             1,
             16 << 20,
             clock.clone(),
@@ -154,7 +164,17 @@ async fn addressed_preparation_one_worker_publishes_atomic_state_and_original_po
     assert_eq!(inspect(&projection,"SELECT length(value) FROM q7_bodies WHERE record_id=(SELECT id FROM q7_records WHERE key=?1)",vec![blob(b"a")],1).await[0],Value::Integer(1<<20));
     let replay = projection
         .replay_commit(
-            input(&definition, &job, original.clone(), directory.path(), 3, 3).commit,
+            input(
+                &definition,
+                &job,
+                original.clone(),
+                directory.path(),
+                3,
+                3,
+                &workers,
+            )
+            .await
+            .commit,
             &job,
             &workers,
         )
@@ -164,8 +184,17 @@ async fn addressed_preparation_one_worker_publishes_atomic_state_and_original_po
     drop(replay);
     assert!(
         projection
-            .prepare_addressed_administration(
-                input(&definition, &job, original, directory.path(), 3, 3),
+            .prepare_administration(
+                input(
+                    &definition,
+                    &job,
+                    original,
+                    directory.path(),
+                    3,
+                    3,
+                    &workers
+                )
+                .await,
                 1,
                 16 << 20,
                 clock,
@@ -212,17 +241,19 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     admin.intent.before_fields = Some(["u".into(), "opaque".into()].into());
     admin.max_result_bytes = 8 << 20;
     let prepare = |request: AdministrativePreparationInput, transport| {
-        projection.prepare_addressed_administration(
-            request,
-            1,
-            transport,
-            clock.clone(),
-            &job,
-            &workers,
-        )
+        projection.prepare_administration(request, 1, transport, clock.clone(), &job, &workers)
     };
     let prepared = prepare(
-        input(&definition, &job, original.clone(), directory.path(), 2, 2),
+        input(
+            &definition,
+            &job,
+            original.clone(),
+            directory.path(),
+            2,
+            2,
+            &workers,
+        )
+        .await,
         16 << 20,
     )
     .await
@@ -251,7 +282,16 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     drop(response);
     original.administration.as_mut().unwrap().max_result_bytes = result_bytes;
     let exact = prepare(
-        input(&definition, &job, original.clone(), directory.path(), 2, 2),
+        input(
+            &definition,
+            &job,
+            original.clone(),
+            directory.path(),
+            2,
+            2,
+            &workers,
+        )
+        .await,
         transport_bytes,
     )
     .await
@@ -261,7 +301,16 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     drop(exact);
     original.administration.as_mut().unwrap().max_result_bytes = result_bytes - 1;
     let overflow = prepare(
-        input(&definition, &job, original.clone(), directory.path(), 2, 2),
+        input(
+            &definition,
+            &job,
+            original.clone(),
+            directory.path(),
+            2,
+            2,
+            &workers,
+        )
+        .await,
         16 << 20,
     )
     .await
@@ -273,7 +322,16 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     );
     drop(overflow);
     original.administration.as_mut().unwrap().max_result_bytes = result_bytes;
-    let mut exact_input = input(&definition, &job, original.clone(), directory.path(), 2, 2);
+    let mut exact_input = input(
+        &definition,
+        &job,
+        original.clone(),
+        directory.path(),
+        2,
+        2,
+        &workers,
+    )
+    .await;
     exact_input.commit.limits.max_group_bytes = logical_bytes;
     exact_input.commit.limits.max_state_bytes = logical_bytes;
     let exact = prepare(exact_input, transport_bytes)
@@ -282,7 +340,16 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
         .unwrap();
     assert_eq!(exact.receipt(), &expected);
     drop(exact);
-    let mut under = input(&definition, &job, original.clone(), directory.path(), 2, 2);
+    let mut under = input(
+        &definition,
+        &job,
+        original.clone(),
+        directory.path(),
+        2,
+        2,
+        &workers,
+    )
+    .await;
     under.commit.limits.max_group_bytes = logical_bytes - 1;
     under.commit.limits.max_state_bytes = logical_bytes - 1;
     let overflow = prepare(under, 16 << 20).await.unwrap().unwrap();
@@ -319,7 +386,16 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     original.request_id = "other-original".into();
     assert!(matches!(
         prepare(
-            input(&definition, &job, original.clone(), directory.path(), 3, 2),
+            input(
+                &definition,
+                &job,
+                original.clone(),
+                directory.path(),
+                3,
+                2,
+                &workers
+            )
+            .await,
             transport_bytes - 1
         )
         .await,
@@ -334,7 +410,16 @@ async fn exact_result_logical_and_transport_bounds_keep_zero_effect_overflow_and
     .await;
     assert!(matches!(
         prepare(
-            input(&definition, &job, original, directory.path(), 3, 2),
+            input(
+                &definition,
+                &job,
+                original,
+                directory.path(),
+                3,
+                2,
+                &workers
+            )
+            .await,
             16 << 20
         )
         .await,
@@ -357,12 +442,12 @@ async fn run_mode(
 ) -> QueueResult<()> {
     if preview {
         projection
-            .preview_addressed_administration(input, clock, job, workers)
+            .preview_administration(input, clock, job, workers)
             .await
             .map(drop)
     } else {
         projection
-            .prepare_addressed_administration(input, 1, 16 << 20, clock, job, workers)
+            .prepare_administration(input, 1, 16 << 20, clock, job, workers)
             .await
             .map(drop)
     }
@@ -400,8 +485,10 @@ async fn precommit_panic_and_caller_cancellation_release_only_after_physical_com
                     transition("panic-original"),
                     directory.path(),
                     2,
-                    2
-                ),
+                    2,
+                    &workers
+                )
+                .await,
                 clock.clone(),
                 &job,
                 &workers
@@ -416,7 +503,9 @@ async fn precommit_panic_and_caller_cancellation_release_only_after_physical_com
             directory.path(),
             2,
             2,
-        );
+            &workers,
+        )
+        .await;
         drop(definition);
         drop(seed_job);
         let pause = Arc::new(ApplyPause {
@@ -505,7 +594,17 @@ async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_a
     }
     let prepared = projection
         .prepare_ordinary_commit(
-            input(&definition, &job, metadata, directory.path(), 2, 2).commit,
+            input(
+                &definition,
+                &job,
+                metadata,
+                directory.path(),
+                2,
+                2,
+                &workers,
+            )
+            .await
+            .commit,
             1,
             16 << 20,
             clock.clone(),
@@ -603,9 +702,105 @@ async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_a
             ]),
         },
     });
+    #[cfg(target_os = "linux")]
+    {
+        use fireweed_core::queue_administration::{AdministrativeClause, SelectorNode};
+        let leaf = WorkSelector::leaf;
+        for (selector, evaluated, matched) in [
+            (
+                leaf(SelectorNode::Field {
+                    name: "meta/key".into(),
+                    predicate: Predicate::Equal(FieldValue::Text("a".into())),
+                }),
+                100,
+                1,
+            ),
+            (
+                leaf(SelectorNode::Field {
+                    name: "meta/key".into(),
+                    predicate: Predicate::Range {
+                        lower: Some(Bound::Included(FieldValue::Text("a".into()))),
+                        upper: Some(Bound::Excluded(FieldValue::Text("b".into()))),
+                    },
+                }),
+                100,
+                1,
+            ),
+            (
+                leaf(SelectorNode::Present {
+                    name: "meta/remove".into(),
+                    present: true,
+                }),
+                100,
+                2,
+            ),
+            (leaf(SelectorNode::LeaseActive(true)), 100, 1),
+            (leaf(SelectorNode::LeaseActive(false)), 100, 1),
+            (leaf(SelectorNode::LeaseActive(false)), 1_000_100, 2),
+            (
+                leaf(SelectorNode::StoredLifecycleIn(vec![Lifecycle::Leased])),
+                1_000_100,
+                1,
+            ),
+            (
+                leaf(SelectorNode::EffectiveLifecycleIn(vec![Lifecycle::Pending])),
+                1_000_100,
+                2,
+            ),
+            (
+                leaf(SelectorNode::Attempts {
+                    comparison: fireweed_core::queue_administration::Comparison::Equal,
+                    value: 1,
+                }),
+                100,
+                1,
+            ),
+        ] {
+            let mut broad = group("broad-metadata-preview");
+            broad.administration = Some(AdministrativeCommit {
+                max_result_bytes: 65536,
+                intent: AdministrativeIntent {
+                    evaluated_at: evaluated,
+                    before_fields: None,
+                    operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                        id: "metadata".into(),
+                        selector,
+                        precondition: WorkSelector::all(vec![]),
+                        action: AdministrativeAction::Delete {
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                        },
+                    }]),
+                },
+            });
+            let preview = projection
+                .preview_administration(
+                    input(&definition, &job, broad, directory.path(), 4, 2, &workers).await,
+                    clock.clone(),
+                    &job,
+                    &workers,
+                )
+                .await
+                .unwrap();
+            let PreviewOutcome::AdministrativeCommitted { administration, .. } =
+                &preview.result().outcome
+            else {
+                panic!("{:?}", preview.result());
+            };
+            assert_eq!(administration.histogram.matched, matched);
+        }
+    }
     let prepared = projection
-        .prepare_addressed_administration(
-            input(&definition, &job, request.clone(), directory.path(), 4, 2),
+        .prepare_administration(
+            input(
+                &definition,
+                &job,
+                request.clone(),
+                directory.path(),
+                4,
+                2,
+                &workers,
+            )
+            .await,
             1,
             16 << 20,
             clock.clone(),
@@ -649,8 +844,8 @@ async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_a
     });
     clock.set(2_000_000);
     let rejected = projection
-        .prepare_addressed_administration(
-            input(&definition, &job, expired, directory.path(), 4, 2),
+        .prepare_administration(
+            input(&definition, &job, expired, directory.path(), 4, 2, &workers).await,
             1,
             16 << 20,
             clock.clone(),
@@ -667,8 +862,8 @@ async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_a
     drop(rejected);
     clock.set(100);
     let prepared = projection
-        .prepare_addressed_administration(
-            input(&definition, &job, request, directory.path(), 4, 2),
+        .prepare_administration(
+            input(&definition, &job, request, directory.path(), 4, 2, &workers).await,
             1,
             16 << 20,
             clock,

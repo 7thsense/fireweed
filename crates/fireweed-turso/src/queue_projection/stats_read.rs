@@ -235,7 +235,7 @@ fn totals_sql(
             &format!("NOT EXISTS(SELECT 1 FROM {table} f WHERE {scope})"),
         ));
     }
-    columns.push(format!("(SELECT count(*) FROM q7_records r WHERE r.queue_id={queue_id} AND r.collection=0 AND r.active=1{base_filter} AND NOT ({}))",raw_valid_authority()));
+    columns.push(format!("(SELECT count(*) FROM q7_records r WHERE r.queue_id={queue_id} AND r.collection=0 AND r.active=1{base_filter} AND NOT ({}))",super::work::raw_valid_authority()));
     Ok((
         format!(
             "{with}SELECT {} FROM q7_records r WHERE r.queue_id={queue_id} AND r.collection=0 AND r.active=1{filter}",
@@ -249,13 +249,10 @@ fn totals_sql(
     ))
 }
 
-pub(super) fn raw_valid_authority() -> &'static str {
-    "typeof(r.lifecycle)='integer' AND r.lifecycle IN (0,1,2,3) AND typeof(r.available_at)='integer' AND typeof(r.eligible_since)='integer' AND ((r.lifecycle=1 AND typeof(r.lease_until)='integer' AND typeof(r.lease_hash)='blob' AND length(r.lease_hash)=32) OR (r.lifecycle<>1 AND r.lease_until IS NULL AND r.lease_hash IS NULL))"
-}
 pub(super) fn effective_lifecycle(now: i64) -> String {
     format!(
         "CASE WHEN NOT ({}) THEN NULL WHEN r.lifecycle=1 AND r.lease_until<={now} THEN 0 ELSE r.lifecycle END",
-        raw_valid_authority()
+        super::work::raw_valid_authority()
     )
 }
 
