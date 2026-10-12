@@ -6,6 +6,7 @@ mod commit;
 mod insert;
 mod publication;
 mod receipts;
+mod state;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::{QueueLogFormat, encode_checked_genesis},
@@ -42,6 +43,8 @@ pub struct QueueRecoveryPipeline {
     before_insert_replay: StagePause,
     #[cfg(test)]
     after_receipt_read: StagePause,
+    #[cfg(test)]
+    after_state_read: StagePause,
     #[cfg(test)]
     before_commit_append: StagePause,
     #[cfg(test)]
@@ -97,6 +100,8 @@ impl QueueRecoveryPipeline {
             before_insert_replay: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_receipt_read: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_state_read: std::sync::Mutex::new(None),
             #[cfg(test)]
             before_commit_append: std::sync::Mutex::new(None),
             #[cfg(test)]

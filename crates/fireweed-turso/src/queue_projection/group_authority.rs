@@ -83,14 +83,18 @@ pub(super) async fn load_group(
     for update in &group.state_updates {
         let collection = collection_number(schema, Some(&update.collection))?;
         let definition = collection_definition(schema, collection)?;
-        let digest = discovery_digest(update.key.as_bytes());
-        let row=one(connection,"SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(version)='blob' AND length(version)=8 THEN version ELSE NULL END,CASE WHEN typeof(active)='integer' THEN active ELSE NULL END FROM q7_records WHERE queue_id=?1 AND collection=?2 AND key_hash=?3 AND key=?4",vec![Value::Integer(queue_id),Value::Integer(i64::from(collection)),blob(&digest),blob(update.key.as_bytes())],3).await?;
-        let Some(row) = row else { continue };
-        let id = integer(&row[0])?;
-        let version = unsigned(&row[1])?;
-        if id <= 0 || version == 0 {
-            return Err(unknown("invalid state high-water metadata"));
-        }
+        let authority = super::state_authority::load_state_authority(
+            connection,
+            queue_id,
+            collection,
+            &update.key,
+        )
+        .await?;
+        let (version, id) = match authority {
+            super::state_authority::StateAuthority::Absent => continue,
+            super::state_authority::StateAuthority::Deleted { version } => (version, None),
+            super::state_authority::StateAuthority::Present { id, version } => (version, Some(id)),
+        };
         snapshot.versions.insert(
             RecordIdentity {
                 collection: Some(update.collection.clone()),
@@ -98,11 +102,7 @@ pub(super) async fn load_group(
             },
             version,
         );
-        match integer(&row[2])? {
-            0 => continue,
-            1 => {}
-            _ => return Err(unknown("invalid state active metadata")),
-        };
+        let Some(id) = id else { continue };
         let mut fields = Fields::new();
         let mut body = bytes::Bytes::new();
         let mut total = 0;

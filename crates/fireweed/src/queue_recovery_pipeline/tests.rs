@@ -1673,6 +1673,111 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     assert_eq!(recovered.target_next_offset, 7);
     assert_eq!(recovered.history.insertion_sequence(), 5);
     drop(recovered);
+    // A complete state read discards the old value when an atomic workflow
+    // transition becomes authoritative after decoding and before completion.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_state_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let state_request = StateReadRequest {
+        queue: address(),
+        collection: "workflow".into(),
+        keys: vec!["run".into(), "absent".into(), "run".into()],
+        max_bytes: 65536,
+    };
+    let read = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = state_request.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .read_state(request, QueueLimits::default(), job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let update = CommitGroup {
+        request_id: "workflow-state-advance".into(),
+        claimed_updates: vec![],
+        state_updates: vec![StateUpdate {
+            collection: "workflow".into(),
+            key: "run".into(),
+            expect: StateExpect::Version(1),
+            change: StateChange::Put {
+                fields: Default::default(),
+                value: vec![9, 10].into(),
+            },
+        }],
+        work_inserts: vec![],
+        work_updates: vec![],
+        administration: None,
+    };
+    drop(
+        pipeline
+            .commit(
+                address(),
+                update,
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    release.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.records()[0], response.records()[2]);
+    assert_eq!(response.records()[1], None);
+    let state = response.records()[0].as_ref().unwrap();
+    assert_eq!(state.version, 2);
+    assert_eq!(state.value.as_ref(), [9, 10]);
+    drop(response);
+    let (terminal_tx, mut terminal_rx) = tokio::sync::oneshot::channel();
+    let cancelled_job = Arc::new(
+        admission
+            .reserve(0)
+            .unwrap()
+            .with_terminal_callback(move || {
+                let _ = terminal_tx.send(());
+            })
+            .unwrap(),
+    );
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_state_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let request = state_request.clone();
+        async move {
+            pipeline
+                .read_state(request, QueueLimits::default(), cancelled_job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    assert!(matches!(caller.await,Err(error) if error.is_cancelled()));
+    assert!(matches!(
+        terminal_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        admission.usage().unwrap().0,
+        2,
+        "cancelled state read retains its operation until completion"
+    );
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(30), terminal_rx)
+        .await
+        .unwrap()
+        .unwrap();
     // Rebuild into a fresh derived projection through original genesis/history.
     let rebuilt = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
         .await
@@ -1680,6 +1785,13 @@ async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry
     let rebuilt =
         QueueRecoveryPipeline::new(store.clone(), rebuilt, workers.clone(), 65536, 1 << 20)
             .unwrap();
+    let state = rebuilt
+        .read_state(state_request, QueueLimits::default(), job.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.records()[0].as_ref().unwrap().value.as_ref(), [9, 10]);
+    assert_eq!(state.records()[0].as_ref().unwrap().version, 2);
+    drop(state);
     let result = rebuilt
         .commit(address(), group, QueueLimits::default(), clock, job.clone())
         .await

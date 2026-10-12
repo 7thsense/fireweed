@@ -10704,8 +10704,8 @@
           "P2f"
         ],
         "detail": "error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "95845771bb24041cdbdb",
-        "identity": "e90b80c9f001a33960c86e0a187247563a0c1e8bbcad097bf329c265332ed1c1",
+        "id": "fe928235de3482eae8b9",
+        "identity": "175231aabfd9116d263baa5d1dc81e36894e10171e65b0b0e7b28a3ea46ed4f8",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -24512,10 +24512,10 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "ceff81718e2ec4014dfc9af0ef05325b6c9cf34e544e0387e50bae61578bb628",
+  "source_inventory_sha256": "d2a48a758cc1014fb1fc5aec58537e93449e79e2ea92163ede6e07068a228e88",
   "workspaces": [
     {
-      "listing_error_sha256": "e90b80c9f001a33960c86e0a187247563a0c1e8bbcad097bf329c265332ed1c1",
+      "listing_error_sha256": "175231aabfd9116d263baa5d1dc81e36894e10171e65b0b0e7b28a3ea46ed4f8",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"

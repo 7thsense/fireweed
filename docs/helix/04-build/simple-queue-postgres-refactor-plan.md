@@ -81,7 +81,8 @@ replay, selective shared-planner insert preparation, owned conditional insert
 publication with original-receipt resolution and covered owned commit-receipt
 lookup, atomic ordinary claim-group commit preparation and owned conditional
 commit publication with fingerprint-bound original-receipt resolution are
-internal primitives.
+internal primitives. Covered owned state reads share complete payload hydration
+and addressed-state metadata validation with commit planning.
 Claim completion validates fresh current ownership and a subsequent authoritative
 head cut; provisional tokens cannot become a response. These local checks are
 not a public S3/Turso qualification. The full constructor/QueueStore, remaining

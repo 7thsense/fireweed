@@ -12,6 +12,8 @@ mod receipts;
 mod replay;
 mod selection;
 mod snapshot;
+mod state_authority;
+mod state_read;
 mod unique_authority;
 mod work;
 pub use commit_prepare::{AdmittedCommitReceipt, CommitPreparationInput, PreparedOrdinaryCommit};
@@ -40,6 +42,7 @@ pub use prepare::PreparedClaim;
 pub use receipts::{AdmittedCommitReceipts, ReceiptReadInput};
 pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 pub use selection::AdmittedClaimSelection;
+pub use state_read::{AdmittedStateRecords, StateReadInput};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 use turso::{
