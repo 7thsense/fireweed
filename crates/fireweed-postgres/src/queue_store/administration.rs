@@ -662,15 +662,6 @@ async fn prepare_native_scratch_bounded<'r>(
     })
 }
 
-struct OwnedScratchDirectory {
-    path: std::path::PathBuf,
-    _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
-}
-impl OwnedScratchDirectory {
-    fn as_path(&self) -> &std::path::Path {
-        &self.path
-    }
-}
 /// Input-bounded ordinary command plus external administrative commands, still
 /// awaiting byte/result limits and atomic application. No publication approval.
 struct NativeProvisionalGroup {
@@ -750,9 +741,7 @@ async fn finalize_native_semantics(
     directory: &std::path::Path,
     quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
 ) -> QueueResult<Result<NativeProvisionalGroup, Rejection>> {
-    use fireweed_engine::queue_administration::{
-        propose_ordinary_after_administration, validate_ordinary_prospective_authority,
-    };
+    use fireweed_engine::queue_administration::validate_ordinary_prospective_authority;
     let NativeAdministrativePreparation {
         mut scratch,
         summary,
@@ -767,72 +756,28 @@ async fn finalize_native_semantics(
     scratch.verify_context(address, queue.definition_pin, queue.next_sequence)?;
     validate_ordinary_prospective_authority(group, &ordinary.snapshot, &queue.schema, reservation)?;
     let ordinary = ordinary.into_owned(reservation)?;
-    let names = directory.as_os_str().len() as u64;
-    let path_charge = reservation.owned_buffer(
-        names
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(4096))
-            .ok_or_else(|| storage("scratch path bound overflow"))?,
-    )?;
-    let path = OwnedScratchDirectory {
-        path: directory.to_owned(),
-        _charge: path_charge,
-    };
-    let run_quota = Arc::clone(&quota);
-    let run_job = Arc::clone(reservation);
-    let (mut scratch, ordinary, decision, path) = workers
-        .run(move || {
-            let decision = scratch.validate_before_business(
-                &ordinary.snapshot,
-                path.as_path(),
-                run_quota,
-                &run_job,
-            )?;
-            Ok((scratch, ordinary, decision, path))
-        })
-        .await?;
-    if summary.overlaps_explicit_work() {
-        return Ok(Err(Rejection::Invalid(
-            "administrative target overlaps explicit group work".into(),
-        )));
-    }
-    if decision.administrative_collision {
-        return Ok(Err(Rejection::UniqueConflict));
-    }
-    let proposal = match propose_ordinary_after_administration(
-        group,
-        &ordinary.snapshot,
-        ownership_now,
-        &queue.schema,
-        reservation,
-    )? {
-        Ok(candidate) => candidate,
-        Err(reason) => return Ok(Err(reason)),
-    };
-    let run_job = Arc::clone(reservation);
-    let (scratch, mut proposal, decision) = workers
-        .run(move || {
-            let decision = scratch.reduce_with_ordinary_effects(
-                proposal.initial_authority(),
-                proposal.unique_effects(),
-                path.as_path(),
-                quota,
-                &run_job,
-            )?;
-            drop(path);
-
-            Ok((scratch, proposal, decision))
-        })
-        .await?;
-    if decision.final_collision {
-        return Ok(Err(Rejection::UniqueConflict));
-    }
-    proposal.sort_commands_for_publication();
-    Ok(Ok(NativeProvisionalGroup {
+    let finalized = fireweed_queue_spool::finalize_administrative_semantics(
         scratch,
         summary,
-        ordinary: proposal,
-        initial: ordinary,
+        ordinary,
+        group,
+        &queue.schema,
+        ownership_now,
+        reservation,
+        workers,
+        directory,
+        quota,
+    )
+    .await?;
+    let finalized = match finalized {
+        Ok(value) => value,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    Ok(Ok(NativeProvisionalGroup {
+        scratch: finalized.scratch,
+        summary: finalized.summary,
+        ordinary: finalized.ordinary,
+        initial: finalized.initial,
         request_fingerprint,
         max_result_bytes,
         max_publication_bytes,

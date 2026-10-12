@@ -543,6 +543,11 @@ struct OwnedLoaded {
     ids: BTreeMap<RecordIdentity, i64>,
     _charge: fireweed_engine::queue_admission::OwnedQueueBufferCharge,
 }
+impl fireweed_queue_spool::AdministrativeOrdinaryAuthority for OwnedLoaded {
+    fn snapshot(&self) -> &RecordSnapshot {
+        &self.snapshot
+    }
+}
 impl Loaded<'_> {
     fn into_owned(self, reservation: &Arc<QueueReservation>) -> QueueResult<OwnedLoaded> {
         if !self._charge.belongs_to(reservation)

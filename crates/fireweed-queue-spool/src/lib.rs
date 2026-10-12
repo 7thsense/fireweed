@@ -891,3 +891,9 @@ pub use worker::ScratchWorkers;
 
 mod publication;
 pub use publication::ResolvedAdministrativePublicationInput;
+
+mod finalization;
+pub use finalization::{
+    AdministrativeOrdinaryAuthority, FinalizedAdministrativeSemantics,
+    finalize_administrative_semantics,
+};
