@@ -10703,9 +10703,9 @@
           "P3-P9/P15",
           "P2f"
         ],
-        "detail": "error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "b8b4d2bd2c768f9e61d1",
-        "identity": "6552f1c376bb185b314f0945b0ca9fde5f1fbed2b2bf03394ca79776ef3c4e5e",
+        "detail": "Compiling thiserror v1.0.69; Compiling thiserror-impl v1.0.69; error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
+        "id": "d9b0f06f6f70034ee8e5",
+        "identity": "c260d1f2aede7c335d37da88bd5b040f9abbc61d9ab960ae6bdeb5e25926d656",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -10718,8 +10718,8 @@
           "P2f"
         ],
         "detail": "error: no matching package named `ctrlc` found; help: if this error is too confusing you may wish to retry without `--offline`",
-        "id": "7b3e3158c440f2c0a8ea",
-        "identity": "4d7dd2d4463cf20c5aa97a060bd783a0193955abd808a632052b027fcc2d15c1",
+        "id": "39ee317b6864f0e0cc2e",
+        "identity": "0015fae4e7b93c76db0c7e5563cf9a1cc56e9db27eb22d7b08a29bdecc3f0fa0",
         "line": 1,
         "owner": "P15",
         "path": "crates/fireweed-bench/Cargo.toml",
@@ -19817,6 +19817,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "turso_compose::generated_replay_tests::generated_replay_schedule_rejects_sequential_or_wrong_order_claims",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::generated_replay_tests::generated_replay_schedule_rejects_sequential_or_wrong_order_claims",
+        "target": "fireweed",
+        "test_id": "turso_compose::generated_replay_tests::generated_replay_schedule_rejects_sequential_or_wrong_order_claims"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "turso_compose::generated_replay_tests::generated_replay_storage_generation_scan_is_world_scoped",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::generated_replay_tests::generated_replay_storage_generation_scan_is_world_scoped",
+        "target": "fireweed",
+        "test_id": "turso_compose::generated_replay_tests::generated_replay_storage_generation_scan_is_world_scoped"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "turso_compose::generated_replay_tests::generated_s3_turso_model_traces_match_every_observation",
           "--",
           "--exact"
@@ -24452,16 +24492,16 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "e51cdab3f70c19aca8242f2b3a3b36d7f235fa99db369b3665f116e7b7bc5baa",
+  "source_inventory_sha256": "9badbaeb37910f73816f09b1a41950979b08853bd40f4a50162a6fc2a1be1157",
   "workspaces": [
     {
-      "listing_error_sha256": "6552f1c376bb185b314f0945b0ca9fde5f1fbed2b2bf03394ca79776ef3c4e5e",
+      "listing_error_sha256": "c260d1f2aede7c335d37da88bd5b040f9abbc61d9ab960ae6bdeb5e25926d656",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"
     },
     {
-      "listing_error_sha256": "4d7dd2d4463cf20c5aa97a060bd783a0193955abd808a632052b027fcc2d15c1",
+      "listing_error_sha256": "0015fae4e7b93c76db0c7e5563cf9a1cc56e9db27eb22d7b08a29bdecc3f0fa0",
       "listing_status": "compile_failure_debt",
       "manifest": "crates/fireweed-bench/Cargo.toml",
       "routing": "independent"

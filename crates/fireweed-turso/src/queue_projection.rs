@@ -1,14 +1,20 @@
 //! Native API-007 projection. Durable log records remain authority; all data,
 //! receipts and the external applied cursor publish in one native transaction.
+mod commit_prepare;
+mod group_authority;
 mod insert_prepare;
 mod insert_replay;
+mod payload;
+mod preparation;
 mod prepare;
 mod receipt_metadata;
 mod receipts;
 mod replay;
 mod selection;
 mod snapshot;
+mod unique_authority;
 mod work;
+pub use commit_prepare::{AdmittedCommitReceipt, CommitPreparationInput, PreparedOrdinaryCommit};
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -641,56 +647,35 @@ async fn load_selected_fields(
     names: &std::collections::BTreeSet<String>,
     job: &Arc<QueueReservation>,
 ) -> QueueResult<LoadedFields> {
-    let name_bytes = names.iter().try_fold(4096u64, |n, name| {
-        n.checked_add(name.len() as u64)
-            .and_then(|n| n.checked_add(256))
-            .ok_or(QueueError::TooLarge)
-    })?;
     let mut loaded = LoadedFields {
         fields: Fields::new(),
-        _charges: vec![job.owned_buffer(name_bytes.checked_mul(4).ok_or(QueueError::TooLarge)?)?],
+        _charges: vec![],
     };
-    for name in names {
-        let no = field_number(definition, name)?;
-        let (metadata_sql, value_sql, params) = if no >= 0 {
-            (
-                "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_fields WHERE record_id=?1 AND field=?2",
-                "SELECT value FROM q7_fields WHERE record_id=?1 AND field=?2",
-                vec![Value::Integer(record_id), Value::Integer(i64::from(no))],
-            )
-        } else {
-            (
-                "SELECT CASE WHEN typeof(value)='blob' THEN length(value) ELSE -1 END FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
-                "SELECT value FROM q7_additional WHERE record_id=?1 AND name_hash=?2 AND name=?3",
-                vec![
-                    Value::Integer(record_id),
-                    blob(&discovery_digest(name.as_bytes())),
-                    blob(name.as_bytes()),
-                ],
-            )
-        };
-        if let Some(metadata) = one(connection, metadata_sql, params.clone(), 1).await? {
-            let length = u64::try_from(integer(&metadata[0])?).map_err(unknown)?;
-            loaded._charges.push(
-                job.owned_buffer(
-                    length
-                        .checked_mul(4)
-                        .and_then(|n| n.checked_add(4096))
-                        .ok_or(QueueError::TooLarge)?,
-                )?,
-            );
-            let value = one(connection, value_sql, params, 1)
-                .await?
-                .ok_or_else(|| unknown("field vanished under transaction"))?;
-            let value: FieldValue = decode(bytes(&value[0])?)?;
-            definition
-                .validate_value(name, &value)
-                .map_err(|_| unknown("stored field type violates definition"))?;
-            loaded.fields.insert(name.clone(), value);
-        }
-    }
+    let mut total = 0;
+    let mut response_limit = false;
+    let mut body = bytes::Bytes::new();
+    payload::load_payload(
+        connection,
+        record_id,
+        definition,
+        payload::PayloadSelection {
+            fields: Some(names),
+            include_body: false,
+            max_bytes: u64::MAX,
+        },
+        &mut payload::NativePayloadBudget {
+            job,
+            charges: &mut loaded._charges,
+            total: &mut total,
+            response_limit: &mut response_limit,
+        },
+        &mut loaded.fields,
+        &mut body,
+    )
+    .await?;
     Ok(loaded)
 }
+
 fn value_bytes(value: &FieldValue) -> u64 {
     match value {
         FieldValue::Integer(_) | FieldValue::Float(_) | FieldValue::Boolean(_) => 8,

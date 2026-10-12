@@ -847,6 +847,20 @@ impl PreviewRequest {
         )
     }
 }
+impl CommitGroup {
+    /// The same borrowed one-group envelope checks used by batch commit/preview.
+    pub fn preflight_for(&self, queue: &QueueAddress, limits: &QueueLimits) -> QueueResult<()> {
+        preflight_commit_groups(queue, std::slice::from_ref(self), limits)
+    }
+    pub fn validate_for(
+        &self,
+        queue: &QueueAddress,
+        schema: &QueueSchema,
+        limits: &QueueLimits,
+    ) -> QueueResult<()> {
+        validate_commit_groups(queue, std::slice::from_ref(self), schema, limits)
+    }
+}
 fn validate_commit_groups(
     queue: &QueueAddress,
     groups: &[CommitGroup],
@@ -1696,10 +1710,12 @@ mod tests {
             groups: vec![group("one")],
         };
         let exact = encoded_len(&CommitFingerprintV3::from(&batch.groups[0])).unwrap();
-        let mut limits = QueueLimits::default();
-        limits.max_group_bytes = exact;
-        limits.max_body_bytes = 1;
-        limits.max_state_bytes = 1;
+        let mut limits = QueueLimits {
+            max_group_bytes: exact,
+            max_body_bytes: 1,
+            max_state_bytes: 1,
+            ..Default::default()
+        };
         assert!(batch.validate(&schema(), &limits).is_ok());
         limits.max_group_bytes -= 1;
         assert_eq!(
@@ -2028,8 +2044,10 @@ mod tests {
             queue: queue(),
             groups: vec![group("one")],
         };
-        let mut limits = QueueLimits::default();
-        limits.max_response_bytes = 10;
+        let limits = QueueLimits {
+            max_response_bytes: 10,
+            ..Default::default()
+        };
         assert_eq!(
             batch.validate(&schema(), &limits),
             Err(QueueError::TooLarge)
@@ -2096,8 +2114,10 @@ mod tests {
             mode: InsertMode::InsertOnly,
             items: vec![item("one")],
         };
-        let mut limits = QueueLimits::default();
-        limits.max_response_bytes = 1;
+        let limits = QueueLimits {
+            max_response_bytes: 1,
+            ..Default::default()
+        };
         assert_eq!(
             request.validate(&schema(), &limits),
             Err(QueueError::TooLarge)

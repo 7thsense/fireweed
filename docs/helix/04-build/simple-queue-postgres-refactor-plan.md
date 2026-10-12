@@ -79,7 +79,8 @@ and filtered candidate selection, resolved claim preparation, owned conditional
 claim publication with original-identity resolution, immutable native insert
 replay, selective shared-planner insert preparation, owned conditional insert
 publication with original-receipt resolution and covered owned commit-receipt
-lookup are internal primitives.
+lookup and atomic ordinary claim-group commit preparation are internal
+primitives.
 Claim completion validates fresh current ownership and a subsequent authoritative
 head cut; provisional tokens cannot become a response. These local checks are
 not a public S3/Turso qualification. The full constructor/QueueStore, remaining

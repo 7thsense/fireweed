@@ -12,24 +12,10 @@ use fireweed_engine::{
     },
     queue_publication::{PublicationReceipt, encode_publication_pinned},
 };
-pub struct PreparedInsert {
-    record: OwnedQueueLogRecord,
-    response: AdmittedInsertReplay,
-    expected_next_offset: u64,
-    writer_epoch: u64,
-}
+pub type PreparedInsert = super::preparation::PreparedPublication<AdmittedInsertReplay>;
 impl PreparedInsert {
     pub fn outcomes(&self) -> &[InsertOutcome] {
-        self.response.outcomes()
-    }
-    pub fn expected_next_offset(&self) -> u64 {
-        self.expected_next_offset
-    }
-    pub fn writer_epoch(&self) -> u64 {
-        self.writer_epoch
-    }
-    pub fn into_parts(self) -> (OwnedQueueLogRecord, AdmittedInsertReplay, u64) {
-        (self.record, self.response, self.expected_next_offset)
+        self.response().outcomes()
     }
 }
 struct Parts {
@@ -94,14 +80,16 @@ impl QueueProjection {
                         &mut worker,
                     )
                     .await?;
-                    Ok(parts.map(|parts| PreparedInsert {
-                        record: parts.record,
-                        response: AdmittedInsertReplay::from_outcomes(
-                            parts.outcomes,
-                            std::mem::take(&mut worker.charges),
-                        ),
-                        expected_next_offset: parts.head,
-                        writer_epoch: parts.epoch,
+                    Ok(parts.map(|parts| {
+                        PreparedInsert::new(
+                            parts.record,
+                            AdmittedInsertReplay::from_outcomes(
+                                parts.outcomes,
+                                std::mem::take(&mut worker.charges),
+                            ),
+                            parts.head,
+                            parts.epoch,
+                        )
                     }))
                 }))
             })
@@ -231,48 +219,16 @@ impl NativeTransactionWork for Worker {
             )?,
         );
         let probes = insert_unique_probes(&request.items, &snapshot, schema)?;
-        for probe in &probes {
-            let index = index_number(&schema.work, &probe.index)?;
-            let digest = discovery_digest(&probe.full_sort_key);
-            let params = vec![
-                Value::Integer(native.queue_id),
-                Value::Integer(i64::from(index)),
-                blob(&digest),
-                blob(&probe.full_sort_key),
-            ];
-            let metadata = one(connection, "SELECT CASE WHEN typeof(r.key)='blob' THEN length(r.key) ELSE -1 END,CASE WHEN typeof(r.id)='integer' THEN r.id ELSE NULL END,CASE WHEN typeof(r.queue_id)='integer' THEN r.queue_id ELSE NULL END,CASE WHEN typeof(r.collection)='integer' THEN r.collection ELSE NULL END,CASE WHEN typeof(r.active)='integer' THEN r.active ELSE NULL END FROM q7_indexes i LEFT JOIN q7_records r ON r.id=i.record_id WHERE i.queue_id=?1 AND i.collection=0 AND i.index_no=?2 AND i.hash=?3 AND i.full_key=?4 AND i.is_unique=1", params.clone(), 5).await?;
-            if let Some(metadata) = metadata {
-                if integer(&metadata[1])? <= 0
-                    || integer(&metadata[2])? != native.queue_id
-                    || integer(&metadata[3])? != 0
-                    || integer(&metadata[4])? != 1
-                {
-                    return Err(unknown(
-                        "unique index owner is missing or outside queue/work authority",
-                    ));
-                }
-                let length = u64::try_from(integer(&metadata[0])?).map_err(unknown)?;
-                self.charges.push(
-                    self.job.owned_buffer(
-                        length
-                            .checked_mul(16)
-                            .and_then(|n| n.checked_add(4096))
-                            .ok_or(QueueError::TooLarge)?,
-                    )?,
-                );
-                let row = one(connection, "SELECT r.key FROM q7_indexes i JOIN q7_records r ON r.id=i.record_id WHERE i.queue_id=?1 AND i.collection=0 AND i.index_no=?2 AND i.hash=?3 AND i.full_key=?4 AND i.is_unique=1", params, 1).await?.ok_or_else(|| unknown("unique owner disappeared"))?;
-                let key = std::str::from_utf8(bytes(&row[0])?)
-                    .map_err(unknown)?
-                    .to_owned();
-                snapshot.unique_owners.insert(
-                    probe.clone(),
-                    RecordIdentity {
-                        collection: None,
-                        key,
-                    },
-                );
-            }
-        }
+        super::unique_authority::load_unique_authority(
+            connection,
+            native.queue_id,
+            schema,
+            &probes,
+            &mut snapshot,
+            &self.job,
+            &mut self.charges,
+        )
+        .await?;
         snapshot.unique_probes_loaded = probes;
         let before = snapshot.clone();
         let clock = &self.clock;

@@ -2932,12 +2932,21 @@
         "evidence"
       ],
       "lines": [
-        782,
-        785,
-        786,
-        834,
-        836,
-        842
+        959,
+        962,
+        963,
+        970,
+        971,
+        975,
+        1032,
+        1033,
+        1034,
+        1054,
+        1055,
+        1056,
+        1057,
+        1059,
+        1065
       ],
       "path": "crates/fireweed/src/generated_replay_tests.rs",
       "symbol": "generated_s3_turso_model_traces_match_every_observation"
@@ -3933,7 +3942,7 @@
       "calls": [
         "run"
       ],
-      "line": 13,
+      "line": 39,
       "path": "scripts/formal/run_replay.py",
       "symbol": "main"
     },
@@ -3942,7 +3951,7 @@
       "calls": [
         "run"
       ],
-      "line": 16,
+      "line": 34,
       "path": "scripts/formal/with_rustfs.py",
       "symbol": "main"
     },
@@ -4674,7 +4683,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "fe17304bcf553e18f29a38ac64adff7e815f287ad5bd4066fc14c218fb14876f",
+  "scan_sha256": "ffb75b5cb7043ae8d172148587e3555008d7c73b9dbce10a8b5da21c98894e05",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -4683,7 +4692,7 @@
       "groups": [
         "evidence"
       ],
-      "last_match_line": 89,
+      "last_match_line": 90,
       "line": 1,
       "markers": [
         "evidence"
@@ -14256,17 +14265,17 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 787,
+      "first_match_line": 964,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 834,
-      "line": 780,
+      "last_match_line": 1057,
+      "line": 957,
       "markers": [
         "evidence",
         "evidence_environment"
       ],
-      "match_count": 3,
+      "match_count": 6,
       "operations": [
         "constant",
         "reader",
@@ -16747,7 +16756,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 23948,
+      "last_match_line": 23988,
       "line": 1,
       "markers": [
         "e3",
@@ -17082,17 +17091,35 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 32,
+      "first_match_line": 16,
       "groups": [
         "script"
       ],
-      "last_match_line": 46,
+      "last_match_line": 16,
       "line": 13,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/run_replay.py",
+      "symbol": "reconcile_witnessed"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 60,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 105,
+      "line": 39,
       "markers": [
         "evidence",
         "evidence_environment"
       ],
-      "match_count": 3,
+      "match_count": 4,
       "operations": [
         "constant",
         "deleter",
@@ -17104,19 +17131,18 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 73,
+      "first_match_line": 104,
       "groups": [
         "script"
       ],
-      "last_match_line": 73,
-      "line": 16,
+      "last_match_line": 104,
+      "line": 34,
       "markers": [
         "evidence"
       ],
       "match_count": 1,
       "operations": [
-        "reader",
-        "writer"
+        "reader"
       ],
       "path": "scripts/formal/with_rustfs.py",
       "symbol": "main"

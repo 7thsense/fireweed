@@ -19,24 +19,10 @@ use fireweed_engine::{
 /// and cannot acknowledge a second token set.
 /// Moving the publication out never moves response allocations out of their
 /// admitted owner. The public response remains available only by borrowing.
-pub struct PreparedClaim {
-    record: OwnedQueueLogRecord,
-    response: AdmittedClaimReplay,
-    expected_next_offset: u64,
-    writer_epoch: u64,
-}
+pub type PreparedClaim = super::preparation::PreparedPublication<AdmittedClaimReplay>;
 impl PreparedClaim {
     pub fn records(&self) -> &[ClaimedWork] {
-        self.response.records()
-    }
-    pub fn expected_next_offset(&self) -> u64 {
-        self.expected_next_offset
-    }
-    pub fn writer_epoch(&self) -> u64 {
-        self.writer_epoch
-    }
-    pub fn into_parts(self) -> (OwnedQueueLogRecord, AdmittedClaimReplay, u64) {
-        (self.record, self.response, self.expected_next_offset)
+        self.response().records()
     }
 }
 struct PreparedParts {
@@ -107,14 +93,16 @@ impl QueueProjection {
                         &mut worker,
                     )
                     .await?;
-                    Ok(result.map(|parts| PreparedClaim {
-                        record: parts.record,
-                        response: AdmittedClaimReplay::from_records(
-                            parts.records,
-                            std::mem::take(&mut worker.charges),
-                        ),
-                        expected_next_offset: parts.expected_next_offset,
-                        writer_epoch: parts.writer_epoch,
+                    Ok(result.map(|parts| {
+                        PreparedClaim::new(
+                            parts.record,
+                            AdmittedClaimReplay::from_records(
+                                parts.records,
+                                std::mem::take(&mut worker.charges),
+                            ),
+                            parts.expected_next_offset,
+                            parts.writer_epoch,
+                        )
                     }))
                 }))
             })
