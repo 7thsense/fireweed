@@ -63,6 +63,7 @@ postgres = ["dep:fireweed-postgres", "dep:tokio"]
 turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
 
 [dev-dependencies]
+turso = { version = "0.8.2", default-features = false }
 fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }
 # product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.

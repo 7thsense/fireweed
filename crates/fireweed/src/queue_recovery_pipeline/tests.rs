@@ -2439,3 +2439,429 @@ fn operation_completion_releases_permit_before_terminal_notification_on_every_dr
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+async fn native_port_fixture(
+    root: &std::path::Path,
+    projection_name: &str,
+    s3_prefix: Option<&str>,
+    clock: Arc<fireweed_conformance::queue_contract::TestClock>,
+) -> NativeQueueStore {
+    let store = if let Some(prefix) = s3_prefix {
+        let env = fireweed_objectlog::test_s3::shared_s3_test_env();
+        ObjectLogEngineStore::open_s3_with_prefixes(
+            &env.endpoint,
+            &env.region,
+            &env.bucket,
+            &env.access_key,
+            &env.secret_key,
+            format!("{prefix}/data/"),
+            format!("{prefix}/meta/"),
+            FlushConfig::default(),
+        )
+        .await
+        .unwrap()
+    } else {
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap()
+    };
+    let workers = ScratchWorkers::new(2, 8).unwrap();
+    let admission = QueueAdmission::new(1, 512 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let projection = QueueProjection::open(&root.join(projection_name), &job, &workers)
+        .await
+        .unwrap();
+    drop(job);
+    let pipeline = test_pipeline_options(
+        Arc::new(store),
+        projection,
+        workers,
+        QueuePipelineOptions {
+            operations: 8,
+            metadata_bytes: 65536,
+            hard_record_bytes: 256 << 20,
+        },
+        root,
+    )
+    .await
+    .unwrap();
+    NativeQueueStore::new(pipeline, QueueLimits::default(), 512 << 20, clock).unwrap()
+}
+#[cfg(target_os = "linux")]
+async fn native_port_identical_contract(s3: bool) {
+    use fireweed_conformance::queue_contract::{self as suite, TestClock};
+    use fireweed_engine::queue_contract::QueueStore;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-native-port-{s3}-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let prefix = s3.then(|| format!("api007-native-port-{nonce}"));
+    let clock = Arc::new(TestClock::default());
+    let queue = native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+    let other =
+        native_port_fixture(&root, "independent.db", prefix.as_deref(), clock.clone()).await;
+    let address = |name: &str| QueueAddress {
+        tenant: "api007-native-port".into(),
+        queue: format!("{nonce}-{name}"),
+    };
+    let missing = ReceiptReadRequest {
+        queue: address("missing"),
+        request_ids: vec!["none".into()],
+        max_bytes: 1 << 20,
+    };
+    assert_eq!(
+        queue.read_commit(missing).await,
+        Err(QueueError::QueueNotFound)
+    );
+    let primary = address("contract");
+    eprintln!("native contract {s3}: run");
+    suite::run(&queue, primary.clone()).await;
+    let expected = queue
+        .read_commit(ReceiptReadRequest {
+            queue: primary.clone(),
+            request_ids: vec!["transition".into()],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
+    eprintln!("native contract {s3}: competing_claims");
+    suite::competing_claims(&queue, &other, address("competition")).await;
+    eprintln!("native contract {s3}: expiry_and_administration");
+    suite::expiry_and_administration(&queue, &clock, address("expiry")).await;
+    eprintln!("native contract {s3}: ordered_long_values_and_cursor_scope");
+    suite::ordered_long_values_and_cursor_scope(&queue, address("long")).await;
+    eprintln!("native contract {s3}: predicate_and_order_oracles");
+    suite::predicate_and_order_oracles(&queue, address("predicates")).await;
+    eprintln!("native contract {s3}: ordered_groups_sparse_stats_and_replay_precedence");
+    suite::ordered_groups_sparse_stats_and_replay_precedence(&queue, &clock, address("groups"))
+        .await;
+    eprintln!("native contract {s3}: ordered_insert_uniqueness");
+    suite::ordered_insert_uniqueness(&queue, address("insert-uniqueness")).await;
+    eprintln!("native contract {s3}: shrinking_upsert_index_amplification");
+    suite::shrinking_upsert_index_amplification(&queue, address("shrinking-upsert")).await;
+    eprintln!("native contract {s3}: indexed_additional_attributes");
+    suite::indexed_additional_attributes(&queue, address("additional-attributes")).await;
+    eprintln!("native contract {s3}: numeric_bucket_stats");
+    suite::numeric_bucket_stats(&queue, &clock, address("numeric-buckets")).await;
+    eprintln!("native contract {s3}: unrestricted_names_obey_response_bounds");
+    suite::unrestricted_names_obey_response_bounds(&queue, address("names-bounds")).await;
+    eprintln!("native contract {s3}: atomic_administration_preview_and_replay");
+    suite::atomic_administration_preview_and_replay(&queue, address("administration-preview"))
+        .await;
+    eprintln!("native contract {s3}: administrative_size_siblings_and_preflight");
+    suite::administrative_size_siblings_and_preflight(&queue, address("administration-sizes"))
+        .await;
+    eprintln!("native contract {s3}: broad_administration_exceeds_input_chunk");
+    suite::broad_administration_exceeds_input_chunk(&queue, address("administration-broad")).await;
+    let acknowledged = suite::prepare_process_loss(&queue, address("acknowledged-reopen")).await;
+    let receipts = |name: &str, ids: Vec<String>| ReceiptReadRequest {
+        queue: address(name),
+        request_ids: ids,
+        max_bytes: 1 << 20,
+    };
+    let administrative_expected = queue
+        .read_commit(receipts(
+            "administration-preview",
+            vec!["admin-transition".into()],
+        ))
+        .await
+        .unwrap();
+    let wide_expected = queue
+        .read_commit(receipts(
+            "administration-sizes",
+            vec!["wide-accepted".into(), "middle".into()],
+        ))
+        .await
+        .unwrap();
+    let clone = queue.clone();
+    queue.shutdown().await.unwrap();
+    other.shutdown().await.unwrap();
+    assert_eq!(
+        clone
+            .read_commit(receipts("contract", vec!["transition".into()]))
+            .await,
+        Err(QueueError::Busy)
+    );
+    // Cold projection rebuild is part of the same suite, not cached DB reuse.
+    let reopened = native_port_fixture(&root, "cold-rebuild.db", prefix.as_deref(), clock).await;
+    assert_eq!(
+        reopened
+            .read_commit(receipts("contract", vec!["transition".into()]))
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        reopened
+            .read_commit(receipts(
+                "administration-preview",
+                vec!["admin-transition".into()]
+            ))
+            .await
+            .unwrap(),
+        administrative_expected
+    );
+    assert_eq!(
+        reopened
+            .read_commit(receipts(
+                "administration-sizes",
+                vec!["wide-accepted".into(), "middle".into()]
+            ))
+            .await
+            .unwrap(),
+        wide_expected
+    );
+    eprintln!("native contract {s3}: verify_process_loss");
+    suite::verify_process_loss(&reopened, acknowledged).await;
+    reopened.shutdown().await.unwrap();
+    drop(reopened);
+    drop(clone);
+    drop(other);
+    drop(queue);
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_store_runs_identical_contract_local() {
+    native_port_identical_contract(false).await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_store_runs_identical_contract_real_s3() {
+    native_port_identical_contract(true).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn missing_original_cache_cannot_duplicate_durable_claim() {
+    use fireweed_engine::queue_contract::QueueStore;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-original-loss-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+    let queue = native_port_fixture(&root, "primary.db", None, clock.clone()).await;
+    let address = QueueAddress {
+        tenant: "cache-loss".into(),
+        queue: "queue".into(),
+    };
+    queue
+        .provision(ProvisionRequest {
+            queue: address.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    queue
+        .insert(InsertRequest {
+            queue: address.clone(),
+            request_id: "seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![NewWork {
+                key: "a".into(),
+                priority: 0,
+                available_at: 0,
+                fields: Default::default(),
+                body: vec![1].into(),
+            }],
+        })
+        .await
+        .unwrap();
+    let request = ClaimRequest {
+        queue: address,
+        request_id: "original".into(),
+        filter: Filter::default(),
+        order: ClaimOrder::PriorityAscending,
+        eligible_at: 0,
+        lease_nanos: 1_000_000,
+        max_records: 1,
+        max_bytes: 65536,
+        fields: None,
+        include_body: true,
+    };
+    let queue_address = request.queue.clone();
+    let original = queue.claim(request.clone()).await.unwrap();
+    assert_eq!(original.len(), 1);
+    queue.shutdown().await.unwrap();
+    drop(queue);
+    // Only corrupt an explicitly closed cache; durable authority stays intact.
+    let path = root.join("primary.db");
+    let db = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let connection = db.connect().unwrap();
+    connection
+        .execute(
+            "DELETE FROM q7_requests WHERE domain=1 AND identity=?1",
+            vec![turso::Value::Blob(b"original".to_vec())],
+        )
+        .await
+        .unwrap();
+    let mut rows = connection
+        .query("SELECT applied_next_offset FROM q7_queues", ())
+        .await
+        .unwrap();
+    let head = rows.next().await.unwrap().unwrap().get_value(0).unwrap();
+    drop(rows);
+    drop(connection);
+    drop(db);
+    let reopened = native_port_fixture(&root, "primary.db", None, clock).await;
+    assert!(matches!(
+        reopened.claim(request).await,
+        Err(QueueError::OutcomeUnknown(_))
+    ));
+    reopened.shutdown().await.unwrap();
+    drop(reopened);
+    let db = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let connection = db.connect().unwrap();
+    let mut rows = connection
+        .query("SELECT applied_next_offset FROM q7_queues", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get_value(0).unwrap(),
+        head
+    );
+    let expected_head = match head {
+        turso::Value::Integer(value) => value,
+        _ => panic!("integer checkpoint"),
+    };
+    let authority = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let namespace = authority
+        .bind_api007_namespace(&queue_address, &job)
+        .await
+        .unwrap();
+    let actual = authority
+        .read_api007_state(namespace, &job, &workers)
+        .await
+        .unwrap();
+    assert_eq!(
+        actual.state().next_offset,
+        expected_head,
+        "no duplicate may enter durable authority"
+    );
+    drop(actual);
+    drop(job);
+    workers.close_and_drain().await.unwrap();
+    drop(workers);
+    drop(authority);
+
+    drop(rows);
+    drop(connection);
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_original_witness_rejects_already_checkpointed_history() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-duplicate-witness-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let admission = QueueAdmission::new(2, 128 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(1, 4).unwrap();
+    provision(&store, &job, &workers).await;
+    append_insert(&store, &job, &workers).await;
+    append_empty(&store, &job, &workers).await;
+    let path = root.join("projection.db");
+    let projection = QueueProjection::open(&path, &job, &workers).await.unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
+    drop(pipeline.recover(address(), job.clone()).await.unwrap());
+    drop(pipeline);
+    workers.close_and_drain().await.unwrap();
+    drop(workers);
+    let workers = ScratchWorkers::new(1, 4).unwrap();
+    let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+    let acquired = store
+        .acquire_api007_state(namespace, &job, &workers)
+        .await
+        .unwrap();
+    let epoch = acquired.state().epoch;
+    // The historical zero-effect fixture is a valid checked durable frame;
+    // this deliberately repeats its receipt identity, not a consumer empty group.
+    let duplicate = empty_record(epoch, 1, &job);
+    let appended = store
+        .append_api007_record(acquired.into_namespace(), duplicate, 3, &job, &workers)
+        .await
+        .unwrap();
+    assert!(appended.outcome().is_ok());
+    drop(appended);
+    // Simulate a cache whose externally applied cursor already covers the
+    // duplicate, so ordinary suffix projector INSERT checks cannot catch it.
+    let db = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let connection = db.connect().unwrap();
+    connection
+        .execute(
+            "UPDATE q7_queues SET applied_next_offset=4,last_record_epoch=?1",
+            vec![turso::Value::Blob(epoch.to_be_bytes().to_vec())],
+        )
+        .await
+        .unwrap();
+    drop(connection);
+    drop(db);
+    let projection = QueueProjection::open(&path, &job, &workers).await.unwrap();
+    let pipeline = test_pipeline(
+        store.clone(),
+        projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
+    let unrelated = pipeline
+        .recover_request(address(), 1, "empty-suffix".into(), job.clone())
+        .await
+        .unwrap();
+    assert_eq!(unrelated.original_identity_present, Some(false));
+    drop(unrelated);
+    assert!(matches!(
+        pipeline
+            .recover_request(address(), 2, "empty-suffix".into(), job.clone())
+            .await,
+        Err(QueueError::OutcomeUnknown(_))
+    ));
+    drop(pipeline);
+    workers.close_and_drain().await.unwrap();
+    drop(workers);
+    drop(job);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}

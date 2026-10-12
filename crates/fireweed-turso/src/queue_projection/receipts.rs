@@ -22,6 +22,15 @@ pub struct AdmittedCommitReceipts {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedCommitReceipts {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<
+        Vec<ReceiptLookup>,
+        Vec<OwnedQueueBufferCharge>,
+    > {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(self.receipts, self._charges)
+    }
+
     pub fn receipts(&self) -> &[ReceiptLookup] {
         &self.receipts
     }

@@ -6,6 +6,7 @@ mod commit;
 mod commit_batch;
 pub use commit_batch::AdmittedQueueCommitBatch;
 mod insert;
+mod mutation;
 mod preview;
 mod publication;
 mod query;
@@ -13,6 +14,8 @@ mod read;
 mod receipts;
 mod state;
 mod stats;
+#[cfg(target_os = "linux")]
+mod store;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::{QueueLogFormat, encode_checked_genesis},
@@ -22,6 +25,8 @@ use fireweed_objectlog::ObjectLogEngineStore;
 use fireweed_queue_spool::ScratchWorkers;
 use fireweed_turso::queue_projection::{QueueProjection, QueueProjectionCheckpoint};
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
+pub use store::NativeQueueStore;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 fn unknown(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(format!("API-007 recovery: {message}"))
@@ -62,6 +67,8 @@ pub struct QueueRecoveryPipeline {
     metadata_bytes: usize,
     hard_record_bytes: u64,
     #[cfg(test)]
+    before_drop: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     before_acquire: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     #[cfg(test)]
     before_claim_append: StagePause,
@@ -88,6 +95,14 @@ pub struct QueueRecoveryPipeline {
     #[cfg(test)]
     after_batch_read: StagePause,
 }
+#[cfg(test)]
+impl Drop for QueueRecoveryPipeline {
+    fn drop(&mut self) {
+        if let Some(hook) = self.before_drop.get_mut().unwrap().take() {
+            hook();
+        }
+    }
+}
 /// Point-in-time coverage only; later consumer reads/writes must establish
 /// current projection and fence authority again.
 pub struct RecoveredQueue {
@@ -96,6 +111,7 @@ pub struct RecoveredQueue {
     pub original_genesis_epoch: u64,
     pub acquired_epoch: u64,
     pub target_next_offset: u64,
+    original_identity_present: Option<bool>,
 }
 /// On return, cancellation or unwind, release the operation permit before the
 /// final task reservation owner can notify shutdown waiters.
@@ -108,6 +124,7 @@ struct RecoveryTask {
     _slot: OwnedSemaphorePermit,
     pipeline: Arc<QueueRecoveryPipeline>,
     address: QueueAddress,
+    identity: Option<(u8, String)>,
     _headers: OwnedQueueBufferCharge,
     job: Arc<QueueReservation>,
 }
@@ -131,6 +148,8 @@ impl QueueRecoveryPipeline {
             operation_slots: Arc::new(Semaphore::new(options.operations)),
             metadata_bytes: options.metadata_bytes,
             hard_record_bytes: options.hard_record_bytes,
+            #[cfg(test)]
+            before_drop: std::sync::Mutex::new(None),
             #[cfg(test)]
             before_acquire: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -196,11 +215,30 @@ impl QueueRecoveryPipeline {
         address: QueueAddress,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
+        self.recover_checked(address, None, job).await
+    }
+    pub(super) async fn recover_request(
+        self: &Arc<Self>,
+        address: QueueAddress,
+        domain: u8,
+        identity: String,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<RecoveredQueue> {
+        self.recover_checked(address, Some((domain, identity)), job)
+            .await
+    }
+    async fn recover_checked(
+        self: &Arc<Self>,
+        address: QueueAddress,
+        identity: Option<(u8, String)>,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<RecoveredQueue> {
         address.validate()?;
         let headers = job.owned_buffer(
             u64::try_from(address.tenant.len())
                 .map_err(|_| QueueError::TooLarge)?
                 .checked_add(u64::try_from(address.queue.len()).map_err(|_| QueueError::TooLarge)?)
+                .and_then(|n| n.checked_add(identity.as_ref().map_or(0, |(_, id)| id.len() as u64)))
                 .and_then(|n| n.checked_mul(16))
                 .and_then(|n| n.checked_add(65536))
                 .ok_or(QueueError::TooLarge)?,
@@ -212,6 +250,7 @@ impl QueueRecoveryPipeline {
             _slot: slot,
             pipeline: Arc::clone(self),
             address,
+            identity,
             _headers: headers,
             job,
         };
@@ -250,9 +289,31 @@ impl RecoveryTask {
         if let Some(notify) = pipeline.before_acquire.lock().unwrap().clone() {
             notify.notify_one();
         }
+        let observed = pipeline
+            .store
+            .read_api007_state(namespace, &self.job, &pipeline.workers)
+            .await?;
+        let before = observed.state();
+        if before.log_start == 0 && before.next_offset == 0 {
+            if pipeline
+                .projection
+                .has_exact_queue(self.address.clone(), &self.job, &pipeline.workers)
+                .await?
+            {
+                return Err(unknown("known projection has no genesis authority"));
+            }
+            let confirmed = pipeline
+                .store
+                .read_api007_state(observed.into_namespace(), &self.job, &pipeline.workers)
+                .await?;
+            if confirmed.state() == before {
+                return Err(QueueError::QueueNotFound);
+            }
+            return Err(unknown("authority changed during absence classification"));
+        }
         let acquired = pipeline
             .store
-            .acquire_api007_state(namespace, &self.job, &pipeline.workers)
+            .acquire_api007_state(observed.into_namespace(), &self.job, &pipeline.workers)
             .await?;
         let target = acquired.state();
         if target.log_start != 0 || target.next_offset < 1 {
@@ -263,6 +324,7 @@ impl RecoveryTask {
         let mut history = ColdQueueHistory::new(&self.address, &self.job)?;
         let mut checkpoint: Option<QueueProjectionCheckpoint> = None;
         let mut genesis_epoch = 0;
+        let mut original_identity_present = self.identity.as_ref().map(|_| false);
         while history.next_offset() < target_next_offset {
             let offset = history.next_offset();
             let plan = pipeline.store.plan_api007_read(
@@ -286,6 +348,38 @@ impl RecoveryTask {
                 ));
             }
             history.observe(offset, record.bytes())?;
+            if let Some((domain, id)) = &self.identity {
+                let present = match view.payload() {
+                    fireweed_engine::queue_log_record::QueueLogPayload::Genesis(_) => false,
+                    fireweed_engine::queue_log_record::QueueLogPayload::Claim(claim) => {
+                        *domain == 1 && claim.request_id() == id
+                    }
+                    fireweed_engine::queue_log_record::QueueLogPayload::Publication(
+                        publication,
+                    ) => {
+                        let mut found = false;
+                        for receipt in publication.receipts() {
+                            let receipt =
+                                receipt.map_err(|e| unknown(&format!("history receipt: {e:?}")))?;
+                            if receipt.domain == *domain && receipt.request_id == id {
+                                if found {
+                                    return Err(unknown(
+                                        "duplicate authoritative original identity",
+                                    ));
+                                }
+                                found = true;
+                            }
+                        }
+                        found
+                    }
+                };
+                if present {
+                    if original_identity_present == Some(true) {
+                        return Err(unknown("duplicate authoritative original identity"));
+                    }
+                    original_identity_present = Some(true);
+                }
+            }
             if offset == 0 {
                 genesis_epoch = history.historical_epoch();
                 let authority = encode_checked_genesis(
@@ -346,6 +440,7 @@ impl RecoveryTask {
             original_genesis_epoch: genesis_epoch,
             acquired_epoch: target.epoch,
             target_next_offset,
+            original_identity_present,
         })
     }
 }

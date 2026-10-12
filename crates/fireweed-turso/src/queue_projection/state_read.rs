@@ -14,6 +14,15 @@ pub struct AdmittedStateRecords {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedStateRecords {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<
+        Vec<Option<StateRecord>>,
+        Vec<OwnedQueueBufferCharge>,
+    > {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(self.records, self._charges)
+    }
+
     pub fn records(&self) -> &[Option<StateRecord>] {
         &self.records
     }

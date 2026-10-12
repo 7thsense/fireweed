@@ -21,6 +21,15 @@ pub struct AdmittedInsertReplay {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedInsertReplay {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<
+        Vec<InsertOutcome>,
+        Vec<OwnedQueueBufferCharge>,
+    > {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(self.outcomes, self._charges)
+    }
+
     pub(super) fn from_outcomes(
         outcomes: Vec<InsertOutcome>,
         charges: Vec<OwnedQueueBufferCharge>,

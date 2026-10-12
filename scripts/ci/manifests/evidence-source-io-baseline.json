@@ -4683,7 +4683,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "a7a69a9bf1aa770ee33da768dfe58780e15d88a10af468fc4b020c12db09ee34",
+  "scan_sha256": "4fa9f2c746f5833bcdb25bbe2090820c9b6c05c311a612323f42ca4cdae1b0ee",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -14173,6 +14173,42 @@
     },
     {
       "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-turso/src/queue_projection/presence.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 13,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 13,
+      "line": 11,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-turso/src/queue_projection/presence.rs",
+      "symbol": "run"
+    },
+    {
+      "evidence_paths": [],
       "first_match_line": 22,
       "groups": [
         "evidence"
@@ -14247,11 +14283,11 @@
       "evidence_paths": [
         "docs/perf/evidence/tp005/million-cycle-production/README.md"
       ],
-      "first_match_line": 154,
+      "first_match_line": 155,
       "groups": [
         "matrix"
       ],
-      "last_match_line": 155,
+      "last_match_line": 156,
       "line": 1,
       "markers": [
         "matrix"
@@ -16756,7 +16792,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 92390,
+      "last_match_line": 92658,
       "line": 1,
       "markers": [
         "e3",

@@ -27,6 +27,15 @@ pub struct AdmittedQueueCommitBatch {
     _containers: OwnedQueueBufferCharge,
 }
 impl AdmittedQueueCommitBatch {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<Vec<CommitReceipt>, impl Send> {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(
+            self.receipts,
+            (self.classification, self.fresh, self._containers),
+        )
+    }
+
     pub fn receipts(&self) -> &[CommitReceipt] {
         &self.receipts
     }

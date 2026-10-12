@@ -160,6 +160,13 @@ per item. Packing/logging groups together never changes their independence.
 - Known rejection means definitely not applied. Infrastructure failure after
   admission may mean outcome unknown, explicitly distinguished from rejection.
   Retry the same request identity or read its receipt; never infer rollback.
+  A native backend may internally prepare that same identity again only after
+  a strictly newer durable fence and a checked complete authoritative prefix
+  prove that the earlier identity is absent and cannot still publish. Cached
+  receipt absence alone is insufficient. Duplicate authoritative identities or
+  cache/history disagreement return outcome unknown. Conditional writes use one
+  transport attempt; a lost write reply cannot become a known rejection through
+  an SDK retry.
 - Commit identity is per group, scoped to queue, fingerprinted over the canonical
   full body. Replay returns the original outcome without rechecking expired
   leases or duplicating effects. Rebatching unchanged groups preserves replay.

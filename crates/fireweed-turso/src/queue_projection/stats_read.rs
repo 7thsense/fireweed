@@ -14,6 +14,13 @@ pub struct AdmittedQueueStats {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedQueueStats {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<QueueStats, Vec<OwnedQueueBufferCharge>>
+    {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(self.stats, self._charges)
+    }
+
     pub fn stats(&self) -> &QueueStats {
         &self.stats
     }

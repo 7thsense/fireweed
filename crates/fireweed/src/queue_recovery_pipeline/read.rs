@@ -102,12 +102,14 @@ impl<R: CoveredRead> ReadExecution<R> {
     }
     pub(super) async fn execute(self) -> QueueResult<R::Output> {
         for _ in 0..3 {
-            let Ok(recovered) = self
+            let recovered = match self
                 .pipeline
                 .recover(self.request.address().clone(), self.job.clone())
                 .await
-            else {
-                continue;
+            {
+                Ok(recovered) => recovered,
+                Err(QueueError::QueueNotFound) => return Err(QueueError::QueueNotFound),
+                Err(_) => continue,
             };
             let result = self
                 .request

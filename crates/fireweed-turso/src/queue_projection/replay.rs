@@ -20,6 +20,15 @@ pub struct AdmittedClaimReplay {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedClaimReplay {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<
+        Vec<ClaimedWork>,
+        Vec<OwnedQueueBufferCharge>,
+    > {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(self.records, self._charges)
+    }
+
     pub(super) fn from_records(
         records: Vec<ClaimedWork>,
         charges: Vec<OwnedQueueBufferCharge>,

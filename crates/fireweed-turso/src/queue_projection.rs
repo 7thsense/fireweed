@@ -15,6 +15,7 @@ mod insert_replay;
 mod payload;
 mod preparation;
 mod prepare;
+mod presence;
 mod preview;
 mod query_read;
 mod receipt_authority;

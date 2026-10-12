@@ -73,69 +73,40 @@ contracts, designs and this execution plan concise and maintained in place.
 
 ## Continuation Evidence
 
-The concrete PostgreSQL interface and public mandatory suite exist. Native S3
-transport/fence/recovery and stock-Turso atomic projection, current claim replay
-and filtered candidate selection, resolved claim preparation, owned conditional
-claim publication with original-identity resolution, immutable native insert
-replay, selective shared-planner insert preparation, owned conditional insert
-publication with original-receipt resolution and covered owned commit-receipt
-lookup, atomic ordinary claim-group commit preparation and owned conditional
-commit publication with fingerprint-bound original-receipt resolution are
-internal primitives. The owned batch bridge holds one operation permit,
-validates every sibling and classifies all original identities in one covered
-native snapshot before ordered fresh execution. Private execution cores reuse
-that permit at capacity one. Positional conflict/expiry statuses retain original
-receipt binding rules, and byte checks measure the public receipt vector rather
-than internal classification tags. A failure after a durable prefix returns
-OutcomeUnknown; request identities recover that prefix. Addressed administrative preparation shares PostgreSQL's
-row proxy, prefix resolution, positional source, scan/finalization and complete
-publication decision. It prepares atomic FWQP2 effects or a zero-effect rejection,
-with immutable FP4 replay. Addressed commits use the same owned conditional
-publication and original-only receipt resolution as ordinary groups. The internal
-pipeline retains constructor-owned scratch root/quota resources for commits and
-previews. Ordinary and administrative preview share guarded result
-ownership, bypass execution receipts and use covered-read freshness without
-publication. Ordinary commit/preview sample the operational clock after
-prospective unique authority on both native paths. Private Linux broad selectors use postfix disk sets and fixed native scalar
-leaves in the original authority snapshot. Earliest-clause ownership precedes
-precondition evaluation; selected full key, physical identity and unsigned
-version are revalidated before shared one-row hydration and EOF-only
-finalization. A private Linux scratch-main owner uses configured-root anonymous
-files, shared precharged file/WAL highwater, one-row autocommit and separate
-indexed Boolean-set tables. Exact stock SDK opcode controls reject listed
-collection-materialization opcodes; ownership, cancellation, identity failure and wider-target tests
-qualify these primitives. Complete SDK memory-peak correspondence remains
-required before public qualification. Authority-side `typeof` and `length`
-reads can materialize complete overflow records inside the stock SDK before
-a later per-key charge; shallow corruption guards and selector checks establish
-correctness, not a hard native-reader allocation bound.
-Shared infrastructure owns final-reservation admission and drain notification;
-PostgreSQL uses it before worker drain and connection cleanup. The internal
-native pipeline takes explicit validated operation capacities and retains
-separate outer-operation and recovery-stage permits even at capacity one.
-Object-log provisioning task capacities still require constructor integration.
-PostgreSQL resolves and probes its typed scratch root once before network
-access; cloned handles share that immutable root and administration never rereads
-process temporary-directory configuration.
-Covered owned state reads share complete payload hydration
-and addressed-state metadata validation with commit planning. Receipt/state
-reads and native indexed queries use one owned completion, admission and
-fresh-coverage orchestrator. Query cursors share the PostgreSQL format; native
-filters share bounded SQL construction with claims. Native stats aggregate totals,
-ordered numeric bins and bounded representative grouping values in one covered
-snapshot, with shared typed field hydration and raw-authority checks. Scan/sort cost still requires
-the settled density and performance qualification below.
-Claim completion validates fresh current ownership and a subsequent authoritative
-head cut; provisional tokens cannot become a response. These local checks are
-not a public S3/Turso qualification. The full constructor/QueueStore, remaining
-reads/mutations and public parity must still land. Full-manifest memory/rewrite
-growth remains unqualified.
+The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
+Linux native port assembles all ten operations from shared planners, native
+filtered selection, stock-Turso atomic projection and conditional log publication.
+Owned response handoff retains admission through delivery or abandoned reply
+cleanup. Shared shutdown drains admission and workers and serializes final
+resource teardown. These internal operations do not activate the public backend.
 
-The single Snorri adapter and matched settled release workloads remain required.
-Stats exposes the exact operational classification sample as signed Unix nanoseconds on both native paths. Snorri as_of conversion and negative-epoch hourly grouping must satisfy the consumer binding at adapter cutover.
-Old formal models/corpora that permit stale empty claims or expired identity reuse
-are superseded for changed properties; revised correspondence is mandatory.
-No completion claim is permitted while any of these required gates is absent.
+Native mutation retries require a strictly newer durable fence, complete checked
+log history and covered original-receipt absence. One requested domain/identity
+witness detects missing or phantom originals and duplicate durable identities
+without retaining a history map. It does not validate all cached rows/indexes or
+known batch-classification receipts; complete cached integrity remains required.
+Fresh catalog-known missing indexes and previously observed malformed authority
+fail closed across reopen, independent handles and later metadata deletion.
+Native S3 conditional writes classify typed conflicts and never retry a lost
+write reply inside the SDK.
+
+Local and real S3/Turso pass the same PostgreSQL conformance functions, including
+independent claimers, atomic state/new work, administration and cold rebuild.
+The public PostgreSQL baseline passes those same scenarios. Public native
+construction and production qualification remain pending. Constructor
+configuration must integrate provisioning capacity and validate before external
+resource access. Scratch roots are resolved once and shared by cloned handles.
+
+Complete stock SDK memory-peak correspondence, cached integrity and bounded
+manifest retention/rewrite remain gates. In particular, native `typeof`/`length`
+can materialize overflow records before later per-key admission; opcode and
+corruption controls establish correctness, not a hard allocation bound. Settled
+release density, scale and cost workloads must qualify performance.
+
+The single Snorri adapter, diagnostics receiver integration, revised formal
+correspondence and matched settled release benchmarks remain required. Snorri
+binds stats as_of to signed Unix nanoseconds, including negative-epoch hourly
+flooring. No completion claim is permitted while any required gate is absent.
 
 ## Validation Plan
 

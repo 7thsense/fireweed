@@ -18,6 +18,13 @@ pub struct AdmittedQueryPage {
     _charges: Vec<OwnedQueueBufferCharge>,
 }
 impl AdmittedQueryPage {
+    pub fn into_owned(
+        self,
+    ) -> fireweed_engine::queue_contract::OwnedQueueValue<QueryPage, Vec<OwnedQueueBufferCharge>>
+    {
+        fireweed_engine::queue_contract::OwnedQueueValue::new(self.page, self._charges)
+    }
+
     pub fn page(&self) -> &QueryPage {
         &self.page
     }

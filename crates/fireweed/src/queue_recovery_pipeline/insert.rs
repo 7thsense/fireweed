@@ -104,75 +104,83 @@ impl InsertTask {
         }
         result
     }
-    async fn resolve(
-        &self,
-        mut covered: Option<RecoveredQueue>,
-    ) -> QueueResult<AdmittedInsertReplay> {
-        // Retry original-identity resolution only; never replan after submission.
-        for _ in 0..3 {
-            let recovered = match covered.take() {
-                Some(recovered) => recovered,
-                None => match self
-                    .pipeline
-                    .recover(self.request.queue.clone(), self.job.clone())
-                    .await
-                {
-                    Ok(recovered) => recovered,
-                    Err(_) => continue,
-                },
-            };
-            match self.replay_covered(&recovered).await {
-                Ok(Some(response)) => return Ok(response),
-                Err(error @ (QueueError::RequestConflict | QueueError::RequestExpired)) => {
-                    return Err(error);
-                }
-                _ => {}
-            }
-        }
-        Err(unknown(
-            "insert publication has no resolved original response",
-        ))
-    }
     async fn execute(self) -> QueueResult<AdmittedInsertReplay> {
-        let recovered = self
-            .pipeline
-            .recover(self.request.queue.clone(), self.job.clone())
-            .await?;
-        let prepared = self
-            .pipeline
-            .projection
-            .prepare_insert(
-                self.input(&recovered)?,
-                recovered.acquired_epoch,
-                self.pipeline.hard_record_bytes,
-                self.clock.clone(),
-                &self.job,
-                &self.pipeline.workers,
-            )
-            .await?;
-        let Some(prepared) = prepared else {
-            return self.resolve(Some(recovered)).await;
-        };
-        let epoch = prepared.writer_epoch();
-        let (record, provisional, expected_head) = prepared.into_parts();
-        drop(provisional);
-        drop(recovered);
-        let namespace = self
-            .pipeline
-            .store
-            .bind_api007_namespace(&self.request.queue, &self.job)
-            .await?;
-        #[cfg(test)]
-        {
-            let pause = self.pipeline.before_insert_append.lock().unwrap().clone();
-            if let Some((entered, release)) = pause {
-                entered.notify_one();
-                release.notified().await;
+        let mut covered = None;
+        for _ in 0..32 {
+            let recovered = match covered.take() {
+                Some(value) => value,
+                None => super::mutation::recover_original(&self).await?,
+            };
+            let prepared = self
+                .pipeline
+                .projection
+                .prepare_insert(
+                    self.input(&recovered)?,
+                    recovered.acquired_epoch,
+                    self.pipeline.hard_record_bytes,
+                    self.clock.clone(),
+                    &self.job,
+                    &self.pipeline.workers,
+                )
+                .await;
+            let prepared = super::mutation::check_preparation(&recovered, prepared)?;
+            let Some(prepared) = prepared else {
+                return match super::mutation::resolve_submission(&self, None, Some(recovered))
+                    .await?
+                {
+                    super::mutation::Submission::Resolved(response) => Ok(response),
+                    super::mutation::Submission::Reprepare(_) => {
+                        Err(unknown("known original cannot be reprepared"))
+                    }
+                };
+            };
+            let epoch = prepared.writer_epoch();
+            let (record, provisional, expected_head) = prepared.into_parts();
+            drop(provisional);
+            drop(recovered);
+            let namespace = self
+                .pipeline
+                .store
+                .bind_api007_namespace(&self.request.queue, &self.job)
+                .await?;
+            #[cfg(test)]
+            {
+                let pause = self.pipeline.before_insert_append.lock().unwrap().clone();
+                if let Some((entered, release)) = pause {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            }
+            self.pipeline
+                .publish_prepared(namespace, record, expected_head, epoch, &self.job)
+                .await?;
+            match super::mutation::resolve_submission(&self, Some(epoch), None).await? {
+                super::mutation::Submission::Resolved(response) => return Ok(response),
+                super::mutation::Submission::Reprepare(next) => covered = Some(next),
             }
         }
-        self.pipeline
-            .publish_prepared(namespace, record, expected_head, epoch, &self.job)
-            .await?;
-        self.resolve(None).await
+        Err(unknown("mutation contention retry exhausted"))
+    }
+}
+
+impl super::mutation::OriginalMutation for InsertTask {
+    type Output = AdmittedInsertReplay;
+    fn pipeline(&self) -> &Arc<QueueRecoveryPipeline> {
+        &self.pipeline
+    }
+    fn address(&self) -> &QueueAddress {
+        &self.request.queue
+    }
+    fn identity(&self) -> (u8, &str) {
+        (0, &self.request.request_id)
+    }
+    fn job(&self) -> &Arc<QueueReservation> {
+        &self.job
+    }
+    fn replay<'a>(
+        &'a self,
+        recovered: &'a RecoveredQueue,
+    ) -> fireweed_engine::queue_contract::QueueFuture<'a, Option<Self::Output>> {
+        Box::pin(self.replay_covered(recovered))
     }
 }
