@@ -16811,6 +16811,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens",
           "--",
           "--exact"
@@ -16858,6 +16878,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path"
       },
       {
         "exact_invocation": [
@@ -77801,6 +77841,34 @@
         "-p",
         "fireweed-turso",
         "--lib",
+        "queue_projection::commit_batch_replay::tests::batch_original_classification_keeps_positional_fates_exact_public_bytes_and_late_errors",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_batch_replay::tests::batch_original_classification_keeps_positional_fates_exact_public_bytes_and_late_errors",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_batch_replay::tests::batch_original_classification_keeps_positional_fates_exact_public_bytes_and_late_errors",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
         "queue_projection::commit_prepare::preview_tests::ordinary_preview_and_publication_retain_reservations_through_precommit_panic_and_cancellation",
         "--",
         "--exact"
@@ -83062,6 +83130,34 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens",
         "--",
         "--exact"
@@ -83125,6 +83221,34 @@
       "expected_ran": 1,
       "harness_id": "queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
       "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -92582,7 +92706,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "1c5b03f73482aa730348de03781f6f5f65d8225bc886c9934e1d148c4e4d6366",
+  "source_inventory_sha256": "e427e46a3652ef2be39b09108bfe7d125849b4e4359ba3bf2697f4c1e074aa02",
   "workspaces": [
     {
       "listing_error_sha256": "",

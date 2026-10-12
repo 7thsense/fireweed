@@ -25,6 +25,16 @@ impl AdmittedCommitReceipts {
     pub fn receipts(&self) -> &[ReceiptLookup] {
         &self.receipts
     }
+    /// Move the single covered original while this owner retains every guard.
+    pub fn take_original(&mut self) -> QueueResult<CommitReceipt> {
+        if !matches!(self.receipts.as_slice(), [ReceiptLookup::Found(_)]) {
+            return Err(unknown("expected one covered original receipt"));
+        }
+        match self.receipts.pop() {
+            Some(ReceiptLookup::Found(receipt)) => Ok(receipt),
+            _ => Err(unknown("covered original receipt disappeared")),
+        }
+    }
 }
 struct OriginalGroup {
     queue: QueueAddress,
@@ -207,47 +217,17 @@ impl NativeTransactionWork for ReceiptWorker {
         // cannot decide the public Postcard response budget.
         let mut raw = Vec::new();
         for identity in &self.input.request.request_ids {
-            let hash = discovery_digest(identity.as_bytes());
-            let params = || {
-                vec![
-                    Value::Integer(snapshot.queue_id),
-                    blob(&hash),
-                    blob(identity.as_bytes()),
-                ]
-            };
-            use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
-            let (format, size) = match read_receipt_metadata(
-                connection,
-                snapshot.queue_id,
-                ReceiptDomain::Commit,
-                identity,
-                self.expected,
-            )
-            .await?
-            {
-                ReceiptMetadata::Absent => {
-                    raw.push(None);
-                    continue;
-                }
-                ReceiptMetadata::Expired => {
-                    raw.push(Some((3, None)));
-                    continue;
-                }
-                ReceiptMetadata::Present { format, size } => (format, size),
-            };
-            self.charges.push(
-                self.job.owned_buffer(
-                    size.checked_mul(4)
-                        .and_then(|n| n.checked_add(4096))
-                        .ok_or(QueueError::TooLarge)?,
-                )?,
+            raw.push(
+                super::receipt_authority::load_raw(
+                    connection,
+                    snapshot.queue_id,
+                    identity,
+                    self.expected,
+                    &self.job,
+                    &mut self.charges,
+                )
+                .await?,
             );
-            let row=one(connection,"SELECT outcome FROM q7_requests WHERE queue_id=?1 AND domain=2 AND identity_hash=?2 AND identity=?3",params(),1).await?.ok_or_else(||unknown("receipt vanished in snapshot"))?;
-            let bytes = bytes(&row[0])?;
-            if bytes.len() as u64 != size {
-                return Err(unknown("receipt length changed in snapshot"));
-            }
-            raw.push(Some((format, Some(bytes.to_vec()))));
         }
         let mut public = Vec::new();
         for (identity, raw) in self.input.request.request_ids.iter().zip(&raw) {

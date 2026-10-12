@@ -81,7 +81,13 @@ replay, selective shared-planner insert preparation, owned conditional insert
 publication with original-receipt resolution and covered owned commit-receipt
 lookup, atomic ordinary claim-group commit preparation and owned conditional
 commit publication with fingerprint-bound original-receipt resolution are
-internal primitives. Addressed administrative preparation shares PostgreSQL's
+internal primitives. The owned batch bridge holds one operation permit,
+validates every sibling and classifies all original identities in one covered
+native snapshot before ordered fresh execution. Private execution cores reuse
+that permit at capacity one. Positional conflict/expiry statuses retain original
+receipt binding rules, and byte checks measure the public receipt vector rather
+than internal classification tags. A failure after a durable prefix returns
+OutcomeUnknown; request identities recover that prefix. Addressed administrative preparation shares PostgreSQL's
 row proxy, prefix resolution, positional source, scan/finalization and complete
 publication decision. It prepares atomic FWQP2 effects or a zero-effect rejection,
 with immutable FP4 replay. Addressed commits use the same owned conditional

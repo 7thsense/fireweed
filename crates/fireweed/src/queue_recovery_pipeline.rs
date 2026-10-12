@@ -3,6 +3,8 @@
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 mod claim;
 mod commit;
+mod commit_batch;
+pub use commit_batch::AdmittedQueueCommitBatch;
 mod insert;
 mod preview;
 mod publication;
@@ -83,6 +85,8 @@ pub struct QueueRecoveryPipeline {
     before_commit_append: StagePause,
     #[cfg(test)]
     after_commit_replay: StagePause,
+    #[cfg(test)]
+    after_batch_read: StagePause,
 }
 /// Point-in-time coverage only; later consumer reads/writes must establish
 /// current projection and fence authority again.
@@ -92,6 +96,12 @@ pub struct RecoveredQueue {
     pub original_genesis_epoch: u64,
     pub acquired_epoch: u64,
     pub target_next_offset: u64,
+}
+/// On return, cancellation or unwind, release the operation permit before the
+/// final task reservation owner can notify shutdown waiters.
+struct OperationCompletion {
+    _slot: OwnedSemaphorePermit,
+    _job: Arc<QueueReservation>,
 }
 struct RecoveryTask {
     // Release the bounded task slot before releasing the operation reservation.
@@ -145,6 +155,8 @@ impl QueueRecoveryPipeline {
             before_commit_append: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_commit_replay: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_batch_read: std::sync::Mutex::new(None),
         }))
     }
     pub(super) fn original_genesis(

@@ -26,6 +26,9 @@ pub(super) trait CoveredRead: IncomingHeaders + Send + Sync + 'static {
 }
 struct ReadTask<R: CoveredRead> {
     _slot: OwnedSemaphorePermit,
+    execution: ReadExecution<R>,
+}
+pub(super) struct ReadExecution<R: CoveredRead> {
     pipeline: Arc<QueueRecoveryPipeline>,
     request: R,
     limits: QueueLimits,
@@ -39,18 +42,7 @@ impl QueueRecoveryPipeline {
         limits: QueueLimits,
         job: Arc<QueueReservation>,
     ) -> QueueResult<R::Output> {
-        request.preflight(&limits)?;
-        let headers = incoming_headers(&request)?
-            .checked_mul(2)
-            .ok_or(QueueError::TooLarge)?;
-        let input = job.owned_buffer(
-            request
-                .encoded_size()?
-                .checked_mul(16)
-                .and_then(|n| n.checked_add(headers))
-                .and_then(|n| n.checked_add(65536))
-                .ok_or(QueueError::TooLarge)?,
-        )?;
+        let execution = ReadExecution::new(self.clone(), request, limits, job)?;
         let slot = self
             .operation_slots
             .clone()
@@ -58,11 +50,7 @@ impl QueueRecoveryPipeline {
             .map_err(|_| QueueError::Busy)?;
         let task = ReadTask {
             _slot: slot,
-            pipeline: self.clone(),
-            request,
-            limits,
-            _input: input,
-            job,
+            execution,
         };
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -76,6 +64,43 @@ impl QueueRecoveryPipeline {
 }
 impl<R: CoveredRead> ReadTask<R> {
     async fn execute(self) -> QueueResult<R::Output> {
+        let completion = OperationCompletion {
+            _slot: self._slot,
+            _job: self.execution.job.clone(),
+        };
+        let result = self.execution.execute().await;
+        drop(completion);
+        result
+    }
+}
+impl<R: CoveredRead> ReadExecution<R> {
+    pub(super) fn new(
+        pipeline: Arc<QueueRecoveryPipeline>,
+        request: R,
+        limits: QueueLimits,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        request.preflight(&limits)?;
+        let headers = incoming_headers(&request)?
+            .checked_mul(2)
+            .ok_or(QueueError::TooLarge)?;
+        let input = job.owned_buffer(
+            request
+                .encoded_size()?
+                .checked_mul(16)
+                .and_then(|n| n.checked_add(headers))
+                .and_then(|n| n.checked_add(65536))
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        Ok(Self {
+            pipeline,
+            request,
+            limits,
+            _input: input,
+            job,
+        })
+    }
+    pub(super) async fn execute(self) -> QueueResult<R::Output> {
         for _ in 0..3 {
             let Ok(recovered) = self
                 .pipeline

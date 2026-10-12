@@ -14,6 +14,9 @@ use fireweed_turso::queue_projection::{
 
 struct CommitTask {
     _slot: OwnedSemaphorePermit,
+    execution: CommitExecution,
+}
+pub(super) struct CommitExecution {
     pipeline: Arc<QueueRecoveryPipeline>,
     queue: QueueAddress,
     group: CommitGroup,
@@ -33,6 +36,44 @@ impl QueueRecoveryPipeline {
         clock: Arc<dyn Clock>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedCommitReceipts> {
+        let execution = CommitExecution::new(self.clone(), queue, group, limits, clock, job)?;
+        let slot = Arc::clone(&self.operation_slots)
+            .try_acquire_owned()
+            .map_err(|_| QueueError::Busy)?;
+        let task = CommitTask {
+            _slot: slot,
+            execution,
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = task.execute().await;
+            let _ = sender.send(result);
+        });
+        receiver
+            .await
+            .map_err(|_| unknown("owned commit task failed"))?
+    }
+}
+impl CommitTask {
+    async fn execute(self) -> QueueResult<AdmittedCommitReceipts> {
+        let completion = OperationCompletion {
+            _slot: self._slot,
+            _job: self.execution.job.clone(),
+        };
+        let result = self.execution.execute().await;
+        drop(completion);
+        result
+    }
+}
+impl CommitExecution {
+    pub(super) fn new(
+        pipeline: Arc<QueueRecoveryPipeline>,
+        queue: QueueAddress,
+        group: CommitGroup,
+        limits: QueueLimits,
+        clock: Arc<dyn Clock>,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
         group.preflight_for(&queue, &limits)?;
         administrative_groups_preflight(&queue, std::slice::from_ref(&group), &limits)?;
         #[cfg(not(target_os = "linux"))]
@@ -48,7 +89,9 @@ impl QueueRecoveryPipeline {
         let headers = incoming_headers(&group)?
             .checked_mul(2)
             .and_then(|n| {
-                n.checked_add((self.scratch_root.path().as_os_str().len() as u64).checked_mul(4)?)
+                n.checked_add(
+                    (pipeline.scratch_root.path().as_os_str().len() as u64).checked_mul(4)?,
+                )
             })
             .ok_or(QueueError::TooLarge)?;
         let input = job.owned_buffer(
@@ -58,30 +101,16 @@ impl QueueRecoveryPipeline {
                 .and_then(|n| n.checked_add(65536))
                 .ok_or(QueueError::TooLarge)?,
         )?;
-        let slot = Arc::clone(&self.operation_slots)
-            .try_acquire_owned()
-            .map_err(|_| QueueError::Busy)?;
-        let task = CommitTask {
-            _slot: slot,
-            pipeline: Arc::clone(self),
+        Ok(Self {
+            pipeline,
             queue,
             group,
             limits,
             clock,
             _input: input,
             job,
-        };
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let result = task.execute().await;
-            let _ = sender.send(result);
-        });
-        receiver
-            .await
-            .map_err(|_| unknown("owned commit task failed"))?
+        })
     }
-}
-impl CommitTask {
     fn input(&self, recovered: &RecoveredQueue) -> QueueResult<CommitPreparationInput> {
         Ok(CommitPreparationInput {
             genesis: self
@@ -158,7 +187,7 @@ impl CommitTask {
             "commit publication has no resolved original response",
         ))
     }
-    async fn execute(self) -> QueueResult<AdmittedCommitReceipts> {
+    pub(super) async fn execute(self) -> QueueResult<AdmittedCommitReceipts> {
         let recovered = self
             .pipeline
             .recover(self.queue.clone(), self.job.clone())

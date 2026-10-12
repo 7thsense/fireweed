@@ -2357,6 +2357,7 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
 }
 
 mod administrative_commit;
+mod commit_batch;
 
 #[test]
 fn pipeline_configuration_rejects_semaphore_overflow_before_resource_construction() {
@@ -2376,4 +2377,65 @@ fn pipeline_configuration_rejects_semaphore_overflow_before_resource_constructio
     options.metadata_bytes = 65536;
     options.hard_record_bytes = 0;
     assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+}
+
+#[test]
+fn operation_completion_releases_permit_before_terminal_notification_on_every_drop_path() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    for path in 0..3 {
+        let slots = Arc::new(Semaphore::new(1));
+        let admission = QueueAdmission::new(1, 100).unwrap();
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let counter = admission.clone();
+        let permits = slots.clone();
+        let signal = observed.clone();
+        let job = Arc::new(
+            admission
+                .reserve(0)
+                .unwrap()
+                .with_terminal_callback(move || {
+                    *signal.lock().unwrap() =
+                        Some((permits.available_permits(), counter.usage().unwrap()));
+                })
+                .unwrap(),
+        );
+        let completion = OperationCompletion {
+            _slot: slots.clone().try_acquire_owned().unwrap(),
+            _job: job,
+        };
+        match path {
+            0 => drop(completion),
+            1 => {
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        let _completion = completion;
+                        panic!("completion unwind control");
+                    }))
+                    .is_err()
+                );
+            }
+            _ => {
+                let mut pending = Box::pin(async move {
+                    let _completion = completion;
+                    std::future::pending::<()>().await;
+                });
+                assert!(
+                    pending
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                assert!(observed.lock().unwrap().is_none());
+                drop(pending);
+            }
+        }
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((1, (0, 0))),
+            "drop path {path}"
+        );
+    }
 }

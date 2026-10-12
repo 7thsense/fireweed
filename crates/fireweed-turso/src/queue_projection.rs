@@ -3,8 +3,10 @@
 mod administrative_prepare;
 #[cfg(target_os = "linux")]
 mod administrative_selection;
+mod commit_batch_replay;
 mod commit_prepare;
 pub use administrative_prepare::AdministrativePreparationInput;
+pub use commit_batch_replay::{AdmittedCommitBatchReplay, CommitBatchReplayInput};
 pub use preview::AdmittedQueuePreview;
 mod filter_sql;
 mod group_authority;
@@ -15,6 +17,7 @@ mod preparation;
 mod prepare;
 mod preview;
 mod query_read;
+mod receipt_authority;
 mod receipt_metadata;
 mod receipts;
 mod replay;
