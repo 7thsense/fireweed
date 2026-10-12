@@ -1,5 +1,5 @@
 {
-  "authority_manifest_sha256": "b699416489088d61bd61a9402044f1cd32d1fb82ebab85e07c93968c4e1d8c9f",
+  "authority_manifest_sha256": "40457873dd14d06ff90f0ada8cfa9b9c606a63c5888965d396131ffcdbb83201",
   "debt_registries": {
     "cargo_machete_exceptions": [],
     "harness_skips": [
@@ -1218,9 +1218,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "98f679de12cf284d0829",
+        "id": "a103f23d46a91c0ef308",
         "identity": "// Corrupt slots are never interpreted as collisions or skipped.",
-        "line": 103,
+        "line": 131,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-objectlog/src/log_engine_store/namespace.rs",
         "status": "discovery_negative"
@@ -49083,6 +49083,34 @@
         "-p",
         "fireweed-objectlog",
         "--lib",
+        "log_engine_store::queue_provision::tests::missing_initializer_authority_waits_without_replacement_and_drains_after_cancel",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "log_engine_store::queue_provision::tests::missing_initializer_authority_waits_without_replacement_and_drains_after_cancel",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::queue_provision::tests::missing_initializer_authority_waits_without_replacement_and_drains_after_cancel",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
         "log_engine_store::queue_replay::cancellation_tests::queued_read_keeps_all_charges_after_caller_drop",
         "--",
         "--exact"
@@ -49258,6 +49286,34 @@
       "expected_ran": 1,
       "harness_id": "log_engine_store::tests::all_waiters_receive_same_typed_append_disposition",
       "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::tests::all_waiters_receive_same_typed_append_disposition",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "log_engine_store::tests::api007_native_log_capacity_is_validated_before_local_or_s3_io",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "log_engine_store::tests::api007_native_log_capacity_is_validated_before_local_or_s3_io",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::tests::api007_native_log_capacity_is_validated_before_local_or_s3_io",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -93022,7 +93078,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "7a6a9b5e7f6158b0bafd15bbbf2d2b16c53364bc5ec6dd844c5a0177ff3d8cda",
+  "source_inventory_sha256": "1787d1d4bd9ceb55fddc6d9985ad4002dbf9a3ef0af29489f4ecde30fd60fcc1",
   "workspaces": [
     {
       "listing_error_sha256": "",

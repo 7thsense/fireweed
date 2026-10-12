@@ -62,6 +62,13 @@ Turso integration owns native snapshot/query/apply transactions. Core/engine own
 resolved codecs and semantic planners; spool owns bounded whole-worker execution
 and temporary streaming. Facade owns composition and the mandatory public port.
 Apply Architecture's boundary checker; no public vendor or transaction handles.
+Native log construction accepts an explicit provisioning-operation capacity and
+validates it before directory creation, SDK construction or S3 probes. The facade
+factory must supply that capacity alongside its other process resource settings;
+legacy constructor defaults do not establish public S3/Turso qualification.
+Provisioning retries retain the verified namespace and wait asynchronously for
+an initializing authority. The configured delay permits at most seven waits whose
+sum is bounded by the pre-position timeout; physical I/O duration is a separate bound.
 
 ## API/Interface Design
 

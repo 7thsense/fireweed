@@ -418,6 +418,44 @@ fn valid_snapshot_ref_id(ref_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+/// Process-local native API-007 provisioning capacity. Validation is pure and
+/// runs before local-directory creation, SDK construction or S3 probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeLogOptions {
+    pub provision_operations: usize,
+    /// Inserted wait between unavailable-authority attempts. Zero yields; at
+    /// most seven waits are inserted. This does not bound physical I/O duration.
+    pub provision_retry_delay: Duration,
+}
+const NATIVE_PROVISION_ATTEMPTS: u32 = 8;
+impl Default for NativeLogOptions {
+    fn default() -> Self {
+        Self {
+            provision_operations: 64,
+            provision_retry_delay: Duration::from_millis(125),
+        }
+    }
+}
+impl NativeLogOptions {
+    pub fn validate(self) -> EngineResult<()> {
+        if self.provision_operations == 0
+            || self.provision_operations > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(EngineError::Invalid("invalid native provisioning capacity"));
+        }
+        if self
+            .provision_retry_delay
+            .checked_mul(NATIVE_PROVISION_ATTEMPTS - 1)
+            .is_none_or(|wait| wait > OBJECT_LOG_PRE_POSITION_TIMEOUT)
+        {
+            return Err(EngineError::Invalid(
+                "invalid native provisioning retry delay",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Fireweed log axis backed by crates.io object-log.
 pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     engine: Arc<LogEngine<S>>,
@@ -425,6 +463,7 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     namespace_origin: Arc<()>,
     raw_io_qualified: bool,
     native_provision_tasks: Arc<tokio::sync::Semaphore>,
+    native_provision_retry_delay: Duration,
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
@@ -448,6 +487,16 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
 impl ObjectLogEngineStore<ManifestSequencer> {
     /// Open a durable local-filesystem log under `root` (FIREWEED_OBJECT_LOG_ROOT).
     pub async fn open_local(root: impl AsRef<Path>, flush: FlushConfig) -> EngineResult<Self> {
+        Self::open_local_with_native_options(root, flush, NativeLogOptions::default()).await
+    }
+
+    /// Open with explicit provisioning capacity, validated before filesystem I/O.
+    pub async fn open_local_with_native_options(
+        root: impl AsRef<Path>,
+        flush: FlushConfig,
+        options: NativeLogOptions,
+    ) -> EngineResult<Self> {
+        options.validate()?;
         let root = root.as_ref();
         std::fs::create_dir_all(root).map_err(store_err)?;
         let root = std::fs::canonicalize(root).map_err(store_err)?;
@@ -522,7 +571,10 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             blob,
             namespace_origin: Arc::new(()),
             raw_io_qualified: true,
-            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(64)),
+            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(
+                options.provision_operations,
+            )),
+            native_provision_retry_delay: options.provision_retry_delay,
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
@@ -614,6 +666,39 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         })
     }
 
+    /// S3 open with explicit native capacity; invalid capacity performs no SDK or
+    /// network work. All other S3 storage qualification remains unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_s3_with_prefixes_and_native_options(
+        endpoint: &str,
+        region: &str,
+        bucket: &str,
+        access_key_id: &str,
+        secret_access_key: &str,
+        data_prefix: impl Into<String>,
+        meta_prefix: impl Into<String>,
+        flush: FlushConfig,
+        options: NativeLogOptions,
+    ) -> EngineResult<Self> {
+        Self::open_s3_with_prefixes_wrapping_blob_and_native_options(
+            endpoint,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key,
+            data_prefix,
+            meta_prefix,
+            flush,
+            options,
+            |blob| blob,
+        )
+        .await
+        .map(|mut store| {
+            store.raw_io_qualified = true;
+            store
+        })
+    }
+
     /// [`open_s3_with_prefixes`](Self::open_s3_with_prefixes) with the log's blob store wrapped
     /// before use, so a test can observe or delay object-log I/O. Queue-definition authority keeps
     /// its own create-only S3 client.
@@ -630,6 +715,35 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         flush: FlushConfig,
         wrap: impl FnOnce(Arc<dyn BlobStore>) -> Arc<dyn BlobStore>,
     ) -> EngineResult<Self> {
+        Self::open_s3_with_prefixes_wrapping_blob_and_native_options(
+            endpoint,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key,
+            data_prefix,
+            meta_prefix,
+            flush,
+            NativeLogOptions::default(),
+            wrap,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_s3_with_prefixes_wrapping_blob_and_native_options(
+        endpoint: &str,
+        region: &str,
+        bucket: &str,
+        access_key_id: &str,
+        secret_access_key: &str,
+        data_prefix: impl Into<String>,
+        meta_prefix: impl Into<String>,
+        flush: FlushConfig,
+        options: NativeLogOptions,
+        wrap: impl FnOnce(Arc<dyn BlobStore>) -> Arc<dyn BlobStore>,
+    ) -> EngineResult<Self> {
+        options.validate()?;
         let blob: Arc<dyn BlobStore> = wrap(Arc::new(object_log::S3BlobStore::new(
             endpoint,
             region,
@@ -661,12 +775,13 @@ impl ObjectLogEngineStore<ManifestSequencer> {
                 EngineError::Storage(detail) => open_store_err(endpoint, detail),
                 other => other,
             })?;
-        Self::open_with_blob_and_authority(
+        Self::open_with_blob_and_authority_and_native_options(
             blob,
             data_prefix,
             meta_prefix,
             flush,
             DefinitionAuthority::S3CreateOnly { put },
+            options,
         )
         .await
         .map_err(|err| match err {
@@ -710,6 +825,26 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         flush: FlushConfig,
         definition_authority: DefinitionAuthority,
     ) -> EngineResult<Self> {
+        Self::open_with_blob_and_authority_and_native_options(
+            blob,
+            data_prefix,
+            meta_prefix,
+            flush,
+            definition_authority,
+            NativeLogOptions::default(),
+        )
+        .await
+    }
+
+    async fn open_with_blob_and_authority_and_native_options(
+        blob: Arc<dyn BlobStore>,
+        data_prefix: impl Into<String>,
+        meta_prefix: impl Into<String>,
+        flush: FlushConfig,
+        definition_authority: DefinitionAuthority,
+        options: NativeLogOptions,
+    ) -> EngineResult<Self> {
+        options.validate()?;
         let data_prefix = data_prefix.into();
         let meta_prefix = meta_prefix.into();
         crate::storage_generation::reject_incompatible_storage_generation(
@@ -735,7 +870,10 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             blob,
             namespace_origin: Arc::new(()),
             raw_io_qualified: false,
-            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(64)),
+            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(
+                options.provision_operations,
+            )),
+            native_provision_retry_delay: options.provision_retry_delay,
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
@@ -2027,6 +2165,105 @@ mod tests {
             linger: std::time::Duration::ZERO,
             ..FlushConfig::default()
         }
+    }
+
+    #[tokio::test]
+    async fn api007_native_log_capacity_is_validated_before_local_or_s3_io() {
+        for provision_operations in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            let options = super::NativeLogOptions {
+                provision_operations,
+                ..Default::default()
+            };
+            let root = temp_root("invalid-native-capacity");
+            assert!(matches!(
+                ObjectLogEngineStore::open_local_with_native_options(&root, zero_linger(), options)
+                    .await,
+                Err(EngineError::Invalid("invalid native provisioning capacity"))
+            ));
+            assert!(!root.exists());
+            let wrapped = std::cell::Cell::new(false);
+            assert!(matches!(
+                ObjectLogEngineStore::open_s3_with_prefixes_wrapping_blob_and_native_options(
+                    "http://127.0.0.1:9",
+                    "region",
+                    "bucket",
+                    "access",
+                    "secret",
+                    "data/",
+                    "meta/",
+                    zero_linger(),
+                    options,
+                    |blob| {
+                        wrapped.set(true);
+                        blob
+                    }
+                )
+                .await,
+                Err(EngineError::Invalid("invalid native provisioning capacity"))
+            ));
+            assert!(!wrapped.get());
+            assert!(matches!(
+                ObjectLogEngineStore::open_s3_with_prefixes_and_native_options(
+                    "http://127.0.0.1:9",
+                    "region",
+                    "bucket",
+                    "access",
+                    "secret",
+                    "data/",
+                    "meta/",
+                    zero_linger(),
+                    options
+                )
+                .await,
+                Err(EngineError::Invalid("invalid native provisioning capacity"))
+            ));
+        }
+        for provision_operations in [1, tokio::sync::Semaphore::MAX_PERMITS] {
+            super::NativeLogOptions {
+                provision_operations,
+                ..Default::default()
+            }
+            .validate()
+            .unwrap();
+        }
+        for provision_retry_delay in [Duration::from_secs(5), Duration::MAX] {
+            let options = super::NativeLogOptions {
+                provision_retry_delay,
+                ..Default::default()
+            };
+            let root = temp_root("invalid-native-retry-delay");
+            assert!(matches!(
+                ObjectLogEngineStore::open_local_with_native_options(&root, zero_linger(), options)
+                    .await,
+                Err(EngineError::Invalid(
+                    "invalid native provisioning retry delay"
+                ))
+            ));
+            assert!(!root.exists());
+            assert!(matches!(
+                ObjectLogEngineStore::open_s3_with_prefixes_and_native_options(
+                    "http://127.0.0.1:9",
+                    "region",
+                    "bucket",
+                    "access",
+                    "secret",
+                    "data/",
+                    "meta/",
+                    zero_linger(),
+                    options
+                )
+                .await,
+                Err(EngineError::Invalid(
+                    "invalid native provisioning retry delay"
+                ))
+            ));
+        }
+        super::NativeLogOptions {
+            provision_retry_delay: Duration::ZERO,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
     }
 
     pub(super) fn qdef() -> QueueDefinition {

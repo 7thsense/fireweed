@@ -62,6 +62,10 @@ struct ProvisionTask<S: Sequencer> {
     job: Arc<QueueReservation>,
     charge: Option<OwnedQueueBufferCharge>,
 }
+#[cfg(test)]
+type RetryHook = Arc<dyn Fn(&Path, u32) + Send + Sync>;
+#[cfg(test)]
+static RETRY_HOOK: Mutex<Option<RetryHook>> = Mutex::new(None);
 impl<S: BoundedSequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     /// Once the whole task is spawned, caller cancellation cannot stop the
     /// bounded protocol between physical stages. Job admission bounds task count.
@@ -137,15 +141,67 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     }
 }
 impl<S: BoundedSequencer<Meta = ()> + 'static> ProvisionTask<S> {
+    async fn wait_retry(&self, attempt: u32) {
+        if attempt + 1 < NATIVE_PROVISION_ATTEMPTS {
+            #[cfg(test)]
+            if let DefinitionAuthority::Local { root } = &self.store.definition_authority {
+                let hook = RETRY_HOOK.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(root, attempt);
+                }
+            }
+            if self.store.native_provision_retry_delay.is_zero() {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(self.store.native_provision_retry_delay).await;
+            }
+        }
+    }
+
     async fn execute(mut self) -> QueueResult<ProvisionedApi007Genesis> {
-        for _ in 0..8 {
+        let mut last_unknown = None;
+        for attempt in 0..NATIVE_PROVISION_ATTEMPTS {
             let namespace = self.namespace.take().expect("one namespace per attempt");
-            let acquired = self
+            // A catalog publication can precede the creator's index. Preserve
+            // the exact verified namespace while the stage consumes its owner;
+            // an unavailable index never authorizes creation or rebinding.
+            self.namespace = Some(namespace.duplicate_owned(&self.job)?);
+            let observed = match self
                 .store
-                .acquire_api007_state(namespace, &self.job, &self.workers)
-                .await?;
+                .read_api007_state(namespace, &self.job, &self.workers)
+                .await
+            {
+                Ok(observed) => observed,
+                Err(error @ QueueError::OutcomeUnknown(_)) => {
+                    last_unknown = Some(error);
+                    self.wait_retry(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let state = observed.state();
+            let acquired = if state.epoch == 0 {
+                if state.log_start != 0 || state.next_offset != 0 {
+                    return Err(unknown("zero epoch has nonempty genesis authority"));
+                }
+                match self
+                    .store
+                    .acquire_api007_state(observed.into_namespace(), &self.job, &self.workers)
+                    .await
+                {
+                    Ok(acquired) => acquired,
+                    Err(error @ QueueError::OutcomeUnknown(_)) => {
+                        last_unknown = Some(error);
+                        self.wait_retry(attempt).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                observed
+            };
             let mut target = acquired.state();
-            if target.log_start != 0 {
+            if target.log_start != 0 || target.next_offset < 0 {
                 return Err(unknown("genesis history was retained away"));
             }
             let mut namespace = acquired.into_namespace();
@@ -175,20 +231,12 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> ProvisionTask<S> {
                         | PackedAppendError::BeforePosition(EngineError::EpochFenced),
                     ) => {
                         drop(appended);
-                        self.namespace = Some(
-                            self.store
-                                .bind_api007_namespace(&self.address, &self.job)
-                                .await?,
-                        );
                         continue;
                     }
                     Err(error) => return Err(unknown(format!("{error:?}"))),
                 }
                 drop(appended);
-                namespace = self
-                    .store
-                    .bind_api007_namespace(&self.address, &self.job)
-                    .await?;
+                namespace = self.namespace.take().expect("retained literal namespace");
             }
             let read = self
                 .store
@@ -217,7 +265,7 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> ProvisionTask<S> {
                 _charge: self.charge.take().expect("one authority charge"),
             });
         }
-        Err(unknown("genesis provisioning races exhausted"))
+        Err(last_unknown.unwrap_or_else(|| unknown("genesis provisioning races exhausted")))
     }
 }
 
@@ -278,6 +326,110 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn missing_initializer_authority_waits_without_replacement_and_drains_after_cancel() {
+        for restore in [false, true] {
+            let root = super::super::tests::temp_root("api007-initializer-wait");
+            std::fs::create_dir_all(&root).unwrap();
+            let store = open(&root).await;
+            let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+            let workers = ScratchWorkers::new(1, 1).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let raw = encode_definition(&schema()).unwrap();
+            let req = request(&store, &raw, 61, &job).await;
+            let partition = partition_key(store.checked_api007_shard(&req.namespace).unwrap());
+            let encoded_partition: String = partition
+                .as_str()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            // The initializer has registered this partition but has not yet
+            // published genesis. Remove its index only with all handles closed.
+            let acquired = store
+                .acquire_api007_state(req.namespace, &job, &workers)
+                .await
+                .unwrap();
+            assert_eq!(acquired.state().epoch, 1);
+            drop(acquired);
+            drop(req.definition);
+            drop(job);
+            drop(store);
+            let index_path = root.join("fwmeta/manifest/index").join(encoded_partition);
+            let index_bytes = std::fs::read(&index_path).unwrap();
+            std::fs::remove_file(&index_path).unwrap();
+            let store = open(&root).await;
+            let waited = Arc::new(tokio::sync::Notify::new());
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let expected_root = root.clone();
+            let observed = waited.clone();
+            let observed_count = count.clone();
+            *RETRY_HOOK.lock().unwrap() = Some(Arc::new(move |candidate, _| {
+                if candidate == expected_root {
+                    observed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    observed.notify_one();
+                }
+            }));
+            let terminal = Arc::new(tokio::sync::Notify::new());
+            let notify = terminal.clone();
+            let job = Arc::new(
+                admission
+                    .reserve(0)
+                    .unwrap()
+                    .with_terminal_callback(move || notify.notify_one())
+                    .unwrap(),
+            );
+            let req = request(&store, &raw, 61, &job).await;
+            let writer = store.clone();
+            let owned_workers = workers.clone();
+            let caller = tokio::spawn(async move {
+                writer
+                    .provision_api007_genesis(req, &job, &owned_workers)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), waited.notified())
+                .await
+                .unwrap();
+            assert!(!index_path.exists());
+            if restore {
+                caller.abort();
+                match caller.await {
+                    Err(error) => assert!(error.is_cancelled()),
+                    Ok(_) => panic!("caller survived cancellation"),
+                }
+                assert_eq!(store.native_provision_tasks.available_permits(), 63);
+                // Resume the initializer's publication, rather than asking the
+                // loser to manufacture authority for the catalog-known queue.
+                std::fs::write(&index_path, &index_bytes).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(store.native_provision_tasks.available_permits(), 64);
+                let job = Arc::new(admission.reserve(0).unwrap());
+                let recovered = store
+                    .provision_api007_genesis(request(&store, &raw, 99, &job).await, &job, &workers)
+                    .await
+                    .unwrap();
+                assert_eq!(recovered.cursor_secret(), &[61; 32]);
+                assert_eq!(recovered.target().epoch, 1);
+                assert_eq!(recovered.target().next_offset, 1);
+                drop(recovered);
+                drop(job);
+            } else {
+                assert!(matches!(
+                    caller.await.unwrap(),
+                    Err(QueueError::OutcomeUnknown(_))
+                ));
+                assert!(!index_path.exists());
+                assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 7);
+            }
+            *RETRY_HOOK.lock().unwrap() = None;
+            workers.close_and_drain().await.unwrap();
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[tokio::test]
     async fn independent_provisioners_converge_and_reopen_original_legacy_authority() {
         let root = super::super::tests::temp_root("api007-provision-race");
         std::fs::create_dir_all(&root).unwrap();
@@ -306,6 +458,7 @@ mod tests {
         assert_eq!(gb.target().next_offset, 1);
         let original_secret = *ga.cursor_secret();
         let original_pin = ga.definition().pin();
+        let original_epoch = ga.target().epoch.max(gb.target().epoch);
         assert_eq!(first.native_provision_tasks.available_permits(), 64);
         drop(ga);
         drop(gb);
@@ -330,6 +483,7 @@ mod tests {
         assert_eq!(current.definition().pin(), original_pin);
         assert_eq!(*current.cursor_secret(), original_secret);
         assert_eq!(current.target().next_offset, 1);
+        assert_eq!(current.target().epoch, original_epoch);
         drop(current);
         let mut conflicting = schema();
         conflicting.max_attempts = 4;
@@ -426,7 +580,11 @@ mod tests {
         let (winner, raw, secret) = match (left, right) {
             (Ok(winner), Err(QueueError::DefinitionConflict)) => (winner, raw_a, 31),
             (Err(QueueError::DefinitionConflict), Ok(winner)) => (winner, raw_b, 32),
-            _ => panic!("expected one success and one definition conflict"),
+            (left, right) => panic!(
+                "expected one success and one definition conflict; left error={:?}, right error={:?}",
+                left.err(),
+                right.err()
+            ),
         };
         assert_eq!(winner.target().next_offset, 1);
         assert_eq!(winner.definition().raw(), raw);
@@ -459,7 +617,22 @@ mod tests {
         use std::io::{Seek, SeekFrom, Write};
         let root = super::super::tests::temp_root("api007-provision-corrupt");
         std::fs::create_dir_all(&root).unwrap();
-        let store = open(&root).await;
+        let store = Arc::new(
+            ObjectLogEngineStore::open_local_with_native_options(
+                &root,
+                object_log::FlushConfig {
+                    linger: std::time::Duration::ZERO,
+                    ..Default::default()
+                },
+                super::super::NativeLogOptions {
+                    provision_operations: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(store.native_provision_tasks.available_permits(), 1);
         let admission = QueueAdmission::new(1, 16 << 20).unwrap();
         let job = Arc::new(admission.reserve(0).unwrap());
         let raw = encode_definition(&schema()).unwrap();
@@ -491,7 +664,7 @@ mod tests {
         let all_slots = store
             .native_provision_tasks
             .clone()
-            .acquire_many_owned(64)
+            .acquire_many_owned(1)
             .await
             .unwrap();
         assert!(matches!(
@@ -502,13 +675,13 @@ mod tests {
         ));
         drop(all_slots);
         // Indexed genesis with a failed acceleration-hint write is ambiguous.
-        // Provision must reacquire and recover it rather than insert a second.
+        // Provision must reread and recover it rather than insert a second.
         store.fail_high_water_puts.store(1, Ordering::SeqCst);
         let created = store
             .provision_api007_genesis(request(&store, &raw, 1, &job).await, &job, &workers)
             .await
             .unwrap();
-        assert!(created.target().epoch >= 2);
+        assert!(created.target().epoch >= 1);
         assert_eq!(created.target().next_offset, 1);
         assert_eq!(created.cursor_secret(), &[1; 32]);
         let shard = store

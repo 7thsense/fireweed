@@ -16,6 +16,34 @@ pub struct VerifiedApi007Namespace {
     _charge: OwnedQueueBufferCharge,
 }
 impl VerifiedApi007Namespace {
+    /// Preserve the literal verified identity while a physical stage consumes
+    /// another owner. The new reservation covers payload aliases and key clones.
+    pub(super) fn duplicate_owned(&self, job: &Arc<QueueReservation>) -> QueueResult<Self> {
+        if !self.belongs_to(job) {
+            return Err(unknown("namespace belongs to another operation"));
+        }
+        self.address()?;
+        let capacity = [
+            self.address.len(),
+            self.shard.tenant_id.as_str().len(),
+            self.shard.queue_id.as_str().len(),
+        ]
+        .into_iter()
+        .try_fold(512u64, |n, bytes| {
+            n.checked_add(u64::try_from(bytes).map_err(storage_queue)?)
+                .ok_or(QueueError::TooLarge)
+        })?
+        .checked_mul(16)
+        .ok_or(QueueError::TooLarge)?;
+        let charge = job.owned_buffer(capacity)?;
+        Ok(Self {
+            shard: self.shard.clone(),
+            address: self.address.clone(),
+            origin: self.origin.clone(),
+            _charge: charge,
+        })
+    }
+
     pub(super) fn belongs_to(&self, job: &QueueReservation) -> bool {
         std::ptr::eq(self._charge.reservation(), job)
     }
