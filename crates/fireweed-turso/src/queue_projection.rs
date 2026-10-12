@@ -2,7 +2,8 @@
 //! receipts and the external applied cursor publish in one native transaction.
 mod administrative_prepare;
 mod commit_prepare;
-pub use administrative_prepare::{AdministrativePreparationInput, AdmittedAdministrativePreview};
+pub use administrative_prepare::AdministrativePreparationInput;
+pub use preview::AdmittedQueuePreview;
 mod filter_sql;
 mod group_authority;
 mod insert_prepare;
@@ -10,6 +11,7 @@ mod insert_replay;
 mod payload;
 mod preparation;
 mod prepare;
+mod preview;
 mod query_read;
 mod receipt_metadata;
 mod receipts;

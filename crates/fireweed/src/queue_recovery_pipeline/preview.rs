@@ -12,7 +12,7 @@ use fireweed_engine::{
 };
 use fireweed_queue_spool::ScratchDiskQuota;
 use fireweed_turso::queue_projection::{
-    AdministrativePreparationInput, AdmittedAdministrativePreview, CommitPreparationInput,
+    AdministrativePreparationInput, AdmittedQueuePreview, CommitPreparationInput,
 };
 use std::path::PathBuf;
 struct PreviewRead {
@@ -35,7 +35,7 @@ impl IncomingHeaders for PreviewRead {
     }
 }
 impl QueueRecoveryPipeline {
-    pub async fn preview_addressed_administration(
+    pub async fn preview(
         self: &Arc<Self>,
         request: PreviewRequest,
         limits: QueueLimits,
@@ -43,7 +43,7 @@ impl QueueRecoveryPipeline {
         directory: PathBuf,
         quota: Arc<ScratchDiskQuota>,
         job: Arc<QueueReservation>,
-    ) -> QueueResult<AdmittedAdministrativePreview> {
+    ) -> QueueResult<AdmittedQueuePreview> {
         self.covered_read(
             PreviewRead {
                 request,
@@ -58,7 +58,7 @@ impl QueueRecoveryPipeline {
     }
 }
 impl CoveredRead for PreviewRead {
-    type Output = AdmittedAdministrativePreview;
+    type Output = AdmittedQueuePreview;
     fn address(&self) -> &QueueAddress {
         &self.request.queue
     }
@@ -72,16 +72,16 @@ impl CoveredRead for PreviewRead {
             std::slice::from_ref(&self.request.group),
             limits,
         )?;
-        if !matches!(
+        if matches!(
             self.request
                 .group
                 .administration
                 .as_ref()
                 .map(|a| &a.intent.operation),
-            Some(AdministrativeOperation::Addressed(_))
+            Some(AdministrativeOperation::SelectFirst(_))
         ) {
             return Err(QueueError::Invalid(
-                "addressed administration required".into(),
+                "broad administrative preview not assembled".into(),
             ));
         }
         Ok(())
@@ -94,31 +94,35 @@ impl CoveredRead for PreviewRead {
         job: &'a Arc<QueueReservation>,
     ) -> QueueFuture<'a, Self::Output> {
         Box::pin(async move {
-            pipeline
-                .projection
-                .preview_addressed_administration(
-                    AdministrativePreparationInput {
-                        commit: CommitPreparationInput {
-                            genesis: pipeline.original_genesis(
-                                &self.request.queue,
-                                recovered,
-                                job,
-                            )?,
-                            queue: self.request.queue.clone(),
-                            group: self.request.group.clone(),
-                            limits,
-                            required_next_offset: recovered.target_next_offset,
-                            required_insertion_sequence: recovered.history.insertion_sequence(),
-                            required_last_record_epoch: recovered.history.historical_epoch(),
+            let input = CommitPreparationInput {
+                genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
+                queue: self.request.queue.clone(),
+                group: self.request.group.clone(),
+                limits,
+                required_next_offset: recovered.target_next_offset,
+                required_insertion_sequence: recovered.history.insertion_sequence(),
+                required_last_record_epoch: recovered.history.historical_epoch(),
+            };
+            if input.group.administration.is_none() {
+                pipeline
+                    .projection
+                    .preview_ordinary_commit(input, self.clock.clone(), job, &pipeline.workers)
+                    .await
+            } else {
+                pipeline
+                    .projection
+                    .preview_addressed_administration(
+                        AdministrativePreparationInput {
+                            commit: input,
+                            scratch_directory: self.directory.clone(),
+                            scratch_quota: self.quota.clone(),
                         },
-                        scratch_directory: self.directory.clone(),
-                        scratch_quota: self.quota.clone(),
-                    },
-                    self.clock.clone(),
-                    job,
-                    &pipeline.workers,
-                )
-                .await
+                        self.clock.clone(),
+                        job,
+                        &pipeline.workers,
+                    )
+                    .await
+            }
         })
     }
     #[cfg(test)]

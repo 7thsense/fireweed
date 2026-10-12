@@ -2015,7 +2015,7 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
         let job = job.clone();
         async move {
             pipeline
-                .preview_addressed_administration(
+                .preview(
                     request,
                     QueueLimits::default(),
                     clock,
@@ -2089,6 +2089,118 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
     let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
     assert_eq!(recovered.target_next_offset, 3);
     drop(recovered);
+    // Ordinary preview uses the same fresh completion, including an identity
+    // already retained by execution with a different original fingerprint.
+    let ordinary = PreviewRequest {
+        queue: address(),
+        group: CommitGroup {
+            request_id: "advance-preview-cut".into(),
+            administration: None,
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(2),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    priority: Some(40),
+                    ..Default::default()
+                }),
+            }],
+        },
+    };
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_preview_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let clock = clock.clone();
+        let directory = root.clone();
+        let quota = quota.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .preview(
+                    ordinary,
+                    QueueLimits::default(),
+                    clock,
+                    directory,
+                    quota,
+                    job,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let update = CommitGroup {
+        request_id: "advance-ordinary-preview-cut".into(),
+        administration: None,
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![],
+        work_updates: vec![UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(2),
+            change: UnclaimedChange::Patch(WorkPatch {
+                priority: Some(30),
+                ..Default::default()
+            }),
+        }],
+    };
+    drop(
+        pipeline
+            .commit(
+                address(),
+                update,
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    release.notify_one();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), caller)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.result().outcome,
+        PreviewOutcome::Rejected(Rejection::VersionConflict)
+    );
+    drop(result);
+    let original = pipeline
+        .read_commit(
+            ReceiptReadRequest {
+                queue: address(),
+                request_ids: vec!["advance-preview-cut".into()],
+                max_bytes: 65536,
+            },
+            QueueLimits::default(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        original.receipts(),
+        &[ReceiptLookup::Found(CommitReceipt {
+            request_id: "advance-preview-cut".into(),
+            outcome: GroupOutcome::Committed {
+                versions: vec![RecordVersion {
+                    collection: None,
+                    key: "a".into(),
+                    version: 2
+                }]
+            }
+        })]
+    );
+    drop(original);
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 4);
+    drop(recovered);
     let terminal = Arc::new(tokio::sync::Notify::new());
     let notification = terminal.clone();
     let read_job = Arc::new(
@@ -2109,7 +2221,7 @@ async fn addressed_preview_discards_stale_before_image_and_never_publishes_execu
         let quota = quota.clone();
         async move {
             pipeline
-                .preview_addressed_administration(
+                .preview(
                     request,
                     QueueLimits::default(),
                     clock,

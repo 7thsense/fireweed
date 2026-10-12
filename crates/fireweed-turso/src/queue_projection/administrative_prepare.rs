@@ -43,15 +43,6 @@ impl AdministrativeOrdinaryAuthority for Authority {
         &self.image
     }
 }
-pub struct AdmittedAdministrativePreview {
-    result: PreviewResult,
-    _charges: Vec<OwnedQueueBufferCharge>,
-}
-impl AdmittedAdministrativePreview {
-    pub fn result(&self) -> &PreviewResult {
-        &self.result
-    }
-}
 #[derive(Clone, Copy)]
 enum Mode {
     Publish { epoch: u64, max_record_bytes: u64 },
@@ -131,7 +122,7 @@ impl QueueProjection {
         clock: Arc<dyn Clock>,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
-    ) -> QueueResult<AdmittedAdministrativePreview> {
+    ) -> QueueResult<AdmittedQueuePreview> {
         match self
             .dispatch_administration(input, Mode::Preview, clock, job, workers)
             .await?
@@ -139,10 +130,7 @@ impl QueueProjection {
             Some(Completed {
                 parts: Parts::Preview(result),
                 charges,
-            }) => Ok(AdmittedAdministrativePreview {
-                result,
-                _charges: charges,
-            }),
+            }) => Ok(AdmittedQueuePreview::new(result, charges)),
             _ => Err(unknown("preview did not return a complete preview")),
         }
     }
@@ -584,24 +572,7 @@ impl NativeTransactionWork for Worker {
             }
             Mode::Preview => {
                 drop(frame);
-                let result = PreviewResult {
-                    outcome: match receipt.outcome {
-                        GroupOutcome::Committed { versions } => {
-                            PreviewOutcome::Committed { versions }
-                        }
-                        GroupOutcome::AdministrativeCommitted {
-                            versions,
-                            administration,
-                        } => PreviewOutcome::AdministrativeCommitted {
-                            versions,
-                            administration,
-                        },
-                        GroupOutcome::Rejected(reason) => PreviewOutcome::Rejected(reason),
-                        GroupOutcome::RequestConflict | GroupOutcome::RequestExpired => {
-                            return Err(unknown("preview consulted execution identity"));
-                        }
-                    },
-                };
+                let result = PreviewResult::try_from(receipt.outcome)?;
                 if encoded_len(&result)? > input.limits.max_response_bytes {
                     return Err(QueueError::TooLarge);
                 }

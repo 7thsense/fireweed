@@ -217,6 +217,29 @@ pub enum PreviewOutcome {
 pub struct PreviewResult {
     pub outcome: PreviewOutcome,
 }
+impl TryFrom<GroupOutcome> for PreviewResult {
+    type Error = QueueError;
+    fn try_from(outcome: GroupOutcome) -> QueueResult<Self> {
+        Ok(Self {
+            outcome: match outcome {
+                GroupOutcome::Committed { versions } => PreviewOutcome::Committed { versions },
+                GroupOutcome::AdministrativeCommitted {
+                    versions,
+                    administration,
+                } => PreviewOutcome::AdministrativeCommitted {
+                    versions,
+                    administration,
+                },
+                GroupOutcome::Rejected(reason) => PreviewOutcome::Rejected(reason),
+                GroupOutcome::RequestConflict | GroupOutcome::RequestExpired => {
+                    return Err(QueueError::OutcomeUnknown(
+                        "preview returned execution receipt status".into(),
+                    ));
+                }
+            },
+        })
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rejection {
     StaleLease,

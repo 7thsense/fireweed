@@ -839,6 +839,8 @@ async fn load_unique_probes<'a>(
         .into_iter()
         .filter(|probe| !loaded.snapshot.unique_probes_loaded.contains(probe))
         .collect();
+    #[cfg(test)]
+    pause_unique_authority(group).await;
     load_unique_authority(tx, queue, loaded, probes, reservation).await
 }
 async fn load_prospective_unique_probes<'a>(
@@ -858,6 +860,8 @@ async fn load_prospective_unique_probes<'a>(
         .into_iter()
         .filter(|probe| !loaded.snapshot.unique_probes_loaded.contains(probe))
         .collect();
+    #[cfg(test)]
+    pause_unique_authority(group).await;
     load_unique_authority(tx, queue, loaded, probes, reservation).await
 }
 async fn load_unique_authority<'a>(
@@ -1777,9 +1781,8 @@ impl QueueStore for PostgresQueueStore {
                         }
                         let mut loaded = load_group(&tx, &queue, group, &reservation).await?;
                         let before = loaded.snapshot.clone();
+                        load_prospective_unique_probes(&tx, &queue, &mut loaded, group, &reservation).await?;
                         let now = timestamp_nanos(clock.now())?;
-                        load_unique_probes(&tx, &queue, &mut loaded, group, now, &reservation)
-                            .await?;
                         let delta =
                             plan_commit_group(group, &mut loaded.snapshot, now, &queue.schema)?;
                         let _output_charge = reservation.buffer(
@@ -1852,38 +1855,20 @@ impl QueueStore for PostgresQueueStore {
                     } else {
                         let mut loaded =
                             load_group(&tx, &queue, &request.group, &reservation).await?;
-                        let now = timestamp_nanos(clock.now())?;
-                        load_unique_probes(
+                        load_prospective_unique_probes(
                             &tx,
                             &queue,
                             &mut loaded,
                             &request.group,
-                            now,
                             &reservation,
                         )
                         .await?;
+                        let now = timestamp_nanos(clock.now())?;
                         plan_commit_group(&request.group, &mut loaded.snapshot, now, &queue.schema)?
                             .receipt
                             .outcome
                     };
-                    let result = PreviewResult {
-                        outcome: match outcome {
-                            GroupOutcome::Committed { versions } => {
-                                PreviewOutcome::Committed { versions }
-                            }
-                            GroupOutcome::AdministrativeCommitted {
-                                versions,
-                                administration,
-                            } => PreviewOutcome::AdministrativeCommitted {
-                                versions,
-                                administration,
-                            },
-                            GroupOutcome::Rejected(reason) => PreviewOutcome::Rejected(reason),
-                            GroupOutcome::RequestConflict | GroupOutcome::RequestExpired => {
-                                return Err(storage("preview returned execution receipt status"));
-                            }
-                        },
-                    };
+                    let result = PreviewResult::try_from(outcome)?;
                     if encoded_len(&result)? > limits.max_response_bytes {
                         return Err(storage("preview response exceeds admitted budget"));
                     }
@@ -2378,6 +2363,39 @@ fn selected_field_numbers(
         .transpose()
 }
 
+#[cfg(test)]
+struct UniqueAuthorityPause {
+    request_id: String,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[cfg(test)]
+fn unique_authority_pause() -> &'static std::sync::Mutex<Option<Arc<UniqueAuthorityPause>>> {
+    static PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<Arc<UniqueAuthorityPause>>>> =
+        std::sync::OnceLock::new();
+    PAUSE.get_or_init(|| std::sync::Mutex::new(None))
+}
+/// Exercise both the historical clock-dependent loader and the prospective
+/// loader at the same incomplete-authority boundary; controls catch early clocks.
+#[cfg(test)]
+async fn pause_unique_authority(group: &CommitGroup) {
+    let pause = {
+        let mut slot = unique_authority_pause().lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|pause| pause.request_id == group.request_id)
+        {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
 // These fixtures share one schema: opening a store intentionally takes a
 // global DDL fence. Isolate fixtures, not the concurrent operations they test.
 #[cfg(test)]
@@ -2393,6 +2411,185 @@ async fn physical_fixture() -> tokio::sync::OwnedMutexGuard<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
+    async fn ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority() {
+        let _fixture = physical_fixture().await;
+        let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
+        let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+        let store = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 1)
+            .await
+            .unwrap();
+        for preview in [false, true] {
+            for claimed in [false, true] {
+                clock.set(100);
+                let address = QueueAddress {
+                    tenant: "final-ordinary-clock".into(),
+                    queue: format!(
+                        "{}-{preview}-{claimed}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ),
+                };
+                store
+                    .provision(ProvisionRequest {
+                        queue: address.clone(),
+                        schema: fireweed_conformance::queue_contract::schema(),
+                    })
+                    .await
+                    .unwrap();
+                store
+                    .insert(InsertRequest {
+                        queue: address.clone(),
+                        request_id: "seed".into(),
+                        mode: InsertMode::InsertOnly,
+                        items: vec![NewWork {
+                            key: "a".into(),
+                            priority: 0,
+                            available_at: 0,
+                            fields: [
+                                ("kind".into(), FieldValue::Text("task".into())),
+                                ("target".into(), FieldValue::Text("before".into())),
+                            ]
+                            .into(),
+                            body: Default::default(),
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                let lease = store
+                    .claim(ClaimRequest {
+                        queue: address.clone(),
+                        request_id: "claim".into(),
+                        filter: Filter::default(),
+                        order: ClaimOrder::PriorityAscending,
+                        eligible_at: 100,
+                        lease_nanos: 1_000_000,
+                        max_records: 1,
+                        max_bytes: 65536,
+                        fields: Some(Default::default()),
+                        include_body: false,
+                    })
+                    .await
+                    .unwrap()
+                    .remove(0);
+                let mut group = CommitGroup {
+                    request_id: "paused-unique-authority".into(),
+                    administration: None,
+                    claimed_updates: vec![],
+                    state_updates: vec![],
+                    work_updates: vec![],
+                    work_inserts: vec![],
+                };
+                let patch = WorkPatch {
+                    fields: [("target".into(), Some(FieldValue::Text("after".into())))].into(),
+                    ..Default::default()
+                };
+                if claimed {
+                    group.claimed_updates.push(ClaimedUpdate {
+                        key: "a".into(),
+                        lease: lease.lease,
+                        expected_version: lease.record.version,
+                        patch,
+                        disposition: Disposition::Complete,
+                    });
+                } else {
+                    group.work_updates.push(UnclaimedUpdate {
+                        key: "a".into(),
+                        expect: StateExpect::Version(lease.record.version),
+                        change: UnclaimedChange::Patch(patch),
+                    });
+                }
+                let pause = Arc::new(UniqueAuthorityPause {
+                    request_id: group.request_id.clone(),
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                });
+                *unique_authority_pause().lock().unwrap() = Some(pause.clone());
+                let operation = tokio::spawn({
+                    let store = store.clone();
+                    let address = address.clone();
+                    async move {
+                        if preview {
+                            store
+                                .preview(PreviewRequest {
+                                    queue: address,
+                                    group,
+                                })
+                                .await
+                        } else {
+                            let receipt = store
+                                .commit(CommitBatch {
+                                    queue: address,
+                                    groups: vec![group],
+                                })
+                                .await?
+                                .remove(0);
+                            PreviewResult::try_from(receipt.outcome)
+                        }
+                    }
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+                    .await
+                    .unwrap();
+                clock.set(2_000_000);
+                pause.release.notify_one();
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), operation)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                if claimed {
+                    assert_eq!(
+                        result.outcome,
+                        PreviewOutcome::Rejected(Rejection::StaleLease)
+                    );
+                } else {
+                    assert_eq!(
+                        result.outcome,
+                        PreviewOutcome::Committed {
+                            versions: vec![RecordVersion {
+                                collection: None,
+                                key: "a".into(),
+                                version: 3
+                            }],
+                        }
+                    );
+                }
+                let stored = store
+                    .query(QueryRequest {
+                        queue: address,
+                        source: RecordSource::Work,
+                        index: "$key".into(),
+                        filter: Filter::default(),
+                        descending: false,
+                        cursor: None,
+                        max_records: 1,
+                        max_bytes: 65536,
+                    })
+                    .await
+                    .unwrap();
+                let QueryRecord::Work(row) = &stored.records[0] else {
+                    panic!("not work")
+                };
+                assert_eq!(row.version, if !preview && !claimed { 3 } else { 2 });
+                assert_eq!(
+                    row.work.fields["target"],
+                    FieldValue::Text(
+                        if !preview && !claimed {
+                            "after"
+                        } else {
+                            "before"
+                        }
+                        .into()
+                    )
+                );
+            }
+        }
+        store.shutdown().await.unwrap();
+    }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
     async fn retained_ordinary_receipt_rejects_administrative_only_disposition() {

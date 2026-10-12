@@ -82,9 +82,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4986f078287fa16b8f81",
+        "id": "24327132ff6a476b8bfa",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2397,
+        "line": 2415,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -96,9 +96,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "2b126edb17ec56d03cd2",
+        "id": "a600a84461c5f2b56b1e",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2470,
+        "line": 2594,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -110,9 +110,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "420fdabe430c4444b05a",
+        "id": "d44d1064e6d566353c55",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2571,
+        "line": 2667,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -124,9 +124,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c6a6d07f423dc6e2667a",
+        "id": "03f19dc5f0ce8ea907da",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2856,
+        "line": 2768,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -138,9 +138,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "57f617c670837ecb2e71",
+        "id": "b5a6128ad5806d089350",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2903,
+        "line": 3053,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -152,9 +152,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "f8a3ff276ed43ed835cd",
+        "id": "ade632587bf6f833e80f",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2908,
+        "line": 3100,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -166,9 +166,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ed98a8dc55a4e39a25ab",
+        "id": "6d8a6307a8029729d0a7",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3694,
+        "line": 3105,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -180,9 +180,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a0d6fa84d8c26d2c5c50",
+        "id": "de5d773b904043f45241",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3907,
+        "line": 3891,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -194,9 +194,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c54f0126e4eb57e79862",
+        "id": "2c187adf1c6d0a563287",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4056,
+        "line": 4104,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -208,9 +208,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4fc23bb50505cf815804",
+        "id": "c1b71c887c4f64d6fbb4",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4138,
+        "line": 4253,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -222,9 +222,23 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b349a159193c392cc417",
+        "id": "710b552cb45cb9ed172d",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4183,
+        "line": 4335,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/queue_store.rs",
+        "status": "debt"
+      },
+      {
+        "category": "ignored_test",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "16f5316f238bb0a097a6",
+        "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
+        "line": 4380,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -54927,6 +54941,34 @@
         "-p",
         "fireweed-postgres",
         "--lib",
+        "queue_store::tests::ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_store::tests::ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority",
+      "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::queue_store::tests::ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "fireweed_postgres",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--lib",
         "queue_store::tests::public_preview_never_allocates_ids_and_late_admin_failure_rolls_back_receipts",
         "--",
         "--exact"
@@ -77391,6 +77433,62 @@
         "-p",
         "fireweed-turso",
         "--lib",
+        "queue_projection::commit_prepare::preview_tests::ordinary_preview_and_publication_retain_reservations_through_precommit_panic_and_cancellation",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_prepare::preview_tests::ordinary_preview_and_publication_retain_reservations_through_precommit_panic_and_cancellation",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_prepare::preview_tests::ordinary_preview_and_publication_retain_reservations_through_precommit_panic_and_cancellation",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_prepare::preview_tests::ordinary_preview_has_identical_response_admission_atomic_proposals_and_no_execution_identity_or_transport_gate",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_prepare::preview_tests::ordinary_preview_has_identical_response_admission_atomic_proposals_and_no_execution_identity_or_transport_gate",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_prepare::preview_tests::ordinary_preview_has_identical_response_admission_atomic_proposals_and_no_execution_identity_or_transport_gate",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
         "queue_projection::commit_prepare::tests::ordinary_commit_preparation_is_atomic_for_claim_state_new_work_and_original_receipts",
         "--",
         "--exact"
@@ -91808,7 +91906,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "20aacd0f9ccc7b0e21e73c5c04a0f9f666a84d1a6b3f96aab528bde2544e554c",
+  "source_inventory_sha256": "048cc8a4186d19377e9ea4ad43d1ce79ee2d3e8c79a003b540b8b94012d6ed70",
   "workspaces": [
     {
       "listing_error_sha256": "",
