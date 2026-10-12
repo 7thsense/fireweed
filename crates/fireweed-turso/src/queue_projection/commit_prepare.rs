@@ -428,8 +428,112 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(lookups.receipts(), [ReceiptLookup::Found(expected)]);
+        assert_eq!(lookups.receipts(), [ReceiptLookup::Found(expected.clone())]);
         drop(lookups);
+        let replay = projection
+            .replay_ordinary_commit(
+                input(&definition, &job, transition.clone(), 4, 3),
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.receipts(), [ReceiptLookup::Found(expected)]);
+        drop(replay);
+        let stored = inspect(
+            &projection,
+            "SELECT outcome FROM q7_requests WHERE domain=2 AND identity=?1",
+            vec![blob(transition.request_id.as_bytes())],
+            1,
+        )
+        .await;
+        let original_bytes = bytes(&stored[0]).unwrap().to_vec();
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET expired=1,outcome=?1 WHERE domain=2 AND identity=?2",
+            vec![blob(&[255]), blob(transition.request_id.as_bytes())],
+        )
+        .await;
+        // Fingerprint mismatch precedes expiry and corrupt payload decoding.
+        let mut changed_replay = transition.clone();
+        changed_replay.work_inserts[0].priority += 1;
+        assert!(matches!(
+            projection
+                .replay_ordinary_commit(
+                    input(&definition, &job, changed_replay, 4, 3),
+                    &job,
+                    &workers
+                )
+                .await,
+            Err(QueueError::RequestConflict)
+        ));
+        let expired = projection
+            .replay_ordinary_commit(
+                input(&definition, &job, transition.clone(), 4, 3),
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(expired.receipts(), [ReceiptLookup::Expired]);
+        drop(expired);
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET expired=0 WHERE domain=2 AND identity=?1",
+            vec![blob(transition.request_id.as_bytes())],
+        )
+        .await;
+        assert!(matches!(
+            projection
+                .replay_ordinary_commit(
+                    input(&definition, &job, transition.clone(), 4, 3),
+                    &job,
+                    &workers
+                )
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET outcome=?1 WHERE domain=2 AND identity=?2",
+            vec![
+                blob(&original_bytes),
+                blob(transition.request_id.as_bytes()),
+            ],
+        )
+        .await;
+        // Compact wire entries still retain large enum/vector headers. The
+        // original-group owner must reject before native dispatch at this cap.
+        let mut compact = group("header-budget-replay");
+        compact.work_updates = (0..4096)
+            .map(|n| UnclaimedUpdate {
+                key: format!("k{n}"),
+                expect: StateExpect::Version(1),
+                change: UnclaimedChange::Delete,
+            })
+            .collect();
+        let wire = encoded_len(&(&address(), &compact)).unwrap() * 16 + 65536;
+        let headers = incoming_headers(&compact).unwrap();
+        assert!(headers > 65536);
+        let tight_admission = QueueAdmission::new(1, wire + headers / 2).unwrap();
+        let tight_job = Arc::new(tight_admission.reserve(0).unwrap());
+        let held_writer = projection.writer.lock().await;
+        let rejection = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            projection.replay_ordinary_commit(
+                input(&definition, &tight_job, compact, 4, 3),
+                &tight_job,
+                &workers,
+            ),
+        )
+        .await
+        .expect("capacity rejection must precede native dispatch");
+        assert!(
+            matches!(rejection,Err(QueueError::OutcomeUnknown(message)) if message=="admitted buffer capacity exhausted; resolve owned operation")
+        );
+        drop(held_writer);
+        drop(tight_job);
+        assert_eq!(tight_admission.usage().unwrap(), (0, 0));
         let b_input = |head| {
             let mut input = claim_input(head);
             input.request.request_id = "claim-b-before-late-cas".into();

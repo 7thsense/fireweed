@@ -1323,3 +1323,374 @@ async fn losing_insert_fence_resolves_winner_without_replanning_or_extra_publica
     assert_eq!(admission.usage().unwrap(), (0, 0));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry() {
+    use fireweed_conformance::queue_contract::TestClock;
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-api007-commit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let admission = QueueAdmission::new(4, 128 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(2, 4).unwrap();
+    let mut definition = schema();
+    definition
+        .state
+        .insert("workflow".into(), definition.work.clone());
+    store
+        .provision_api007_genesis(
+            Api007GenesisRequest {
+                namespace: store.bind_api007_namespace(&address(), &job).await.unwrap(),
+                definition: AdmittedQueueDefinition::from_raw(
+                    &encode_definition(&definition).unwrap(),
+                    &job,
+                )
+                .unwrap(),
+                candidate_secret: [17; 32],
+                max_record_bytes: 1 << 20,
+                metadata_bytes: 65536,
+            },
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+    let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+        .await
+        .unwrap();
+    let pipeline =
+        QueueRecoveryPipeline::new(store.clone(), projection, workers.clone(), 65536, 1 << 20)
+            .unwrap();
+    let clock = Arc::new(TestClock::default());
+    clock.set(100);
+    let work = |key: &str| NewWork {
+        key: key.into(),
+        priority: 1,
+        available_at: 0,
+        fields: Default::default(),
+        body: bytes::Bytes::new(),
+    };
+    drop(
+        pipeline
+            .insert(
+                InsertRequest {
+                    queue: address(),
+                    request_id: "seed-commit".into(),
+                    mode: InsertMode::InsertOnly,
+                    items: vec![work("a")],
+                },
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    let claimed = pipeline
+        .claim(
+            ClaimRequest {
+                queue: address(),
+                request_id: "claim-commit".into(),
+                filter: Filter::default(),
+                order: ClaimOrder::PriorityAscending,
+                eligible_at: 0,
+                lease_nanos: 1_000_000,
+                max_records: 1,
+                max_bytes: 65536,
+                fields: None,
+                include_body: true,
+            },
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    let row = claimed.records()[0].clone();
+    drop(claimed);
+    let group = CommitGroup {
+        request_id: "atomic-original".into(),
+        claimed_updates: vec![ClaimedUpdate {
+            key: "a".into(),
+            lease: row.lease,
+            expected_version: row.record.version,
+            patch: WorkPatch::default(),
+            disposition: Disposition::Complete,
+        }],
+        state_updates: vec![StateUpdate {
+            collection: "workflow".into(),
+            key: "run".into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: Default::default(),
+                value: vec![7, 8].into(),
+            },
+        }],
+        work_inserts: vec![work("next")],
+        work_updates: vec![],
+        administration: None,
+    };
+    let result = pipeline
+        .commit(
+            address(),
+            group.clone(),
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    let original = result.receipts().to_vec();
+    drop(result);
+    assert!(
+        matches!(&original[..], [ReceiptLookup::Found(CommitReceipt {outcome:GroupOutcome::Committed {versions}, ..})] if versions.len()==3)
+    );
+    // Later expiry cannot turn this original immutable success into a new plan.
+    clock.set(2_000_000);
+    let result = pipeline
+        .commit(
+            address(),
+            group.clone(),
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.receipts(), original);
+    drop(result);
+    let mut changed = group.clone();
+    changed.work_inserts[0].priority += 1;
+    assert!(matches!(
+        pipeline
+            .commit(
+                address(),
+                changed,
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone()
+            )
+            .await,
+        Err(QueueError::RequestConflict)
+    ));
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 4);
+    assert_eq!(recovered.history.insertion_sequence(), 2);
+    drop(recovered);
+    // Caller cancellation after preparation cannot abandon atomic publication.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.before_commit_append.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+    let cancelled_job = Arc::new(
+        admission
+            .reserve(0)
+            .unwrap()
+            .with_terminal_callback(move || {
+                let _ = terminal_tx.send(());
+            })
+            .unwrap(),
+    );
+    let cancelled = CommitGroup {
+        request_id: "cancelled-commit".into(),
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![work("cancel-next")],
+        work_updates: vec![],
+        administration: None,
+    };
+    let caller = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let group = cancelled.clone();
+        let clock = clock.clone();
+        async move {
+            pipeline
+                .commit(
+                    address(),
+                    group,
+                    QueueLimits::default(),
+                    clock,
+                    cancelled_job,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(30), terminal_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let response = pipeline
+        .commit(
+            address(),
+            cancelled,
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        response.receipts(),
+        [ReceiptLookup::Found(CommitReceipt {
+            outcome: GroupOutcome::Committed { .. },
+            ..
+        })]
+    ));
+    drop(response);
+    // A stale prepared publisher loses its fence and resolves the winner's
+    // original receipt, without replanning or inserting an extra log record.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.before_commit_append.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let competing = CommitGroup {
+        request_id: "competing-commit".into(),
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![work("winner-next")],
+        work_updates: vec![],
+        administration: None,
+    };
+    let stale = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let group = competing.clone();
+        let clock = clock.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .commit(address(), group, QueueLimits::default(), clock, job.clone())
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let winner = pipeline
+        .commit(
+            address(),
+            competing,
+            QueueLimits::default(),
+            clock.clone(),
+            job.clone(),
+        )
+        .await
+        .unwrap();
+    let winner_receipts = winner.receipts().to_vec();
+    drop(winner);
+    release.notify_one();
+    let stale = tokio::time::timeout(std::time::Duration::from_secs(30), stale)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale.receipts(), winner_receipts);
+    drop(stale);
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 6);
+    assert_eq!(recovered.history.insertion_sequence(), 4);
+    drop(recovered);
+    // Discard an already-decoded original response if its authoritative cut
+    // advances before completion, then resolve the same original identity.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *pipeline.after_commit_replay.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let retry = tokio::spawn({
+        let pipeline = pipeline.clone();
+        let group = group.clone();
+        let clock = clock.clone();
+        let job = job.clone();
+        async move {
+            pipeline
+                .commit(address(), group, QueueLimits::default(), clock, job)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap();
+    let advance = CommitGroup {
+        request_id: "advance-replay-cut".into(),
+        claimed_updates: vec![],
+        state_updates: vec![],
+        work_inserts: vec![work("cut-next")],
+        work_updates: vec![],
+        administration: None,
+    };
+    drop(
+        pipeline
+            .commit(
+                address(),
+                advance,
+                QueueLimits::default(),
+                clock.clone(),
+                job.clone(),
+            )
+            .await
+            .unwrap(),
+    );
+    let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+    let state = store
+        .read_api007_state(namespace, &job, &workers)
+        .await
+        .unwrap();
+    let advanced_epoch = state.state().epoch;
+    drop(state);
+    release.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), retry)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.receipts(), original);
+    drop(response);
+    let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+    let state = store
+        .read_api007_state(namespace, &job, &workers)
+        .await
+        .unwrap();
+    assert!(
+        state.state().epoch > advanced_epoch,
+        "stale receipt must trigger original-identity recovery before returning"
+    );
+    drop(state);
+    let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+    assert_eq!(recovered.target_next_offset, 7);
+    assert_eq!(recovered.history.insertion_sequence(), 5);
+    drop(recovered);
+    // Rebuild into a fresh derived projection through original genesis/history.
+    let rebuilt = QueueProjection::open(&root.join("rebuilt.db"), &job, &workers)
+        .await
+        .unwrap();
+    let rebuilt =
+        QueueRecoveryPipeline::new(store.clone(), rebuilt, workers.clone(), 65536, 1 << 20)
+            .unwrap();
+    let result = rebuilt
+        .commit(address(), group, QueueLimits::default(), clock, job.clone())
+        .await
+        .unwrap();
+    assert_eq!(result.receipts(), original);
+    drop(result);
+    drop(rebuilt);
+    drop(pipeline);
+    workers.close_and_drain().await.unwrap();
+    drop(job);
+    drop(store);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+    std::fs::remove_dir_all(root).unwrap();
+}

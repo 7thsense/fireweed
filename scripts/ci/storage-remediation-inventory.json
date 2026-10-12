@@ -10703,9 +10703,9 @@
           "P3-P9/P15",
           "P2f"
         ],
-        "detail": "Compiling thiserror v1.0.69; Compiling thiserror-impl v1.0.69; error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
-        "id": "d9b0f06f6f70034ee8e5",
-        "identity": "c260d1f2aede7c335d37da88bd5b040f9abbc61d9ab960ae6bdeb5e25926d656",
+        "detail": "error: could not compile `fireweed-server` (test \"p14_change_record_nonblocking_modes\") due to 1 previous error",
+        "id": "95845771bb24041cdbdb",
+        "identity": "e90b80c9f001a33960c86e0a187247563a0c1e8bbcad097bf329c265332ed1c1",
         "line": 1,
         "owner": "P3-P9/P15",
         "path": "Cargo.toml",
@@ -16804,6 +16804,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry"
       },
       {
         "exact_invocation": [
@@ -24492,10 +24512,10 @@
   },
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "9badbaeb37910f73816f09b1a41950979b08853bd40f4a50162a6fc2a1be1157",
+  "source_inventory_sha256": "ceff81718e2ec4014dfc9af0ef05325b6c9cf34e544e0387e50bae61578bb628",
   "workspaces": [
     {
-      "listing_error_sha256": "c260d1f2aede7c335d37da88bd5b040f9abbc61d9ab960ae6bdeb5e25926d656",
+      "listing_error_sha256": "e90b80c9f001a33960c86e0a187247563a0c1e8bbcad097bf329c265332ed1c1",
       "listing_status": "compile_failure_debt",
       "manifest": "Cargo.toml",
       "routing": "root"

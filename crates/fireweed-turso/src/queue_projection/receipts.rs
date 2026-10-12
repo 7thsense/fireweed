@@ -26,11 +26,18 @@ impl AdmittedCommitReceipts {
         &self.receipts
     }
 }
+struct OriginalGroup {
+    queue: QueueAddress,
+    group: CommitGroup,
+    _charge: OwnedQueueBufferCharge,
+}
 struct ReceiptWorker {
     projection: Arc<QueueProjection>,
     input: ReceiptReadInput,
     job: Arc<QueueReservation>,
     charges: Vec<OwnedQueueBufferCharge>,
+    expected: Option<(u8, [u8; 32])>,
+    original: Option<OriginalGroup>,
 }
 impl QueueProjection {
     /// No clock/current-row reevaluation: retained outcomes preserve original
@@ -38,6 +45,71 @@ impl QueueProjection {
     pub async fn read_commit_receipts(
         self: &Arc<Self>,
         input: ReceiptReadInput,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedCommitReceipts> {
+        self.dispatch_receipts(input, None, None, job, workers)
+            .await
+    }
+
+    /// Resolve one original ordinary group. Fingerprint comparison shares the
+    /// same native snapshot as expiry and immutable outcome decoding.
+    pub async fn replay_ordinary_commit(
+        self: &Arc<Self>,
+        input: super::commit_prepare::CommitPreparationInput,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedCommitReceipts> {
+        input.group.preflight_for(&input.queue, &input.limits)?;
+        if input.group.administration.is_some() {
+            return Err(QueueError::Invalid(
+                "ordinary replay requires ordinary group".into(),
+            ));
+        }
+        // Own the group and the lookup identity clone before allocation or SDK
+        // dispatch; retain this charge through binding validation and return.
+        let headers = incoming_headers(&input.group)?;
+        let charge = job.owned_buffer(
+            encoded_len(&(&input.queue, &input.group))?
+                .checked_mul(16)
+                .and_then(|n| n.checked_add(headers))
+                .and_then(|n| n.checked_add(65536))
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        let original = OriginalGroup {
+            queue: input.queue,
+            group: input.group,
+            _charge: charge,
+        };
+        let fingerprint = original.group.fingerprint(&original.queue)?;
+        let lookup_queue = original.queue.clone();
+        let lookup_identity = original.group.request_id.clone();
+        self.dispatch_receipts(
+            ReceiptReadInput {
+                genesis: input.genesis,
+                request: ReceiptReadRequest {
+                    queue: lookup_queue,
+                    request_ids: vec![lookup_identity],
+                    max_bytes: input.limits.max_response_bytes,
+                },
+                limits: input.limits,
+                required_next_offset: input.required_next_offset,
+                required_insertion_sequence: input.required_insertion_sequence,
+                required_last_record_epoch: input.required_last_record_epoch,
+            },
+            Some((3, fingerprint)),
+            Some(original),
+            job,
+            workers,
+        )
+        .await
+    }
+
+    async fn dispatch_receipts(
+        self: &Arc<Self>,
+        input: ReceiptReadInput,
+        expected: Option<(u8, [u8; 32])>,
+        original: Option<OriginalGroup>,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<AdmittedCommitReceipts> {
@@ -73,6 +145,8 @@ impl QueueProjection {
             input,
             job: job.clone(),
             charges: vec![job.owned_buffer(capacity)?],
+            expected,
+            original,
         };
         workers
             .run(move || {
@@ -122,6 +196,13 @@ impl NativeTransactionWork for ReceiptWorker {
                 self.input.required_last_record_epoch,
             ),
         )?;
+        if let Some(original) = &self.original {
+            original.group.validate_for(
+                &original.queue,
+                snapshot.definition.schema(),
+                &self.input.limits,
+            )?;
+        }
         // Retain independently charged raw outcomes first. FWQP fixed lengths
         // cannot decide the public Postcard response budget.
         let mut raw = Vec::new();
@@ -140,7 +221,7 @@ impl NativeTransactionWork for ReceiptWorker {
                 snapshot.queue_id,
                 ReceiptDomain::Commit,
                 identity,
-                None,
+                self.expected,
             )
             .await?
             {
@@ -206,7 +287,18 @@ impl NativeTransactionWork for ReceiptWorker {
         // One shared DTO projection/conversion; no second outcome semantics in
         // this adapter. Both transient bytes and final headers stay admitted.
         let encoded = encode(&public)?;
-        decode(&encoded)
+        let receipts: Vec<ReceiptLookup> = decode(&encoded)?;
+        if let (Some(original), Some(ReceiptLookup::Found(receipt))) =
+            (&self.original, receipts.first())
+        {
+            fireweed_engine::queue_publication::PublicationReceipt::commit(
+                &original.queue,
+                &original.group,
+                receipt,
+            )
+            .map_err(publication_error)?;
+        }
+        Ok(receipts)
     }
 }
 

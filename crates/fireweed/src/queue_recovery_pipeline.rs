@@ -2,6 +2,7 @@
 //! Coverage is operation-scoped; this is not a consumer transaction or readiness cache.
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 mod claim;
+mod commit;
 mod insert;
 mod publication;
 mod receipts;
@@ -41,6 +42,10 @@ pub struct QueueRecoveryPipeline {
     before_insert_replay: StagePause,
     #[cfg(test)]
     after_receipt_read: StagePause,
+    #[cfg(test)]
+    before_commit_append: StagePause,
+    #[cfg(test)]
+    after_commit_replay: StagePause,
 }
 /// Point-in-time coverage only; later consumer reads/writes must establish
 /// current projection and fence authority again.
@@ -92,6 +97,10 @@ impl QueueRecoveryPipeline {
             before_insert_replay: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_receipt_read: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_commit_append: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_commit_replay: std::sync::Mutex::new(None),
         }))
     }
     async fn head_matches(
